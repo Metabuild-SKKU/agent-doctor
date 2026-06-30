@@ -49,7 +49,9 @@ agent_doctor/
 │   └── state.py      # LangGraph 공유 상태 정의
 ├── agents/
 │   ├── ingest/
-│   │   └── agent.py  # 데이터 수집 (Notion / Google Drive / 파일)
+│   │   ├── agent.py  # 데이터 수집 (Notion / Google Drive / 파일)
+│   │   ├── oauth.py  # Notion 인증 (Access Token / OAuth)
+│   │   └── README.md # Ingest Agent 상세 설명
 │   ├── index/
 │   │   └── agent.py  # 청크 분할 + 벡터화 + 저장
 │   ├── eval/
@@ -58,6 +60,9 @@ agent_doctor/
 │   │   └── agent.py  # 파라미터 자동 조정
 │   └── serve/
 │       └── agent.py  # MCP 서버 생성 + 서빙
+├── tests/
+│   ├── test_ingest.py  # Ingest Agent 테스트
+│   └── test_oauth.py   # Notion OAuth 테스트
 ├── graph.py          # LangGraph 파이프라인 (Orchestrator)
 ├── requirements.txt
 └── .env.example
