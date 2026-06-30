@@ -1,0 +1,26 @@
+# 코어
+langgraph
+python-dotenv
+pyyaml
+
+# Ingest Agent
+notion-client          # Notion 연결
+google-api-python-client  # Google Drive 연결
+google-auth
+pdfplumber             # PDF 파싱
+python-docx            # DOCX 파싱
+openpyxl               # XLSX 파싱
+hwp5                   # HWP 파싱
+
+# Serve Agent
+fastapi
+uvicorn
+openai
+
+# Index Agent (팀원 A)
+llama-index
+llama-index-llms-openai
+tiktoken
+
+# Eval Agent (팀원 B)
+ragas

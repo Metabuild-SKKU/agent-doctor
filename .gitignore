@@ -1,0 +1,33 @@
+# 환경변수
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# 가상환경
+venv/
+.venv/
+env/
+
+# 데이터 (용량 큼)
+data/
+*.json
+!sample_data/*.json
+
+# 결과물
+results/
+
+# IDE
+.vscode/
+.idea/
+*.DS_Store
+
+# 벡터 DB
+qdrant_storage/
