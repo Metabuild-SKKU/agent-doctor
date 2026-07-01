@@ -14,9 +14,14 @@ openpyxl               # XLSX 파싱
 hwp5                   # HWP 파싱
 
 # Serve Agent
+mcp[cli]               # MCP 서버 (FastMCP 포함)
 fastapi
 uvicorn
 openai
+
+# Index Agent
+sentence-transformers  # 임베딩 (테스트용, 무료 로컬)
+qdrant-client          # 벡터 DB 클라이언트
 
 # Index Agent (팀원 A)
 llama-index
