@@ -5,6 +5,7 @@ pyyaml
 
 # Ingest Agent
 notion-client          # Notion 연결
+requests               # OAuth 토큰 교환
 google-api-python-client  # Google Drive 연결
 google-auth
 pdfplumber             # PDF 파싱
