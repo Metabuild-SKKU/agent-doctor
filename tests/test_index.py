@@ -65,10 +65,10 @@ else:
     print("\n── 검색 테스트 ──")
     try:
         import numpy as np
-        from agents.index.agent import _embed
+        from agents.index.qdrant_store import embed
 
         query = "재택근무 며칠이야?"
-        query_vec = np.array(_embed(query))
+        query_vec = np.array(embed(query))
 
         scored = []
         for chunk in result.chunks:
