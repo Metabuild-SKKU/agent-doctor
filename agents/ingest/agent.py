@@ -144,6 +144,38 @@ def _ingest_file(source_url: str) -> list[Document]:
     )]
 
 
+# ── JSON Corpus ───────────────────────────────────────────────────
+
+def _ingest_json_corpus(source_url: str) -> list[Document]:
+    """
+    직무체험 — 전처리된 corpus.json 로드
+
+    기대 형식:
+        [{"id": "doc_0", "text": "...", "source": "고용동향.pdf"}, ...]
+    """
+    import json
+
+    path = Path(source_url)
+    if not path.exists():
+        raise FileNotFoundError(f"파일 없음: {source_url}")
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError("corpus.json은 리스트 형식이어야 합니다: [{id, text, source}, ...]")
+
+    docs = []
+    for item in data:
+        docs.append(Document(
+            doc_id  = item.get("id", str(uuid.uuid4())),
+            source  = item.get("source", str(path.resolve())),
+            format  = "txt",
+            content = item["text"],
+            metadata= {"source_file": item.get("source", path.name)},
+        ))
+
+    return docs
+
+
 # ── Google Drive (TODO) ───────────────────────────────────────────
 
 def _ingest_gdrive(source_url: str) -> list[Document]:
@@ -157,9 +189,10 @@ def _ingest_gdrive(source_url: str) -> list[Document]:
 # ── 라우팅 테이블 ─────────────────────────────────────────────────
 
 _INGESTERS = {
-    "notion": _ingest_notion,
-    "file":   _ingest_file,
-    "gdrive": _ingest_gdrive,
+    "notion":      _ingest_notion,
+    "file":        _ingest_file,
+    "json_corpus": _ingest_json_corpus,
+    "gdrive":      _ingest_gdrive,
 }
 
 
