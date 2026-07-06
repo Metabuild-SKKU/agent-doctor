@@ -72,8 +72,7 @@ print("\n── Finding 목록 ──")
 if not report.findings:
     print("  (없음)")
 for f in report.findings:
-    print(f"  [{f.severity}] {f.type} / {f.metadata.get('label')} - {f.description[:50]}...")
-    print(f"      처방: {f.prescription}")
+    print(f"  [{f.severity}] {f.type} / {f.label} ({f.metadata.get('group')}그룹)")
 
 # 계약 검증: run 은 항상 state 를 반환, report 존재
 assert result is state, "run()은 동일 state 를 반환해야 함"
