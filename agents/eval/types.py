@@ -81,6 +81,7 @@ class EvalRecord:
     retrieved_chunk_ids: list[str] = field(default_factory=list)
     generated_answer: str = ""
     oracle_answer: Optional[str] = None                          # gold context로 생성한 답
+    oracle_context: list[str] = field(default_factory=list)      # gold context 텍스트 (oracle 트랙 RAGAS용)
 
     # STEP3-1: 규칙 지표
     recall_at_k: float = 0.0

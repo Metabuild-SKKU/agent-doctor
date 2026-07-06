@@ -75,7 +75,8 @@ findings      : list[Finding]  # 원인 + prescription (Optimize 가 소비)
 | `EVAL_ENABLE_LLM` | off | `1/true` 면 STEP3-2 RAGAS(LLM-as-Judge) 진단 활성화 |
 | `OPENAI_API_KEY` | — | 있으면 답변 생성/RAGAS 를 LLM 으로, 없으면 폴백 |
 | `EVAL_GEN_MODEL` | `gpt-4o-mini` | 답변 생성 모델(응답용) |
-| `EVAL_JUDGE_MODEL` | `gpt-4o` | 평가 모델(설계 원칙: 응답≠평가) |
+| `EVAL_JUDGE_MODEL` | `gpt-4o` | RAGAS 평가(심판) 모델(설계 원칙: 응답≠평가) |
+| `EVAL_EMBED_MODEL` | `text-embedding-3-small` | Response Relevancy 코사인용 임베딩 |
 | `QDRANT_URL` / `QDRANT_API_KEY` | `:memory:` | 검색 인덱스 대상 |
 
 > 기본값만으로도 **외부 API 없이** 규칙 지표 기반 진단이 동작합니다(폴백 설계).
@@ -111,8 +112,10 @@ agents/eval/
 
 1. **Probe 자동생성** (`probe_gen.py`) — 청크 직접 추출 폴백 → **RAGAS TestsetGenerator**
    (지식그래프 + 시나리오, 75% RAGAS / 20% DataMorgana / 5% 무응답)로 교체.
-2. **RAGAS 지표** (`ragas_eval.py`) — `evaluate_real_track` / `evaluate_oracle_track` /
-   `evaluate_aspect_critics` 를 실제 `ragas.metrics` 로 연결.
+2. **RAGAS 지표** (`ragas_eval.py`) — ✅ 구현됨. RAGAS 알고리즘(청구 분해·순위 가중 등)을
+   OpenAI LLM-as-Judge로 직접 계산(Faithfulness/ContextPrecision/ContextRecall/ResponseRelevancy
+   + staleness/contradiction AspectCritic). `EVAL_ENABLE_LLM=1`로 활성화. ragas 라이브러리는
+   langchain 버전 충돌로 import가 불안정해 미사용 — 환경이 지원하면 `evaluate_*_track` 내부만 교체.
 3. **LLM 생성** (`retrieval_temp.py`) — `_llm_generate` 를 실제 RAG 생성기로. (Index 검색 개발 후에도 유지될 부분)
 4. **Reranker** — Bi-Encoder 후 Cross-Encoder 재정렬(2차 개선). Index 검색이 담당하게 될 영역.
 5. **진단 신호 훅** (`diagnose.py`) — 처방 파일의 A/B/C/D 16개 라벨을 **라벨당 판정 함수 1개**로

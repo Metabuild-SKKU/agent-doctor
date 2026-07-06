@@ -108,6 +108,7 @@ def _evaluate_probe(
     # STEP2: Oracle 답변 (gold context 가 있을 때만)
     gold_ctx = [chunk_text[cid] for cid in probe.gold_chunk_ids if cid in chunk_text]
     if gold_ctx:
+        rec.oracle_context = gold_ctx
         rec.oracle_answer = generate_answer(probe.question, gold_ctx)
 
     # STEP3-1: 규칙 지표 + 브랜치
