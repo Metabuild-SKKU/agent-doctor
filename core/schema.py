@@ -55,6 +55,9 @@ class Probe:
     expected_difficulty: str = "medium"
     answer_exists: Optional[bool] = None
     ground_truth: Optional[str] = None
+    # ── Eval Agent 확장 필드 (설계 문서 'Probe 스키마' / 옵셔널·하위호환) ──
+    gold_chunk_ids: list[str] = field(default_factory=list)  # Recall@k 계산용 정답 청크
+    qtype: Optional[str] = None          # 멀티홉 유형: "bridge" | "comparison" | "aggregation" | None
 
 
 @dataclass
