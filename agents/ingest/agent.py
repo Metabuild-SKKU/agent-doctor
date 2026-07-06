@@ -159,17 +159,31 @@ def _ingest_json_corpus(source_url: str) -> list[Document]:
     if not path.exists():
         raise FileNotFoundError(f"파일 없음: {source_url}")
 
-    data = json.loads(path.read_text(encoding="utf-8"))
+    with path.open(encoding="utf-8") as f:
+        data = json.load(f)
     if not isinstance(data, list):
         raise ValueError("corpus.json은 리스트 형식이어야 합니다: [{id, text, source}, ...]")
 
     docs = []
-    for item in data:
+    seen_ids: set[str] = set()
+    for i, item in enumerate(data):
+        content = item.get("text")
+        if not content:
+            raise ValueError(f"item[{i}] (id={item.get('id', '?')})에 'text' 필드가 없습니다")
+
+        doc_id = item.get("id", str(uuid.uuid4()))
+        if doc_id in seen_ids:
+            raise ValueError(f"item[{i}]의 doc_id '{doc_id}'가 앞선 항목과 중복됩니다")
+        seen_ids.add(doc_id)
+
+        src = item.get("source", str(path.resolve()))
+        fmt = Path(src).suffix.lstrip(".").lower() or "txt"
+
         docs.append(Document(
-            doc_id  = item.get("id", str(uuid.uuid4())),
-            source  = item.get("source", str(path.resolve())),
-            format  = "txt",
-            content = item["text"],
+            doc_id  = doc_id,
+            source  = src,
+            format  = fmt,
+            content = content,
             metadata= {"source_file": item.get("source", path.name)},
         ))
 
