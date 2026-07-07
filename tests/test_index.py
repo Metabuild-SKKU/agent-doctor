@@ -60,6 +60,7 @@ else:
         print(f"  임베딩 차원: {len(chunk.embedding)}")
         print(f"  임베딩 앞부분: {[round(v, 4) for v in embedding_preview]}...")
         print(f"  메타데이터: {chunk.metadata}")
+        print(f"  char_span: {chunk.char_span}  token_count: {chunk.token_count}  hash: {chunk.hash}")
 
     # ── 간단 유사도 검색 테스트 ──────────────────────────────────
     print("\n── 검색 테스트 ──")

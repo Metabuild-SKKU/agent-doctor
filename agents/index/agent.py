@@ -17,37 +17,42 @@ Index Agent — 문서를 청킹 → 임베딩 → Qdrant 저장
 """
 from __future__ import annotations
 
+import hashlib
 import os
 
 from core.schema import Chunk
 from core.state import AgentDoctorState
 from agents.index.qdrant_store import (
-    build_client, ensure_collection, upsert_chunks, embed, VECTOR_DIM
+    build_client, ensure_collection, upsert_chunks, embed, count_tokens, VECTOR_DIM
 )
 
 
 # ── 청킹 ──────────────────────────────────────────────────────────
 
-def _chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
+def _chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[tuple[str, int, int]]:
     """
     텍스트를 chunk_size(문자 수) 단위로 분할.
+    각 청크를 (텍스트, 시작 위치, 끝 위치) 튜플로 반환한다 — 위치는 원본
+    Document.content 기준 char_span으로 그대로 저장되어, 나중에 chunk_size가
+    바뀌어 재청킹되어도 Eval이 원문 위치 기준으로 gold 청크를 다시 찾을 수 있다.
 
     [팀원 구현 포인트] 더 정교한 청킹으로 교체 가능:
       - 문장 경계 분할: kss.split_sentences(text)
       - 단락 기준 분할: text.split("\n\n")
       - 의미 기반 분할: SemanticChunker 등
     """
-    text = text.strip()
-    if not text:
+    leading_ws = len(text) - len(text.lstrip())  # strip()으로 사라지는 만큼 offset 보정
+    stripped = text.strip()
+    if not stripped:
         return []
-    if len(text) <= chunk_size:
-        return [text]
+    if len(stripped) <= chunk_size:
+        return [(stripped, leading_ws, leading_ws + len(stripped))]
 
     chunks = []
     start = 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        chunks.append(text[start:end])
+    while start < len(stripped):
+        end = min(start + chunk_size, len(stripped))
+        chunks.append((stripped[start:end], start + leading_ws, end + leading_ws))
         next_start = start + chunk_size - chunk_overlap
         if next_start <= start:
             break
@@ -88,12 +93,15 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         title = doc.metadata.get("title", doc.doc_id)
         print(f"[Index]  └ '{title}' → {len(texts)}개 청크 생성")
 
-        for i, text in enumerate(texts):
-            vector = embed(text)
+        for i, (chunk_text, start, end) in enumerate(texts):
+            vector = embed(chunk_text)
             chunk = Chunk(
                 chunk_id=f"{doc.doc_id}_chunk_{i:03d}",
                 doc_id=doc.doc_id,
-                text=text,
+                text=chunk_text,
+                char_span=(start, end),
+                token_count=count_tokens(chunk_text),
+                hash=hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()[:16],
                 embedding=vector,
                 metadata={**doc.metadata, "chunk_index": i, "source": doc.source},
             )

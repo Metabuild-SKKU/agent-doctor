@@ -102,6 +102,18 @@ def search(client: QdrantClient, query_vector: list[float], top_k: int = 3) -> l
 _model = None  # 모델 싱글톤 (첫 호출 시 로드)
 
 
+def _ensure_model():
+    """임베딩 모델을 로드(1회)하고 반환. embed()/count_tokens()가 공유."""
+    global _model
+    if _model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+        except ImportError:
+            _model = "random"  # 폴백 표시용
+    return _model
+
+
 def embed(text: str) -> list[float]:
     """
     텍스트 → 벡터. Index Agent와 API 서버 양쪽에서 공유.
@@ -112,16 +124,22 @@ def embed(text: str) -> list[float]:
             input=text, model="text-embedding-3-small"
         ).data[0].embedding
     """
-    global _model
-    if _model is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
-        except ImportError:
-            _model = "random"  # 폴백 표시용
-
-    if _model == "random":
+    model = _ensure_model()
+    if model == "random":
         import random
         return [random.uniform(-1, 1) for _ in range(VECTOR_DIM)]
 
-    return _model.encode(text, normalize_embeddings=True).tolist()
+    return model.encode(text, normalize_embeddings=True).tolist()
+
+
+def count_tokens(text: str) -> int:
+    """
+    embed()가 쓰는 모델의 토크나이저 기준으로 토큰 수를 센다.
+    한국어는 문자 수 대비 토큰 수가 많이 나오므로(1.5~2배), chunk_size를
+    글자 수로만 관리하면 실제 토큰이 임베딩 모델 입력 한계를 넘을 수 있다 —
+    이 값을 Chunk.token_count에 남겨 관측 가능하게 한다.
+    """
+    model = _ensure_model()
+    if model == "random":
+        return max(1, len(text) // 2)  # 모델 로드 실패 시 근사치
+    return len(model.tokenizer.encode(text))
