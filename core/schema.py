@@ -56,8 +56,14 @@ class Probe:
     answer_exists: Optional[bool] = None
     ground_truth: Optional[str] = None
     # ── Eval Agent 확장 필드 (설계 문서 'Probe 스키마' / 옵셔널·하위호환) ──
-    gold_chunk_ids: list[str] = field(default_factory=list)  # Recall@k 계산용 정답 청크
+    gold_chunk_ids: list[str] = field(default_factory=list)  # [캐시] Recall@k 계산용 정답 청크.
+    # gold_spans 기준으로 재계산되는 캐시 — 재청킹(Optimize→Index) 후에는 무효화될 수 있음.
     qtype: Optional[str] = None          # 멀티홉 유형: "bridge" | "comparison" | "aggregation" | None
+    metadata: dict = field(default_factory=dict)   # 생성 출처(gen_method/persona/style/length 등)
+    gold_doc_id: Optional[str] = None              # 정답이 있는 원본 문서 ID (재청킹에도 안 깨지는 기준)
+    gold_char_span: Optional[tuple[int, int]] = None  # 원문 내 정답 위치 (start, end). 단일 대표 span.
+    gold_spans: list[dict] = field(default_factory=list)
+    # gold_spans 항목 예: {"doc_id": str, "start": int, "end": int}. 멀티홉 probe는 여러 개 가짐.
 
 
 @dataclass

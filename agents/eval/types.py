@@ -43,6 +43,21 @@ RAGAS_WEIGHTS = {
     "response_relevancy": 0.20,
 }
 
+# STEP1 Probe 생성 믹스 비율 (설계 §STEP1, 합=1.0)
+RAGAS_MIX_RATIO = 0.75
+DATAMORGANA_MIX_RATIO = 0.20
+NO_ANSWER_MIX_RATIO = 0.05
+
+# STEP1 지식그래프 엣지 임계값 (이 이상이면 두 청크를 연결)
+KG_ENTITY_OVERLAP_MIN = 0.2     # 키워드/entity Jaccard 유사도
+KG_EMBEDDING_SIM_MIN = 0.5      # chunk.embedding 코사인 유사도
+
+# STEP1 시나리오 샘플링 후보 (RAGAS Scenario 파라미터)
+PERSONAS = ["신입사원", "실무 담당자"]
+QUERY_STYLES = ["web_search", "conversational", "imperative"]
+QUERY_LENGTHS = ["short", "medium", "long"]
+EVOL_DIRECTIONS = ["depth", "breadth", "reasoning", "conditioning"]
+
 
 class Branch:
     """
