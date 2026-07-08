@@ -29,7 +29,7 @@ import json
 import os
 import re
 
-from core.schema import Chunk, Probe
+from core.schema import Chunk, Document, Probe
 from core.state import AgentDoctorState
 
 # 자동 생성 기본 개수 (설계: testset_size=5~10 으로 시작해 비용 확인 후 확대)
@@ -162,3 +162,103 @@ def _topic_of(text: str) -> str:
     first = first.strip().strip("#•-*> ").strip()
     # 너무 길면 앞 40자만
     return first[:40] if len(first) > 40 else first
+
+
+# ── gold span / 위치-인덱스 유틸 (다음 단계에서 사용 예정, 아직 미배선) ──
+#
+# RAGAS 스타일 재구현(STEP1)에서 gold_char_span/gold_spans 로 정답 위치를
+# 원문(Document.content) 절대 좌표로 저장해두면, Optimize→Index 재청킹 후에도
+# (chunk_size/overlap이 달라져도) probe.gold_chunk_ids 를 다시 맞출 수 있다.
+# 여기서는 그 순수 계산 로직만 둔다 — generate_probes() 는 아직 이 함수들을
+# 호출하지 않는다(호출부 배선은 이후 단계에서 실측 생성기와 함께 연결).
+#
+# 전제: Chunk.text 는 Document.content 의 앞에서부터 순서대로 나온 부분 문자열이다
+# (agents/index/agent.py::_chunk_text 가 고정 크기로 슬라이스하는 방식과, 향후
+# 문장/의미 단위 청킹으로 바뀌어도 유지되는 유일한 불변식).
+
+def _chunk_index_of(chunk: Chunk) -> int:
+    """청크의 문서 내 순번. metadata['chunk_index'] 우선, 없으면 chunk_id 끝 숫자로 폴백."""
+    idx = chunk.metadata.get("chunk_index") if chunk.metadata else None
+    if isinstance(idx, int):
+        return idx
+    m = re.search(r"(\d+)$", chunk.chunk_id or "")
+    return int(m.group(1)) if m else 0
+
+
+def _locate_span(doc_content: str, needle: str, cursor: int) -> tuple[int, int] | None:
+    """
+    doc_content 에서 needle을 cursor 위치부터 찾아 (start, end) 를 반환.
+    cursor 이후에 없으면(예: 검색용 cursor 추정이 어긋난 경우) 처음부터 한 번 더 찾아본다.
+    둘 다 실패하면 None.
+    """
+    if not needle:
+        return None
+    idx = doc_content.find(needle, cursor)
+    if idx == -1:
+        idx = doc_content.find(needle)
+        if idx == -1:
+            return None
+    return (idx, idx + len(needle))
+
+
+def _build_doc_position_index(doc: Document, chunks: list[Chunk]) -> list[tuple[str, int, int]]:
+    """
+    doc에 속한 청크들을 chunk_index 순서로 doc.content 안에서 찾아
+    [(chunk_id, start, end), ...] 로 반환한다(못 찾은 청크는 건너뜀).
+
+    chunk_index 순서로 훑으면서 직전 청크의 start로 cursor를 옮기기 때문에
+    (겹치는) 청크가 순서를 지켜 반복 등장해도 이전 위치를 앞지르지 않는다.
+    """
+    doc_chunks = sorted(
+        (c for c in chunks if c.doc_id == doc.doc_id),
+        key=_chunk_index_of,
+    )
+    index: list[tuple[str, int, int]] = []
+    cursor = 0
+    for c in doc_chunks:
+        span = _locate_span(doc.content, c.text, cursor)
+        if span is None:
+            continue
+        start, end = span
+        index.append((c.chunk_id, start, end))
+        cursor = start
+    return index
+
+
+def _resync_gold_chunk_ids(
+    probes: list[Probe], chunks: list[Chunk], documents: list[Document]
+) -> list[Probe]:
+    """
+    probe.gold_spans(원문 절대 좌표, 재청킹해도 불변)를 기준으로 현재 chunks 와
+    구간이 겹치는 청크 id를 다시 찾아 probe.gold_chunk_ids 를 갱신한다(in-place + 반환).
+    gold_spans 가 없는 probe는 건드리지 않는다(기존 legacy 경로 그대로 유지).
+
+    [설계 편차] 최초 계획엔 "state.chunks만 있으면 되고 state.documents는 필요 없다"고
+    적혀 있었으나, 새 chunk의 (start, end)를 얻으려면 결국 원문(Document.content)에서
+    다시 찾아야 하므로 documents 인자가 필요하다 — chunk_size/overlap로 좌표를 역산하면
+    지금의 고정 크기 청킹에만 맞고 향후 청킹 전략 교체에 깨지므로 그 방식은 쓰지 않는다.
+    """
+    docs_by_id = {d.doc_id: d for d in documents}
+    position_cache: dict[str, list[tuple[str, int, int]]] = {}
+
+    def _position_index(doc_id: str) -> list[tuple[str, int, int]]:
+        if doc_id not in position_cache:
+            doc = docs_by_id.get(doc_id)
+            position_cache[doc_id] = _build_doc_position_index(doc, chunks) if doc else []
+        return position_cache[doc_id]
+
+    for probe in probes:
+        if not probe.gold_spans:
+            continue
+        matched: list[str] = []
+        for span in probe.gold_spans:
+            doc_id = span.get("doc_id")
+            s_start, s_end = span.get("start"), span.get("end")
+            if doc_id is None or s_start is None or s_end is None:
+                continue
+            for chunk_id, c_start, c_end in _position_index(doc_id):
+                if c_start < s_end and c_end > s_start:  # 구간 겹침
+                    matched.append(chunk_id)
+        if matched:
+            probe.gold_chunk_ids = list(dict.fromkeys(matched))  # 순서 유지 dedupe
+    return probes
