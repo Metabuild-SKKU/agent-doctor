@@ -7,7 +7,11 @@ STEP5: 진단 리포트 생성
     - overall_score : RAGAS 가중 평균(있으면) / 없으면 규칙 지표 폴백
     - pass_threshold: overall_score >= PASS_SCORE_THRESHOLD
     - ragas_scores  : RAGAS 평균 + 규칙 지표 평균 + 브랜치 분포(관측용)
-    - findings      : 전 record 의 Finding 합침
+    - findings      : 전 record 의 Finding 합침(확정 우선·저비용 tier 우선 정렬)
+    - findings_summary: 확정/예비·tier·라벨 집계(+진단 모드). Optimize 가 확정건 우선 처리하도록 요약
+
+  주의: overall_score/pass_threshold 는 '지표' 기반이라 예비 Finding 이 pass 를 뒤집지 않는다.
+        예비는 '더 깊은 모드에서 확정할 수 있는 의심 원인'으로만 싣는다(정보 제공).
 
 graph.route_after_eval() 이 report.pass_threshold 로 Serve/Optimize 분기를 결정한다.
 """
@@ -19,14 +23,24 @@ from collections import Counter
 from core.schema import DiagnosticReport
 from agents.eval.types import (
     EvalRecord, Branch, RAGAS_WEIGHTS, PASS_SCORE_THRESHOLD, F1_PASS_THRESHOLD,
+    resolve_mode,
 )
 
 _RAGAS_KEYS = ("faithfulness", "context_precision", "context_recall", "response_relevancy")
 
 
-def build_report(records: list[EvalRecord], iteration: int) -> DiagnosticReport:
-    """records 를 집계해 DiagnosticReport 반환."""
+def build_report(records: list[EvalRecord], iteration: int, mode: int | None = None) -> DiagnosticReport:
+    """records 를 집계해 DiagnosticReport 반환.
+
+    mode(진단 모드)는 findings_summary 에 기록해 '이 findings 가 어느 깊이에서 나왔는지'를 남긴다.
+    (예비 findings 는 더 깊은 모드에서 확정 가능하다는 맥락.) 미지정 시 EVAL_MODE/기본값.
+    """
+    if mode is None:
+        mode = resolve_mode()
+
     findings = [f for r in records for f in r.findings]
+    # Optimize 소비 편의: 확정 우선 → 저비용 tier 우선. 동률은 원래 순서 유지(stable sort).
+    findings.sort(key=lambda f: (not f.confirmed, f.tier if f.tier is not None else 9))
 
     ragas_means = _ragas_means(records)
     rule_means = _rule_means(records)
@@ -48,6 +62,7 @@ def build_report(records: list[EvalRecord], iteration: int) -> DiagnosticReport:
     report = DiagnosticReport(
         report_id=f"report_{uuid.uuid4().hex[:8]}",
         findings=findings,
+        findings_summary=_findings_summary(findings, mode),
         ragas_scores=scores,
         oracle_accuracy=oracle_acc,
         overall_score=overall_val,
@@ -60,6 +75,28 @@ def build_report(records: list[EvalRecord], iteration: int) -> DiagnosticReport:
 
 
 # ── 집계 헬퍼 ─────────────────────────────────────────────────────
+
+def _findings_summary(findings: list, mode: int) -> dict:
+    """Finding 들을 확정/예비·tier·라벨로 집계. Optimize 가 확정건 우선 처리하도록 요약 제공.
+
+      mode              : 이 진단이 실행된 모드(1~4). 예비가 왜 예비인지의 맥락.
+      confirmed/preliminary : 확정·예비 개수 (confirmed=False 는 상위 모드에서 확정 필요)
+      by_tier           : tier(1~4)별 개수
+      confirmed_labels / preliminary_labels : 라벨별 개수(확정/예비 분리)
+    """
+    confirmed = [f for f in findings if f.confirmed]
+    preliminary = [f for f in findings if not f.confirmed]
+    return {
+        "mode": mode,
+        "total": len(findings),
+        "confirmed": len(confirmed),
+        "preliminary": len(preliminary),
+        "by_tier": dict(sorted(Counter(
+            (f.tier if f.tier is not None else 0) for f in findings).items())),
+        "confirmed_labels": dict(Counter(f.label for f in confirmed)),
+        "preliminary_labels": dict(Counter(f.label for f in preliminary)),
+    }
+
 
 def _ragas_means(records: list[EvalRecord]) -> dict:
     """실제 트랙 RAGAS 지표별 평균 (측정된 것만)."""
@@ -124,8 +161,12 @@ def _oracle_accuracy(records: list[EvalRecord]) -> float | None:
 def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     n = len(records)
     fail = sum(1 for r in records if r.branch not in (Branch.SUCCESS, Branch.NO_ANSWER_OK))
+    fs = report.findings_summary
     print(f"[Eval] STEP5: 리포트 생성 - probe {n}개, 실패 {fail}개, "
-          f"overall={report.overall_score}, pass={report.pass_threshold}")
+          f"overall={report.overall_score}, pass={report.pass_threshold} (모드 {fs.get('mode')})")
     if report.findings:
         by_type = Counter(f.type for f in report.findings)
-        print(f"[Eval]        Finding {len(report.findings)}개: {dict(by_type)}")
+        print(f"[Eval]        Finding {len(report.findings)}개 "
+              f"(확정 {fs.get('confirmed', 0)} / 예비 {fs.get('preliminary', 0)}): {dict(by_type)}")
+        if fs.get("preliminary"):
+            print(f"[Eval]        예비 {fs['preliminary']}개는 더 깊은 모드(EVAL_MODE=deep/full)에서 확정 가능")

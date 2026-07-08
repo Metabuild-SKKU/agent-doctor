@@ -24,7 +24,7 @@ from __future__ import annotations
 from core.schema import Probe
 from core.state import AgentDoctorState
 
-from agents.eval.types import Branch, EvalRecord, DEFAULT_TOP_K
+from agents.eval.types import Branch, EvalRecord, DEFAULT_TOP_K, resolve_mode, Mode, llm_eval_enabled
 from agents.eval.probe_gen import generate_probes
 # ⚠️ 임시: Index Agent가 검색 리트리버를 제공하기 전까지만 retrieval_temp 사용.
 #     Index 검색이 준비되면 retrieval_temp 를 삭제하고 여기 import 를 교체할 것.
@@ -49,13 +49,17 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     # 반복 카운터 증가 (route_after_eval 의 종료 조건)
     state.iteration += 1
 
+    # 진단 모드(비용 tier 상한): EVAL_MODE 환경변수. STEP3-2/STEP4/리포트가 이 값으로 게이팅된다.
+    mode = resolve_mode()
+    print(f"[Eval] 진단 모드 = {mode} (1=fast·2=standard·3=deep·4=full)")
+
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
         probes = generate_probes(state)
         if not probes:
             print("[Eval] 경고: Probe 0개 생성 → 평가 불가, 통과 처리")
             state.probes = []
-            state.report = build_report([], state.iteration)
+            state.report = build_report([], state.iteration, mode)
             state.status = "evaluated"
             return state
 
@@ -67,13 +71,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         records = [
-            _evaluate_probe(p, client, state.chunks, chunk_text, top_k)
+            _evaluate_probe(p, client, state.chunks, chunk_text, top_k, mode)
             for p in probes
         ]
 
         # ── STEP5: 리포트 ─────────────────────────────────────
         state.probes = probes
-        state.report = build_report(records, state.iteration)
+        state.report = build_report(records, state.iteration, mode)
         state.status = "evaluated"
 
     except Exception as e:  # 계약: 예외를 밖으로 던지지 않는다
@@ -92,6 +96,7 @@ def _evaluate_probe(
     chunks: list,
     chunk_text: dict[str, str],
     top_k: int,
+    mode: int,
 ) -> EvalRecord:
     """한 Probe 에 대해 검색·생성·지표·판정을 수행하고 EvalRecord 반환."""
     rec = EvalRecord(probe=probe)
@@ -128,9 +133,16 @@ def _evaluate_probe(
         # 정답 미보유(user_log 등) → 규칙 판정 불가. RAGAS(무정답 지표)에만 의존.
         rec.branch = Branch.SUCCESS
 
-    # STEP3-2: LLM(RAGAS) 진단 — 활성화 시에만 record 를 채움
-    run_llm_metrics(rec)
+    # STEP3-2: LLM(RAGAS) 진단 — 활성화 + 모드 DEEP 이상일 때만 사용
+    if not llm_eval_enabled():
+        pass
+    elif mode is not None and mode < Mode.DEEP:
+        pass  # 모드 게이트: DEEP(3) 미만은 RAGAS(LLM) 스킵 — 검색/코퍼스 tier 로만 진단
+    elif rec.branch in (Branch.SUCCESS, Branch.NO_ANSWER_OK):
+        pass  # 진단할 게 없으면 LLM 호출 안 함
+    else:
+        run_llm_metrics(rec)  # 게이트는 위에서 통과 — evaluate 는 RAGAS 실행만 담당
 
-    # STEP4: 원인 판정
-    rec.findings = diagnose(rec)
+    # STEP4: 원인 판정 (모드 tier 상한으로 확정/예비 결정)
+    rec.findings = diagnose(rec, mode)
     return rec

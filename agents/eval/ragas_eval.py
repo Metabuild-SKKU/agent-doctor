@@ -20,7 +20,8 @@ RAGAS 4개 지표 + AspectCritic 을 **LLM-as-Judge** 로 측정한다.
     환경이 ragas 를 지원하면 라이브러리 호출로 교체해도 결과가 동일하다.
 
 비용·재현성:
-    - 기본 비활성. `EVAL_ENABLE_LLM=1` 일 때만 동작.
+    - 실행 게이트는 호출부(agent._evaluate_probe)가 담당: `EVAL_ENABLE_LLM=1` + `EVAL_MODE≥deep`
+      + 진단 대상 브랜치일 때만 evaluate() 를 호출한다(기본 비활성).
     - 응답 모델 ≠ 평가 모델(EVAL_JUDGE_MODEL, 기본 gpt-4o), temperature=0.
     - 키 없음·호출/파싱 실패 → 조용히 건너뛰고(폴백) 규칙 지표(STEP3-1)로 진행.
 """
@@ -179,13 +180,8 @@ _SCHEMA_RECALL = '{"properties": {"classifications": {"items": {"properties": {"
 
 
 # ══════════════════════════════════════════════════════════════════
-#  활성화 / 심판 LLM
+#  심판 LLM
 # ══════════════════════════════════════════════════════════════════
-
-def llm_eval_enabled() -> bool:
-    """LLM(RAGAS) 진단 활성화 여부. 기본 꺼짐."""
-    return os.getenv("EVAL_ENABLE_LLM", "").strip().lower() in ("1", "true", "yes", "on")
-
 
 def _judge():
     """평가(심판)용 OpenAI 클라이언트와 모델명. 키·라이브러리 없으면 None."""
@@ -207,12 +203,12 @@ def evaluate(record: EvalRecord) -> None:
     """
     브랜치에 따라 실제/오라클 트랙 RAGAS 지표와 AspectCritic 을 계산해
     record.ragas / record.oracle_ragas / record.aspect 에 채운다.
-    비활성·실패 시 아무것도 채우지 않는다(폴백).
+    실패 시 아무것도 채우지 않는다(폴백).
+
+    활성화(EVAL_ENABLE_LLM)·모드(EVAL_MODE≥deep)·브랜치 게이트는 **호출부(agent._evaluate_probe)**
+    가 담당한다. 여기서는 키 없음(_judge=None)만 방어하고 RAGAS 실행에만 집중한다.
+    (직접 호출·테스트는 게이트 없이 바로 RAGAS 를 돌린다.)
     """
-    if not llm_eval_enabled():
-        return
-    if record.branch in (Branch.SUCCESS, Branch.NO_ANSWER_OK):
-        return  # 진단할 게 없으면 LLM 호출 안 함
 
     judge = _judge()
     if judge is None:

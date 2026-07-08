@@ -67,14 +67,29 @@ print(f"overall:     {report.overall_score}")
 print(f"pass:        {report.pass_threshold}")
 print(f"oracle_acc:  {report.oracle_accuracy}")
 print(f"ragas_scores:{report.ragas_scores}")
+print(f"findings_summary:{report.findings_summary}")
 
 print("\n── Finding 목록 ──")
 if not report.findings:
     print("  (없음)")
 for f in report.findings:
-    print(f"  [{f.severity}] {f.type} / {f.label} ({f.metadata.get('group')}그룹)")
+    mark = "확정" if f.confirmed else "예비"
+    print(f"  [{f.severity}] {f.type} / {f.label} "
+          f"(tier{f.tier}·{mark}·{f.metadata.get('group')}그룹)")
 
 # 계약 검증: run 은 항상 state 를 반환, report 존재
 assert result is state, "run()은 동일 state 를 반환해야 함"
 assert result.report is not None, "report 가 생성되어야 함"
+
+# findings_summary 계약: 필수 키 존재 + 개수 정합 + 확정우선 정렬
+fs = report.findings_summary
+for key in ("mode", "total", "confirmed", "preliminary", "by_tier",
+            "confirmed_labels", "preliminary_labels"):
+    assert key in fs, f"findings_summary 에 {key} 누락"
+assert fs["total"] == len(report.findings) == fs["confirmed"] + fs["preliminary"]
+# 확정 우선 정렬: 확정 findings 가 예비보다 앞
+confirmed_flags = [f.confirmed for f in report.findings]
+assert confirmed_flags == sorted(confirmed_flags, reverse=True), "확정 우선 정렬이 아님"
+# 기본 FAST 모드: 생성 실패 브랜치는 예비 generation_failure 로 롤업
+assert fs["mode"] == 1, "기본 EVAL_MODE 는 FAST(1)"
 print("\n전체 파이프라인 스모크 테스트 통과 [OK]")

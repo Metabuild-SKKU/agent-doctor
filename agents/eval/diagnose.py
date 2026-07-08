@@ -28,7 +28,50 @@ from core.schema import Finding
 from agents.eval.types import (
     Branch, EvalRecord, DEFAULT_TOP_K,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
+    Mode, DEFAULT_MODE, resolve_mode,
 )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  진단 모드 (비용 tier)
+#  - diagnose() 진입 시 현재 실행의 자원 상한(_active_mode)을 설정한다.
+#    (단일스레드 eval 루프 전제. 병렬화하면 contextvars 로 교체.)
+#  - 라벨마다 '확정(confirm) tier' = 판별에 필요한 가장 비싼 자원(_LABEL_TIER).
+#    mode >= tier → 확정(confirmed=True), 미만 → 예비(confirmed=False).
+#  - 생성 원인(B)은 전부 RAGAS(DEEP) 의존 → DEEP 미만이면 예비 generation_failure 로 롤업.
+# ══════════════════════════════════════════════════════════════════
+
+_active_mode: int = DEFAULT_MODE
+
+_LABEL_TIER = {
+    # A 검색: BM25/top-N/rank = tier1, 단 missing_gold 는 코퍼스 스캔 = tier2
+    "retrieval_low_rank":                  Mode.FAST,
+    "retrieval_lexical_mismatch":          Mode.FAST,
+    "retrieval_semantic_mismatch":         Mode.FAST,
+    "retrieval_incomplete_enumeration":    Mode.FAST,
+    "retrieval_missing_gold":              Mode.STANDARD,
+    "retrieval_missing_bridge_dependency": Mode.FULL,     # 재실행(iterative decompose)
+    # B 생성: RAGAS/LLM = tier3
+    "generation_hop_binding_error":        Mode.DEEP,
+    "generation_hallucination":            Mode.DEEP,
+    "generation_partial_answer":           Mode.DEEP,
+    "generation_contradiction":            Mode.DEEP,
+    "generation_failure":                  Mode.DEEP,     # 예비 롤업(원인 미상)
+    # C context: RAGAS 후보 + 재실행 확정 = tier4
+    "too_long_context":                    Mode.FULL,
+    "lost_in_the_middle":                  Mode.FULL,
+    "context_noise_interference":          Mode.FULL,
+    # D 데이터
+    "bad_gold_answer":                     Mode.DEEP,     # RAGAS 두 지표(faith·rel)
+    "corpus_gap":                          Mode.STANDARD,
+    "corpus_gap_partial_hop":              Mode.STANDARD,
+    # aux
+    "staleness":                           Mode.DEEP,     # AspectCritic
+}
+
+
+def _tier_of(label: str) -> int:
+    return _LABEL_TIER.get(label, Mode.FAST)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -82,17 +125,20 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
-    """멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음). 처방: 단계별 근거 CoT."""
+    """멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음). 처방: 단계별 근거 CoT.
+    faithfulness 가 '측정되어' 높을 때만 판정(미측정=None 은 근거 없음 → 판정 안 함)."""
     faith = _faith(record)
-    if not (_is_multi_hop(record) and (faith is None or faith >= RAGAS_FAITHFULNESS_MIN)):
+    if not (_is_multi_hop(record) and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN):
         return None
     return _finding(record, "generation_hop_binding_error", "generation_failure")
 
 
 def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
-    """정답 context가 있는데 지어냄(생성 실패 기본 라벨). 처방: 그라운딩 프롬프트+인용."""
+    """정답 context가 있는데 지어냄. 처방: 그라운딩 프롬프트+인용.
+    faithfulness 가 '측정되어' 낮을 때만 판정(미측정=None 은 근거 없음 → 판정 안 함).
+    RAGAS 미실행 시엔 _gen_cause 가 예비 generation_failure 로 롤백한다."""
     faith = _faith(record)
-    if not (faith is None or faith < RAGAS_FAITHFULNESS_MIN):   # 낮거나 미측정
+    if not (faith is not None and faith < RAGAS_FAITHFULNESS_MIN):
         return None
     return _finding(record, "generation_hallucination", "generation_failure")
 
@@ -205,7 +251,7 @@ def _dx_retrieval_gen_fail(record: EvalRecord) -> list[Finding]:
     return _collect(
         corpus_gap(record),
         _first(record, _RETRIEVAL_CAUSE),
-        _first(record, _GENERATION_CAUSE),
+        _gen_cause(record),
         generation_contradiction(record),
     )
 
@@ -215,7 +261,7 @@ def _dx_retrieval_partial_gen_fail(record: EvalRecord) -> list[Finding]:
     return _collect(
         corpus_gap_partial_hop(record),
         _first(record, _RETRIEVAL_CAUSE_PARTIAL),
-        _first(record, _GENERATION_CAUSE),
+        _gen_cause(record),
         generation_contradiction(record),
     )
 
@@ -223,7 +269,7 @@ def _dx_retrieval_partial_gen_fail(record: EvalRecord) -> list[Finding]:
 def _dx_ambiguous_context(record: EvalRecord) -> list[Finding]:
     # 애매함, 컨텍스트 원인: C 원인 1개 + 모순
     return _collect(
-        _first(record, _CONTEXT_CAUSE),
+        _context_cause(record),
         generation_contradiction(record),
     )
 
@@ -231,15 +277,16 @@ def _dx_ambiguous_context(record: EvalRecord) -> list[Finding]:
 def _dx_ambiguous_gen(record: EvalRecord) -> list[Finding]:
     # 애매함, 생성 원인: 생성 원인 1개 + 모순
     return _collect(
-        _first(record, _GENERATION_CAUSE),
+        _gen_cause(record),
         generation_contradiction(record),
     )
 
 
 def _dx_no_answer_violation(record: EvalRecord) -> list[Finding]:
-    # 무응답인데 답을 지어냄 → 할루시네이션 성격
+    # 무응답인데 답을 지어냄 → 생성 원인(모드 따라 예비 롤업/세분화) + 모순
+    #   다른 생성 브랜치와 동일하게 _gen_cause 로 라우팅(DEEP 미만이면 예비 generation_failure).
     return _collect(
-        generation_hallucination(record),
+        _gen_cause(record),
         generation_contradiction(record),
     )
 
@@ -262,8 +309,16 @@ _GROUP_ORDER = {"D": 0, "A": 1, "C": 2, "B": 3, "aux": 8}
 _SEV_ORDER = {"critical": 0, "warning": 1, "info": 2}
 
 
-def diagnose(record: EvalRecord) -> list[Finding]:
-    """record 의 브랜치에 맞는 라벨 함수들을 호출해 Finding 리스트를 만든다."""
+def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
+    """record 의 브랜치에 맞는 라벨 함수들을 호출해 Finding 리스트를 만든다.
+
+    mode(진단 tier 상한)에 따라 상위-tier 라벨은 '예비(confirmed=False)'로 나가고,
+    생성 원인(RAGAS 의존)은 DEEP 미만이면 하나의 예비 generation_failure 로 롤업된다.
+    mode 미지정 시 EVAL_MODE 환경변수(기본 FAST)를 사용한다.
+    """
+    global _active_mode
+    _active_mode = mode if mode is not None else resolve_mode()
+
     if record.branch in (Branch.SUCCESS, Branch.NO_ANSWER_OK):
         return []
 
@@ -282,12 +337,43 @@ def diagnose(record: EvalRecord) -> list[Finding]:
 # ── 판정 콤비네이터 ──────────────────────────────────────────────
 
 def _first(record: EvalRecord, funcs) -> Optional[Finding]:
-    """funcs 를 순서대로 호출, 첫 번째 매치(Finding) 채택. 없으면 None."""
+    """funcs 를 순서대로 호출. 현재 모드에서 '확정 가능한(confirmed)' 첫 매치를 우선 채택하고,
+    없으면 첫 매치(가장 구체적)를 예비로 반환한다. 매치 자체가 없으면 None.
+
+    tier 게이팅과 구체성 순서를 화해시키기 위함: 상위-tier(현재 모드에서 확정 불가) 라벨이
+    하위-tier 확정 라벨을 가리지 않게 한다. 예) STANDARD 에서 bridge(FULL·예비)가
+    missing_gold(STANDARD·확정)를 덮어쓰지 않도록.
+    """
+    first_match = None
     for fn in funcs:
         f = fn(record)
-        if f is not None:
+        if f is None:
+            continue
+        if f.confirmed:
             return f
-    return None
+        if first_match is None:
+            first_match = f
+    return first_match
+
+
+def _gen_cause(record: EvalRecord) -> Optional[Finding]:
+    """생성 원인 1개. DEEP 이상이고 RAGAS 근거로 특정되면 그 라벨, 아니면 예비 generation_failure.
+    (DEEP 미만=근거 없음, 또는 DEEP인데 RAGAS 미실행/미매치 → 세분화 불가 → 항상 예비 롤업.)"""
+    if _active_mode >= Mode.DEEP:
+        cause = _first(record, _GENERATION_CAUSE)
+        if cause is not None:
+            return cause
+    return _finding(record, "generation_failure", "generation_failure", confirmed=False)
+
+
+def _context_cause(record: EvalRecord) -> Optional[Finding]:
+    """컨텍스트(C) 원인 1개. C는 RAGAS(후보)+재실행(확정) 의존. DEEP 이상이면 후보 판정,
+    아니면(또는 미특정) 예비 generation_failure 로 롤업."""
+    if _active_mode >= Mode.DEEP:
+        cause = _first(record, _CONTEXT_CAUSE)
+        if cause is not None:
+            return cause
+    return _finding(record, "generation_failure", "generation_failure", confirmed=False)
 
 
 def _collect(*items) -> list[Finding]:
@@ -408,16 +494,29 @@ def _severity_of(label: str) -> str:
     return "warning"
 
 
-def _finding(record: EvalRecord, label: str, ftype: str) -> Finding:
-    """라벨 함수 공통 Finding 생성기. 라벨(진단명)만 싣는다."""
+def _finding(record: EvalRecord, label: str, ftype: str,
+             confirmed: Optional[bool] = None) -> Finding:
+    """라벨 함수 공통 Finding 생성기. 라벨(진단명)만 싣는다.
+
+    tier = 라벨의 확정 자원 tier. confirmed 기본값은 '현재 진단 모드가 그 tier 를 감당하는지'.
+    다만 근거 없이 특정만 못 한 롤업(generation_failure)처럼 강제로 예비 처리해야 할 때는
+    confirmed=False 를 명시해 override 한다(모드가 높아도 예비 유지).
+    확정 못 한 라벨은 예비(confirmed=False)로 내보내 상위 모드에서 확정하도록 남긴다.
+    """
     probe = record.probe
     group = _group_of(label, ftype)
+    tier = _tier_of(label)
+    if confirmed is None:
+        confirmed = _active_mode >= tier
+    prefix = "" if confirmed else "[예비] "
     return Finding(
         finding_id=f"{probe.probe_id}:{label}",
         type=ftype,
         severity=_severity_of(label),
-        description=f"[{group}그룹] {label}",
+        description=f"{prefix}[{group}그룹] {label}",
         label=label,
+        tier=tier,
+        confirmed=confirmed,
         affected_chunks=list(probe.gold_chunk_ids),
         affected_probes=[probe.probe_id],
         metadata={"group": group, "branch": record.branch},
