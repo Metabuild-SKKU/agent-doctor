@@ -98,6 +98,7 @@ agents/eval/
 ├── agent.py       # run(state) — STEP1~5 오케스트레이션
 ├── types.py       # EvalRecord(내부 중간결과) · 상수 · Branch
 ├── probe_gen.py   # STEP1  Probe 생성
+├── knowledge_graph.py # STEP1  청크 간 관계 그래프(RAGAS 멀티홉 후보 탐색용, 휴리스틱 전용)
 ├── retrieval_temp.py  # STEP2  (임시) 자체 검색 + 답변 생성 — Index 검색 개발 후 삭제
 ├── metrics.py     # STEP3-1 규칙 지표(Recall@k/F1/Oracle) + 브랜치
 ├── ragas_eval.py  # STEP3-2 RAGAS/LLM 진단 (옵션)
@@ -110,8 +111,21 @@ agents/eval/
 
 ## 주요 확장 지점 `[구현 포인트]`
 
-1. **Probe 자동생성** (`probe_gen.py`) — 청크 직접 추출 폴백 → **RAGAS TestsetGenerator**
-   (지식그래프 + 시나리오, 75% RAGAS / 20% DataMorgana / 5% 무응답)로 교체.
+1. **Probe 자동생성** (`probe_gen.py`, `knowledge_graph.py`) — 🚧 진행 중. 청크 직접 추출
+   폴백을 **RAGAS TestsetGenerator 방식**(지식그래프 + 시나리오, 75% RAGAS / 20% DataMorgana /
+   5% 무응답)으로 교체하는 작업이 진행 중이며, 아직 `generate_probes()`에 배선되지 않은
+   상태로 구현·검증된 부분은 다음과 같다:
+   - `Probe` 스키마에 `metadata`/`gold_doc_id`/`gold_char_span`/`gold_spans` 필드 추가
+     (재청킹돼도 안 깨지는 원문 절대 좌표 기반 정답 위치).
+   - `_build_doc_position_index`/`_locate_span`/`_resync_gold_chunk_ids`(`probe_gen.py`) —
+     `gold_spans`를 기준으로 현재 `state.chunks`와 겹치는 청크 id를 재계산하는 유틸.
+   - `knowledge_graph.py` — 청크 간 관계 그래프(키워드 Jaccard + 임베딩 코사인, LLM 미사용)와
+     `connected_pairs()`로 멀티홉 후보 탐색.
+   - `_allocate_budget`/`_allocate_ragas_quadrants`/`_generate_ragas_probes`(`probe_gen.py`) —
+     그래프 기반 단일홉(구체/추상) + 멀티홉(bridge/comparison/aggregation) 질문 합성(LLM +
+     휴리스틱 폴백).
+   - 남은 일: DataMorgana-lite/무응답(Held-out·False Premise) 생성기, `eval_probes.json`
+     영속화(`probe_store.py`), `generate_probes()` 전체 배선 + 회귀 테스트.
 2. **RAGAS 지표** (`ragas_eval.py`) — ✅ 구현됨. RAGAS 알고리즘(청구 분해·순위 가중 등)을
    OpenAI LLM-as-Judge로 직접 계산(Faithfulness/ContextPrecision/ContextRecall/ResponseRelevancy
    + staleness/contradiction AspectCritic). `EVAL_ENABLE_LLM=1`로 활성화. ragas 라이브러리는
