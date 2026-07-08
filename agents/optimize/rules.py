@@ -11,10 +11,9 @@ agents/optimize/rules.py
   1. 처방은 항상 "순서 있는 리스트". 가벼운 것(런타임) → 무거운 것(재색인) 순.
      planner가 맨 앞부터 하나씩 꺼내 적용하고, 실패 시 다음 후보로 순차검증.
      (동시 적용 금지 = 방식2. 한 라벨의 여러 config를 한꺼번에 바꾸면 방식1로 후퇴)
-  2. 각 처방에 (reindex, cost, guardrail) 메타데이터를 박는다.
+  2. 각 처방에 (reindex, cost) 메타데이터를 박는다.
      - reindex: 재색인 필요 여부. True면 그래프가 Index 노드를 경유해야 함.
      - cost:    처방비용. 우선순위 공식(빈도×신뢰도÷비용)의 분모. 런타임=1, 재색인=3.
-     - guardrail: 이 처방이 악화시킬 수 있는 지표. 롤백 하한선 체크 대상.
   3. 미확정 라벨은 지우지 말고 status="draft"로 남긴다.
 
 [협업 구조 — 라벨 단위 소유권, 그룹은 taxonomy 정리용]
@@ -71,14 +70,12 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"use_reranker": True},
                 "reindex": False,
                 "cost": None, # 숫자 튜닝 필요
-                "guardrail": ["latency"],
             },
             {
                 "id": "widen_rerank_candidates",
                 "patch": {"rerank_candidates": "increase"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["latency"],
             },
         ],
     },
@@ -94,7 +91,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"use_hybrid": True},
                 "reindex": False,       # 검색 시점 융합, 색인 재생성 불필요
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["context_precision"],
             },
         ],
         # NOTE: baseline이 이미 hybrid면 발생 안 함. naive(dense-only) MVP 전용.
@@ -111,7 +107,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"embedding_model": "upgrade"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["latency", "cost"],
                 # WARN: VECTOR_DIM 변경 시 Qdrant 컬렉션 재생성 필요 (qdrant_store.py)
             },
             {
@@ -119,7 +114,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"chunk_size": "decrease"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["context_recall"],
             },
         ],
         # NOTE: 세 갈래(모델약함/도메인약함/청크희석) 구분은 Eval 토픽클러스터 신호로
@@ -137,21 +131,18 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"top_k": "increase"},
                 "reindex": False,       # 제일 가벼움, 먼저 시도
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["latency", "too_long_context"],
             },
             {
                 "id": "increase_chunk_overlap",
                 "patch": {"chunk_overlap": "increase"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["cost"],
             },
             {
                 "id": "adjust_chunk_size",
                 "patch": {"chunk_size": "adjust"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["context_precision", "cost"],
             },
         ],
     },
@@ -167,19 +158,129 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"top_k": "increase"},   # 나열형은 gold 개수 > 고정 top_k
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["too_long_context", "latency"],
             },
             # TODO(index-합의): MMR 다양성 옵션 필드가 index_config에 없음.
             #   {"id": "enable_mmr", "patch": {"mmr": True}, ...}
         ],
     },
 
-    "retrieval_missing_bridge_dependency": {"group": "A", "assigned": None, "status": "unassigned", "prescriptions": []},
-    "chunking_context_mismatch":            {"group": "A", "assigned": None, "status": "unassigned", "prescriptions": []},
-    "chunking_overchunking":                {"group": "A", "assigned": None, "status": "unassigned", "prescriptions": []},
-    "chunking_underchunking":                {"group": "A", "assigned": None, "status": "unassigned", "prescriptions": []},
-    "reranker_low_recall":                   {"group": "A", "assigned": None, "status": "unassigned", "prescriptions": []},
-    "reranker_low_precision":                {"group": "A", "assigned": None, "status": "unassigned", "prescriptions": []},
+    "retrieval_missing_bridge_dependency": {
+        "group": "A",
+        "assigned": "권성우",
+        "status": "draft",              # multi-hop query rewrite / max_hops 스키마 합의 필요
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "enable_query_decomposition",
+                "patch": {"query_rewrite": "decompose", "max_hops": "increase"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "expand_bridge_entity_query",
+                "patch": {"bridge_entity_expansion": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # BLOCKER: query_rewrite/max_hops 필드가 AgentDoctorState/index_config에 없음.
+    },
+
+    "chunking_context_mismatch": {
+        "group": "A",
+        "assigned": "권성우",
+        "status": "draft",              # chunking_strategy 필드 합의 필요
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "increase_chunk_overlap",
+                "patch": {"chunk_overlap": "increase"},
+                "reindex": True,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "switch_chunking_strategy",
+                "patch": {"chunking_strategy": "recursive_sentence"},
+                "reindex": True,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # NOTE: overlap 증가는 현재 index_config에 존재하지만 chunking_strategy는 추가 합의 필요.
+    },
+
+    "chunking_overchunking": {
+        "group": "A",
+        "assigned": "권성우",
+        "status": "draft",
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "increase_chunk_size",
+                "patch": {"chunk_size": "increase"},
+                "reindex": True,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+    },
+
+    "chunking_underchunking": {
+        "group": "A",
+        "assigned": "권성우",
+        "status": "draft",
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "decrease_chunk_size",
+                "patch": {"chunk_size": "decrease"},
+                "reindex": True,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+    },
+
+    "reranker_low_recall": {
+        "group": "A",
+        "assigned": "권성우",
+        "status": "draft",              # reranker 필드가 아직 index_config에 없음
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "widen_rerank_candidates",
+                "patch": {"rerank_candidates": "increase"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "relax_reranker_threshold",
+                "patch": {"reranker_threshold": "decrease"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # BLOCKER: reranker 관련 config 필드와 실제 reranker 단계가 아직 없음.
+    },
+
+    "reranker_low_precision": {
+        "group": "A",
+        "assigned": "권성우",
+        "status": "draft",              # reranker 필드가 아직 index_config에 없음
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "swap_reranker_model",
+                "patch": {"reranker_model": "upgrade"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "tighten_reranker_threshold",
+                "patch": {"reranker_threshold": "increase"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # BLOCKER: reranker 관련 config 필드와 실제 reranker 단계가 아직 없음.
+    },
 
     # ═══════════════════════════════════════════════════════════════
     #  B그룹 — 생성 실패 (Oracle Test 실패)
@@ -197,14 +298,12 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                           "require_citation": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["answer_relevancy"],  # 너무 엄격해지면 과도한 기권 위험
             },
             {
                 "id": "upgrade_generation_model",
                 "patch": {"generation_model": "upgrade"},  # 프롬프트로 안 되면 최후 수단
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["cost", "latency"],
             },
         ],
         # BLOCKER: core/state.py 에 generation_config 필드 없음. 추가 전까지 draft.
@@ -221,14 +320,12 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"system_prompt": "모든 하위 질문에 빠짐없이 답하라"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["answer_relevancy"],
             },
             {
                 "id": "checklist_review_step",
                 "patch": {"answer_checklist_review": True},  # 답변 누락 점검 단계 추가
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["latency", "cost"],
             },
         ],
         # BLOCKER: generation_config 필드 없음.
@@ -245,7 +342,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"verifier_on": True, "verifier_type": "faithfulness"},
                 "reindex": False,
                 "cost": None,            # 숫자 튜닝 필요
-                "guardrail": ["latency", "cost"],
             },
         ],
         # BLOCKER: generation_config 없음 + verifier 노드 자체가 아직 미구현
@@ -263,16 +359,98 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"restate_question": True},  # 답변 전 질문 재진술 강제
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["latency"],
             },
         ],
         # BLOCKER: generation_config 없음.
     },
 
-    "generation_abstention_failure":      {"group": "B", "assigned": None, "status": "unassigned", "prescriptions": []},
-    "generation_parametric_overreliance": {"group": "B", "assigned": None, "status": "unassigned", "prescriptions": []},
-    "generation_numerical_error":         {"group": "B", "assigned": None, "status": "unassigned", "prescriptions": []},
-    "generation_hop_binding_error":       {"group": "B", "assigned": None, "status": "unassigned", "prescriptions": []},
+    "generation_abstention_failure": {
+        "group": "B",
+        "assigned": "권성우",
+        "status": "draft",              # generation_config 필드 합의 필요
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "strengthen_abstention_prompt",
+                "patch": {"abstention_prompt": "strengthen", "grounding_strict": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "require_citation",
+                "patch": {"require_citation": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # BLOCKER: generation_config 필드 없음.
+    },
+
+    "generation_parametric_overreliance": {
+        "group": "B",
+        "assigned": "권성우",
+        "status": "draft",              # generation_config 필드 합의 필요
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "strict_grounding_prompt",
+                "patch": {"grounding_strict": True, "require_citation": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "lower_temperature",
+                "patch": {"temperature": "decrease"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # BLOCKER: generation_config 필드 없음.
+    },
+
+    "generation_numerical_error": {
+        "group": "B",
+        "assigned": "권성우",
+        "status": "draft",              # generation_config 필드 합의 필요
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "require_numeric_citation",
+                "patch": {"numeric_citation_required": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "enable_calculation_check",
+                "patch": {"calculation_check": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # BLOCKER: generation_config 필드 및 calculation checker 단계 없음.
+    },
+
+    "generation_hop_binding_error": {
+        "group": "B",
+        "assigned": "권성우",
+        "status": "draft",              # multi-hop answer planning 스키마 합의 필요
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "force_hop_evidence_binding",
+                "patch": {"answer_format": "cot_chained", "require_hop_citation": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "enable_bridge_entity_verifier",
+                "patch": {"bridge_entity_verifier": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # BLOCKER: generation_config 필드 및 verifier 단계 없음.
+    },
 
     # ═══════════════════════════════════════════════════════════════
     #  C그룹 — context 구조 문제
@@ -289,14 +467,12 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"top_k": "decrease"},
                 "reindex": False,       # 가장 가벼움, 먼저 시도
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["context_recall"],
             },
             {
                 "id": "context_compression",
                 "patch": {"context_compression": True},  # 관련도 낮은 청크 필터링/압축
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["context_recall", "latency"],
                 # TODO(index-합의): context_compression 필드 index_config에 없음
             },
             {
@@ -304,13 +480,59 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"chunk_size": "decrease"},
                 "reindex": True,        # 마지막 수단, 재색인 필요
                 "cost": None,           # 숫자 튜닝 필요
-                "guardrail": ["context_recall", "cost"],
             },
         ],
     },
 
-    "lost_in_the_middle":        {"group": "C", "assigned": None, "status": "unassigned", "prescriptions": []},
-    "context_noise_interference":{"group": "C", "assigned": None, "status": "unassigned", "prescriptions": []},
+    "lost_in_the_middle": {
+        "group": "C",
+        "assigned": "권성우",
+        "status": "draft",              # context ordering 필드 합의 필요
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "reorder_context_edges",
+                "patch": {"context_ordering": "most_relevant_edges"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "decrease_top_k",
+                "patch": {"top_k": "decrease"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # BLOCKER: context_ordering/top_k 필드가 현재 index_config에 없음.
+    },
+
+    "context_noise_interference": {
+        "group": "C",
+        "assigned": "권성우",
+        "status": "draft",              # filtering/MMR/reranker 필드 합의 필요
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [
+            {
+                "id": "enable_noise_filter",
+                "patch": {"noise_filter": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "enable_mmr",
+                "patch": {"mmr": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "strict_conflict_prompt",
+                "patch": {"conflict_resolution_prompt": "prefer_high_confidence_evidence"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # BLOCKER: noise_filter/mmr/generation_config 필드가 아직 없음.
+    },
 
     # ═══════════════════════════════════════════════════════════════
     #  D그룹 — 데이터 문제 (config로 처방 불가, 사람 개입)
@@ -334,7 +556,14 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         # corpus_gap과 동일 처리 + 어느 hop이 빠졌는지 리포트에 구체적으로 명시.
     },
 
-    "bad_gold_answer": {"group": "D", "assigned": None, "status": "unassigned", "prescriptions": []},
+    "bad_gold_answer": {
+        "group": "D",
+        "assigned": "권성우",
+        "status": "manual",
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "prescriptions": [],
+        # RAG pipeline 결함이 아니라 평가셋 문제. Probe ground_truth 수정/제거 또는 사람 검수 큐로 전달.
+    },
 }
 
 
