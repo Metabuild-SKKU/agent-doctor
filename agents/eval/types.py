@@ -58,6 +58,16 @@ QUERY_STYLES = ["web_search", "conversational", "imperative"]
 QUERY_LENGTHS = ["short", "medium", "long"]
 EVOL_DIRECTIONS = ["depth", "breadth", "reasoning", "conditioning"]
 
+# STEP1 RAGAS 4분면 배분 비율 (합=1.0). 멀티홉 엣지가 없으면 multi_* 몫은
+# single_* 쪽으로 접힌다(agents/eval/probe_gen.py::_allocate_ragas_quadrants).
+RAGAS_QUADRANT_WEIGHTS = {
+    "single_specific": 0.4,
+    "single_abstract": 0.3,
+    "multi_specific": 0.2,
+    "multi_abstract": 0.1,
+}
+MULTIHOP_SUBTYPES = ["bridge", "comparison", "aggregation"]
+
 
 class Branch:
     """
