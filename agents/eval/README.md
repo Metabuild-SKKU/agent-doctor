@@ -106,6 +106,34 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, by_tier, 
 - **STEP3-2 RAGAS 는 `deep` 이상에서만 실행**된다(`ragas_eval.evaluate` 의 모드 게이트). `EVAL_ENABLE_LLM` 과 AND 조건.
 - 현재 tier 2~4 의 판별 신호 일부는 훅(미구현)이라, 아직 검색 원인 확정은 제한적이다(`[구현 포인트]` 참고).
 
+### 라벨별 tier 분류 (확정에 필요한 자원)
+
+`diagnose._LABEL_TIER` 가 코드상 단일 출처. tier = "판별을 **확정**하는 데 필요한 가장 비싼 자원".
+
+| 라벨 | 그룹 | tier | 확정 자원 |
+|---|---|:---:|---|
+| `retrieval_incomplete_enumeration` | A 검색 | 1 | gold수 vs top-k 순수 규칙 |
+| `retrieval_low_rank` | A 검색 | 2 | top-N 재검색 |
+| `retrieval_lexical_mismatch` | A 검색 | 2 | BM25 조회 |
+| `retrieval_semantic_mismatch` | A 검색 | 2 | BM25 + 코퍼스 확인 |
+| `retrieval_missing_gold` | A 검색 | 2 | 코퍼스 멤버십 조회 |
+| `retrieval_missing_bridge_dependency` | A 검색 | 4 | iterative decompose 재실행 |
+| `generation_hallucination` | B 생성 | 3 | RAGAS faithfulness |
+| `generation_partial_answer` | B 생성 | 3 | RAGAS relevancy |
+| `generation_hop_binding_error` | B 생성 | 3 | RAGAS faithfulness(+추론검증) |
+| `generation_contradiction` | B 생성 | 3 | AspectCritic(LLM) |
+| `generation_failure` (롤업) | B 생성 | 3 | DEEP에서 세분화 (항상 예비) |
+| `too_long_context` | C context | 4 | ablation 재실행(축소) |
+| `lost_in_the_middle` | C context | 4 | 재실행(재정렬) |
+| `context_noise_interference` | C context | 4 | 재실행(노이즈 제거) |
+| `bad_gold_answer` | D 데이터 | 3 | RAGAS 2지표(진짜 확정은 사람) |
+| `corpus_gap` | D 데이터 | 2 | 코퍼스 조회 |
+| `corpus_gap_partial_hop` | D 데이터 | 2 | 코퍼스 조회(hop별) |
+
+> "확정"은 원인 검증(처방이 실제로 통함)을 뜻한다. C그룹·`bridge_dependency` 는 ablation/재실행으로만
+> 확정되므로 tier4다 — 필요해지면 후에 `preliminary_tier=3(RAGAS 후보) / confirm_tier=4(재실행 확정)` 로
+> 분리할 수 있다. `bad_gold_answer` 는 자동으론 tier3까지만 의심 가능하고 진짜 확정은 사람 검수 몫.
+
 ---
 
 ## 테스트
