@@ -70,45 +70,57 @@ def _tier_of(label: str) -> int:
 # ══════════════════════════════════════════════════════════════════
 
 def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
-    """gold가 top-N 후보엔 있으나 순위가 낮아 top-k 밖. 처방: 리랭커 추가."""
-    if _gold_in_wider_candidates(record) is not True:
-        return None
-    return _finding(record, "retrieval_low_rank", "retrieval_failure")
+    """gold가 top-N 후보엔 있으나 순위가 낮아 top-k 밖. 처방: 리랭커 추가.
+    확정: top-N 재검색에서 gold 발견(tier2). 싼 예비 신호 없음."""
+    if _gold_in_wider_candidates(record) is True:
+        return _finding(record, "retrieval_low_rank", "retrieval_failure", confirmed=True)
+    return None
 
 
 def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
-    """dense는 놓쳤으나 BM25로 잡히는 단어 불일치. 처방: 하이브리드 검색."""
-    if _bm25_hits_gold(record) is not True:
-        return None
-    return _finding(record, "retrieval_lexical_mismatch", "retrieval_failure")
+    """dense는 놓쳤으나 BM25로 잡히는 단어 불일치. 처방: 하이브리드 검색.
+    확정: BM25 가 gold 를 잡음(tier2). 싼 예비 신호 없음."""
+    if _bm25_hits_gold(record) is True:
+        return _finding(record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True)
+    return None
 
 
 def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
-    """dense·BM25 모두 놓친 의미 연결 실패. 처방: 임베딩/청킹 교체."""
-    if _bm25_hits_gold(record) is not False:   # None(미확보)/True 면 아님
-        return None
-    return _finding(record, "retrieval_semantic_mismatch", "retrieval_failure")
+    """dense·BM25 모두 놓친 의미 연결 실패. 처방: 임베딩/청킹 교체.
+    확정: BM25 도 gold 를 못 잡음(tier2). 싼 예비 신호 없음."""
+    if _bm25_hits_gold(record) is False:
+        return _finding(record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=True)
+    return None
 
 
 def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
-    """gold는 corpus에 있으나 top-k에 없음(검색 원인 미상 시 기본 라벨). 처방: top_k/chunk 조정."""
-    if not (record.recall_at_k < 1):
-        return None
-    return _finding(record, "retrieval_missing_gold", "retrieval_failure")
+    """gold는 corpus에 있으나 top-k에 없음. 처방: top_k/chunk 조정.
+    확정: 코퍼스에 gold 존재(tier2). 예비: recall<1(tier1, 코퍼스 확인 전)."""
+    in_corpus = _gold_in_corpus(record)
+    if in_corpus is True:
+        return _finding(record, "retrieval_missing_gold", "retrieval_failure", confirmed=True)
+    if in_corpus is None and record.recall_at_k < 1:
+        return _finding(record, "retrieval_missing_gold", "retrieval_failure", confirmed=False)
+    return None
 
 
 def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]:
-    """멀티홉 연쇄형: 2번째 hop 근거가 1번째 hop에 의존. 처방: iterative_decompose."""
-    if not (_is_multi_hop(record) and record.recall_at_k < 1):
-        return None
-    return _finding(record, "retrieval_missing_bridge_dependency", "retrieval_failure")
+    """멀티홉 연쇄형: 2번째 hop 근거가 1번째 hop에 의존. 처방: iterative_decompose.
+    확정: decompose 재실행 시 회복(tier4). 예비: 멀티홉+recall<1(tier1)."""
+    recovers = _bridge_decompose_recovers(record)
+    if recovers is True:
+        return _finding(record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=True)
+    if recovers is None and _is_multi_hop(record) and record.recall_at_k < 1:
+        return _finding(record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False)
+    return None
 
 
 def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
-    """나열형: 필요한 근거 개수 가변인데 top-k 고정이라 누락. 처방: 동적 top-k/adaptive."""
-    if not _enumeration_signal(record):
-        return None
-    return _finding(record, "retrieval_incomplete_enumeration", "retrieval_failure")
+    """나열형: 필요한 근거 개수 가변인데 top-k 고정이라 누락. 처방: 동적 top-k/adaptive.
+    확정: gold수 vs top-k 순수 규칙(tier1) — 바로 확정."""
+    if _enumeration_signal(record):
+        return _finding(record, "retrieval_incomplete_enumeration", "retrieval_failure", confirmed=True)
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -117,36 +129,37 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
 
 def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
     """멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음). 처방: 단계별 근거 CoT.
-    faithfulness 가 '측정되어' 높을 때만 판정(미측정=None 은 근거 없음 → 판정 안 함)."""
+    확정: faithfulness 측정되어 높음(tier3). 미측정 None → 안 뜸(→ _pick 롤업)."""
     faith = _faith(record)
-    if not (_is_multi_hop(record) and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN):
-        return None
-    return _finding(record, "generation_hop_binding_error", "generation_failure")
+    if _is_multi_hop(record) and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN:
+        return _finding(record, "generation_hop_binding_error", "generation_failure", confirmed=True)
+    return None
 
 
 def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
     """정답 context가 있는데 지어냄. 처방: 그라운딩 프롬프트+인용.
-    faithfulness 가 '측정되어' 낮을 때만 판정(미측정=None 은 근거 없음 → 판정 안 함).
-    RAGAS 미실행 시엔 _pick 이 예비 generation_failure 로 롤백한다."""
+    확정: faithfulness 측정되어 낮음(tier3). 미측정 None → 안 뜸(→ _pick 롤업)."""
     faith = _faith(record)
-    if not (faith is not None and faith < RAGAS_FAITHFULNESS_MIN):
-        return None
-    return _finding(record, "generation_hallucination", "generation_failure")
+    if faith is not None and faith < RAGAS_FAITHFULNESS_MIN:
+        return _finding(record, "generation_hallucination", "generation_failure", confirmed=True)
+    return None
 
 
 def generation_partial_answer(record: EvalRecord) -> Optional[Finding]:
-    """정답 context가 있는데 일부 요소·조건 누락. 처방: 완결성 프롬프트/checklist."""
+    """정답 context가 있는데 일부 요소·조건 누락. 처방: 완결성 프롬프트/checklist.
+    확정: relevancy 측정되어 낮음(tier3)."""
     rel = _rel(record)
-    if not (rel is not None and rel < RAGAS_RESPONSE_RELEVANCY_MIN):
-        return None
-    return _finding(record, "generation_partial_answer", "generation_failure")
+    if rel is not None and rel < RAGAS_RESPONSE_RELEVANCY_MIN:
+        return _finding(record, "generation_partial_answer", "generation_failure", confirmed=True)
+    return None
+
 
 # 나중에 개발
 def generation_contradiction(record: EvalRecord) -> Optional[Finding]:
-    """답변이 컨텍스트/사실과 모순(AspectCritic). 다른 라벨과 함께 붙는다."""
-    if record.aspect.get("contradiction") != 1:
-        return None
-    return _finding(record, "generation_contradiction", "generation_failure")
+    """답변이 컨텍스트/사실과 모순(AspectCritic, tier3). 다른 라벨과 함께 붙는다."""
+    if record.aspect.get("contradiction") == 1:
+        return _finding(record, "generation_contradiction", "generation_failure", confirmed=True)
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -154,22 +167,30 @@ def generation_contradiction(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def too_long_context(record: EvalRecord) -> Optional[Finding]:
-    """context가 너무 길어 잡음·과부하로 품질 저하. 처방: top-k 축소/필터링/압축."""
-    if _context_shorten_helps(record) is not True:
-        return None
-    return _finding(record, "too_long_context", "retrieval_failure")
+    """context가 너무 길어 잡음·과부하로 품질 저하. 처방: top-k 축소/필터링/압축.
+    확정: 축소 재실행 시 회복(tier4). 싼 예비 신호 없음."""
+    if _context_shorten_helps(record) is True:
+        return _finding(record, "too_long_context", "retrieval_failure", confirmed=True)
+    return None
 
 
 def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
-    """청크가 긴 context 중간이라 LLM이 참조 못함. 처방: context 재정렬/top-k 축소."""
-    if _gold_front_helps(record) is not True:
-        return None
-    return _finding(record, "lost_in_the_middle", "retrieval_failure")
+    """청크가 긴 context 중간이라 LLM이 참조 못함. 처방: context 재정렬/top-k 축소.
+    확정: gold 앞배치 재실행 시 회복(tier4). 싼 예비 신호 없음."""
+    if _gold_front_helps(record) is True:
+        return _finding(record, "lost_in_the_middle", "retrieval_failure", confirmed=True)
+    return None
 
 
 def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
-    """비-gold 청크의 상충 정보에 이끌림(C 잔여 원인). 처방: 노이즈 필터링+프롬프트."""
-    return _finding(record, "context_noise_interference", "retrieval_failure")
+    """비-gold 청크의 상충 정보에 이끌림(C 잔여 원인). 처방: 노이즈 필터링+프롬프트.
+    확정: 노이즈 제거 재실행 시 회복(tier4). 예비: C 잔여이므로 확정 전엔 항상 예비."""
+    helps = _noise_removal_helps(record)
+    if helps is True:
+        return _finding(record, "context_noise_interference", "retrieval_failure", confirmed=True)
+    if helps is None:
+        return _finding(record, "context_noise_interference", "retrieval_failure", confirmed=False)
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -177,24 +198,27 @@ def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def bad_gold_answer(record: EvalRecord) -> Optional[Finding]:
-    """정답셋 자체 오류/모호(충실도·관련성 모두 측정 고득점인데 gold만 불일치). 처방: 사람 검수."""
-    if not _both_high(_faith(record), _rel(record)):
-        return None
-    return _finding(record, "bad_gold_answer", "gap")
+    """정답셋 자체 오류/모호(충실도·관련성 모두 측정 고득점인데 gold만 불일치). 처방: 사람 검수.
+    확정(자동): faith·rel 둘 다 측정 고득점(tier3). 진짜 확정은 사람 검수."""
+    if _both_high(_faith(record), _rel(record)):
+        return _finding(record, "bad_gold_answer", "gap", confirmed=True)
+    return None
 
 
 def corpus_gap(record: EvalRecord) -> Optional[Finding]:
-    """필요한 자료가 코퍼스에 없음(단일홉). 처방: 문서 추가 요청."""
-    if _gold_in_corpus(record) is not False or _is_multi_hop(record):
-        return None
-    return _finding(record, "corpus_gap", "gap")
+    """필요한 자료가 코퍼스에 없음(단일홉). 처방: 문서 추가 요청.
+    확정: 코퍼스에 gold 없음(tier2). 싼 예비 신호 없음."""
+    if _gold_in_corpus(record) is False and not _is_multi_hop(record):
+        return _finding(record, "corpus_gap", "gap", confirmed=True)
+    return None
 
 
 def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
-    """멀티홉 중 일부 hop 근거만 코퍼스에 없음. 처방: 해당 hop 문서 추가 요청."""
-    if _gold_in_corpus(record) is not False or not _is_multi_hop(record):
-        return None
-    return _finding(record, "corpus_gap_partial_hop", "gap")
+    """멀티홉 중 일부 hop 근거만 코퍼스에 없음. 처방: 해당 hop 문서 추가 요청.
+    확정: 코퍼스에 gold 없음(tier2). 싼 예비 신호 없음."""
+    if _gold_in_corpus(record) is False and _is_multi_hop(record):
+        return _finding(record, "corpus_gap_partial_hop", "gap", confirmed=True)
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -391,21 +415,24 @@ def _enumeration_signal(record: EvalRecord) -> bool:
 # ── tier2 · 추가 검색 쿼리 (자원: top-N 재검색 / BM25 / 코퍼스 조회) — [훅 미구현] ──
 
 def _gold_in_wider_candidates(record: EvalRecord):
-    """[구현 포인트·tier2] top-N(예: 100) 재검색 후 gold 존재 여부. retrieval_low_rank 용.
-    구현 시 첫 줄: if _active_mode < Mode.STANDARD: return None"""
-    return None
+    """[구현 포인트·tier2] top-N(예: 100) 재검색 후 gold 존재 여부. retrieval_low_rank 용."""
+    if _active_mode < Mode.STANDARD:   # 비용 게이트 (STANDARD 미만이면 재검색 안 함)
+        return None
+    return None                        # 구현 시: 실제 top-N 재검색 → True/False
 
 
 def _bm25_hits_gold(record: EvalRecord):
-    """[구현 포인트·tier2] BM25 검색 후 gold 존재 여부. lexical(True)/semantic(False) mismatch 용.
-    구현 시 첫 줄: if _active_mode < Mode.STANDARD: return None"""
-    return None
+    """[구현 포인트·tier2] BM25 검색 후 gold 존재 여부. lexical(True)/semantic(False) mismatch 용."""
+    if _active_mode < Mode.STANDARD:
+        return None
+    return None                        # 구현 시: 실제 BM25 → True/False
 
 
 def _gold_in_corpus(record: EvalRecord):
-    """[구현 포인트·tier2] 코퍼스 전체 조회로 gold 존재 여부. corpus_gap(_partial_hop) 용.
-    구현 시 첫 줄: if _active_mode < Mode.STANDARD: return None"""
-    return None
+    """[구현 포인트·tier2] 코퍼스 전체 조회로 gold 존재 여부. True→missing_gold / False→corpus_gap."""
+    if _active_mode < Mode.STANDARD:
+        return None
+    return None                        # 구현 시: 실제 코퍼스 조회 → True/False
 
 
 # ── tier3 · LLM/RAGAS (자원: STEP3-2 RAGAS 점수 · AspectCritic) ──
@@ -421,13 +448,17 @@ def _use_oracle(record: EvalRecord) -> bool:
 
 
 def _faith(record: EvalRecord):
-    """faithfulness(충실도). hallucination / hop_binding / bad_gold 용. 미측정 None."""
+    """faithfulness(충실도). hallucination / hop_binding / bad_gold 용. 모드부족/미측정 None."""
+    if _active_mode < Mode.DEEP:       # 비용 게이트 (RAGAS 는 DEEP 이상에서만)
+        return None
     src = record.oracle_ragas if _use_oracle(record) else record.ragas
     return src.get("faithfulness")
 
 
 def _rel(record: EvalRecord):
-    """response_relevancy(관련성). partial_answer / bad_gold 용. 미측정 None."""
+    """response_relevancy(관련성). partial_answer / bad_gold 용. 모드부족/미측정 None."""
+    if _active_mode < Mode.DEEP:
+        return None
     src = record.oracle_ragas if _use_oracle(record) else record.ragas
     return src.get("response_relevancy")
 
@@ -439,19 +470,35 @@ def _both_high(faith, rel) -> bool:
 
 
 # ── tier4 · 파이프라인 재실행 (자원: ablation 재실행) — [훅 미구현] ──
-# (context_noise_interference 는 C 잔여 fallback — 전용 훅 없이 무조건 발동, tier4 예비로 남음)
-# (missing_bridge_dependency 는 tier1 신호로 발동하나 확정은 iterative_decompose 재실행 필요 → tier4)
+# 각 신호는 확정용. 대응 라벨은 싼 예비 신호가 있으면 그걸로 예비를 먼저 낸다
+# (bridge=멀티홉+recall, context_noise=C 잔여 항상). 확정은 이 재실행 훅이 True 를 줄 때만.
 
 def _context_shorten_helps(record: EvalRecord):
-    """[구현 포인트·tier4] context 축소 재실행 시 정답률 상승 여부. too_long_context 용.
-    구현 시 첫 줄: if _active_mode < Mode.FULL: return None"""
-    return None
+    """[구현 포인트·tier4] context 축소 재실행 시 정답률 상승 여부. too_long_context 확정용."""
+    if _active_mode < Mode.FULL:
+        return None
+    return None                        # 구현 시: 축소 재실행 → True/False
 
 
 def _gold_front_helps(record: EvalRecord):
-    """[구현 포인트·tier4] gold를 앞쪽 배치 재실행 시 정답률 회복 여부. lost_in_the_middle 용.
-    구현 시 첫 줄: if _active_mode < Mode.FULL: return None"""
-    return None
+    """[구현 포인트·tier4] gold를 앞쪽 배치 재실행 시 정답률 회복 여부. lost_in_the_middle 확정용."""
+    if _active_mode < Mode.FULL:
+        return None
+    return None                        # 구현 시: 재정렬 재실행 → True/False
+
+
+def _bridge_decompose_recovers(record: EvalRecord):
+    """[구현 포인트·tier4] iterative_decompose 재실행 시 hop2 근거 회복 여부. missing_bridge 확정용."""
+    if _active_mode < Mode.FULL:
+        return None
+    return None                        # 구현 시: 분해 재검색 → True/False
+
+
+def _noise_removal_helps(record: EvalRecord):
+    """[구현 포인트·tier4] 비-gold 노이즈 제거 재실행 시 회복 여부. context_noise 확정용."""
+    if _active_mode < Mode.FULL:
+        return None
+    return None                        # 구현 시: 노이즈 제거 재실행 → True/False
 
 
 # ── Finding 빌더 ─────────────────────────────────────────────────
@@ -480,20 +527,17 @@ def _severity_of(label: str) -> str:
     return "warning"
 
 
-def _finding(record: EvalRecord, label: str, ftype: str,
-             confirmed: Optional[bool] = None) -> Finding:
-    """라벨 함수 공통 Finding 생성기. 라벨(진단명)만 싣는다.
+def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool) -> Finding:
+    """라벨 함수 공통 Finding 생성기.
 
-    tier = 라벨의 확정 자원 tier. confirmed 기본값은 '현재 진단 모드가 그 tier 를 감당하는지'.
-    다만 근거 없이 특정만 못 한 롤업(generation_failure)처럼 강제로 예비 처리해야 할 때는
-    confirmed=False 를 명시해 override 한다(모드가 높아도 예비 유지).
-    확정 못 한 라벨은 예비(confirmed=False)로 내보내 상위 모드에서 확정하도록 남긴다.
+    confirmed 는 라벨 함수가 명시한다 — '확정 신호가 실제로 발동했는지'.
+      True  = 확정 신호(그 자원)가 발동해 확정.
+      False = 싼 예비 신호로 의심만(확정 자원 미실행) → 상위 모드에서 확정.
+    (mode>=tier 자동판정 아님 — 자원 미실행/미측정이면 예비.) tier 는 리포트용 메타.
     """
     probe = record.probe
     group = _group_of(label, ftype)
     tier = _tier_of(label)
-    if confirmed is None:
-        confirmed = _active_mode >= tier
     prefix = "" if confirmed else "[예비] "
     return Finding(
         finding_id=f"{probe.probe_id}:{label}",

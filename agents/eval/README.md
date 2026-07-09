@@ -94,6 +94,10 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, by_tier, 
 라벨(진단명)은 판별에 필요한 **가장 비싼 자원**을 tier 로 갖는다. 사용자가 고른 모드(`EVAL_MODE`)가
 그 tier 상한을 정해, 감당 못 하는 라벨은 **예비(`Finding.confirmed=False`)** 로 내보내고 상위 모드에서 확정한다.
 
+**확정(`confirmed=True`)은 그 라벨의 '확정 신호'가 실제로 발동해야 성립한다** — 자원 미실행/미측정이면 예비다
+(단순히 `mode>=tier` 라서 확정이 아님). 신호는 자기 tier의 자원을 self-gate 하고(모드 부족 시 `None`),
+라벨 함수는 `확정 신호 → (미실행이고 싼 신호 있으면) 예비` 순으로 판정한다. → 거짓확정이 구조적으로 불가.
+
 | 모드 | 값 | 추가 자원 | 확정 가능한 라벨 |
 |------|----|----------|-----------------|
 | `fast` | 1 | 규칙·기존 지표만(추가 쿼리 없음) | `retrieval_incomplete_enumeration` (gold수 vs top-k 순수 규칙) |
