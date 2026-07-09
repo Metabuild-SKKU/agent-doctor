@@ -38,6 +38,11 @@ class Chunk:
     text: str
     page: Optional[int] = None
     section: Optional[str] = None
+    char_span: Optional[tuple[int, int]] = None  # (start, end) — 부모 Document.content 기준 위치.
+    # 재청킹돼도 안 깨지는 기준. Eval이 gold_char_span과 겹치는 청크를 찾아 gold를 재판정하는 데 씀.
+    token_count: Optional[int] = None            # 실제 임베딩 모델 토크나이저 기준 토큰 수
+    parent_id: Optional[str] = None              # Small-to-Big(부모 섹션) 확장 대비. 현재는 미사용
+    hash: Optional[str] = None                   # sha256(text) 앞부분. 중복 판별/증분 인덱싱용
     embedding: Optional[list[float]] = None    # dense 벡터
     sparse_vector: Optional[dict] = None       # BM25 sparse
     metadata: dict = field(default_factory=dict)
@@ -55,6 +60,11 @@ class Probe:
     expected_difficulty: str = "medium"
     answer_exists: Optional[bool] = None
     ground_truth: Optional[str] = None
+    gold_doc_id: Optional[str] = None            # 정답이 있는 원본 문서 ID (청킹과 무관, 항상 유효)
+    gold_char_span: Optional[tuple[int, int]] = None  # 원문 내 정답 위치 — Chunk.char_span과 동일 좌표계
+    gold_chunk_ids: list[str] = field(default_factory=list)  # 생성 시점 캐시. 재청킹 후엔 신뢰 금지,
+    # gold_char_span으로 매번 재계산할 것
+    qtype: Optional[str] = None          # "bridge" | "comparison" | "aggregation" | None
 
 
 @dataclass

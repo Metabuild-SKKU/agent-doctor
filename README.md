@@ -54,7 +54,8 @@ agent_doctor_v2/
 │   │   └── README.md
 │   ├── index/
 │   │   ├── agent.py       # 청크 분할 + 임베딩 + Qdrant 저장
-│   │   └── qdrant_store.py  # Qdrant 클라이언트 / 검색 / 임베딩 공통 모듈
+│   │   ├── qdrant_store.py  # Qdrant 클라이언트 / 검색 / 임베딩 공통 모듈
+│   │   └── graph_index.py   # NetworkX 그래프 / Mermaid / PyVis
 │   ├── eval/
 │   │   └── agent.py       # RAG 품질 진단
 │   ├── optimize/
@@ -129,8 +130,9 @@ python tests/test_pipeline.py
       Notion API → 페이지 블록 파싱 → Document 객체 생성
         ↓
   [2] Index Agent
-      Document → 고정 크기 청킹(512자) → sentence-transformers 임베딩
-      → Qdrant(in-memory) upsert → state.chunks 업데이트
+      Document 검증·중복 제거 → Markdown/문단 경계 청킹
+      → BGE-M3 임베딩 → Qdrant upsert → graph artifact 생성
+      → state.chunks, state.index_artifacts 업데이트
         ↓
   [3] Serve Agent
       chunks.json 저장(임베딩 포함)
@@ -149,9 +151,11 @@ python tests/test_pipeline.py
 |------|------|------|
 | 문서 수집 | Notion API | 블록 단위 재귀 파싱, 페이지네이션 처리 |
 | 인증 | Access Token / OAuth2 | `.env` 토큰 또는 브라우저 OAuth 흐름 |
-| 청킹 | 고정 크기 (512자, overlap 50) | `_chunk_text()` — 교체 가능한 구조 |
-| 임베딩 | sentence-transformers | `paraphrase-multilingual-MiniLM-L12-v2` (384차원, 한국어 지원) |
+| 청킹 | Markdown + recursive boundary | 기본 600자, overlap 80 |
+| 임베딩 | sentence-transformers | `BAAI/bge-m3` (1024차원, 다국어) |
 | 벡터 DB | Qdrant in-memory | 운영 시 `QDRANT_URL`로 Cloud 전환 |
+| 검색 | Dense baseline | config로 Hybrid/Reranker 활성화 |
+| 그래프 | NetworkX | Mermaid, GraphML, PyVis 출력 |
 | 검색 API | FastAPI + uvicorn | `GET /search?query=...` → 벡터 검색 결과 반환 |
 | MCP 서버 | FastMCP (stdio) | Claude Desktop이 프로세스로 직접 실행 |
 | 상태 공유 | LangGraph `AgentDoctorState` | 에이전트 간 데이터 전달 |
@@ -185,10 +189,10 @@ http://localhost:8766/search?query=재택근무     # 벡터 검색 테스트
 
 | 항목 | 현재 (로컬 테스트) | 향후 (운영) |
 |------|------------------|------------|
-| 임베딩 모델 | sentence-transformers (무료, 384차원) | - |
+| 임베딩 모델 | BAAI/bge-m3 (무료, 1024차원) | Eval 결과에 따라 교체 |
 | 벡터 DB | Qdrant in-memory (프로세스 내) | Qdrant Cloud (영구 저장) |
 | MCP 연결 | stdio (로컬 파일 경로) | URL 방식 (클라우드 배포 후) |
-| 청킹 전략 | 고정 크기 | - |
+| 청킹 전략 | Markdown 구조 + 경계 기반 분할 | Semantic/parent-child 실험 |
 
 ---
 

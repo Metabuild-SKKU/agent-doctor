@@ -20,8 +20,11 @@ uvicorn
 openai
 
 # Index Agent
-sentence-transformers  # 임베딩 (테스트용, 무료 로컬)
+pydantic>=2            # Ingest → Index 입력 스키마 검증
+sentence-transformers  # BAAI/bge-m3 임베딩 / BGE reranker
 qdrant-client          # 벡터 DB 클라이언트
+networkx               # 문서-청크-개념 그래프
+pyvis                  # 그래프 HTML 시각화
 
 # Index Agent (팀원 A)
 llama-index

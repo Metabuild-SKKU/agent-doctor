@@ -23,6 +23,8 @@ data/
 
 # 결과물
 results/
+output/index_graph/
+lib/
 
 # IDE
 .vscode/

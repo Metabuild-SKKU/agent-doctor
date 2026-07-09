@@ -38,6 +38,8 @@ mock_docs = [
 # ── 실행 ──────────────────────────────────────────────────────────
 state = AgentDoctorState()
 state.documents = mock_docs
+# 단독 테스트에서는 외부 LLM 호출 없이 재현 가능한 keyword graph를 사용한다.
+state.index_config["graph_extraction"] = "keyword"
 
 print("=" * 50)
 print("Index Agent 테스트 시작")
@@ -60,6 +62,7 @@ else:
         print(f"  임베딩 차원: {len(chunk.embedding)}")
         print(f"  임베딩 앞부분: {[round(v, 4) for v in embedding_preview]}...")
         print(f"  메타데이터: {chunk.metadata}")
+        print(f"  char_span: {chunk.char_span}  token_count: {chunk.token_count}  hash: {chunk.hash}")
 
     # ── 간단 유사도 검색 테스트 ──────────────────────────────────
     print("\n── 검색 테스트 ──")
