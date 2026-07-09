@@ -70,7 +70,7 @@ class PrescriptionSpec:
 
 # rules.py에서 내려오는 prescription id를 AgentDoctor 내부 표준 config path로 매핑한다.
 # 이 테이블은 외부 모듈이 직접 읽는 public contract가 아니라 config_mapper 내부 구현이다.
-# 외부로 전달해야 하는 prescription id는 ConfigPatch.metadata["prescription_id"]에 싣는다.
+# 외부로 전달해야 하는 prescription id 목록은 ConfigPatch.metadata["prescription_ids"]에 싣는다.
 PRESCRIPTION_SPECS: dict[str, PrescriptionSpec] = {
     "increase_top_k": PrescriptionSpec(
         target_path="retriever.top_k",
@@ -317,7 +317,7 @@ def map_prescriptions_to_config(
         result.search_space[spec.target_path].extend(executable_values)
 
         # 10. 각 후보값은 독립적인 ConfigPatch 후보가 된다.
-        #     reporter 등 후속 단계가 내부 spec table을 import하지 않도록 prescription_id는 metadata에 싣는다.
+        #     reporter 등 후속 단계가 내부 spec table을 import하지 않도록 prescription_ids는 metadata에 싣는다.
         for value in executable_values:
             patches.append(
                 ConfigPatch(
