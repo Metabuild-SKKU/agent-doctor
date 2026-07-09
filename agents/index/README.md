@@ -1,108 +1,104 @@
-# Index Agent
+# Index Module
 
-Ingest Agent가 수집한 `Document`를 청킹 → 임베딩 → Qdrant 저장해 검색 가능한 상태로 만드는 에이전트.
-
----
-
-## 역할
-
-```
-[Ingest Agent] → state.documents
-                        ↓
-                 [Index Agent]
-                        ↓
-        청킹 → 임베딩 → Qdrant 저장
-                        ↓
-                 state.chunks  →  [Eval Agent]로 전달
-```
-
----
+Ingest가 만든 `Document`를 검증하고, 검색 가능한 `Chunk`와 그래프 산출물로 변환한다.
 
 ## 처리 흐름
 
-```
-Document.content (전체 텍스트)
-    ↓ _chunk_text()
-["청크1", "청크2", ...]  (512자 단위, overlap 50)
-    ↓ embed()
-[[0.12, -0.34, ...], ...]  (384차원 벡터)
-    ↓ upsert_chunks()
-Qdrant 컬렉션 "agent_doctor"
-    ↓
-state.chunks (Chunk 리스트, embedding 포함)
+```text
+state.documents
+  → 입력 검증·텍스트 정규화
+  → 문서/청크 SHA-256 중복 제거
+  → Markdown header + 문단 경계 청킹
+  → BAAI/bge-m3 dense embedding
+  → 선택적 sparse vector 생성
+  → Qdrant upsert
+  → NetworkX graph + Mermaid/PyVis 출력
+  → state.chunks / state.index_artifacts
 ```
 
----
+## v1 기본 선택
 
-## 출력 데이터 (`state.chunks`)
+| 항목 | 기본값 | 변경 방법 |
+|---|---|---|
+| 청킹 | Markdown 구조 우선 + recursive boundary | `chunk_size`, `chunk_overlap` |
+| 크기 | 600자, overlap 80자 | `state.index_config` |
+| 임베딩 | `BAAI/bge-m3` (1024차원) | `embedding_model`, `embedding_dimension` |
+| Vector DB | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY` |
+| 검색 | Dense, top-k 5 | `top_k` |
+| Hybrid | 기본 OFF | `use_hybrid=True` |
+| Reranker | 기본 OFF | `use_reranker=True` |
+| Graph | NetworkX + Mermaid/PyVis | `graph_*` 설정 |
+
+Hybrid와 reranker는 baseline 결과를 먼저 측정한 뒤 Optimize가 켜는 기능이다.
+
+## 파일
+
+```text
+agents/index/
+├── agent.py          # 검증·중복 제거·청킹·전체 실행
+├── qdrant_store.py   # 임베딩·dense/hybrid 검색·reranker·Qdrant
+├── graph_index.py    # entity/relation graph와 시각화
+└── README.md
+```
+
+## 입력·출력 계약
+
+입력:
 
 ```python
-@dataclass
-class Chunk:
-    chunk_id    : str               # "{doc_id}_chunk_{index}"
-    doc_id      : str               # 원본 문서 ID
-    text        : str               # 청크 텍스트
-    embedding   : list[float]       # 384차원 벡터 (sentence-transformers)
-    sparse_vector: dict | None      # 향후 BGE-M3 hybrid 검색용
-    metadata    : dict              # title, source, chunk_index 등
+state.documents: list[Document]
+state.index_config: dict
 ```
 
----
+출력:
 
-## 사용 기술
+```python
+state.chunks: list[Chunk]
+state.index_artifacts = {
+    "graphml": ".../index_graph.graphml",
+    "mermaid": ".../index_graph.md",
+    "pyvis": ".../index_graph.html",
+    "documents": 2,
+    "chunks": 14,
+    "reused_embeddings": 0,
+}
+```
 
-| 항목 | 현재 (테스트) | 향후 (운영) |
-|------|-------------|------------|
-| 청킹 | 고정 크기 512자, overlap 50 | - |
-| 임베딩 모델 | `paraphrase-multilingual-MiniLM-L12-v2` (384차원, 무료) | - |
-| 벡터 DB | Qdrant in-memory | Qdrant Cloud |
-| 한국어 지원 | 보통 | 우수 (OpenAI) / 최상 (BGE-M3) |
+각 Chunk metadata에는 `document_hash`, `chunk_hash`, `index_signature`,
+`embedding_model`과 검색 설정이 들어간다. Serve API는 이 값을 읽어 질문도
+같은 모델로 임베딩한다.
 
+## Graph 추출
 
+`graph_extraction="auto"`이면 `OPENAI_API_KEY`가 있을 때 LLM JSON extraction을
+사용한다. 키가 없거나 호출에 실패하면 keyword extraction으로 폴백한다.
 
----
+생성 관계:
+
+```text
+(Document)-[:contains]->(Chunk)
+(Chunk)-[:mentions]->(Entity)
+(Entity)-[:related_to]->(Entity)
+(Chunk)-[:similar_to]->(Chunk)
+```
+
+## 모델을 바꿀 때
+
+문서 임베딩과 검색 임베딩의 모델·차원은 반드시 같아야 한다. 기존 Qdrant
+컬렉션과 차원이 다르면 기본적으로 오류를 낸다. 기존 컬렉션 재생성을 명시적으로
+허용하려면 다음 값을 사용한다.
+
+```python
+state.index_config["recreate_collection_on_dimension_mismatch"] = True
+```
+
+운영 데이터가 있는 컬렉션에서는 삭제 영향을 확인한 뒤 사용해야 한다.
 
 ## 테스트
 
-### 단독 테스트 (mock Document)
-
-```bash
+```powershell
+python -m unittest tests.test_index_unit -v
 python tests/test_index.py
 ```
 
-mock Document 2개로 청킹 + 임베딩 결과 확인. Ingest Agent 없이 실행 가능.
-
-### 파이프라인 테스트 (Notion 연동)
-
-```bash
-python tests/test_pipeline.py
-```
-
-실제 Notion 페이지 수집 → Index → Serve까지 연결.
-
----
-
-## 파일 구조
-
-```
-agents/index/
-├── agent.py          # run(state) — 청킹 + 임베딩 + Qdrant upsert
-├── qdrant_store.py   # Qdrant 클라이언트 / upsert / 검색 / 임베딩 공통 모듈
-└── README.md         # 이 파일
-```
-
----
-
-## qdrant_store.py 공개 인터페이스
-
-Serve Agent의 `api.py`도 이 모듈을 import해서 사용함.
-
-```python
-from agents.index.qdrant_store import build_client, ensure_collection, upsert_chunks, search, embed
-
-build_client(url=":memory:")          # Qdrant 클라이언트 생성
-ensure_collection(client)             # 컬렉션 없으면 생성
-upsert_chunks(client, chunks)         # Chunk 리스트 저장
-search(client, query_vector, top_k)   # 벡터 유사도 검색
-embed("텍스트")                       # 텍스트 → 벡터
-```
+단위 테스트는 임베딩 모델을 mock 처리하므로 BGE-M3를 다운로드하지 않는다.

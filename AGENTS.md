@@ -34,6 +34,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 | `source_url`, `source_type`, `user_questions` | (파이프라인 입력) | Ingest / Eval |
 | `documents` | Ingest | Index |
 | `chunks` | Index | Eval, Serve |
+| `index_artifacts` | Index | 디버깅·시각화·운영 확인 |
 | `index_config` | Optimize (수정) | Index |
 | `probes`, `report` | Eval | Optimize, Serve, `graph.py` 분기 |
 | `iteration`, `max_iterations` | 반복 제어 | `route_after_eval()` |
@@ -69,7 +70,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 ```
 
 - **Ingest** (`agents/ingest/`) — Notion·로컬 파일(txt/md/pdf) 수집 → `documents`. (`oauth.py`: Notion 인증)
-- **Index** (`agents/index/`) — 청킹 → 임베딩 → Qdrant 저장 → `chunks`. (`qdrant_store.py`: 클라이언트·검색·임베딩 공통 모듈)
+- **Index** (`agents/index/`) — 검증·중복 제거 → 구조 기반 청킹 → 임베딩 → Qdrant/Graph 저장 → `chunks`, `index_artifacts`. (`qdrant_store.py`: 클라이언트·검색·임베딩 공통 모듈)
 - **Eval** (`agents/eval/`) — RAG 품질 진단 → `probes`, `report`. *(현재 스텁)*
 - **Optimize** (`agents/optimize/`) — 파라미터 자동 조정 → `index_config`. *(현재 스텁)*
 - **Serve** (`agents/serve/`) — 청크 저장 + FastAPI(`api.py`) 기동 + MCP 서버(`mcp_server.py`) 등록 → `mcp_endpoint`.
