@@ -61,6 +61,7 @@ class ConfigPatch:
         reindex_required: 이 변경을 적용한 뒤 재색인이 필요한지 여부.
         description: 사용자나 로그에 보여줄 변경 설명.
         warnings: 아직 state에 없는 key, 재색인 필요 같은 주의사항 목록.
+        metadata: prescription_ids 같은 mapper/adapter용 확장 정보.
     """
 
     changes: dict[str, Any]
@@ -68,6 +69,7 @@ class ConfigPatch:
     reindex_required: bool = False
     description: str = ""
     warnings: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -107,6 +109,44 @@ class PrescriptionCandidate:
     guardrails: list[str] = field(default_factory=list)
     reason: str = ""
     tradeoffs: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SkippedPrescription:
+    """
+    config_mapper가 실행 가능한 patch로 변환하지 못한 처방.
+
+    속성:
+        prescription_id: rule 수준의 prescription id.
+        reason: 짧은 machine-readable skip 사유.
+        target: 알 수 있는 경우, 변경하려던 내부 config path.
+        metadata: log, adapter, report에서 쓸 수 있는 추가 정보.
+    """
+
+    prescription_id: str
+    reason: str
+    target: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ConfigMappingResult:
+    """
+    config_mapper가 prescription을 patch로 변환한 뒤 반환하는 결과.
+
+    속성:
+        patches: 실행 가능한 AgentDoctor 표준 config patch 후보.
+        search_space: optimizer/adapter가 사용할 path별 후보값 목록.
+        skipped: 지원하지 않거나, 유효하지 않거나, 이미 만족되어 건너뛴 처방.
+        warnings: 치명적이지 않은 mapping warning 목록.
+        metadata: 선택적인 debug/trace 정보.
+    """
+
+    patches: list[ConfigPatch] = field(default_factory=list)
+    search_space: dict[str, list[Any]] = field(default_factory=dict)
+    skipped: list[SkippedPrescription] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
