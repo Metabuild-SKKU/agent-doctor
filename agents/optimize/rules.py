@@ -205,6 +205,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "prescriptions": [
             {
+                #baseline이 single-shot 검색이라는 전제 하에 유효한 처방
                 "id": "enable_query_decomposition",
                 "patch": {
                     "query_rewrite": "decompose",
@@ -338,6 +339,17 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "prescriptions": [
             {
+                # MVP: temperature만 낮추는 게 제일 가벼움 (프롬프트 수정과 독립적인 레버)
+                "id": "lower_temperature",
+                "patch": {"temperature": "decrease"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                # MVP는 프롬프트 텍스트를 직접 패치값으로 사용.
+                # TODO(업그레이드): grounding_strict:true 같은 신호 방식으로 전환.
+                #   rules.py엔 "엄격 모드 on/off" 스위치만 남기고, 실제 프롬프트 문구는
+                #   Eval 구현이 결정하도록 분리 (use_hybrid/use_reranker와 같은 패턴).
                 "id": "strict_grounding_prompt",
                 "patch": {"system_prompt": "context에 없으면 모른다고 답하라",
                           "require_citation": True},
