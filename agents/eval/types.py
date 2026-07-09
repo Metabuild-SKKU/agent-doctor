@@ -47,16 +47,17 @@ RAGAS_WEIGHTS = {
 
 # ── 진단 모드 (비용 tier) ─────────────────────────────────────────
 # 사용자가 고르는 '진단 깊이'. 값 = 그 모드가 감당하는 최대 자원 tier.
-#   자원 사다리:  규칙(0) < 싼 조회·BM25/top-N(1) < 코퍼스 스캔(2) < LLM·RAGAS(3) < 파이프라인 재실행(4)
+#   자원 사다리(=tier):  tier1 규칙·기존지표만  <  tier2 추가 검색 쿼리(top-N 재검색·BM25·코퍼스)
+#                        <  tier3 LLM·RAGAS  <  tier4 파이프라인 재실행(ablation)
 # 라벨은 '판별에 필요한 가장 비싼 자원'이 곧 confirm tier 다(diagnose._LABEL_TIER).
 #   mode >= tier  → 확정(confirmed=True),   mode < tier → 예비(confirmed=False)로 낸다.
 # 생성 원인(B)은 전부 RAGAS(=DEEP) 의존이라, DEEP 미만에선 하나의 예비 'generation_failure' 로 롤업.
 # STEP3-2 RAGAS 자체도 DEEP 이상에서만 실행한다(ragas_eval.evaluate 의 모드 게이트).
 class Mode:
-    FAST = 1       # 규칙 + 싼 조회 (LLM 없음)        — 검색 원인 위주
-    STANDARD = 2   # + 코퍼스 전체 스캔                — missing_gold / corpus_gap
-    DEEP = 3       # + LLM(RAGAS/AspectCritic)        — 생성 원인 진단
-    FULL = 4       # + 파이프라인 재실행(ablation)     — context 원인 확정
+    FAST = 1       # 규칙·기존지표만 (추가 쿼리·LLM 없음) — 나열형(enumeration)만 확정
+    STANDARD = 2   # + 추가 검색 쿼리(top-N·BM25·코퍼스)   — 검색 원인 대부분 확정
+    DEEP = 3       # + LLM(RAGAS/AspectCritic)         — 생성 원인 진단
+    FULL = 4       # + 파이프라인 재실행(ablation)      — context 원인 확정
 
 
 DEFAULT_MODE = Mode.FAST   # 미지정 시 가장 싼 모드

@@ -96,9 +96,9 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, by_tier, 
 
 | 모드 | 값 | 추가 자원 | 확정 가능한 라벨 |
 |------|----|----------|-----------------|
-| `fast` | 1 | 규칙 + 싼 조회(BM25/top-N) | 검색 원인(`retrieval_low_rank`/`lexical`/`semantic`/`enumeration`) |
-| `standard` | 2 | + 코퍼스 전체 스캔 | `retrieval_missing_gold`, `corpus_gap(_partial_hop)` |
-| `deep` | 3 | + **LLM(RAGAS/AspectCritic)** | 생성 원인(`hallucination`/`partial`/`hop_binding`/`contradiction`), `bad_gold_answer`, `staleness` |
+| `fast` | 1 | 규칙·기존 지표만(추가 쿼리 없음) | `retrieval_incomplete_enumeration` (gold수 vs top-k 순수 규칙) |
+| `standard` | 2 | + 추가 검색 쿼리(top-N 재검색·BM25·코퍼스) | 검색 원인(`low_rank`/`lexical`/`semantic`/`missing_gold`), `corpus_gap(_partial_hop)` |
+| `deep` | 3 | + **LLM(RAGAS/AspectCritic)** | 생성 원인(`hallucination`/`partial`/`hop_binding`/`contradiction`), `bad_gold_answer` |
 | `full` | 4 | + 파이프라인 재실행(ablation) | context 원인(`too_long`/`lost_in_the_middle`/`context_noise`), `bridge_dependency` |
 
 - **생성 원인은 전부 RAGAS(=deep) 의존** → `deep` 미만이면 하나의 예비 `generation_failure` 로 롤업된다
@@ -139,7 +139,7 @@ agents/eval/
    (지식그래프 + 시나리오, 75% RAGAS / 20% DataMorgana / 5% 무응답)로 교체.
 2. **RAGAS 지표** (`ragas_eval.py`) — ✅ 구현됨. RAGAS 알고리즘(청구 분해·순위 가중 등)을
    OpenAI LLM-as-Judge로 직접 계산(Faithfulness/ContextPrecision/ContextRecall/ResponseRelevancy
-   + staleness/contradiction AspectCritic). `EVAL_ENABLE_LLM=1`로 활성화. ragas 라이브러리는
+   + contradiction AspectCritic). `EVAL_ENABLE_LLM=1`로 활성화. ragas 라이브러리는
    langchain 버전 충돌로 import가 불안정해 미사용 — 환경이 지원하면 `evaluate_*_track` 내부만 교체.
 3. **LLM 생성** (`retrieval_temp.py`) — `_llm_generate` 를 실제 RAG 생성기로. (Index 검색 개발 후에도 유지될 부분)
 4. **Reranker** — Bi-Encoder 후 Cross-Encoder 재정렬(2차 개선). Index 검색이 담당하게 될 영역.

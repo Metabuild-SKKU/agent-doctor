@@ -5,7 +5,7 @@ STEP3-2: LLM 진단 (RAGAS 지표 측정)
 RAGAS 4개 지표 + AspectCritic 을 **LLM-as-Judge** 로 측정한다.
     - 실제 트랙  : Faithfulness, Context Precision/Recall, Response Relevancy
     - 오라클 트랙 : Faithfulness, Response Relevancy (gold context 투입 결과)
-    - AspectCritic: staleness / contradiction 이진 판정
+    - AspectCritic: contradiction 이진 판정
 
 프롬프트 출처:
     RAGAS 라이브러리는 이 환경(langchain 1.x + langgraph)과 의존성 충돌로 import가 불가하다.
@@ -166,8 +166,6 @@ _ASPECT_INSTRUCTION_TMPL = (
     "as verdict.\nCriteria Definition: {definition}"
 )
 # 커스텀 criteria (RAGAS AspectCritic definition 슬롯에 주입)
-_ASPECT_STALENESS = ("Does the response or the retrieved context contain outdated "
-                     "information that is no longer valid as of now?")
 _ASPECT_CONTRADICTION = ("Does the response contain information that contradicts the "
                          "retrieved context?")
 
@@ -277,12 +275,11 @@ def evaluate_oracle_track(record: EvalRecord, judge) -> dict:
 
 
 def evaluate_aspect_critics(record: EvalRecord, judge) -> dict:
-    """커스텀 AspectCritic(이진): staleness / contradiction."""
+    """커스텀 AspectCritic(이진): contradiction."""
     q = record.probe.question
     ans = record.generated_answer
     ctx = record.retrieved_context
     return {
-        "staleness": _aspect_critic(judge, _ASPECT_STALENESS, q, ans, ctx),
         "contradiction": _aspect_critic(judge, _ASPECT_CONTRADICTION, q, ans, ctx),
     }
 

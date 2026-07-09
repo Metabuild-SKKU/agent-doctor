@@ -2,23 +2,23 @@
 agents/eval/diagnose.py
 STEP4: 원인 판정 (Finding 생성)
 
-설계 문서 STEP4 '브랜치 별 판정 순서' + '처방' 파일을 구조 그대로 구현.
-
 구조 원칙:
-  1. **라벨마다 판정 함수 1개.**  각 함수는 자기 라벨의 '판별 신호(원인)'를 검사해
-     맞으면 Finding, 아니면 None 을 돌려준다. (원인·처방 요약은 각 함수 docstring 참고)
-  2. **브랜치마다 해당 함수들을 호출.**  각 브랜치(_dx_*)가 설계의 판정 순서표대로 라벨
+  1. 라벨마다 판정 함수 1개: 각 함수는 자기 라벨의 '판별 신호(원인)'를 
+     검사해 맞으면 Finding, 아니면 None 을 돌려준다.
+  2. 브랜치마다 해당 함수들을 호출: 각 브랜치(_dx_*)가 설계의 판정 순서표대로 라벨
      함수들을 부른다. '하나만 고르는' 부분은 _first(첫 매치), 추가로 붙는 것은 따로 호출.
 
-Finding 은 **라벨(진단명)** 만 싣는다. 라벨별 처방·바꿔야 하는 config 는 처방 파일에 정리돼
-있으며 Optimize Agent 가 label 로 매핑해 적용한다(진단=Eval, 처방적용=Optimize 분리).
+Finding에 label을 담고 다음단계로 진행된다.
 
-라벨 그룹: A 검색실패 / B 생성실패 / C context구조 / D 데이터. 처방 순서: **D 먼저** → A → C → B.
-Finding.type 은 공유 스키마 허용 집합만 사용하고, 세분화 라벨은 Finding.label 필드에 담는다.
+라벨 그룹: A 검색실패 / B 생성실패 / C context구조 / D 데이터.
+Finding.type 필드에 라벨 그룹을 담고, Finding.label 필드에 세분화 라벨을 담는다.
 
-[구현 포인트]  일부 판별 신호는 파이프라인 추가 실험이 필요(_bm25_hits_gold,
-  _gold_in_wider_candidates, _gold_in_corpus, _context_shorten_helps, _gold_front_helps).
-  지금은 None(미확보)을 반환해 각 체인의 '가장 일반적·저비용 라벨'로 안전 기본 판정한다.
+진단 모드:
+  - diagnose() 진입 시 현재 실행의 모드(_active_mode)를 설정한다.
+  - 지정된 진단 모드 이하까지만 확정할수있음.
+    모드가 낮다면 -> 예비로 지정.
+  - 생성 원인(B)은 전부 RAGAS(DEEP) 의존 → DEEP 미만이면 예비 generation_failure 로 롤업.
+
 """
 from __future__ import annotations
 
@@ -31,26 +31,18 @@ from agents.eval.types import (
     Mode, DEFAULT_MODE, resolve_mode,
 )
 
-
-# ══════════════════════════════════════════════════════════════════
-#  진단 모드 (비용 tier)
-#  - diagnose() 진입 시 현재 실행의 자원 상한(_active_mode)을 설정한다.
-#    (단일스레드 eval 루프 전제. 병렬화하면 contextvars 로 교체.)
-#  - 라벨마다 '확정(confirm) tier' = 판별에 필요한 가장 비싼 자원(_LABEL_TIER).
-#    mode >= tier → 확정(confirmed=True), 미만 → 예비(confirmed=False).
-#  - 생성 원인(B)은 전부 RAGAS(DEEP) 의존 → DEEP 미만이면 예비 generation_failure 로 롤업.
-# ══════════════════════════════════════════════════════════════════
-
+# 진단 모드, 단계
 _active_mode: int = DEFAULT_MODE
 
 _LABEL_TIER = {
-    # A 검색: BM25/top-N/rank = tier1, 단 missing_gold 는 코퍼스 스캔 = tier2
-    "retrieval_low_rank":                  Mode.FAST,
-    "retrieval_lexical_mismatch":          Mode.FAST,
-    "retrieval_semantic_mismatch":         Mode.FAST,
-    "retrieval_incomplete_enumeration":    Mode.FAST,
-    "retrieval_missing_gold":              Mode.STANDARD,
-    "retrieval_missing_bridge_dependency": Mode.FULL,     # 재실행(iterative decompose)
+    # A 검색: 원인 확정엔 추가 검색 쿼리(top-N 재검색/BM25/코퍼스)가 필요 = tier2.
+    #         단 enumeration 은 gold수 vs top-k 순수 규칙이라 추가 조회 불필요 = tier1.
+    "retrieval_incomplete_enumeration":    Mode.FAST,      # 순수 규칙(gold수 vs top-k)
+    "retrieval_low_rank":                  Mode.STANDARD,  # top-N 재검색 필요
+    "retrieval_lexical_mismatch":          Mode.STANDARD,  # BM25 조회 필요
+    "retrieval_semantic_mismatch":         Mode.STANDARD,  # BM25 조회(둘 다 놓침 확인)
+    "retrieval_missing_gold":              Mode.STANDARD,  # 코퍼스 조회
+    "retrieval_missing_bridge_dependency": Mode.FULL,      # 재실행(iterative decompose)
     # B 생성: RAGAS/LLM = tier3
     "generation_hop_binding_error":        Mode.DEEP,
     "generation_hallucination":            Mode.DEEP,
@@ -65,8 +57,6 @@ _LABEL_TIER = {
     "bad_gold_answer":                     Mode.DEEP,     # RAGAS 두 지표(faith·rel)
     "corpus_gap":                          Mode.STANDARD,
     "corpus_gap_partial_hop":              Mode.STANDARD,
-    # aux
-    "staleness":                           Mode.DEEP,     # AspectCritic
 }
 
 
@@ -206,19 +196,10 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
     return _finding(record, "corpus_gap_partial_hop", "gap")
 
 
-# ── 보조(처방 파일 밖): AspectCritic staleness ────────────────────
-
-def staleness(record: EvalRecord) -> Optional[Finding]:
-    """답변/컨텍스트에 오래된 정보(AspectCritic). taxonomy 밖 보조 Finding."""
-    if record.aspect.get("staleness") != 1:
-        return None
-    return _finding(record, "staleness", "staleness")
-
-
 # ══════════════════════════════════════════════════════════════════
 #  브랜치별 판정 (설계 STEP4 '브랜치 별 판정 순서')
 #  - 검색 원인/생성 원인/컨텍스트 원인은 '첫 매치'로 하나만 채택(_first)
-#  - corpus_gap·모순·staleness 는 추가로 붙음
+#  - corpus_gap·모순 은 추가로 붙음
 # ══════════════════════════════════════════════════════════════════
 
 _RETRIEVAL_CAUSE = (
@@ -304,8 +285,8 @@ _BRANCH_DISPATCH = {
 
 # ── 메인 ─────────────────────────────────────────────────────────
 
-# 처방 순서: D 먼저 → A → C → B, 그다음 심각도. (aux 보조는 맨 뒤)
-_GROUP_ORDER = {"D": 0, "A": 1, "C": 2, "B": 3, "aux": 8}
+# 처방 순서: D 먼저 → A → C → B, 그다음 심각도.
+_GROUP_ORDER = {"D": 0, "A": 1, "C": 2, "B": 3}
 _SEV_ORDER = {"critical": 0, "warning": 1, "info": 2}
 
 
@@ -324,7 +305,6 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
 
     dispatcher = _BRANCH_DISPATCH.get(record.branch)
     findings = list(dispatcher(record)) if dispatcher else []
-    _extend(findings, staleness(record))   # taxonomy 밖 보조
 
     findings = _dedup(findings)
     findings.sort(key=lambda f: (
@@ -379,11 +359,6 @@ def _context_cause(record: EvalRecord) -> Optional[Finding]:
 def _collect(*items) -> list[Finding]:
     """None 을 걸러 Finding 리스트로."""
     return [f for f in items if f is not None]
-
-
-def _extend(findings: list[Finding], item: Optional[Finding]) -> None:
-    if item is not None:
-        findings.append(item)
 
 
 def _dedup(findings: list[Finding]) -> list[Finding]:
@@ -466,9 +441,7 @@ def _gold_front_helps(record: EvalRecord):
 # ── Finding 빌더 ─────────────────────────────────────────────────
 
 def _group_of(label: str, ftype: str) -> str:
-    """label·ftype 에서 그룹(A/B/C/D/aux)을 파생 — 처방 순서 정렬용."""
-    if ftype == "staleness":
-        return "aux"
+    """label·ftype 에서 그룹(A/B/C/D)을 파생 — 처방 순서 정렬용."""
     if ftype == "gap":
         return "D"
     if label.startswith("retrieval_"):
@@ -478,19 +451,16 @@ def _group_of(label: str, ftype: str) -> str:
     return "C"
 
 
-# 심각도: 구조적/데이터 결함은 critical, 보조 안내는 info, 나머지는 warning
+# 심각도: 구조적/데이터 결함은 critical, 나머지는 warning
 _CRITICAL_LABELS = {
     "retrieval_semantic_mismatch", "retrieval_missing_gold",
     "generation_hallucination", "corpus_gap", "corpus_gap_partial_hop",
 }
-_INFO_LABELS = {"staleness"}
 
 
 def _severity_of(label: str) -> str:
     if label in _CRITICAL_LABELS:
         return "critical"
-    if label in _INFO_LABELS:
-        return "info"
     return "warning"
 
 
