@@ -191,6 +191,20 @@ DEFAULT_CONSTRAINTS: dict[str, dict[str, Any]] = {
 }
 
 
+# capabilities가 생략됐을 때 사용하는 보수적 기본값이다.
+# 현재 AgentDoctorState.index_config에서 직접 확인 가능한 chunking/hybrid 계열은 허용하고,
+# 아직 pipeline/state에 명확히 없는 reranker/context compression/strategy 계열은 기본 비허용으로 둔다.
+# adapter나 optimizer가 실제 지원 여부를 알고 있으면 map_prescriptions_to_config(..., capabilities=...)로 override한다.
+DEFAULT_CAPABILITIES: dict[str, bool] = {
+    "retriever.top_k": True,
+    "hybrid_search": True,
+    "chunking": True,
+    "reranker": False,
+    "context_compression": False,
+    "chunking_strategy": False,
+}
+
+
 # MVP에서는 복잡한 conflict resolution을 하지 않는다.
 # 서로 반대 방향의 prescription이 동시에 들어오면 둘 다 skipped로 보내고 warning만 남긴다.
 # 같은 방향 처방(increase_top_k + dynamic_top_k)은 conflict가 아니라 dedupe 대상으로 처리한다.
@@ -219,7 +233,7 @@ def map_prescriptions_to_config(
     """rules.py의 prescription id를 실행 가능한 config patch 후보로 변환한다."""
 
     result = ConfigMappingResult()
-    capabilities = capabilities or {}
+    capabilities = _merge_capabilities(capabilities or {})
     constraints = _merge_constraints(constraints or {})
 
     # 1. 서로 반대 방향의 처방이 함께 들어온 경우, mapper가 임의로 선택하지 않는다.
@@ -266,7 +280,7 @@ def map_prescriptions_to_config(
             continue
 
         # 5. 현재 pipeline이 해당 기능을 지원하지 않으면 실행 불가능한 처방으로 skip한다.
-        #    capabilities에 key가 없으면 "알 수 없음"이 아니라 MVP 기본값인 "허용"으로 본다.
+        #    capabilities에 key가 없으면 DEFAULT_CAPABILITIES의 보수적 기본값을 따른다.
         supported, reason = _is_supported(spec, capabilities)
         if not supported:
             result.skipped.append(
@@ -467,12 +481,22 @@ def _is_supported(
     """현재 pipeline capabilities로 prescription target을 실행할 수 있는지 확인한다."""
 
     # capabilities는 adapter/pipeline이 실제로 제공하는 기능 목록이다.
-    # key가 명시적으로 False일 때만 skip하고, key가 없으면 MVP 기본값으로 허용한다.
+    # key가 없으면 보수적으로 unsupported로 본다. 기본 허용 목록은 DEFAULT_CAPABILITIES에 명시한다.
     if not spec.capability:
         return True, None
-    if spec.capability in capabilities and not bool(capabilities[spec.capability]):
+    if not bool(capabilities.get(spec.capability, False)):
         return False, "unsupported_capability"
     return True, None
+
+
+def _merge_capabilities(capabilities: dict[str, Any]) -> dict[str, Any]:
+    """기본 capabilities와 입력 capabilities를 병합한다."""
+
+    # 입력 capabilities는 adapter/optimizer가 알고 있는 실제 지원 여부다.
+    # 명시 입력이 있으면 DEFAULT_CAPABILITIES보다 우선한다.
+    merged: dict[str, Any] = dict(DEFAULT_CAPABILITIES)
+    merged.update(capabilities)
+    return merged
 
 
 def _find_conflicting_prescriptions(prescription_ids: list[str]) -> set[str]:

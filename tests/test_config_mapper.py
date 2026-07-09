@@ -33,6 +33,7 @@ class ConfigMapperTest(unittest.TestCase):
         result = map_prescriptions_to_config(
             ["enable_hybrid", "context_compression", "shrink_chunk_size"],
             {"use_hybrid": False, "context_compression": False, "chunk_size": 500},
+            capabilities={"context_compression": True},
         )
 
         self.assertEqual(result.search_space["retriever.search_type"], ["hybrid"])
@@ -48,6 +49,26 @@ class ConfigMapperTest(unittest.TestCase):
 
         self.assertEqual(result.patches, [])
         self.assertEqual(result.skipped[0].reason, "unsupported_capability")
+
+    def test_reranker_requires_explicit_capability(self):
+        result = map_prescriptions_to_config(
+            ["enable_reranker"],
+            {"use_reranker": False},
+        )
+
+        self.assertEqual(result.patches, [])
+        self.assertEqual(result.skipped[0].reason, "unsupported_capability")
+
+        supported = map_prescriptions_to_config(
+            ["enable_reranker"],
+            {"use_reranker": False},
+            capabilities={"reranker": True},
+        )
+
+        self.assertEqual(
+            [patch.changes for patch in supported.patches],
+            [{"reranker.enabled": True}],
+        )
 
     def test_constraints_filter_candidates(self):
         result = map_prescriptions_to_config(
