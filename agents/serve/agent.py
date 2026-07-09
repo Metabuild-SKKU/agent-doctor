@@ -45,11 +45,10 @@ CLAUDE_CONFIG = _find_claude_config()
 
 
 def _serialize_chunks(state: AgentDoctorState) -> str:
-    """state.chunks → JSON (embedding 포함, sparse_vector 제외)"""
+    """state.chunks → JSON (dense/sparse vector와 검색 설정 포함)"""
     data = []
     for chunk in state.chunks:
         d = dataclasses.asdict(chunk)
-        d.pop("sparse_vector", None)   # embedding은 벡터 검색에 필요하므로 유지
         data.append(d)
     return json.dumps(data, ensure_ascii=False, default=str, indent=2)
 

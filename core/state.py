@@ -34,11 +34,25 @@ class AgentDoctorState:
     # Index Agent 결과
     chunks: list[Chunk] = field(default_factory=list)
     index_config: dict = field(default_factory=lambda: {
-        "chunk_size": 512,
-        "chunk_overlap": 50,
-        "embedding_model": "openai://text-embedding-3-small",
-        "use_hybrid": True,
+        "chunk_size": 600,
+        "chunk_overlap": 80,
+        "chunk_strategy": "markdown_recursive",
+        "embedding_model": "BAAI/bge-m3",
+        "embedding_dimension": 1024,
+        "deduplicate": True,
+        "top_k": 5,
+        "use_hybrid": False,
+        "hybrid_dense_weight": 0.7,
+        "use_reranker": False,
+        "reranker_model": "BAAI/bge-reranker-v2-m3",
+        "graph_enabled": True,
+        "graph_extraction": "auto",
+        "graph_llm_model": "gpt-4.1-mini",
+        "graph_similarity_threshold": 0.9,
+        "graph_output_dir": "output/index_graph",
+        "recreate_collection_on_dimension_mismatch": False,
     })
+    index_artifacts: dict = field(default_factory=dict)
 
     # Eval Agent 결과
     probes: list[Probe] = field(default_factory=list)
