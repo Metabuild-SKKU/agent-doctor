@@ -21,6 +21,9 @@ state.status="error" / state.error 에 기록하고 state 를 반환한다.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+
 from core.schema import Probe
 from core.state import AgentDoctorState
 
@@ -53,6 +56,12 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     mode = resolve_mode()
     print(f"[Eval] 진단 모드 = {mode} (1=fast·2=standard·3=deep·4=full)")
 
+    # 진단 신호 캐시: 파이프라인 버전(index_config+코퍼스)이 바뀌면 무효화 → stale 재사용 방지.
+    version = _pipeline_version(state)
+    if state.diagnosis_cache_version != version:
+        state.diagnosis_cache = {}
+        state.diagnosis_cache_version = version
+
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
         probes = generate_probes(state)
@@ -70,8 +79,11 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         top_k = int(state.index_config.get("top_k", DEFAULT_TOP_K))
 
         # ── STEP2~4: probe 별 평가 ────────────────────────────
+        #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
+        #   진단 중 계산한 비싼 신호가 state 에 누적되어 재진단 시 재사용된다.
         records = [
-            _evaluate_probe(p, client, state.chunks, chunk_text, top_k, mode)
+            _evaluate_probe(p, client, state.chunks, chunk_text, top_k, mode,
+                            state.diagnosis_cache.setdefault(p.probe_id, {}))
             for p in probes
         ]
 
@@ -90,6 +102,14 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 # ── probe 1개 평가 (STEP2 → STEP3 → STEP4) ───────────────────────
 
+def _pipeline_version(state: AgentDoctorState) -> str:
+    """진단 신호 캐시 무효화 키. index_config(Optimize가 바꿈)+코퍼스가 바뀌면 값이 달라진다.
+    (재실행/코퍼스 의존 신호는 이 버전 내에서만 재사용 안전.)"""
+    key = json.dumps(state.index_config, sort_keys=True, default=str)
+    key += "|chunks=" + ",".join(sorted(c.chunk_id for c in state.chunks))
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+
+
 def _evaluate_probe(
     probe: Probe,
     client,
@@ -97,9 +117,11 @@ def _evaluate_probe(
     chunk_text: dict[str, str],
     top_k: int,
     mode: int,
+    sig_cache: dict,
 ) -> EvalRecord:
-    """한 Probe 에 대해 검색·생성·지표·판정을 수행하고 EvalRecord 반환."""
-    rec = EvalRecord(probe=probe)
+    """한 Probe 에 대해 검색·생성·지표·판정을 수행하고 EvalRecord 반환.
+    sig_cache 는 state.diagnosis_cache[probe_id] 뷰 — 진단 신호 memoize 가 여기(=state)에 누적된다."""
+    rec = EvalRecord(probe=probe, signals=sig_cache)
 
     # STEP2: 검색(임시): Index 리트리버 미개발 → retrieval_temp.retrieve 사용
     hits = retrieve(client, chunks, probe.question, top_k)

@@ -132,3 +132,7 @@ class EvalRecord:
 
     # STEP4: 원인 판정
     findings: list[Finding] = field(default_factory=list)
+
+    # 진단 신호 memoize 뷰: agent 가 state.diagnosis_cache[probe_id] 를 주입 → 쓰기가 state 로 전파.
+    # 비싼 판별 신호(_signal)가 여기 캐시돼 재진단 시 재사용된다.
+    signals: dict = field(default_factory=dict)

@@ -70,32 +70,44 @@ def _tier_of(label: str) -> int:
 # ══════════════════════════════════════════════════════════════════
 
 def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
-    """gold가 top-N 후보엔 있으나 순위가 낮아 top-k 밖. 처방: 리랭커 추가.
-    확정: top-N 재검색에서 gold 발견(tier2). 싼 예비 신호 없음."""
+    """
+    gold가 top-N 후보엔 있으나 순위가 낮아 top-k 밖. 처방: 리랭커 추가.
+    확정: top-N 재검색에서 gold 발견(tier2). 
+    예비: 없음
+    """
     if _gold_in_wider_candidates(record) is True:
         return _finding(record, "retrieval_low_rank", "retrieval_failure", confirmed=True)
     return None
 
 
 def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
-    """dense는 놓쳤으나 BM25로 잡히는 단어 불일치. 처방: 하이브리드 검색.
-    확정: BM25 가 gold 를 잡음(tier2). 싼 예비 신호 없음."""
+    """
+    dense는 놓쳤으나 BM25로 잡히는 단어 불일치. 처방: 하이브리드 검색.
+    확정: BM25 가 gold 를 잡음(tier2). 
+    예비: 없음
+    """
     if _bm25_hits_gold(record) is True:
         return _finding(record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True)
     return None
 
 
 def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
-    """dense·BM25 모두 놓친 의미 연결 실패. 처방: 임베딩/청킹 교체.
-    확정: BM25 도 gold 를 못 잡음(tier2). 싼 예비 신호 없음."""
+    """
+    dense·BM25 모두 놓친 의미 연결 실패. 처방: 임베딩/청킹 교체.
+    확정: BM25 도 gold 를 못 잡음(tier2). 
+    예비: 없음
+    """
     if _bm25_hits_gold(record) is False:
         return _finding(record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=True)
     return None
 
 
 def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
-    """gold는 corpus에 있으나 top-k에 없음. 처방: top_k/chunk 조정.
-    확정: 코퍼스에 gold 존재(tier2). 예비: recall<1(tier1, 코퍼스 확인 전)."""
+    """
+    gold는 corpus에 있으나 top-k에 없음. 처방: top_k/chunk 조정.
+    확정: 코퍼스에 gold 존재(tier2). 
+    예비: recall<1(tier1, 코퍼스 확인 전).
+    """
     in_corpus = _gold_in_corpus(record)
     if in_corpus is True:
         return _finding(record, "retrieval_missing_gold", "retrieval_failure", confirmed=True)
@@ -105,8 +117,11 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
 
 
 def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]:
-    """멀티홉 연쇄형: 2번째 hop 근거가 1번째 hop에 의존. 처방: iterative_decompose.
-    확정: decompose 재실행 시 회복(tier4). 예비: 멀티홉+recall<1(tier1)."""
+    """
+    멀티홉 연쇄형: 2번째 hop 근거가 1번째 hop에 의존. 처방: iterative_decompose.
+    확정: decompose 재실행 시 회복(tier4). 
+    예비: 멀티홉+recall<1(tier1).
+    """
     recovers = _bridge_decompose_recovers(record)
     if recovers is True:
         return _finding(record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=True)
@@ -116,8 +131,10 @@ def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]
 
 
 def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
-    """나열형: 필요한 근거 개수 가변인데 top-k 고정이라 누락. 처방: 동적 top-k/adaptive.
-    확정: gold수 vs top-k 순수 규칙(tier1) — 바로 확정."""
+    """
+    나열형: 필요한 근거 개수 가변인데 top-k 고정이라 누락. 처방: 동적 top-k/adaptive.
+    확정: gold수 vs top-k 순수 규칙(tier1) — 바로 확정.?????????
+    """
     if _enumeration_signal(record):
         return _finding(record, "retrieval_incomplete_enumeration", "retrieval_failure", confirmed=True)
     return None
@@ -128,8 +145,10 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
-    """멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음). 처방: 단계별 근거 CoT.
-    확정: faithfulness 측정되어 높음(tier3). 미측정 None → 안 뜸(→ _pick 롤업)."""
+    """
+    멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음). 처방: 단계별 근거 CoT.
+    확정: faithfulness 측정되어 높음(tier3). 미측정 None → 안 뜸(→ _pick 롤업).
+    """
     faith = _faith(record)
     if _is_multi_hop(record) and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN:
         return _finding(record, "generation_hop_binding_error", "generation_failure", confirmed=True)
@@ -137,8 +156,10 @@ def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
 
 
 def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
-    """정답 context가 있는데 지어냄. 처방: 그라운딩 프롬프트+인용.
-    확정: faithfulness 측정되어 낮음(tier3). 미측정 None → 안 뜸(→ _pick 롤업)."""
+    """
+    정답 context가 있는데 지어냄. 처방: 그라운딩 프롬프트+인용.
+    확정: faithfulness 측정되어 낮음(tier3). 미측정 None → 안 뜸(→ _pick 롤업).
+    """
     faith = _faith(record)
     if faith is not None and faith < RAGAS_FAITHFULNESS_MIN:
         return _finding(record, "generation_hallucination", "generation_failure", confirmed=True)
@@ -146,8 +167,10 @@ def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
 
 
 def generation_partial_answer(record: EvalRecord) -> Optional[Finding]:
-    """정답 context가 있는데 일부 요소·조건 누락. 처방: 완결성 프롬프트/checklist.
-    확정: relevancy 측정되어 낮음(tier3)."""
+    """
+    정답 context가 있는데 일부 요소·조건 누락. 처방: 완결성 프롬프트/checklist.
+    확정: relevancy 측정되어 낮음(tier3).
+    """
     rel = _rel(record)
     if rel is not None and rel < RAGAS_RESPONSE_RELEVANCY_MIN:
         return _finding(record, "generation_partial_answer", "generation_failure", confirmed=True)
@@ -155,11 +178,13 @@ def generation_partial_answer(record: EvalRecord) -> Optional[Finding]:
 
 
 # 나중에 개발
-def generation_contradiction(record: EvalRecord) -> Optional[Finding]:
-    """답변이 컨텍스트/사실과 모순(AspectCritic, tier3). 다른 라벨과 함께 붙는다."""
-    if record.aspect.get("contradiction") == 1:
-        return _finding(record, "generation_contradiction", "generation_failure", confirmed=True)
-    return None
+# def generation_contradiction(record: EvalRecord) -> Optional[Finding]:
+#     """
+#     답변이 컨텍스트/사실과 모순(AspectCritic, tier3). 다른 라벨과 함께 붙는다.
+#     """
+#     if record.aspect.get("contradiction") == 1:
+#         return _finding(record, "generation_contradiction", "generation_failure", confirmed=True)
+#     return None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -167,8 +192,11 @@ def generation_contradiction(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def too_long_context(record: EvalRecord) -> Optional[Finding]:
-    """context가 너무 길어 잡음·과부하로 품질 저하. 처방: top-k 축소/필터링/압축.
-    확정: 축소 재실행 시 회복(tier4). 싼 예비 신호 없음."""
+    """
+    context가 너무 길어 잡음·과부하로 품질 저하. 처방: top-k 축소/필터링/압축.
+    확정: 축소 재실행 시 회복(tier4). 
+    예비: 없음
+    """
     if _context_shorten_helps(record) is True:
         return _finding(record, "too_long_context", "retrieval_failure", confirmed=True)
     return None
@@ -313,38 +341,6 @@ _BRANCH_DISPATCH = {
     Branch.NO_ANSWER_VIOLATION:        _branch_no_answer_violation,
 }
 
-
-# ── 메인 ─────────────────────────────────────────────────────────
-
-# 처방 순서: D 먼저 → A → C → B, 그다음 심각도.
-_GROUP_ORDER = {"D": 0, "A": 1, "C": 2, "B": 3}
-_SEV_ORDER = {"critical": 0, "warning": 1, "info": 2}
-
-
-def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
-    """record 의 브랜치에 맞는 라벨 함수들을 호출해 Finding 리스트를 만든다.
-
-    mode(진단 tier 상한)에 따라 상위-tier 라벨은 '예비(confirmed=False)'로 나가고,
-    생성 원인(RAGAS 의존)은 DEEP 미만이면 하나의 예비 generation_failure 로 롤업된다.
-    mode 미지정 시 EVAL_MODE 환경변수(기본 FAST)를 사용한다.
-    """
-    global _active_mode
-    _active_mode = mode if mode is not None else resolve_mode()
-
-    if record.branch in (Branch.SUCCESS, Branch.NO_ANSWER_OK):
-        return []
-
-    dispatcher = _BRANCH_DISPATCH.get(record.branch)
-    findings = list(dispatcher(record)) if dispatcher else []
-
-    findings = _dedup(findings)
-    findings.sort(key=lambda f: (
-        _GROUP_ORDER.get(f.metadata.get("group"), 9),
-        _SEV_ORDER.get(f.severity, 9),
-    ))
-    return findings
-
-
 # ── 판정 콤비네이터 ──────────────────────────────────────────────
 
 def _pick(record: EvalRecord, spec) -> Optional[Finding]:
@@ -391,11 +387,20 @@ def _dedup(findings: list[Finding]) -> list[Finding]:
 
 # ══════════════════════════════════════════════════════════════════
 #  판별 신호 (라벨 함수가 호출) — tier / 사용 자원별 정리
-#    각 신호는 '그 자원이 있어야 나오는 값'. 라벨의 confirm tier = 그 신호의 자원 tier.
-#    [훅]은 아직 미구현(None 반환) → 관련 라벨은 안 뜨고, 싼-형제/롤업이 예비를 대신한다.
-#    · 진단 게이트(확정/예비): _finding 의 confirmed = mode>=tier 가 담당(중앙집중).
-#    · 비용 게이트(비싼 작업 실행): [훅] 구현 시 첫 줄에 `if _active_mode < <tier>: return None`.
+#    각 신호는 tri-state: None(미실행/모름) · True · False.
+#    · 비용 게이트: [훅] 첫 줄에서 self-gate (`if _active_mode < <tier>: return None`).
+#    · 확정 게이트: 라벨 함수가 신호 발동 여부로 confirmed 를 정함(_finding 에 명시).
+#    · memoize: 비싼 [훅]은 _signal 로 record.signals(=state 캐시)에 저장 → 재진단 시 재사용.
 # ══════════════════════════════════════════════════════════════════
+
+def _signal(record: EvalRecord, name: str, compute):
+    """비싼 판별 신호 memoize. record.signals(=state.diagnosis_cache[probe_id] 뷰)에 있으면 재사용,
+    없으면 compute() 계산해 저장. (self-gate 로 걸러진 None 은 호출 전에 return 되어 캐시되지 않음.)"""
+    cache = record.signals
+    if name not in cache:
+        cache[name] = compute()
+    return cache[name]
+
 
 # ── tier1 · 순수 규칙 (자원: 이미 계산된 지표/probe 메타 — 추가 조회 없음) ──
 # (recall_at_k < 1 도 tier1 순수 규칙 — missing_gold / bridge 가 라벨 함수에서 직접 사용)
@@ -418,21 +423,21 @@ def _gold_in_wider_candidates(record: EvalRecord):
     """[구현 포인트·tier2] top-N(예: 100) 재검색 후 gold 존재 여부. retrieval_low_rank 용."""
     if _active_mode < Mode.STANDARD:   # 비용 게이트 (STANDARD 미만이면 재검색 안 함)
         return None
-    return None                        # 구현 시: 실제 top-N 재검색 → True/False
+    return _signal(record, "gold_in_wider_candidates", lambda: None)  # 구현 시 lambda→top-N 재검색
 
 
 def _bm25_hits_gold(record: EvalRecord):
     """[구현 포인트·tier2] BM25 검색 후 gold 존재 여부. lexical(True)/semantic(False) mismatch 용."""
     if _active_mode < Mode.STANDARD:
         return None
-    return None                        # 구현 시: 실제 BM25 → True/False
+    return _signal(record, "bm25_hits_gold", lambda: None)           # 구현 시 lambda→BM25 조회
 
 
 def _gold_in_corpus(record: EvalRecord):
     """[구현 포인트·tier2] 코퍼스 전체 조회로 gold 존재 여부. True→missing_gold / False→corpus_gap."""
     if _active_mode < Mode.STANDARD:
         return None
-    return None                        # 구현 시: 실제 코퍼스 조회 → True/False
+    return _signal(record, "gold_in_corpus", lambda: None)           # 구현 시 lambda→코퍼스 조회
 
 
 # ── tier3 · LLM/RAGAS (자원: STEP3-2 RAGAS 점수 · AspectCritic) ──
@@ -465,6 +470,8 @@ def _rel(record: EvalRecord):
 
 def _both_high(faith, rel) -> bool:
     """bad_gold_answer 판정용: 충실도·관련성이 모두 '측정되어' 임계값 이상."""
+    if _active_mode < Mode.DEEP:
+        return None
     return (faith is not None and faith >= RAGAS_FAITHFULNESS_MIN
             and rel is not None and rel >= RAGAS_RESPONSE_RELEVANCY_MIN)
 
@@ -477,28 +484,28 @@ def _context_shorten_helps(record: EvalRecord):
     """[구현 포인트·tier4] context 축소 재실행 시 정답률 상승 여부. too_long_context 확정용."""
     if _active_mode < Mode.FULL:
         return None
-    return None                        # 구현 시: 축소 재실행 → True/False
+    return _signal(record, "context_shorten_helps", lambda: None)    # 구현 시 lambda→축소 재실행
 
 
 def _gold_front_helps(record: EvalRecord):
     """[구현 포인트·tier4] gold를 앞쪽 배치 재실행 시 정답률 회복 여부. lost_in_the_middle 확정용."""
     if _active_mode < Mode.FULL:
         return None
-    return None                        # 구현 시: 재정렬 재실행 → True/False
+    return _signal(record, "gold_front_helps", lambda: None)         # 구현 시 lambda→재정렬 재실행
 
 
 def _bridge_decompose_recovers(record: EvalRecord):
     """[구현 포인트·tier4] iterative_decompose 재실행 시 hop2 근거 회복 여부. missing_bridge 확정용."""
     if _active_mode < Mode.FULL:
         return None
-    return None                        # 구현 시: 분해 재검색 → True/False
+    return _signal(record, "bridge_decompose_recovers", lambda: None)  # 구현 시 lambda→분해 재검색
 
 
 def _noise_removal_helps(record: EvalRecord):
     """[구현 포인트·tier4] 비-gold 노이즈 제거 재실행 시 회복 여부. context_noise 확정용."""
     if _active_mode < Mode.FULL:
         return None
-    return None                        # 구현 시: 노이즈 제거 재실행 → True/False
+    return _signal(record, "noise_removal_helps", lambda: None)      # 구현 시 lambda→노이즈 제거 재실행
 
 
 # ── Finding 빌더 ─────────────────────────────────────────────────
@@ -551,3 +558,34 @@ def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool) -> Fin
         affected_probes=[probe.probe_id],
         metadata={"group": group, "branch": record.branch},
     )
+
+
+# ── 메인 ─────────────────────────────────────────────────────────
+
+# 처방 순서: D 먼저 → A → C → B, 그다음 심각도.
+_GROUP_ORDER = {"D": 0, "A": 1, "C": 2, "B": 3}
+_SEV_ORDER = {"critical": 0, "warning": 1, "info": 2}
+
+
+def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
+    """record 의 브랜치에 맞는 라벨 함수들을 호출해 Finding 리스트를 만든다.
+
+    mode(진단 tier 상한)에 따라 상위-tier 라벨은 '예비(confirmed=False)'로 나가고,
+    생성 원인(RAGAS 의존)은 DEEP 미만이면 하나의 예비 generation_failure 로 롤업된다.
+    mode 미지정 시 EVAL_MODE 환경변수(기본 FAST)를 사용한다.
+    """
+    global _active_mode
+    _active_mode = mode if mode is not None else resolve_mode()
+
+    if record.branch in (Branch.SUCCESS, Branch.NO_ANSWER_OK):
+        return []
+
+    dispatcher = _BRANCH_DISPATCH.get(record.branch)
+    findings = list(dispatcher(record)) if dispatcher else []
+
+    findings = _dedup(findings)
+    findings.sort(key=lambda f: (
+        _GROUP_ORDER.get(f.metadata.get("group"), 9),
+        _SEV_ORDER.get(f.severity, 9),
+    ))
+    return findings
