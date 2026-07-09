@@ -12,7 +12,7 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from agents.index.graph_index import build_graph_artifacts
@@ -157,6 +157,36 @@ def _preferred_boundary(text: str, start: int, hard_end: int) -> int:
     return hard_end
 
 
+def _fixed_chunks(
+    text: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    *,
+    base_offset: int = 0,
+    section: str | None = None,
+) -> list[_ChunkDraft]:
+    """문장 경계를 고려하지 않고 일정 글자 수로 분할한다."""
+    if not text:
+        return []
+    chunks: list[_ChunkDraft] = []
+    step = chunk_size - chunk_overlap
+    for start in range(0, len(text), step):
+        end = min(start + chunk_size, len(text))
+        chunk, trimmed_start, trimmed_end = _trimmed_slice(text, start, end)
+        if chunk:
+            chunks.append(
+                _ChunkDraft(
+                    text=chunk,
+                    section=section,
+                    start=base_offset + trimmed_start,
+                    end=base_offset + trimmed_end,
+                )
+            )
+        if end >= len(text):
+            break
+    return chunks
+
+
 def _recursive_chunks(
     text: str,
     chunk_size: int,
@@ -202,25 +232,57 @@ def _recursive_chunks(
     return chunks
 
 
-def _chunk_text(
-    text: str,
+def _fixed_strategy(
+    document: Document,
     chunk_size: int,
     chunk_overlap: int,
-) -> list[tuple[str, int, int]]:
-    """텍스트와 원본 기준 (start, end)를 반환하는 호환용 공개 함수."""
-    trimmed, start, _ = _trimmed_slice(text, 0, len(text))
+) -> list[_ChunkDraft]:
+    text, start, _ = _trimmed_slice(document.content, 0, len(document.content))
+    return _fixed_chunks(
+        text,
+        chunk_size,
+        chunk_overlap,
+        base_offset=start,
+    )
+
+
+def _markdown_strategy(
+    document: Document,
+    _chunk_size: int,
+    _chunk_overlap: int,
+) -> list[_ChunkDraft]:
+    """Markdown 제목 단위만 사용하며 긴 섹션도 추가로 자르지 않는다."""
     return [
-        (draft.text, draft.start, draft.end)
-        for draft in _recursive_chunks(
-            trimmed,
-            chunk_size,
-            chunk_overlap,
-            base_offset=start,
+        _ChunkDraft(
+            text=section.text,
+            section=section.section,
+            start=section.start,
+            end=section.end,
         )
+        for section in _split_markdown_sections(document.content)
     ]
 
 
-def _chunk_document(document: Document, chunk_size: int, chunk_overlap: int) -> list[_ChunkDraft]:
+def _recursive_strategy(
+    document: Document,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> list[_ChunkDraft]:
+    text, start, _ = _trimmed_slice(document.content, 0, len(document.content))
+    return _recursive_chunks(
+        text,
+        chunk_size,
+        chunk_overlap,
+        base_offset=start,
+    )
+
+
+def _markdown_recursive_strategy(
+    document: Document,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> list[_ChunkDraft]:
+    """Markdown 섹션으로 1차 분리한 뒤 긴 섹션만 recursive로 나눈다."""
     drafts: list[_ChunkDraft] = []
     for section in _split_markdown_sections(document.content):
         drafts.extend(
@@ -233,6 +295,51 @@ def _chunk_document(document: Document, chunk_size: int, chunk_overlap: int) -> 
             )
         )
     return drafts
+
+
+ChunkStrategy = Callable[[Document, int, int], list[_ChunkDraft]]
+
+CHUNK_STRATEGIES: dict[str, ChunkStrategy] = {
+    "fixed": _fixed_strategy,
+    "markdown": _markdown_strategy,
+    "recursive": _recursive_strategy,
+    "markdown_recursive": _markdown_recursive_strategy,
+}
+
+
+def _chunk_text(
+    text: str,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> list[tuple[str, int, int]]:
+    """기존 fixed-size 청킹 계약과 원본 기준 위치를 유지하는 공개 함수."""
+    trimmed, start, _ = _trimmed_slice(text, 0, len(text))
+    return [
+        (draft.text, draft.start, draft.end)
+        for draft in _fixed_chunks(
+            trimmed,
+            chunk_size,
+            chunk_overlap,
+            base_offset=start,
+        )
+    ]
+
+
+def _chunk_document(
+    document: Document,
+    chunk_size: int,
+    chunk_overlap: int,
+    strategy: str = "markdown_recursive",
+) -> list[_ChunkDraft]:
+    """동일한 출력 계약으로 등록된 청킹 전략을 실행한다."""
+    try:
+        chunker = CHUNK_STRATEGIES[strategy]
+    except KeyError as exc:
+        choices = ", ".join(CHUNK_STRATEGIES)
+        raise ValueError(
+            f"지원하지 않는 chunk_strategy입니다: {strategy}. 선택값: {choices}"
+        ) from exc
+    return chunker(document, chunk_size, chunk_overlap)
 
 
 def _index_signature(config: dict) -> str:
@@ -255,6 +362,12 @@ def _validate_config(config: dict) -> None:
         raise ValueError("chunk_size는 1 이상의 정수여야 합니다.")
     if not isinstance(overlap, int) or overlap < 0 or overlap >= chunk_size:
         raise ValueError("chunk_overlap은 0 이상 chunk_size 미만이어야 합니다.")
+    strategy = config.get("chunk_strategy", "markdown_recursive")
+    if strategy not in CHUNK_STRATEGIES:
+        choices = ", ".join(CHUNK_STRATEGIES)
+        raise ValueError(
+            f"지원하지 않는 chunk_strategy입니다: {strategy}. 선택값: {choices}"
+        )
     top_k = config.get("top_k", 5)
     if not isinstance(top_k, int) or top_k <= 0:
         raise ValueError("top_k는 1 이상의 정수여야 합니다.")
@@ -325,9 +438,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 document,
                 chunk_size=config["chunk_size"],
                 chunk_overlap=config["chunk_overlap"],
+                strategy=config.get("chunk_strategy", "markdown_recursive"),
             )
             title = document.metadata.get("title", document.doc_id)
-            print(f"[Index] └ '{title}' → {len(drafts)}개 청크 후보")
+            print(
+                f"[Index] └ '{title}' → {len(drafts)}개 청크 후보 "
+                f"(strategy={config.get('chunk_strategy', 'markdown_recursive')})"
+            )
 
             document_chunks: list[Chunk] = []
             for draft in drafts:

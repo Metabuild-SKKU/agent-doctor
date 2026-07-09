@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from agents.index.agent import _chunk_document, _chunk_text, run
+from agents.index.agent import CHUNK_STRATEGIES, _chunk_document, _chunk_text, run
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
     build_client,
@@ -31,6 +31,12 @@ def _document(doc_id: str, content: str) -> Document:
 
 
 class ChunkingTests(unittest.TestCase):
+    def test_all_chunk_strategies_are_registered(self):
+        self.assertEqual(
+            set(CHUNK_STRATEGIES),
+            {"fixed", "markdown", "recursive", "markdown_recursive"},
+        )
+
     def test_overlap_and_max_size_are_respected(self):
         source = "가나다라마바사 " * 30
         chunks = _chunk_text(source, chunk_size=40, chunk_overlap=8)
@@ -50,6 +56,31 @@ class ChunkingTests(unittest.TestCase):
         self.assertEqual(drafts[0].section, "설치")
         self.assertEqual(drafts[1].section, "설치 > Windows")
         self.assertEqual(document.content[drafts[1].start : drafts[1].end], drafts[1].text)
+
+    def test_strategies_can_be_swapped_with_one_config_value(self):
+        document = _document(
+            "guide",
+            "# 설치\n" + ("설치 설명 문장입니다. " * 8)
+            + "\n## Windows\n" + ("PowerShell 설명입니다. " * 8),
+        )
+
+        fixed = _chunk_document(document, 40, 8, strategy="fixed")
+        markdown = _chunk_document(document, 40, 8, strategy="markdown")
+        recursive = _chunk_document(document, 40, 8, strategy="recursive")
+        combined = _chunk_document(
+            document,
+            40,
+            8,
+            strategy="markdown_recursive",
+        )
+
+        self.assertTrue(all(chunk.section is None for chunk in fixed))
+        self.assertEqual([chunk.section for chunk in markdown], ["설치", "설치 > Windows"])
+        self.assertTrue(any(len(chunk.text) > 40 for chunk in markdown))
+        self.assertTrue(all(chunk.section is None for chunk in recursive))
+        self.assertTrue(all(len(chunk.text) <= 40 for chunk in recursive))
+        self.assertTrue(all(chunk.section is not None for chunk in combined))
+        self.assertTrue(all(len(chunk.text) <= 40 for chunk in combined))
 
 
 class IndexRunTests(unittest.TestCase):
@@ -124,6 +155,16 @@ class IndexRunTests(unittest.TestCase):
 
         self.assertEqual(result.status, "error")
         self.assertIn("chunk_overlap", result.error)
+
+    def test_unknown_chunk_strategy_returns_error_state(self):
+        state = self._state()
+        state.documents = [_document("doc-1", "본문")]
+        state.index_config["chunk_strategy"] = "unknown"
+
+        result = run(state)
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("chunk_strategy", result.error)
 
     def test_blank_document_fails_pydantic_validation(self):
         state = self._state()

@@ -20,7 +20,7 @@ state.documents
 
 | 항목 | 기본값 | 변경 방법 |
 |---|---|---|
-| 청킹 | Markdown 구조 우선 + recursive boundary | `chunk_size`, `chunk_overlap` |
+| 청킹 | 교체 가능한 4개 전략 | `chunk_strategy`, `chunk_size`, `chunk_overlap` |
 | 크기 | 600자, overlap 80자 | `state.index_config` |
 | 임베딩 | `BAAI/bge-m3` (1024차원) | `embedding_model`, `embedding_dimension` |
 | Vector DB | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY` |
@@ -30,6 +30,28 @@ state.documents
 | Graph | NetworkX + Mermaid/PyVis | `graph_*` 설정 |
 
 Hybrid와 reranker는 baseline 결과를 먼저 측정한 뒤 Optimize가 켜는 기능이다.
+
+## 청킹 전략 교체
+
+모든 전략은 동일한 `ChunkDraft(text, section, start, end)` 형태를 반환하므로
+이후 임베딩·Qdrant·Eval 코드는 바뀌지 않는다.
+
+```python
+state.index_config["chunk_strategy"] = "fixed"
+state.index_config["chunk_strategy"] = "markdown"
+state.index_config["chunk_strategy"] = "recursive"
+state.index_config["chunk_strategy"] = "markdown_recursive"
+```
+
+| 전략 | 동작 | 용도 |
+|---|---|---|
+| `fixed` | 일정 글자 수로 자름 | 가장 단순한 baseline |
+| `markdown` | 제목/소제목 경계만 사용 | 구조 비교 실험 |
+| `recursive` | 문단→문장→공백 경계 사용 | 일반 텍스트 |
+| `markdown_recursive` | Markdown 1차 분할 후 긴 섹션 재분할 | 기본값 |
+
+한 번의 Index 실행에서는 한 전략을 선택한다. Eval 결과가 낮으면 Optimize가
+`chunk_strategy`를 바꾸고 Index를 재실행할 수 있다.
 
 ## 파일
 
