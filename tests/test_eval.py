@@ -75,7 +75,7 @@ if not report.findings:
 for f in report.findings:
     mark = "확정" if f.confirmed else "예비"
     print(f"  [{f.severity}] {f.type} / {f.label} "
-          f"(tier{f.tier}·{mark}·{f.metadata.get('group')}그룹)")
+          f"({mark}·{f.metadata.get('group')}그룹)")
 
 # 계약 검증: run 은 항상 state 를 반환, report 존재
 assert result is state, "run()은 동일 state 를 반환해야 함"
@@ -83,7 +83,7 @@ assert result.report is not None, "report 가 생성되어야 함"
 
 # findings_summary 계약: 필수 키 존재 + 개수 정합 + 확정우선 정렬
 fs = report.findings_summary
-for key in ("mode", "total", "confirmed", "preliminary", "by_tier",
+for key in ("mode", "total", "confirmed", "preliminary",
             "confirmed_labels", "preliminary_labels"):
     assert key in fs, f"findings_summary 에 {key} 누락"
 assert fs["total"] == len(report.findings) == fs["confirmed"] + fs["preliminary"]

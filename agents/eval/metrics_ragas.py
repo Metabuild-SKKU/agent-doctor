@@ -1,5 +1,5 @@
 """
-agents/eval/ragas_eval.py
+agents/eval/metrics_ragas.py
 STEP3-2: LLM 진단 (RAGAS 지표 측정)
 
 RAGAS 4개 지표 + AspectCritic 을 **LLM-as-Judge** 로 측정한다.

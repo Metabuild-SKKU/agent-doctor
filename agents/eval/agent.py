@@ -8,8 +8,8 @@ Eval Agent — RAG 파이프라인 품질 진단
 설계 문서(Evaluate Module)의 STEP 1~5 를 순서대로 실행한다:
     STEP1  Probe 생성            → probe_gen.generate_probes
     STEP2  각 Probe로 검색·생성   → retrieval.retrieve / generate_answer
-    STEP3-1 규칙 지표·브랜치      → metrics.recall_at_k / token_f1 / decide_branch
-    STEP3-2 LLM(RAGAS) 진단      → ragas_eval.evaluate   (옵션, 기본 꺼짐)
+    STEP3-1 규칙 지표            → diagnose 내부 _compute_metrics (recall_at_k / token_f1)
+    STEP3-2 LLM(RAGAS) 진단      → diagnose 내부 signals RAGAS 신호 (옵션, 기본 꺼짐)
     STEP4  원인 판정(Finding)     → diagnose.diagnose
     STEP5  DiagnosticReport 생성  → report.build_report
 
@@ -32,8 +32,9 @@ from agents.eval.probe_gen import generate_probes
 # ⚠️ 임시: Index Agent가 검색 리트리버를 제공하기 전까지만 retrieval_temp 사용.
 #     Index 검색이 준비되면 retrieval_temp 를 삭제하고 여기 import 를 교체할 것.
 from agents.eval.retrieval_temp import build_eval_index, retrieve, generate_answer, _keyword_search
-from agents.eval.ragas_eval import evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge
+from agents.eval.metrics_ragas import evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge
 from agents.eval.diagnose import diagnose, set_context as set_diag_context
+from agents.eval.report import build_report
 
 
 def _ragas_track(record: EvalRecord, track: str) -> dict:
@@ -51,7 +52,6 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
     except Exception as e:
         print(f"[Eval] RAGAS({track}) 실패({e}) → 폴백")
         return {}
-from agents.eval.report import build_report
 
 
 def run(state: AgentDoctorState) -> AgentDoctorState:
@@ -160,6 +160,7 @@ def _evaluate_probe(
         rec.oracle_answer = generate_answer(probe.question, gold_ctx)
 
     # STEP3-1(지표)·STEP3-2(RAGAS)·STEP4(진단)는 전부 diagnose 안에서 계산·판정한다.
+    # 구조를 계산 -> diagnose에서 diagnose -> 모든 계산으로 변경함.
     #   agent 는 STEP2(파이프라인 실행)까지만 — record 는 raw I/O(검색·생성 결과)만 담는다.
     rec.findings = diagnose(rec, mode)
     return rec

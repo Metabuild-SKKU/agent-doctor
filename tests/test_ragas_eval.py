@@ -30,7 +30,7 @@ if not _key or "..." in _key or len(_key) < 20:
 
 os.environ["EVAL_ENABLE_LLM"] = "1"   # RAGAS 진단 활성화
 
-import agents.eval.ragas_eval as R
+import agents.eval.metrics_ragas as R
 from core.schema import Probe
 from agents.eval.types import Branch, EvalRecord
 

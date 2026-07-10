@@ -71,7 +71,6 @@ class Finding:
     severity: str  # "critical" | "warning" | "info"
     description: str
     label: Optional[str] = None          # 세분화 진단명(처방 파일 라벨). Optimize가 label→처방 매핑에 사용
-    tier: Optional[int] = None           # 진단 확정에 필요한 최대 자원 tier(1~4). 낮을수록 싸게 확정(Mode 참고)
     confirmed: bool = True               # 확정 판정 여부. False=예비(더 높은 진단 모드에서 확정 필요)
     affected_chunks: list[str] = field(default_factory=list)
     affected_probes: list[str] = field(default_factory=list)
@@ -86,7 +85,7 @@ class DiagnosticReport:
     """
     report_id: str
     findings: list[Finding] = field(default_factory=list)
-    findings_summary: dict = field(default_factory=dict)  # 확정/예비·tier 집계(진단 모드 포함). Optimize 소비용
+    findings_summary: dict = field(default_factory=dict)  # 확정/예비·라벨 집계(진단 모드 포함). Optimize 소비용
     ragas_scores: dict = field(default_factory=dict)
     oracle_accuracy: Optional[float] = None
     overall_score: Optional[float] = None

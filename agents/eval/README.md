@@ -61,14 +61,14 @@ STEP5  리포트            report.py      overall_score / pass_threshold 산출
 ```python
 overall_score : float | None   # RAGAS 가중평균(있으면) / 규칙지표 폴백 / 신호없으면 None
 pass_threshold: bool           # overall_score >= 0.8 (설계 §7, types.PASS_SCORE_THRESHOLD)
-ragas_scores  : dict           # RAGAS 평균 + 규칙지표 평균 + 브랜치 분포
+ragas_scores  : dict           # RAGAS 평균 + 규칙지표 평균 + 결과 분포(diagnosed/ok)
 oracle_accuracy: float | None  # Oracle 트랙 통과율
-findings      : list[Finding]  # 원인 라벨(확정 우선·저비용 tier 우선 정렬). 각 Finding 은 label/tier/confirmed 보유
-findings_summary: dict         # {mode, total, confirmed, preliminary, by_tier, confirmed_labels, preliminary_labels}
+findings      : list[Finding]  # 원인 라벨(확정 우선 정렬). 각 Finding 은 label/confirmed 보유
+findings_summary: dict         # {mode, total, confirmed, preliminary, confirmed_labels, preliminary_labels}
 ```
 
-각 `Finding` 은 `label`(진단명) 외에 **`tier`**(확정에 필요한 자원 tier 1~4)와 **`confirmed`**(현재 모드에서 확정됐는지)를
-가진다. `confirmed=False`(예비)는 *더 깊은 모드에서 확정 가능한 의심 원인*이며, `overall_score`/`pass_threshold` 를
+각 `Finding` 은 `label`(진단명)과 **`confirmed`**(현재 모드에서 확정됐는지)를 가진다.
+`confirmed=False`(예비)는 *더 깊은 모드에서 확정 가능한 의심 원인*이며, `overall_score`/`pass_threshold` 를
 바꾸지 않는다(지표 기반). Optimize 는 `findings_summary.confirmed_labels` 로 확정 원인부터 처방한다.
 
 ---
@@ -107,12 +107,13 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, by_tier, 
 
 - **생성 원인은 전부 RAGAS(=deep) 의존** → `deep` 미만이면 하나의 예비 `generation_failure` 로 롤업된다
   (LLM 없이는 hallucination/bad_gold 를 싸게 구분할 수 없다는 정직한 한계).
-- **STEP3-2 RAGAS 는 `deep` 이상에서만 실행**된다(`ragas_eval.evaluate` 의 모드 게이트). `EVAL_ENABLE_LLM` 과 AND 조건.
+- **STEP3-2 RAGAS 는 `deep` 이상에서만 실행**된다(`signals` 의 RAGAS 신호 DEEP 게이트). `EVAL_ENABLE_LLM` 과 AND 조건.
 - 현재 tier 2~4 의 판별 신호 일부는 훅(미구현)이라, 아직 검색 원인 확정은 제한적이다(`[구현 포인트]` 참고).
 
 ### 라벨별 tier 분류 (확정에 필요한 자원)
 
-`diagnose._LABEL_TIER` 가 코드상 단일 출처. tier = "판별을 **확정**하는 데 필요한 가장 비싼 자원".
+아래는 각 라벨을 **확정**하는 데 필요한 자원 정리(설계 문서용). tier 값은 `Finding` 에 싣지 않고,
+각 판별 신호가 `signals.py` 에서 자기 자원(tier)을 실행 모드로 self-gate 한다(mode 부족 시 `None`).
 
 | 라벨 | 그룹 | tier | 확정 자원 |
 |---|---|:---:|---|

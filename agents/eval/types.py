@@ -49,10 +49,10 @@ RAGAS_WEIGHTS = {
 # 사용자가 고르는 '진단 깊이'. 값 = 그 모드가 감당하는 최대 자원 tier.
 #   자원 사다리(=tier):  tier1 규칙·기존지표만  <  tier2 추가 검색 쿼리(top-N 재검색·BM25·코퍼스)
 #                        <  tier3 LLM·RAGAS  <  tier4 파이프라인 재실행(ablation)
-# 라벨은 '판별에 필요한 가장 비싼 자원'이 곧 confirm tier 다(diagnose._LABEL_TIER).
-#   mode >= tier  → 확정(confirmed=True),   mode < tier → 예비(confirmed=False)로 낸다.
+# 라벨은 '판별에 필요한 가장 비싼 자원'이 곧 그 라벨의 confirm tier 다(각 신호가 signals.py 에서 self-gate).
+#   mode >= tier 이고 그 확정 신호가 실제 발동 → 확정(confirmed=True), 아니면 예비(confirmed=False).
 # 생성 원인(B)은 전부 RAGAS(=DEEP) 의존이라, DEEP 미만에선 하나의 예비 'generation_failure' 로 롤업.
-# STEP3-2 RAGAS 자체도 DEEP 이상에서만 실행한다(ragas_eval.evaluate 의 모드 게이트).
+# STEP3-2 RAGAS 자체도 DEEP 이상에서만 실행한다(signals._faith 등 RAGAS 신호의 DEEP 게이트).
 class Mode:
     FAST = 1       # 규칙·기존지표만 (추가 쿼리·LLM 없음) — 나열형(enumeration)만 확정
     STANDARD = 2   # + 추가 검색 쿼리(top-N·BM25·코퍼스)   — 검색 원인 대부분 확정
