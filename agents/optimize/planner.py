@@ -274,12 +274,6 @@ def _build_candidates(
             description=f"{finding.label} → {pres['id']}",
             metadata={"prescription_id": pres["id"]},
         )
-        # applies_when(신호기반 택1) 은 optimizer 가 finding.metadata 와
-        # 대조해 쓰도록 후보 metadata 로 실어 보낸다. 없으면 넣지 않는다.
-        meta: dict = {}
-        if pres.get("applies_when"):
-            meta["applies_when"] = pres["applies_when"]
-
         candidates.append(
             PrescriptionCandidate(
                 id=pres["id"],
@@ -290,8 +284,10 @@ def _build_candidates(
                 cost=float(_derive_cost(pres)),
                 priority=0.0,          # 후보 개별 우선순위는 MVP 미사용
                 target_metrics=list(target_metrics),  # rules.py 라벨의 target_metrics
+                # 신호기반 택1(retrieval_semantic_mismatch 등). 없으면 빈 dict
+                # → optimizer 가 순서대로 순차 시도(fallback).
+                applies_when=dict(pres.get("applies_when", {})),
                 reason=finding.description,
-                metadata=meta,
             )
         )
     return candidates
