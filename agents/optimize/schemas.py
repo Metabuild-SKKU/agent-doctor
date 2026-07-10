@@ -328,6 +328,9 @@ class OptimizeDecision:
         request_id: 연결된 OptimizationRequest ID. 없을 수 있다.
         next_route: 다음 그래프 흐름. index, serve, end 중 하나.
         reason: 이 결정을 내린 이유.
+        manual_labels: 이번 진단에서 함께 발견된 D그룹(manual) 라벨들.
+            apply_optimize로 자동 처방이 진행되는 경우에도, 별도로 사람이
+            확인해야 할 문제가 있으면 여기 담아 reporter가 사용자에게 알린다.
     """
 
     mode: DecisionMode
@@ -336,6 +339,7 @@ class OptimizeDecision:
     request_id: str | None = None
     next_route: NextRoute = "serve"
     reason: str = ""
+    manual_labels: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -72,7 +72,7 @@ def plan(
           - decision.mode != "apply_optimize" 이면 request 는 None.
           - apply_optimize 이면 request 에 처방 후보가 담긴다.
     """
-    blacklist = blacklist or set()
+    blacklist = blacklist or set() # set은 blacklist가 None인 경우 필요
 
     if state.report is None:
         return None, OptimizeDecision(
@@ -83,7 +83,7 @@ def plan(
             reason="진단 리포트가 없음 — 최적화 스킵",
         )
 
-    manual, actionable = _split_findings(state.report.findings)
+    manual, actionable = _split_findings(state.report.findings) #draft 부분은 사라짐
     decision = _decide_mode(state, actionable, manual)
 
     if decision.mode != "apply_optimize":
@@ -99,6 +99,7 @@ def plan(
             requires_user_confirmation=False,
             next_route="serve",
             reason="처방 후보가 모두 블랙리스트에 걸림",
+            manual_labels=decision.manual_labels,
         )
 
     finding, rule, _score_val = picked
@@ -147,6 +148,8 @@ def _decide_mode(
       - 자동처방 없음 + manual 없음 → use_current(skipped) → serve
       - 자동처방 있음               → apply_optimize → index
     """
+    manual_labels = [f.label for f in manual if f.label]
+
     report = state.report
     if report is not None and report.pass_threshold:
         return OptimizeDecision(
@@ -155,6 +158,7 @@ def _decide_mode(
             requires_user_confirmation=False,
             next_route="serve",
             reason="모든 임계값 달성 — 최적화 불필요",
+            manual_labels=manual_labels,
         )
 
     if not actionable:
@@ -165,6 +169,7 @@ def _decide_mode(
                 requires_user_confirmation=True,
                 next_route="serve",
                 reason="자동 처방 가능한 라벨 없음 — 사람 개입 필요(D그룹)",
+                manual_labels=manual_labels,
             )
         return OptimizeDecision(
             mode="use_current",
@@ -172,6 +177,7 @@ def _decide_mode(
             requires_user_confirmation=False,
             next_route="serve",
             reason="처방 가능한 finding 없음",
+            manual_labels=manual_labels,
         )
 
     return OptimizeDecision(
@@ -180,6 +186,7 @@ def _decide_mode(
         requires_user_confirmation=False,
         next_route="index",
         reason="처방 가능한 finding 존재 → 최적화 진행",
+        manual_labels=manual_labels,
     )
 
 
