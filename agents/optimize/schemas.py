@@ -154,6 +154,48 @@ class ConfigMappingResult:
 
 
 @dataclass
+class RAGBuilderTrialResult:
+    """
+    RAGBuilder가 실행한 단일 trial 결과.
+
+    이 값은 surrogate pipeline에서의 최적화 결과일 뿐이다. 실제 사용자
+    pipeline에 적용하려면 ConfigPatch 후보로 변환한 뒤 eval 검증을 거쳐야 한다.
+    """
+
+    trial_id: str
+    config: dict[str, Any]
+    score: float | None = None
+    metrics: dict[str, Any] = field(default_factory=dict)
+    status: Literal["completed", "failed", "rejected", "unsupported"] = "completed"
+    unsupported_reasons: list[str] = field(default_factory=list)
+    raw_trial: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RAGBuilderResult:
+    """
+    RAGBuilder adapter가 반환하는 표준화된 외부 최적화 결과.
+
+    RAGBuilderResult는 surrogate RAGBuilder pipeline에서 유망했던 config 조합을
+    설명한다. 사용자 pipeline에서 실제 개선이 있었는지 판단하는 최종
+    ValidationResult가 아니다.
+    """
+
+    request_id: str
+    best_config: dict[str, Any] | None
+    best_score: float | None
+    trial_results: list[RAGBuilderTrialResult] = field(default_factory=list)
+    optimized_stage: str = "retrieval"
+    search_space: dict[str, list[Any]] = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)
+    raw_result: dict[str, Any] = field(default_factory=dict)
+    status: Literal["completed", "failed", "skipped"] = "completed"
+    error: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class OptimizationRequest:
     """
     planner가 만들고 optimizer/adapter가 소비하는 최적화 요청.
@@ -341,8 +383,8 @@ class OptimizationHistoryItem:
     """
     최적화 1회 시도에 대한 이력 기록.
 
-    같은 처방을 반복 적용하지 않도록 하거나, guardrail 위반 시 rollback할 때
-    필요한 정보를 저장한다. 초기 구현에서는 state에 dict로 저장하더라도,
+    같은 처방을 반복 적용하지 않도록 하거나, 전역 하한선 위반/점수 하락으로
+    rollback할 때 필요한 정보를 저장한다. 초기 구현에서는 state에 dict로 저장하더라도,
     이 모델을 기준으로 history.py에서 직렬화하면 된다.
 
     Attributes:
