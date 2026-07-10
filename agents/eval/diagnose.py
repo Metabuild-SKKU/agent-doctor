@@ -160,7 +160,7 @@ def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
     멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음).
     확정: faithfulness 높음.
     """
-    faith = _faith(record)
+    faith = _faith_oracle(record)
     if _is_multi_hop(record) and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN:
         return _finding(record, "generation_hop_binding_error", "generation_failure", confirmed=True)
     return None
@@ -171,7 +171,7 @@ def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
     정답 context가 있는데 지어냄.
     확정: faithfulness 낮음.
     """
-    faith = _faith(record)
+    faith = _faith_oracle(record)
     if faith is not None and faith < RAGAS_FAITHFULNESS_MIN:
         return _finding(record, "generation_hallucination", "generation_failure", confirmed=True)
     return None
@@ -182,7 +182,7 @@ def generation_partial_answer(record: EvalRecord) -> Optional[Finding]:
     정답 context가 있는데 일부 요소·조건 누락.
     확정: relevancy 낮음.
     """
-    rel = _rel(record)
+    rel = _rel_oracle(record)
     if rel is not None and rel < RAGAS_RESPONSE_RELEVANCY_MIN:
         return _finding(record, "generation_partial_answer", "generation_failure", confirmed=True)
     return None
@@ -204,7 +204,7 @@ def generation_partial_answer(record: EvalRecord) -> Optional[Finding]:
 
 def too_long_context(record: EvalRecord) -> Optional[Finding]:
     """
-    context가 너무 길어 잡음·과부하로 품질 저하. 처방: top-k 축소/필터링/압축.
+    context가 너무 길어 잡음·과부하로 품질 저하.
     확정: 축소 재실행 시 회복(tier4). 
     예비: 없음
     """
@@ -214,16 +214,22 @@ def too_long_context(record: EvalRecord) -> Optional[Finding]:
 
 
 def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
-    """청크가 긴 context 중간이라 LLM이 참조 못함. 처방: context 재정렬/top-k 축소.
-    확정: gold 앞배치 재실행 시 회복(tier4). 싼 예비 신호 없음."""
+    """
+    청크가 긴 context 중간이라 LLM이 참조 못함.
+    확정: gold 앞배치 재실행 시 회복(tier4). 
+    예비: 없음
+    """
     if _gold_front_helps(record) is True:
         return _finding(record, "lost_in_the_middle", "retrieval_failure", confirmed=True)
     return None
 
 
 def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
-    """비-gold 청크의 상충 정보에 이끌림(C 잔여 원인). 처방: 노이즈 필터링+프롬프트.
-    확정: 노이즈 제거 재실행 시 회복(tier4). 예비: C 잔여이므로 확정 전엔 항상 예비."""
+    """
+    비-gold 청크의 상충 정보에 이끌림.
+    확정: 노이즈 제거 재실행 시 회복(tier4). 
+    예비: 확정 전엔 항상 예비.
+    """
     helps = _noise_removal_helps(record)
     if helps is True:
         return _finding(record, "context_noise_interference", "retrieval_failure", confirmed=True)
@@ -237,24 +243,41 @@ def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def bad_gold_answer(record: EvalRecord) -> Optional[Finding]:
-    """정답셋 자체 오류/모호(충실도·관련성 모두 측정 고득점인데 gold만 불일치). 처방: 사람 검수.
-    확정(자동): faith·rel 둘 다 측정 고득점(tier3). 진짜 확정은 사람 검수."""
+    """
+    정답셋 자체 오류/모호(충실도·관련성 모두 고득점인데 gold만 불일치) — 실제 트랙(컨텍스트 계열).
+    확정(자동): faith·rel 둘 다 측정 고득점(tier3). [진짜 확정은 사람 검수.]
+    """
     if _both_high(_faith(record), _rel(record)):
         return _finding(record, "bad_gold_answer", "gap", confirmed=True)
     return None
 
 
+def bad_gold_answer_oracle(record: EvalRecord) -> Optional[Finding]:
+    """
+    bad_gold_answer 의 오라클 트랙 버전(생성 실패 계열). 
+    라벨은 동일('bad_gold_answer').
+    """
+    if _both_high(_faith_oracle(record), _rel_oracle(record)):
+        return _finding(record, "bad_gold_answer", "gap", confirmed=True)
+    return None
+
+
 def corpus_gap(record: EvalRecord) -> Optional[Finding]:
-    """필요한 자료가 코퍼스에 없음(단일홉). 처방: 문서 추가 요청.
-    확정: 코퍼스에 gold 없음(tier2). 싼 예비 신호 없음."""
+    """
+    필요한 자료가 코퍼스에 없음(단일홉).
+    확정: 코퍼스에 gold 없음(tier2). 
+    예비: 없음
+    """
     if _gold_in_corpus(record) is False and not _is_multi_hop(record):
         return _finding(record, "corpus_gap", "gap", confirmed=True)
     return None
 
 
 def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
-    """멀티홉 중 일부 hop 근거만 코퍼스에 없음. 처방: 해당 hop 문서 추가 요청.
-    확정: 코퍼스에 gold 없음(tier2). 싼 예비 신호 없음."""
+    """
+    멀티홉 중 일부 hop 근거만 코퍼스에 없음. 
+    확정: 코퍼스에 gold 없음(tier2).
+    예비: 없음"""
     if _gold_in_corpus(record) is False and _is_multi_hop(record):
         return _finding(record, "corpus_gap_partial_hop", "gap", confirmed=True)
     return None
@@ -280,7 +303,7 @@ _RETRIEVAL_CAUSE_PARTIAL = (
     None, None,
 )
 _GENERATION_CAUSE = (
-    (bad_gold_answer, generation_hop_binding_error, generation_hallucination, generation_partial_answer),
+    (bad_gold_answer_oracle, generation_hop_binding_error, generation_hallucination, generation_partial_answer),
     Mode.DEEP, "generation_failure",
 )
 _CONTEXT_CAUSE = (
@@ -460,28 +483,36 @@ def _gold_in_corpus(record: EvalRecord):
 # 점수는 record.ragas / record.oracle_ragas 에 이미 실려 있음(있으면). 미측정 = None.
 # (record.aspect["contradiction"] 도 tier3 AspectCritic — generation_contradiction 이 직접 사용)
 
-def _use_oracle(record: EvalRecord) -> bool:
-    """트랙 선택: 생성 실패 계열은 오라클 트랙 점수로, 컨텍스트 계열은 실제 트랙으로 판정."""
-    return record.branch in (
-        Branch.RETRIEVAL_GEN_FAIL, Branch.RETRIEVAL_PARTIAL_GEN_FAIL,
-        Branch.AMBIGUOUS_GEN, Branch.NO_ANSWER_VIOLATION,
-    )
-
+#   실제 트랙  = record.ragas       (검색결과 컨텍스트로 생성한 답)
+#   오라클 트랙 = record.oracle_ragas (gold 컨텍스트로 생성한 답)
+# 생성 원인(hallucination/hop_binding/partial)은 항상 오라클, bad_gold만 각 트랙 사용.
 
 def _faith(record: EvalRecord):
-    """faithfulness(충실도). hallucination / hop_binding / bad_gold 용."""
-    if _active_mode < Mode.DEEP:       # 비용 게이트 (RAGAS 는 DEEP 이상에서만)
+    """faithfulness(충실도) — 실제 트랙."""
+    if _active_mode < Mode.DEEP:       # 비용 게이트 
         return None
-    src = record.oracle_ragas if _use_oracle(record) else record.ragas
-    return src.get("faithfulness")
+    return record.ragas.get("faithfulness")
+
+
+def _faith_oracle(record: EvalRecord):
+    """faithfulness(충실도) — 오라클 트랙."""
+    if _active_mode < Mode.DEEP:
+        return None
+    return record.oracle_ragas.get("faithfulness")
 
 
 def _rel(record: EvalRecord):
-    """response_relevancy(관련성). partial_answer / bad_gold 용. 모드부족/미측정 None."""
+    """response_relevancy(관련성) — 실제 트랙."""
     if _active_mode < Mode.DEEP:
         return None
-    src = record.oracle_ragas if _use_oracle(record) else record.ragas
-    return src.get("response_relevancy")
+    return record.ragas.get("response_relevancy")
+
+
+def _rel_oracle(record: EvalRecord):
+    """response_relevancy(관련성) — 오라클 트랙."""
+    if _active_mode < Mode.DEEP:
+        return None
+    return record.oracle_ragas.get("response_relevancy")
 
 
 def _both_high(faith, rel) -> bool:
