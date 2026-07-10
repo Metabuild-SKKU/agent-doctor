@@ -39,8 +39,10 @@ _active_mode: int = DEFAULT_MODE
 
 
 class _Ctx:
-    """tier2 판별 훅(재검색/코퍼스 조회)이 쓰는 검색 자원. agent 가 set_context 로 주입한다.
-    retrieve_fn/keyword_fn 을 주입받아 diagnose 가 retrieval 계층과 직접 결합하지 않는다."""
+    """
+    tier2 판별 훅(재검색/코퍼스 조회)이 쓰는 검색 자원. agent 가 set_context 로 주입한다.
+    2단계: RAG/index module에서 값 및 함수들을 가져와야한다!!!!!!!!!!!
+    """
     client = None
     chunks: list = []
     corpus_ids: frozenset = frozenset()
@@ -171,7 +173,7 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
     나열형: 필요한 근거 개수 가변인데 top-k 고정이라 누락.
     확정: gold수 vs top-k 순수 규칙(tier1) — 바로 확정.?????????
     """
-    if _enumeration_signal(record):
+    if _enumeration_cache(record):
         return _finding(record, "retrieval_incomplete_enumeration", "retrieval_failure", confirmed=True)
     return None
 
@@ -448,10 +450,10 @@ def _dedup(findings: list[Finding]) -> list[Finding]:
 #    각 신호는 tri-state: None(미실행/모름) · True · False.
 #    · 비용 게이트: [훅] 첫 줄에서 self-gate (`if _active_mode < <tier>: return None`).
 #    · 확정 게이트: 라벨 함수가 신호 발동 여부로 confirmed 를 정함(_finding 에 명시).
-#    · memoize: 비싼 [훅]은 _signal 로 record.signals(=state 캐시)에 저장 → 재진단 시 재사용.
+#    · memoize: 비싼 [훅]은 _cache 로 record.signals(=state 캐시)에 저장 → 재진단 시 재사용.
 # ══════════════════════════════════════════════════════════════════
 
-def _signal(record: EvalRecord, name: str, compute):
+def _cache(record: EvalRecord, name: str, compute):
     """ 판별 신호 memoize를 위한 함수. 
 
      1) record.signals(=state.diagnosis_cache[probe_id] 뷰)에 있으면 재사용,
@@ -471,7 +473,7 @@ def _is_multi_hop(record: EvalRecord) -> bool:
     return record.probe.qtype in ("bridge", "comparison", "aggregation")
 
 
-def _enumeration_signal(record: EvalRecord) -> bool:
+def _enumeration_cache(record: EvalRecord) -> bool:
     """gold 개수가 top-k(=검색 결과 수)에 근접/초과 → 나열형 누락. incomplete_enumeration 용."""
     k = len(record.retrieved_chunk_ids) or DEFAULT_TOP_K
     gold_n = len(record.probe.gold_chunk_ids)
@@ -484,24 +486,31 @@ def _recall_ok(record: EvalRecord) -> bool:
 # ── tier2 · 추가 검색 쿼리 (자원: top-N 재검색 / BM25 / 코퍼스 조회) — set_context 로 주입 ──
 
 def _gold_in_wider_candidates(record: EvalRecord):
-    """top-N 재검색에서, top-k 가 놓친 gold 가 넓은 후보엔 있나. retrieval_low_rank 확정용.
-    True=놓친 gold 가 top-N 후보에 있음(리랭커로 회복 가능) / False=후보에도 없음 / None=자원·모드 미충족."""
+    """
+    top-N 재검색에서, top-k 가 놓친 gold 가 넓은 후보엔 있나 확인. 
+    retrieval_low_rank 확정용.
+    True=놓친 gold 찾음 / False=후보에도 없음 / None=자원·모드 미충족.
+    """
     if _active_mode < Mode.STANDARD or _ctx.retrieve_fn is None:
         return None
 
     def compute():
-        missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)
+        missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids) # 차집합 - 놓친 골드
         if not missed:
             return None
-        hits = _ctx.retrieve_fn(_ctx.client, _ctx.chunks, record.probe.question, _ctx.wide_n)
-        wide_ids = {h.get("chunk_id") for h in hits}
-        return bool(missed & wide_ids)
-    return _signal(record, "gold_in_wider_candidates", compute)
+        hits = _ctx.retrieve_fn(_ctx.client, _ctx.chunks, record.probe.question, _ctx.wide_n) # 넓은 n으로 검색
+        wide_ids = {h.get("chunk_id") for h in hits} 
+        return bool(missed & wide_ids) # 교집합 - 하나라도 찾았으면 True.
+    
+    return _cache(record, "gold_in_wider_candidates", compute)
 
 
 def _bm25_hits_gold(record: EvalRecord):
-    """키워드(BM25) 검색이 dense top-k 가 놓친 gold 를 잡나. lexical(True)/semantic(False) mismatch 용.
-    True=키워드로 잡힘(단어 불일치) / False=키워드도 놓침(의미 불일치) / None=자원·모드 미충족."""
+    """
+    키워드(BM25) 검색이 dense top-k 가 놓친 gold 를 잡나. 
+    lexical(True)/semantic(False) mismatch 용.
+    True=키워드로 잡힘(단어 불일치) / False=키워드도 놓침(의미 불일치) / None=자원·모드 미충족.
+    """
     if _active_mode < Mode.STANDARD or _ctx.keyword_fn is None:
         return None
 
@@ -509,10 +518,10 @@ def _bm25_hits_gold(record: EvalRecord):
         missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)
         if not missed:
             return None
-        hits = _ctx.keyword_fn(_ctx.chunks, record.probe.question, _ctx.wide_n)
+        hits = _ctx.keyword_fn(_ctx.chunks, record.probe.question, _ctx.wide_n) # 위와 같으나 검색 함수만 다름
         kw_ids = {h.get("chunk_id") for h in hits}
         return bool(missed & kw_ids)
-    return _signal(record, "bm25_hits_gold", compute)
+    return _cache(record, "bm25_hits_gold", compute)
 
 
 def _gold_in_corpus(record: EvalRecord):
@@ -525,8 +534,8 @@ def _gold_in_corpus(record: EvalRecord):
         golds = record.probe.gold_chunk_ids
         if not golds:
             return None
-        return all(g in _ctx.corpus_ids for g in golds)
-    return _signal(record, "gold_in_corpus", compute)
+        return all(g in _ctx.corpus_ids for g in golds) # 코퍼스 전체와 대조
+    return _cache(record, "gold_in_corpus", compute)
 
 
 # ── tier3 · LLM/RAGAS (자원: STEP3-2 RAGAS 점수 · AspectCritic) ──
@@ -581,28 +590,28 @@ def _context_shorten_helps(record: EvalRecord):
     """[구현 포인트·tier4] context 축소 재실행 시 정답률 상승 여부. too_long_context 확정용."""
     if _active_mode < Mode.FULL:
         return None
-    return _signal(record, "context_shorten_helps", lambda: None)    # 구현 시 lambda→축소 재실행
+    return _cache(record, "context_shorten_helps", lambda: None)    # 구현 시 lambda→축소 재실행
 
 
 def _gold_front_helps(record: EvalRecord):
     """[구현 포인트·tier4] gold를 앞쪽 배치 재실행 시 정답률 회복 여부. lost_in_the_middle 확정용."""
     if _active_mode < Mode.FULL:
         return None
-    return _signal(record, "gold_front_helps", lambda: None)         # 구현 시 lambda→재정렬 재실행
+    return _cache(record, "gold_front_helps", lambda: None)         # 구현 시 lambda→재정렬 재실행
 
 
 def _bridge_decompose_recovers(record: EvalRecord):
     """[구현 포인트·tier4] iterative_decompose 재실행 시 hop2 근거 회복 여부. missing_bridge 확정용."""
     if _active_mode < Mode.FULL:
         return None
-    return _signal(record, "bridge_decompose_recovers", lambda: None)  # 구현 시 lambda→분해 재검색
+    return _cache(record, "bridge_decompose_recovers", lambda: None)  # 구현 시 lambda→분해 재검색
 
 
 def _noise_removal_helps(record: EvalRecord):
     """[구현 포인트·tier4] 비-gold 노이즈 제거 재실행 시 회복 여부. context_noise 확정용."""
     if _active_mode < Mode.FULL:
         return None
-    return _signal(record, "noise_removal_helps", lambda: None)      # 구현 시 lambda→노이즈 제거 재실행
+    return _cache(record, "noise_removal_helps", lambda: None)      # 구현 시 lambda→노이즈 제거 재실행
 
 
 # ── Finding 빌더 ─────────────────────────────────────────────────
