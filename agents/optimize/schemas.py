@@ -91,6 +91,10 @@ class PrescriptionCandidate:
         cost: 처방 비용. 낮을수록 우선 시도하기 쉽다.
         priority: planner가 계산한 후보 우선순위 점수.
         target_metrics: 이 처방으로 개선하려는 주요 지표 목록.
+        applies_when: 이 처방이 적용되는 조건(신호 기반 택1).
+            예: {"topic_cluster": ["spread", "concentrated"]}.
+            Eval이 finding.metadata로 주는 신호와 optimizer가 대조해 후보를
+            거른다. 비어있으면 신호 판단 없이 순서대로 순차 시도(fallback).
         reason: 이 처방을 제안한 이유.
         tradeoffs: latency, cost, precision 하락 등 예상되는 부작용.
         metadata: 실험적 신호나 원본 rule dict 같은 확장 정보.
@@ -105,6 +109,7 @@ class PrescriptionCandidate:
     cost: float | None = None
     priority: float = 0.0
     target_metrics: list[str] = field(default_factory=list)
+    applies_when: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
     tradeoffs: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
