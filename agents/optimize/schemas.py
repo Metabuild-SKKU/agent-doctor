@@ -343,6 +343,30 @@ class OptimizeDecision:
 
 
 @dataclass
+class Verdict:
+    """
+    history.judge가 내리는 처방 유지/롤백 판정 결과.
+
+    OptimizeDecision이 planner의 흐름 결정 봉투인 것과 대응된다. 한 처방을
+    적용해 재측정한 뒤, 그 처방을 유지할지 되돌릴지를 담는다. agent.py가 이
+    값을 보고 실제 롤백(config 복원)·블랙리스트 등록을 수행한다.
+
+    Attributes:
+        keep: True면 유지, False면 롤백.
+        before_score: 처방 전 단일 점수(Eval overall_score).
+        after_score: 처방 후 단일 점수(Eval overall_score).
+        floor_violations: 하한선을 위반한 지표명 목록. 있으면 무조건 롤백.
+        reason: 이 판정을 내린 이유(사람이 읽는 설명).
+    """
+
+    keep: bool
+    before_score: float
+    after_score: float
+    floor_violations: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+@dataclass
 class OptimizationReport:
     """
     reporter가 생성하는 사용자용 처방 요약.
