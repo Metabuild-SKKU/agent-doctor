@@ -121,11 +121,11 @@ def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
 
 def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
-    dense·BM25 모두 놓친 의미 연결 실패.
-    확정: BM25 도 gold 를 못 잡음(tier2). 
+    dense·BM25 모두 놓친 의미 연결 실패. (단 gold 가 코퍼스엔 있을 때만 — 없으면 corpus_gap)
+    확정: BM25 도 gold 를 못 잡음 + gold 는 코퍼스에 존재(tier2).
     예비: 없음
     """
-    if _bm25_hits_gold(record) is False:
+    if _bm25_hits_gold(record) is False and _gold_in_corpus(record) is not False:
         return _finding(record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=True)
     return None
 
