@@ -119,13 +119,12 @@ class EvalRecord:
     oracle_answer: Optional[str] = None                          # gold context로 생성한 답
     oracle_context: list[str] = field(default_factory=list)      # gold context 텍스트 (oracle 트랙 RAGAS용)
 
-    # STEP3-1: 규칙 지표
+    # STEP3-1: 규칙 지표 (diagnose 가 진입 시 계산·저장)
     recall_at_k: float = 0.0
     f1_score: float = 0.0
     oracle_f1: float = 0.0
-    branch: str = Branch.SUCCESS
 
-    # STEP3-2: LLM(RAGAS) 지표 — 활성화된 경우에만 채워짐
+    # STEP3-2: LLM(RAGAS) 지표 — diagnose 가 lazy 로 채움
     ragas: dict = field(default_factory=dict)          # 실제 트랙
     oracle_ragas: dict = field(default_factory=dict)   # 오라클 트랙
     aspect: dict = field(default_factory=dict)         # AspectCritic 결과

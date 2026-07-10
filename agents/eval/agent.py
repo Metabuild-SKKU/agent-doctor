@@ -27,12 +27,11 @@ import json
 from core.schema import Probe
 from core.state import AgentDoctorState
 
-from agents.eval.types import Branch, EvalRecord, DEFAULT_TOP_K, resolve_mode, Mode, llm_eval_enabled
+from agents.eval.types import EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled
 from agents.eval.probe_gen import generate_probes
 # ⚠️ 임시: Index Agent가 검색 리트리버를 제공하기 전까지만 retrieval_temp 사용.
 #     Index 검색이 준비되면 retrieval_temp 를 삭제하고 여기 import 를 교체할 것.
 from agents.eval.retrieval_temp import build_eval_index, retrieve, generate_answer, _keyword_search
-from agents.eval.metrics import recall_at_k, token_f1, is_abstention, decide_branch
 from agents.eval.ragas_eval import evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge
 from agents.eval.diagnose import diagnose, set_context as set_diag_context
 
@@ -160,26 +159,7 @@ def _evaluate_probe(
         rec.oracle_context = gold_ctx
         rec.oracle_answer = generate_answer(probe.question, gold_ctx)
 
-    # STEP3-1: 규칙 지표 + 브랜치
-    rec.recall_at_k = recall_at_k(probe.gold_chunk_ids, rec.retrieved_chunk_ids)
-
-    if probe.ground_truth:  # 정답이 있어야 규칙 판정 의미 있음
-        ref = probe.ground_truth
-        rec.f1_score = token_f1(rec.generated_answer, ref)
-        rec.oracle_f1 = token_f1(rec.oracle_answer or "", ref) if rec.oracle_answer else 0.0
-        answer_exists = True if probe.answer_exists is None else probe.answer_exists
-        rec.branch = decide_branch(
-            rec.recall_at_k, rec.f1_score, rec.oracle_f1,
-            answer_exists=answer_exists,
-            abstained=is_abstention(rec.generated_answer),
-        )
-    else:
-        # 정답 미보유(user_log 등) → 규칙 판정 불가. RAGAS(무정답 지표)에만 의존.
-        rec.branch = Branch.SUCCESS
-
-    # STEP3-2 RAGAS 는 diagnose 안에서 lazy 로 계산됨(set_context 의 ragas_fn). 여기선 계산 안 함.
-    # (rec.branch 는 report 관측·Finding metadata 용으로만 유지 — diagnose 는 브랜치 안 씀.)
-
-    # STEP4: 진단 (metric·RAGAS·tier2/4 신호 전부 diagnose 안에서 lazy·memoize 계산)
+    # STEP3-1(지표)·STEP3-2(RAGAS)·STEP4(진단)는 전부 diagnose 안에서 계산·판정한다.
+    #   agent 는 STEP2(파이프라인 실행)까지만 — record 는 raw I/O(검색·생성 결과)만 담는다.
     rec.findings = diagnose(rec, mode)
     return rec

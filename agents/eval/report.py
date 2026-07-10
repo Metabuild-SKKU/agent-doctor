@@ -22,7 +22,7 @@ from collections import Counter
 
 from core.schema import DiagnosticReport
 from agents.eval.types import (
-    EvalRecord, Branch, RAGAS_WEIGHTS, PASS_SCORE_THRESHOLD, F1_PASS_THRESHOLD,
+    EvalRecord, RAGAS_WEIGHTS, PASS_SCORE_THRESHOLD, F1_PASS_THRESHOLD,
     resolve_mode,
 )
 
@@ -49,7 +49,9 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
 
     scores = {**rule_means}
     scores.update(ragas_means)                          # RAGAS 평균(있으면)
-    scores["branch_distribution"] = dict(Counter(r.branch for r in records))
+    # 브랜치 제거 → findings 유무로 결과 분포(진단됨/정상)
+    n_diag = sum(1 for r in records if r.findings)
+    scores["outcome_distribution"] = {"diagnosed": n_diag, "ok": len(records) - n_diag}
 
     # 평가 신호(GT 규칙지표/RAGAS)가 전혀 없으면 진단 불가 →
     # eval 한계로 파이프라인을 막지 않도록 통과 처리(overall_score=None).
@@ -160,7 +162,7 @@ def _oracle_accuracy(records: list[EvalRecord]) -> float | None:
 
 def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     n = len(records)
-    fail = sum(1 for r in records if r.branch not in (Branch.SUCCESS, Branch.NO_ANSWER_OK))
+    fail = sum(1 for r in records if r.findings)
     fs = report.findings_summary
     print(f"[Eval] STEP5: 리포트 생성 - probe {n}개, 실패 {fail}개, "
           f"overall={report.overall_score}, pass={report.pass_threshold} (모드 {fs.get('mode')})")

@@ -33,7 +33,7 @@ from agents.eval.types import (
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
     F1_PASS_THRESHOLD, Mode, DEFAULT_MODE, resolve_mode,
 )
-from agents.eval.metrics import token_f1, is_abstention   # 전제 신호·tier4 ablation 평가용
+from agents.eval.metrics import recall_at_k, token_f1, is_abstention   # STEP3-1 지표(diagnose 이관)
 
 # 진단 모드, 단계
 _active_mode: int = DEFAULT_MODE
@@ -469,8 +469,17 @@ def _context_applicable(record: EvalRecord) -> bool:
     return _recall_ok(record) and _oracle_ok(record) and not _f1_ok(record)
 
 
+def _compute_metrics(record: EvalRecord) -> None:
+    """규칙 지표(recall/f1/oracle_f1)를 record 에 계산·저장. (agent STEP3-1 이관, diagnose 진입 시 1회.)
+    전제 헬퍼·report 가 record.recall_at_k / f1_score / oracle_f1 로 읽는다."""
+    gt = record.probe.ground_truth
+    record.recall_at_k = recall_at_k(record.probe.gold_chunk_ids, record.retrieved_chunk_ids)
+    record.f1_score = token_f1(record.generated_answer, gt) if gt else 0.0
+    record.oracle_f1 = token_f1(record.oracle_answer, gt) if (gt and record.oracle_answer) else 0.0
+
+
 def _no_diagnosis(record: EvalRecord) -> bool:
-    """진단 불필요: 정답셋 없음 / 올바른 무응답 / 성공(검색·생성 다 좋음)."""
+    """진단 불필요(= 예전 Branch.SUCCESS/NO_ANSWER_OK): 정답셋 없음 / 올바른 무응답 / 성공."""
     if not record.probe.ground_truth:
         return True
     if record.probe.answer_exists is False and is_abstention(record.generated_answer):
@@ -725,7 +734,7 @@ def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool) -> Fin
         confirmed=confirmed,
         affected_chunks=list(probe.gold_chunk_ids),
         affected_probes=[probe.probe_id],
-        metadata={"group": group, "branch": record.branch},
+        metadata={"group": group},
     )
 
 
@@ -745,6 +754,8 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
     """
     global _active_mode
     _active_mode = mode if mode is not None else resolve_mode()
+
+    _compute_metrics(record)      # STEP3-1 지표(recall/f1/oracle_f1) 계산 → record 반영
 
     if _no_diagnosis(record):     # 정답셋 없음 / 올바른 무응답 / 성공
         return []
