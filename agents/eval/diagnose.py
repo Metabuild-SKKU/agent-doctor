@@ -5,6 +5,8 @@ STEP4: 원인 판정 (Finding 생성)
 구조 원칙:
   1. 라벨마다 판정 함수 1개: 각 함수는 자기 라벨의 '판별 신호(원인)'를 
      검사해 맞으면 Finding, 아니면 None 을 돌려준다.
+     -> 예비 신호로 먼저 게이팅하고, 그 후에 확정 신호로 판별한다.
+
   2. 브랜치마다 해당 함수들을 호출: 각 브랜치(_dx_*)가 설계의 판정 순서표대로 라벨
      함수들을 부른다. '하나만 고르는' 부분은 _pick(원인 체인 스펙), 추가로 붙는 것은 따로 호출.
 
@@ -14,10 +16,11 @@ Finding에 label을 담고 다음단계로 진행된다.
 Finding.type 필드에 라벨 그룹을 담고, Finding.label 필드에 세분화 라벨을 담는다.
 
 진단 모드:
+  - 1[FAST], 2[STANDARD], 3[DEEP], 4[FULL]
   - diagnose() 진입 시 현재 실행의 모드(_active_mode)를 설정한다.
-  - 지정된 진단 모드 이하까지만 확정할수있음.
-    모드가 낮다면 -> 예비로 지정.
-  - 생성 원인(B)은 전부 RAGAS(DEEP) 의존 → DEEP 미만이면 예비 generation_failure 로 롤업.
+  - 지정된 진단 모드 이하까지의 진단만 수행할수 있다.
+  - 각 라벨은 확정 라벨(비용 큼), 예비 라벨(비용 작음, 없는 함수가 많음)을 가진다.
+  - 생성 원인(B)은 전부 RAGAS(DEEP) 의존 → DEEP 미만이면 예비 generation_failure 로 롤업한다.
 
 """
 from __future__ import annotations
@@ -71,7 +74,7 @@ def _tier_of(label: str) -> int:
 
 def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
     """
-    gold가 top-N 후보엔 있으나 순위가 낮아 top-k 밖. 처방: 리랭커 추가.
+    gold가 top-N 후보엔 있으나 순위가 낮아 top-k 밖.
     확정: top-N 재검색에서 gold 발견(tier2). 
     예비: 없음
     """
@@ -82,7 +85,7 @@ def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
 
 def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
-    dense는 놓쳤으나 BM25로 잡히는 단어 불일치. 처방: 하이브리드 검색.
+    dense는 놓쳤으나 BM25로 잡히는 단어 불일치.
     확정: BM25 가 gold 를 잡음(tier2). 
     예비: 없음
     """
@@ -93,7 +96,7 @@ def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
 
 def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
-    dense·BM25 모두 놓친 의미 연결 실패. 처방: 임베딩/청킹 교체.
+    dense·BM25 모두 놓친 의미 연결 실패.
     확정: BM25 도 gold 를 못 잡음(tier2). 
     예비: 없음
     """
@@ -104,35 +107,43 @@ def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
 
 def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
     """
-    gold는 corpus에 있으나 top-k에 없음. 처방: top_k/chunk 조정.
+    gold는 corpus에 있으나 top-k에 없음. 
     확정: 코퍼스에 gold 존재(tier2). 
     예비: recall<1(tier1, 코퍼스 확인 전).
     """
+    if (_recall_ok(record)):
+        return None
+    
     in_corpus = _gold_in_corpus(record)
     if in_corpus is True:
         return _finding(record, "retrieval_missing_gold", "retrieval_failure", confirmed=True)
-    if in_corpus is None and record.recall_at_k < 1:
+    if in_corpus is None:
         return _finding(record, "retrieval_missing_gold", "retrieval_failure", confirmed=False)
-    return None
+    if in_corpus is False:
+        return None
 
 
 def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]:
     """
-    멀티홉 연쇄형: 2번째 hop 근거가 1번째 hop에 의존. 처방: iterative_decompose.
+    멀티홉 연쇄형: 2번째 hop 근거가 1번째 hop에 의존.
     확정: decompose 재실행 시 회복(tier4). 
     예비: 멀티홉+recall<1(tier1).
     """
+    if _recall_ok(record) or not _is_multi_hop(record):
+        return None
+
     recovers = _bridge_decompose_recovers(record)
     if recovers is True:
         return _finding(record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=True)
-    if recovers is None and _is_multi_hop(record) and record.recall_at_k < 1:
+    if recovers is None:
         return _finding(record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False)
-    return None
+    if recovers is False:
+        return None
 
 
 def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
     """
-    나열형: 필요한 근거 개수 가변인데 top-k 고정이라 누락. 처방: 동적 top-k/adaptive.
+    나열형: 필요한 근거 개수 가변인데 top-k 고정이라 누락.
     확정: gold수 vs top-k 순수 규칙(tier1) — 바로 확정.?????????
     """
     if _enumeration_signal(record):
@@ -146,8 +157,8 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
 
 def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
     """
-    멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음). 처방: 단계별 근거 CoT.
-    확정: faithfulness 측정되어 높음(tier3). 미측정 None → 안 뜸(→ _pick 롤업).
+    멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음).
+    확정: faithfulness 높음.
     """
     faith = _faith(record)
     if _is_multi_hop(record) and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN:
@@ -157,8 +168,8 @@ def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
 
 def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
     """
-    정답 context가 있는데 지어냄. 처방: 그라운딩 프롬프트+인용.
-    확정: faithfulness 측정되어 낮음(tier3). 미측정 None → 안 뜸(→ _pick 롤업).
+    정답 context가 있는데 지어냄.
+    확정: faithfulness 낮음.
     """
     faith = _faith(record)
     if faith is not None and faith < RAGAS_FAITHFULNESS_MIN:
@@ -168,8 +179,8 @@ def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
 
 def generation_partial_answer(record: EvalRecord) -> Optional[Finding]:
     """
-    정답 context가 있는데 일부 요소·조건 누락. 처방: 완결성 프롬프트/checklist.
-    확정: relevancy 측정되어 낮음(tier3).
+    정답 context가 있는데 일부 요소·조건 누락.
+    확정: relevancy 낮음.
     """
     rel = _rel(record)
     if rel is not None and rel < RAGAS_RESPONSE_RELEVANCY_MIN:
@@ -344,16 +355,14 @@ _BRANCH_DISPATCH = {
 # ── 판정 콤비네이터 ──────────────────────────────────────────────
 
 def _pick(record: EvalRecord, spec) -> Optional[Finding]:
-    """원인 체인 스펙 (funcs, gate, rollup) 에서 '한 원인'을 고른다.
+    """원인 묶음에서 '한 원인'을 고른다.
 
-      1) 현재 모드에서 확정 가능한(confirmed) 첫 매치를 우선, 없으면 첫 매치(가장 구체적)를 예비로.
-         (tier 게이팅 ↔ 구체성 순서 화해: 상위-tier 예비 라벨이 하위-tier 확정 라벨을 가리지 않게.
-          예: STANDARD 에서 bridge(FULL·예비)가 missing_gold(STANDARD·확정)를 덮어쓰지 않도록.)
-      2) gate 미만 모드면 체인을 시도조차 안 함(세분화에 그 자원이 필요할 때).
-      3) 세분화 실패(gate 미달/매치 없음) 시 rollup(예비)로 롤백. rollup 없으면 None.
+      1) 현재 모드에서 확정된 첫 라벨을 리턴한다.
+      2) 모든 라벨을 돌았음에도 확정된 라벨이 없다면, 가장 첫번째 예비 라벨을 리턴한다.
+      3) 현재 모드에서 아무 라벨을 찾지 못하면 시 rollup(예비)을 리턴. rollup 없으면 None.
     """
     funcs, gate, rollup = spec
-    if gate is None or _active_mode >= gate:
+    if gate is None or _active_mode >= gate:    # 묶음에 명시된 mode보다 낮으면 스킵
         first_match = None
         for fn in funcs:
             f = fn(record)
@@ -371,11 +380,12 @@ def _pick(record: EvalRecord, spec) -> Optional[Finding]:
 
 
 def _collect(*items) -> list[Finding]:
-    """None 을 걸러 Finding 리스트로."""
+    """None 을 걸러 리스트로 만드는 util."""
     return [f for f in items if f is not None]
 
 
 def _dedup(findings: list[Finding]) -> list[Finding]:
+    """혹시모를 duplicant를 삭제하는 util."""
     seen, out = set(), []
     for f in findings:
         key = f.label
@@ -394,8 +404,11 @@ def _dedup(findings: list[Finding]) -> list[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def _signal(record: EvalRecord, name: str, compute):
-    """비싼 판별 신호 memoize. record.signals(=state.diagnosis_cache[probe_id] 뷰)에 있으면 재사용,
-    없으면 compute() 계산해 저장. (self-gate 로 걸러진 None 은 호출 전에 return 되어 캐시되지 않음.)"""
+    """ 판별 신호 memoize를 위한 함수. 
+
+     1) record.signals(=state.diagnosis_cache[probe_id] 뷰)에 있으면 재사용,
+     2) 없으면 compute() 계산해 저장. 
+     """
     cache = record.signals
     if name not in cache:
         cache[name] = compute()
@@ -416,6 +429,9 @@ def _enumeration_signal(record: EvalRecord) -> bool:
     gold_n = len(record.probe.gold_chunk_ids)
     return gold_n >= 2 and gold_n >= int(k * 0.8)
 
+def _recall_ok(record: EvalRecord) -> bool:
+    """recall_at_k를 검사해서 threshold를 넘기는지 검사. 매우 간단한데 일관성을 위해 따로 분리"""
+    return record.recall_at_k >= 1
 
 # ── tier2 · 추가 검색 쿼리 (자원: top-N 재검색 / BM25 / 코퍼스 조회) — [훅 미구현] ──
 
@@ -453,7 +469,7 @@ def _use_oracle(record: EvalRecord) -> bool:
 
 
 def _faith(record: EvalRecord):
-    """faithfulness(충실도). hallucination / hop_binding / bad_gold 용. 모드부족/미측정 None."""
+    """faithfulness(충실도). hallucination / hop_binding / bad_gold 용."""
     if _active_mode < Mode.DEEP:       # 비용 게이트 (RAGAS 는 DEEP 이상에서만)
         return None
     src = record.oracle_ragas if _use_oracle(record) else record.ragas
