@@ -92,6 +92,10 @@ class PrescriptionCandidate:
         priority: planner가 계산한 후보 우선순위 점수.
         target_metrics: 이 처방으로 개선하려는 주요 지표 목록.
         guardrails: 악화 여부를 감시해야 하는 보호 지표 목록.
+        applies_when: 이 처방이 적용되는 조건(신호 기반 택1).
+            예: {"topic_cluster": ["spread", "concentrated"]}.
+            Eval이 finding.metadata로 주는 신호와 optimizer가 대조해 후보를
+            거른다. 비어있으면 신호 판단 없이 순서대로 순차 시도(fallback).
         reason: 이 처방을 제안한 이유.
         tradeoffs: latency, cost, precision 하락 등 예상되는 부작용.
         metadata: 실험적 신호나 원본 rule dict 같은 확장 정보.
@@ -107,6 +111,7 @@ class PrescriptionCandidate:
     priority: float = 0.0
     target_metrics: list[str] = field(default_factory=list)
     guardrails: list[str] = field(default_factory=list)
+    applies_when: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
     tradeoffs: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -382,8 +387,9 @@ class OptimizationHistoryItem:
     """
     최적화 1회 시도에 대한 이력 기록.
 
-    같은 처방을 반복 적용하지 않도록 하거나, guardrail 위반 시 rollback할 때
-    필요한 정보를 저장한다. 초기 구현에서는 state에 dict로 저장하더라도,
+    같은 처방을 반복 적용하지 않도록 하거나, guardrail 및 전역 하한선 위반,
+    점수 하락으로
+    rollback할 때 필요한 정보를 저장한다. 초기 구현에서는 state에 dict로 저장하더라도,
     이 모델을 기준으로 history.py에서 직렬화하면 된다.
 
     Attributes:

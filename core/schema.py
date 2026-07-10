@@ -67,6 +67,7 @@ class Finding:
     type: str    # "gap" | "contradiction" | "duplicate" | "staleness" | "retrieval_failure" | "generation_failure"
     severity: str  # "critical" | "warning" | "info"
     description: str
+    label: Optional[str] = None          # 세분화 진단명(처방 파일 라벨). Optimize가 label→처방 매핑에 사용
     affected_chunks: list[str] = field(default_factory=list)
     affected_probes: list[str] = field(default_factory=list)
     prescription: Optional[str] = None

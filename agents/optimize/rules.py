@@ -16,20 +16,7 @@ agents/optimize/rules.py
      - cost:    처방비용. 우선순위 공식(빈도×신뢰도÷비용)의 분모. 런타임=1, 재색인=3.
   3. 미확정 라벨은 지우지 말고 status="draft"로 남긴다.
 
-[협업 구조 — 라벨 단위 소유권, 그룹은 taxonomy 정리용]
-  taxonomy 그룹(A/B/C/D)은 표의 분류를 그대로 유지해 읽기 편하게 하되,
-  실제 담당은 그룹 단위가 아니라 "라벨 단위"로 나뉜다.
-  각자 자기 담당 라벨의 dict "값"만 채우고, 남의 라벨 항목은 절대 건드리지 않는다
-  (status="unassigned" 껍데기 그대로 둠). 이러면 서로 다른 줄을 고치는 게 되어
-  git merge 시 충돌이 거의 발생하지 않는다.
 
-  이승준 담당(12개):
-    retrieval_low_rank, retrieval_lexical_mismatch, retrieval_semantic_mismatch,
-    retrieval_missing_gold, retrieval_incomplete_enumeration,
-    generation_hallucination, generation_partial_answer, generation_contradiction,
-    generation_misinterpretation, too_long_context, corpus_gap, corpus_gap_partial_hop
-
-  나머지 13개는 unassigned 스켈레톤만 존재 (다른 담당자가 자기 항목만 채울 것).
 """
 from __future__ import annotations
 
@@ -37,7 +24,6 @@ from __future__ import annotations
 # ── 처방 상태 상수 ────────────────────────────────────────────────
 # ready       : 처방 로직 확정, planner가 실행 가능
 # draft       : 라벨은 있으나 처방 미확정 (신호/스키마 합의 대기)
-# unassigned  : 아직 담당자가 채우지 않은 스켈레톤 (건드리지 않을 것)
 # manual      : config로 못 고침, 사람 개입 필요 (D그룹)
 
 # ── config 키 주의 ────────────────────────────────────────────────
@@ -63,7 +49,8 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
         "assigned": "이승준",
         "status": "ready",
-        "diagnosis_confidence": None,  # 숫자 튜닝 필요 
+        "diagnosis_confidence": None,  # 숫자 튜닝 필요
+        "target_metrics": ["context_precision"],  # gold는 검색됨, 순위 품질이 문제
         "prescriptions": [
             {
                 "id": "enable_reranker",
@@ -71,13 +58,8 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "reindex": False,
                 "cost": None, # 숫자 튜닝 필요
             },
-            {
-                "id": "widen_rerank_candidates",
-                "patch": {"rerank_candidates": "increase"},
-                "reindex": False,
-                "cost": None,           # 숫자 튜닝 필요
-            },
         ],
+        # NOTE: baseline reranker=off 전제. 리랭커를 켜는 것이 유일 처방.
     },
 
     "retrieval_lexical_mismatch": {
@@ -85,15 +67,16 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # dense가 놓친 gold를 검색결과에 포함시킴
         "prescriptions": [
             {
                 "id": "enable_hybrid",
                 "patch": {"use_hybrid": True},
-                "reindex": False,       # 검색 시점 융합, 색인 재생성 불필요
+                "reindex": False,       
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # NOTE: baseline이 이미 hybrid면 발생 안 함. naive(dense-only) MVP 전용.
+        # NOTE: baseline이 이미 hybrid면 발생 가능성 낮음. naive(dense-only) MVP 전용.
     },
 
     "retrieval_semantic_mismatch": {
@@ -101,23 +84,50 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # dense·BM25 둘 다 놓친 gold를 검색되게
+
+        #   토픽클러스터 분석은 Eval 소관 → finding.metadata["topic_cluster"]로 넘어옴.
+        #   rules는 후보만 나열 + applies_when 태그, 실제 선택은 planner가 수행.
+        #     "spread"       → Case3(임베딩 모델 자체 약함) → 임베딩 교체
+        #     "concentrated" → Case2(특정 도메인 약함)      → 임베딩 교체(도메인특화/파인튜닝)
+        #     "none"         → Case1(청크 희석)             → 청킹 조정
+        
+        #   신호가 없으면(MVP) planner가 리스트 순서대로 순차 시도(fallback).
+        
+        # TODO(eval-합의): topic_cluster 신호 키/값을 Eval과 확정.
+        
         "prescriptions": [
             {
+                # 임베딩 모델 바꾸기 case 3 2에 해당
                 "id": "swap_embedding_model",
                 "patch": {"embedding_model": "upgrade"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
+                "applies_when": {"topic_cluster": ["spread", "concentrated"]},
                 # WARN: VECTOR_DIM 변경 시 Qdrant 컬렉션 재생성 필요 (qdrant_store.py)
+                
+                # TODO: Case2(도메인약함)는 범용 upgrade가 아니라 도메인특화/파인튜닝 모델이 
+                # 이상적 → adapter 단계에서 세분화. MVP는 upgrade로 통합.
             },
             {
+                # 청크 크기 축소 case 1에 해당
                 "id": "shrink_chunk_size",
                 "patch": {"chunk_size": "decrease"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
+                "applies_when": {"topic_cluster": ["none"]},
+            },
+            {
+                # 청킹 전략 교체 case 1에 해당 (초안 누락분 보강)
+                "id": "switch_chunking_strategy",
+                "patch": {"chunking_strategy": "recursive_sentence"},
+                "reindex": True,
+                "cost": None,           # 숫자 튜닝 필요
+                "applies_when": {"topic_cluster": ["none"]},
+                # NOTE: chunking_context_mismatch와 동일 처방(Case1: 청크 경계 의미 희석).
+                # TODO(index-합의)  chunking_strategy 필드는 index_config 합의 대기.  
             },
         ],
-        # NOTE: 세 갈래(모델약함/도메인약함/청크희석) 구분은 Eval 토픽클러스터 신호로
-        #   갈린다. rules는 후보만 나열, 선택은 planner가 finding.metadata 보고 결정.
     },
 
     "retrieval_missing_gold": {
@@ -125,6 +135,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 후보에 아예 없는 gold를 가져오게
         "prescriptions": [
             {
                 "id": "increase_top_k",
@@ -139,19 +150,30 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
-                "id": "adjust_chunk_size",
-                "patch": {"chunk_size": "adjust"},
+                "id": "increase_chunk_size",
+                "patch": {"chunk_size": "increase"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
             },
+            {
+              
+                "id": "expand_query",
+                "patch": {"query_rewrite": "expand"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
         ],
+        # TODO: BLOCKER: query_rewrite 필드가 AgentDoctorState/index_config에 없음
+        #   (retrieval_missing_bridge_dependency의 query_rewrite:"decompose"와 같은 필드,
+        #    값만 다름 — 필드 자체는 이미 그쪽에서 스키마 합의 대기 중).
     },
 
     "retrieval_incomplete_enumeration": {
         "group": "A",
         "assigned": "이승준",
-        "status": "draft",              # top_k 처방만 실행 가능, MMR 옵션은 스키마 미정
+        "status": "draft",              # 3개 처방 다 스키마 미정, 실행은 아직 불가
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 나열형 gold 일부 누락(recall@k 부분) 보완
         "prescriptions": [
             {
                 "id": "dynamic_top_k",
@@ -159,8 +181,25 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
-            # TODO(index-합의): MMR 다양성 옵션 필드가 index_config에 없음.
-            #   {"id": "enable_mmr", "patch": {"mmr": True}, ...}
+            {
+                # 관련성만이 아니라 다양성까지 고려해 top-k 안 쏠림을 줄임
+                "id": "enable_mmr",
+                "patch": {"mmr": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+                # BLOCKER: mmr 필드가 index_config에 없음.  # TODO(index-합의)
+            },
+            {
+                # top-k 고정 대신, 검색 도중 "더 필요한지" 판단해 반복 검색
+                "id": "enable_adaptive_retrieval",
+                "patch": {"adaptive_retrieval": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+
+                #  # TODO(index-합의) BLOCKER: adaptive_retrieval 필드가 없음 + 단순 config 값이 아니라
+                #   검색 제어흐름 자체를 바꾸는 처방이라 구현 난이도 제일 높음.
+                #   지금 당장 개발 대상은 아니고, 후보로만 남겨둠(추후 발전 여지).
+            },
         ],
     },
 
@@ -169,21 +208,32 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # multi-hop query rewrite / max_hops 스키마 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 미검색된 hop2 gold를 가져오게
         "prescriptions": [
             {
+                #baseline이 single-shot 검색이라는 전제 하에 유효한 처방
                 "id": "enable_query_decomposition",
-                "patch": {"query_rewrite": "decompose", "max_hops": "increase"},
+                "patch": {
+                    "query_rewrite": "decompose",
+                    "max_hops": "increase",
+                    "sub_query_generator_prompt": "bridge_entity_aware",
+                },
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
+                # 초안 외 확장: 브릿지 엔티티를 명시적으로 추출해 다음 hop 검색어에 강조.
+                #   초안 판별신호("hop1 답을 쿼리에 추가해 재검색")에서 파생된 보조 기법.
                 "id": "expand_bridge_entity_query",
                 "patch": {"bridge_entity_expansion": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: query_rewrite/max_hops 필드가 AgentDoctorState/index_config에 없음.
+        # BLOCKER: query_rewrite/max_hops/sub_query_generator_prompt가 index_config가 아니라
+        #   generation_config 소속인데, 그 네임스페이스 자체가 AgentDoctorState에 없음.
+        #   B그룹 전체를 막는 것과 동일 원인(파일 상단 35-38번 줄 참고) → 이 필드가
+        #   추가되면 B그룹뿐 아니라 이 라벨도 같이 풀림.
     },
 
     "chunking_context_mismatch": {
@@ -191,6 +241,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # chunking_strategy 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 청크 경계에서 잘린 gold를 온전히 검색되게
         "prescriptions": [
             {
                 "id": "increase_chunk_overlap",
@@ -213,6 +264,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 과편화된 청크 → 완전한 gold 맥락 확보
         "prescriptions": [
             {
                 "id": "increase_chunk_size",
@@ -228,6 +280,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_precision"],  # 큰 청크에 섞인 무관 내용 → 유용성 개선
         "prescriptions": [
             {
                 "id": "decrease_chunk_size",
@@ -243,6 +296,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # reranker 필드가 아직 index_config에 없음
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 재랭커가 걸러낸 gold를 다시 살림
         "prescriptions": [
             {
                 "id": "widen_rerank_candidates",
@@ -265,6 +319,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # reranker 필드가 아직 index_config에 없음
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_precision"],  # 재랭커가 상위로 올린 무관 청크 억제
         "prescriptions": [
             {
                 "id": "swap_reranker_model",
@@ -282,6 +337,8 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         # BLOCKER: reranker 관련 config 필드와 실제 reranker 단계가 아직 없음.
     },
 
+
+
     # ═══════════════════════════════════════════════════════════════
     #  B그룹 — 생성 실패 (Oracle Test 실패)
     # ═══════════════════════════════════════════════════════════════
@@ -291,8 +348,20 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "draft",              # 로직은 확정, generation_config 필드 부재로 블로킹
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["faithfulness"],  # context에 없는 내용 지어냄 → 근거성
         "prescriptions": [
             {
+                # MVP: temperature만 낮추는 게 제일 가벼움 (프롬프트 수정과 독립적인 레버)
+                "id": "lower_temperature",
+                "patch": {"temperature": "decrease"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                # MVP는 프롬프트 텍스트를 직접 패치값으로 사용.
+                # TODO(업그레이드): grounding_strict:true 같은 신호 방식으로 전환.
+                #   rules.py엔 "엄격 모드 on/off" 스위치만 남기고, 실제 프롬프트 문구는
+                #   Eval 구현이 결정하도록 분리 (use_hybrid/use_reranker와 같은 패턴).
                 "id": "strict_grounding_prompt",
                 "patch": {"system_prompt": "context에 없으면 모른다고 답하라",
                           "require_citation": True},
@@ -314,6 +383,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["answer_relevancy"],  # 질문 요구 일부만 충족 → 완결성
         "prescriptions": [
             {
                 "id": "completeness_prompt",
@@ -336,6 +406,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "draft",              # 재실행형(LLM 재검증 패스), 실행 방식도 별도 확정 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["faithfulness"],  # 청크 간 모순을 못 풀고 답변 → 근거성
         "prescriptions": [
             {
                 "id": "llm_verification_pass",
@@ -353,6 +424,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["answer_relevancy"],  # 질문 조건 오독 → 질문 의도 반영도
         "prescriptions": [
             {
                 "id": "restate_question",
@@ -369,6 +441,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # generation_config 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["faithfulness"],  # 모른다고 해야 하는데 지어냄 → 근거성
         "prescriptions": [
             {
                 "id": "strengthen_abstention_prompt",
@@ -391,6 +464,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # generation_config 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["faithfulness"],  # 맞았지만 context 근거 없음(파라미터 의존) → 근거성
         "prescriptions": [
             {
                 "id": "strict_grounding_prompt",
@@ -413,6 +487,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # generation_config 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["faithfulness"],  # 숫자 계산/집계 오류 → 원문 근거성
         "prescriptions": [
             {
                 "id": "require_numeric_citation",
@@ -435,6 +510,9 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # multi-hop answer planning 스키마 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        # 각 fact는 근거 있어 faithfulness는 안 낮음 → 대신 결합 오류를 잡는
+        # answer_relevancy를 대표 지표로. 이상적으론 List-Component F1 같은 커스텀 채점.
+        "target_metrics": ["answer_relevancy"],
         "prescriptions": [
             {
                 "id": "force_hop_evidence_binding",
@@ -461,6 +539,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "ready",              # top_k 축소는 기존 키로 바로 실행 가능
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["noise_sensitivity"],  # 과다 context의 잡음에 답변이 흔들림
         "prescriptions": [
             {
                 "id": "decrease_top_k",
@@ -489,6 +568,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # context ordering 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_utilization"],  # 검색은 됐으나 중간 청크를 답변에 못 씀
         "prescriptions": [
             {
                 "id": "reorder_context_edges",
@@ -511,6 +591,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # filtering/MMR/reranker 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["noise_sensitivity"],  # 비-gold 상충 청크가 답변을 오염
         "prescriptions": [
             {
                 "id": "enable_noise_filter",
