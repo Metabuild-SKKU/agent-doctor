@@ -33,8 +33,25 @@ from agents.eval.probe_gen import generate_probes
 #     Index 검색이 준비되면 retrieval_temp 를 삭제하고 여기 import 를 교체할 것.
 from agents.eval.retrieval_temp import build_eval_index, retrieve, generate_answer, _keyword_search
 from agents.eval.metrics import recall_at_k, token_f1, is_abstention, decide_branch
-from agents.eval.ragas_eval import evaluate as run_llm_metrics
+from agents.eval.ragas_eval import evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge
 from agents.eval.diagnose import diagnose, set_context as set_diag_context
+
+
+def _ragas_track(record: EvalRecord, track: str) -> dict:
+    """diagnose 가 lazy 로 부르는 RAGAS 트랙 계산기(set_context 로 주입).
+    비활성(EVAL_ENABLE_LLM)·키없음·실패 → {} 폴백. (DEEP 게이트는 diagnose 신호가 담당.)"""
+    if not llm_eval_enabled():
+        return {}
+    judge = _ragas_judge()
+    if judge is None:
+        return {}
+    try:
+        if track == "oracle":
+            return evaluate_oracle_track(record, judge) if record.oracle_answer is not None else {}
+        return evaluate_real_track(record, judge)
+    except Exception as e:
+        print(f"[Eval] RAGAS({track}) 실패({e}) → 폴백")
+        return {}
 from agents.eval.report import build_report
 
 
@@ -81,7 +98,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # tier2/tier4 판별 훅(재검색·코퍼스·재생성)이 쓸 자원 주입
         set_diag_context(client=client, chunks=state.chunks,
                          retrieve_fn=retrieve, keyword_fn=_keyword_search,
-                         generate_fn=generate_answer)
+                         generate_fn=generate_answer, ragas_fn=_ragas_track)
 
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
@@ -160,16 +177,9 @@ def _evaluate_probe(
         # 정답 미보유(user_log 등) → 규칙 판정 불가. RAGAS(무정답 지표)에만 의존.
         rec.branch = Branch.SUCCESS
 
-    # STEP3-2: LLM(RAGAS) 진단 — 활성화 + 모드 DEEP 이상일 때만 사용
-    if not llm_eval_enabled():
-        pass
-    elif mode is not None and mode < Mode.DEEP:
-        pass  # 모드 게이트: DEEP(3) 미만은 RAGAS(LLM) 스킵 — 검색/코퍼스 tier 로만 진단
-    elif rec.branch in (Branch.SUCCESS, Branch.NO_ANSWER_OK):
-        pass  # 진단할 게 없으면 LLM 호출 안 함
-    else:
-        run_llm_metrics(rec)  # 게이트는 위에서 통과 — evaluate 는 RAGAS 실행만 담당
+    # STEP3-2 RAGAS 는 diagnose 안에서 lazy 로 계산됨(set_context 의 ragas_fn). 여기선 계산 안 함.
+    # (rec.branch 는 report 관측·Finding metadata 용으로만 유지 — diagnose 는 브랜치 안 씀.)
 
-    # STEP4: 원인 판정 (모드 tier 상한으로 확정/예비 결정)
+    # STEP4: 진단 (metric·RAGAS·tier2/4 신호 전부 diagnose 안에서 lazy·memoize 계산)
     rec.findings = diagnose(rec, mode)
     return rec
