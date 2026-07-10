@@ -78,9 +78,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         chunk_text = {c.chunk_id: c.text for c in state.chunks}
         top_k = int(state.index_config.get("top_k", DEFAULT_TOP_K))
 
-        # tier2 판별 훅(재검색/BM25/코퍼스)이 쓸 검색 자원 주입
+        # tier2/tier4 판별 훅(재검색·코퍼스·재생성)이 쓸 자원 주입
         set_diag_context(client=client, chunks=state.chunks,
-                         retrieve_fn=retrieve, keyword_fn=_keyword_search)
+                         retrieve_fn=retrieve, keyword_fn=_keyword_search,
+                         generate_fn=generate_answer)
 
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →

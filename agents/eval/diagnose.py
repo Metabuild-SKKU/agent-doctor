@@ -33,6 +33,7 @@ from agents.eval.types import (
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
     Mode, DEFAULT_MODE, resolve_mode,
 )
+from agents.eval.metrics import token_f1   # tier4 ablation 재생성 답 평가용
 
 # 진단 모드, 단계
 _active_mode: int = DEFAULT_MODE
@@ -40,7 +41,7 @@ _active_mode: int = DEFAULT_MODE
 
 class _Ctx:
     """
-    tier2 판별 훅(재검색/코퍼스 조회)이 쓰는 검색 자원. agent 가 set_context 로 주입한다.
+    tier2/tier4 판별 훅(재검색·코퍼스 조회·재생성)이 쓰는 자원. agent 가 set_context 로 주입한다.
     2단계: RAG/index module에서 값 및 함수들을 가져와야한다!!!!!!!!!!!
     """
     client = None
@@ -48,20 +49,23 @@ class _Ctx:
     corpus_ids: frozenset = frozenset()
     retrieve_fn = None       # (client, chunks, question, top_n) -> list[{"chunk_id",...}]
     keyword_fn = None        # (chunks, query, top_n) -> list[{"chunk_id",...}]
+    generate_fn = None       # (question, contexts) -> str   (tier4 ablation 재생성)
     wide_n: int = 100        # top-N 재검색·BM25 후보 크기
 
 
 _ctx = _Ctx()
 
 
-def set_context(client=None, chunks=None, retrieve_fn=None, keyword_fn=None, wide_n=100):
-    """tier2 판별 훅이 쓸 검색 자원 주입. agent.run 이 진단 전 1회 호출.
+def set_context(client=None, chunks=None, retrieve_fn=None, keyword_fn=None,
+                generate_fn=None, wide_n=100):
+    """tier2/tier4 판별 훅이 쓸 자원 주입. agent.run 이 진단 전 1회 호출.
     미주입이면 해당 훅은 자원 없음으로 None(=미확보) 반환."""
     _ctx.client = client
     _ctx.chunks = chunks or []
     _ctx.corpus_ids = frozenset(c.chunk_id for c in _ctx.chunks)
     _ctx.retrieve_fn = retrieve_fn
     _ctx.keyword_fn = keyword_fn
+    _ctx.generate_fn = generate_fn
     _ctx.wide_n = wide_n
 
 # confirm tier = 라벨을 '확정'하는 데 필요한 가장 비싼 자원. (전체 분류표는 README '진단 모드' 참고)
@@ -582,36 +586,88 @@ def _both_high(faith, rel) -> bool:
             and rel is not None and rel >= RAGAS_RESPONSE_RELEVANCY_MIN)
 
 
-# ── tier4 · 파이프라인 재실행 (자원: ablation 재실행) — [훅 미구현] ──
-# 각 신호는 확정용. 대응 라벨은 싼 예비 신호가 있으면 그걸로 예비를 먼저 낸다
-# (bridge=멀티홉+recall, context_noise=C 잔여 항상). 확정은 이 재실행 훅이 True 를 줄 때만.
+# ── tier4 · 파이프라인 재실행 (자원: ablation 재생성/재검색) — set_context 로 주입 ──
+# context 를 수정(축소/재정렬/노이즈제거)해 재생성한 답의 token_f1 이 baseline 보다 오르면
+# 그 수정이 '원인을 제거'한 것 → 확정. bridge 는 1차 근거로 질의를 확장해 재검색.
+_ABLATION_MARGIN = 0.1   # baseline(record.f1_score) 대비 이 이상 개선돼야 '도움됨(True)'
+
+
+def _ablation_helps(record: EvalRecord, contexts: list):
+    """수정된 contexts 로 재생성한 답의 token_f1 이 baseline 대비 _ABLATION_MARGIN 이상 개선되나.
+    True=개선(그 수정이 원인 제거) / False=미개선 / None=생성함수·정답 없음."""
+    gen = _ctx.generate_fn
+    gt = record.probe.ground_truth
+    if gen is None or not gt or not contexts:
+        return None
+    new_f1 = token_f1(gen(record.probe.question, contexts), gt)
+    return new_f1 >= record.f1_score + _ABLATION_MARGIN
+
 
 def _context_shorten_helps(record: EvalRecord):
-    """[구현 포인트·tier4] context 축소 재실행 시 정답률 상승 여부. too_long_context 확정용."""
-    if _active_mode < Mode.FULL:
+    """[tier4] context 를 절반으로 줄여 재생성 시 f1 개선되나. too_long_context 확정용."""
+    if _active_mode < Mode.FULL or _ctx.generate_fn is None:
         return None
-    return _cache(record, "context_shorten_helps", lambda: None)    # 구현 시 lambda→축소 재실행
+
+    def compute():
+        ctx = record.retrieved_context
+        if len(ctx) <= 2:
+            return None                        # 이미 짧음 → 축소 무의미
+        return _ablation_helps(record, ctx[:len(ctx) // 2])
+    return _cache(record, "context_shorten_helps", compute)
 
 
 def _gold_front_helps(record: EvalRecord):
-    """[구현 포인트·tier4] gold를 앞쪽 배치 재실행 시 정답률 회복 여부. lost_in_the_middle 확정용."""
-    if _active_mode < Mode.FULL:
+    """[tier4] gold 청크를 맨 앞으로 재정렬 후 재생성 시 f1 회복되나. lost_in_the_middle 확정용."""
+    if _active_mode < Mode.FULL or _ctx.generate_fn is None:
         return None
-    return _cache(record, "gold_front_helps", lambda: None)         # 구현 시 lambda→재정렬 재실행
 
-
-def _bridge_decompose_recovers(record: EvalRecord):
-    """[구현 포인트·tier4] iterative_decompose 재실행 시 hop2 근거 회복 여부. missing_bridge 확정용."""
-    if _active_mode < Mode.FULL:
-        return None
-    return _cache(record, "bridge_decompose_recovers", lambda: None)  # 구현 시 lambda→분해 재검색
+    def compute():
+        golds = set(record.probe.gold_chunk_ids)
+        pairs = list(zip(record.retrieved_chunk_ids, record.retrieved_context))
+        front = [t for i, t in pairs if i in golds]
+        rest = [t for i, t in pairs if i not in golds]
+        if not front or not rest:
+            return None                        # gold 없거나 재정렬 무의미
+        reordered = front + rest
+        if reordered == record.retrieved_context:
+            return None                        # 이미 gold 가 앞
+        return _ablation_helps(record, reordered)
+    return _cache(record, "gold_front_helps", compute)
 
 
 def _noise_removal_helps(record: EvalRecord):
-    """[구현 포인트·tier4] 비-gold 노이즈 제거 재실행 시 회복 여부. context_noise 확정용."""
+    """[tier4] 비-gold(노이즈) 청크 제거 시 f1 회복되나. context_noise 확정용.
+    C그룹은 recall=1 이라 gold-only == oracle context → 이미 계산된 oracle_f1 재사용(재생성 불필요)."""
     if _active_mode < Mode.FULL:
         return None
-    return _cache(record, "noise_removal_helps", lambda: None)      # 구현 시 lambda→노이즈 제거 재실행
+
+    def compute():
+        if not record.probe.ground_truth or record.oracle_answer is None:
+            return None
+        golds = set(record.probe.gold_chunk_ids)
+        if not any(i not in golds for i in record.retrieved_chunk_ids):
+            return None                        # 제거할 노이즈(비-gold)가 없음
+        return record.oracle_f1 >= record.f1_score + _ABLATION_MARGIN
+    return _cache(record, "noise_removal_helps", compute)
+
+
+def _bridge_decompose_recovers(record: EvalRecord):
+    """[tier4] 1차 근거로 질의를 확장(연쇄)해 재검색 시 놓친 gold 를 회복하나. missing_bridge 확정용.
+    단 plain 재검색(low_rank)으로 이미 잡히면 bridge 아님 → False."""
+    if _active_mode < Mode.FULL or _ctx.retrieve_fn is None:
+        return None
+
+    def compute():
+        missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)
+        if not missed:
+            return None
+        if _gold_in_wider_candidates(record) is True:
+            return False                       # plain 재검색으로 잡힘 → low_rank 소관
+        expanded = record.probe.question + " " + " ".join(record.retrieved_context[:2])
+        hits = _ctx.retrieve_fn(_ctx.client, _ctx.chunks, expanded, _ctx.wide_n)
+        hop2_ids = {h.get("chunk_id") for h in hits}
+        return bool(missed & hop2_ids)
+    return _cache(record, "bridge_decompose_recovers", compute)
 
 
 # ── Finding 빌더 ─────────────────────────────────────────────────
