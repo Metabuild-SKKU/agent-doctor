@@ -31,10 +31,10 @@ from agents.eval.types import Branch, EvalRecord, DEFAULT_TOP_K, resolve_mode, M
 from agents.eval.probe_gen import generate_probes
 # ⚠️ 임시: Index Agent가 검색 리트리버를 제공하기 전까지만 retrieval_temp 사용.
 #     Index 검색이 준비되면 retrieval_temp 를 삭제하고 여기 import 를 교체할 것.
-from agents.eval.retrieval_temp import build_eval_index, retrieve, generate_answer
+from agents.eval.retrieval_temp import build_eval_index, retrieve, generate_answer, _keyword_search
 from agents.eval.metrics import recall_at_k, token_f1, is_abstention, decide_branch
 from agents.eval.ragas_eval import evaluate as run_llm_metrics
-from agents.eval.diagnose import diagnose
+from agents.eval.diagnose import diagnose, set_context as set_diag_context
 from agents.eval.report import build_report
 
 
@@ -77,6 +77,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # client = build_eval_index(state.chunks)
         chunk_text = {c.chunk_id: c.text for c in state.chunks}
         top_k = int(state.index_config.get("top_k", DEFAULT_TOP_K))
+
+        # tier2 판별 훅(재검색/BM25/코퍼스)이 쓸 검색 자원 주입
+        set_diag_context(client=client, chunks=state.chunks,
+                         retrieve_fn=retrieve, keyword_fn=_keyword_search)
 
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →

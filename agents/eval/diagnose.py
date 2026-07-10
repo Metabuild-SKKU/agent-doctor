@@ -37,6 +37,31 @@ from agents.eval.types import (
 # 진단 모드, 단계
 _active_mode: int = DEFAULT_MODE
 
+
+class _Ctx:
+    """tier2 판별 훅(재검색/코퍼스 조회)이 쓰는 검색 자원. agent 가 set_context 로 주입한다.
+    retrieve_fn/keyword_fn 을 주입받아 diagnose 가 retrieval 계층과 직접 결합하지 않는다."""
+    client = None
+    chunks: list = []
+    corpus_ids: frozenset = frozenset()
+    retrieve_fn = None       # (client, chunks, question, top_n) -> list[{"chunk_id",...}]
+    keyword_fn = None        # (chunks, query, top_n) -> list[{"chunk_id",...}]
+    wide_n: int = 100        # top-N 재검색·BM25 후보 크기
+
+
+_ctx = _Ctx()
+
+
+def set_context(client=None, chunks=None, retrieve_fn=None, keyword_fn=None, wide_n=100):
+    """tier2 판별 훅이 쓸 검색 자원 주입. agent.run 이 진단 전 1회 호출.
+    미주입이면 해당 훅은 자원 없음으로 None(=미확보) 반환."""
+    _ctx.client = client
+    _ctx.chunks = chunks or []
+    _ctx.corpus_ids = frozenset(c.chunk_id for c in _ctx.chunks)
+    _ctx.retrieve_fn = retrieve_fn
+    _ctx.keyword_fn = keyword_fn
+    _ctx.wide_n = wide_n
+
 # confirm tier = 라벨을 '확정'하는 데 필요한 가장 비싼 자원. (전체 분류표는 README '진단 모드' 참고)
 #   tier1 순수 규칙 · tier2 추가 검색 쿼리 · tier3 LLM/RAGAS · tier4 파이프라인 재실행
 _LABEL_TIER = {
@@ -456,27 +481,52 @@ def _recall_ok(record: EvalRecord) -> bool:
     """recall_at_k를 검사해서 threshold를 넘기는지 검사. 매우 간단한데 일관성을 위해 따로 분리"""
     return record.recall_at_k >= 1
 
-# ── tier2 · 추가 검색 쿼리 (자원: top-N 재검색 / BM25 / 코퍼스 조회) — [훅 미구현] ──
+# ── tier2 · 추가 검색 쿼리 (자원: top-N 재검색 / BM25 / 코퍼스 조회) — set_context 로 주입 ──
 
 def _gold_in_wider_candidates(record: EvalRecord):
-    """[구현 포인트·tier2] top-N(예: 100) 재검색 후 gold 존재 여부. retrieval_low_rank 용."""
-    if _active_mode < Mode.STANDARD:   # 비용 게이트 (STANDARD 미만이면 재검색 안 함)
+    """top-N 재검색에서, top-k 가 놓친 gold 가 넓은 후보엔 있나. retrieval_low_rank 확정용.
+    True=놓친 gold 가 top-N 후보에 있음(리랭커로 회복 가능) / False=후보에도 없음 / None=자원·모드 미충족."""
+    if _active_mode < Mode.STANDARD or _ctx.retrieve_fn is None:
         return None
-    return _signal(record, "gold_in_wider_candidates", lambda: None)  # 구현 시 lambda→top-N 재검색
+
+    def compute():
+        missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)
+        if not missed:
+            return None
+        hits = _ctx.retrieve_fn(_ctx.client, _ctx.chunks, record.probe.question, _ctx.wide_n)
+        wide_ids = {h.get("chunk_id") for h in hits}
+        return bool(missed & wide_ids)
+    return _signal(record, "gold_in_wider_candidates", compute)
 
 
 def _bm25_hits_gold(record: EvalRecord):
-    """[구현 포인트·tier2] BM25 검색 후 gold 존재 여부. lexical(True)/semantic(False) mismatch 용."""
-    if _active_mode < Mode.STANDARD:
+    """키워드(BM25) 검색이 dense top-k 가 놓친 gold 를 잡나. lexical(True)/semantic(False) mismatch 용.
+    True=키워드로 잡힘(단어 불일치) / False=키워드도 놓침(의미 불일치) / None=자원·모드 미충족."""
+    if _active_mode < Mode.STANDARD or _ctx.keyword_fn is None:
         return None
-    return _signal(record, "bm25_hits_gold", lambda: None)           # 구현 시 lambda→BM25 조회
+
+    def compute():
+        missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)
+        if not missed:
+            return None
+        hits = _ctx.keyword_fn(_ctx.chunks, record.probe.question, _ctx.wide_n)
+        kw_ids = {h.get("chunk_id") for h in hits}
+        return bool(missed & kw_ids)
+    return _signal(record, "bm25_hits_gold", compute)
 
 
 def _gold_in_corpus(record: EvalRecord):
-    """[구현 포인트·tier2] 코퍼스 전체 조회로 gold 존재 여부. True→missing_gold / False→corpus_gap."""
-    if _active_mode < Mode.STANDARD:
+    """gold 가 코퍼스에 존재하나(멤버십 조회). True→missing_gold / False→corpus_gap.
+    gold 전부 존재 True / 하나라도 없으면 False / gold·자원 없으면 None."""
+    if _active_mode < Mode.STANDARD or not _ctx.corpus_ids:
         return None
-    return _signal(record, "gold_in_corpus", lambda: None)           # 구현 시 lambda→코퍼스 조회
+
+    def compute():
+        golds = record.probe.gold_chunk_ids
+        if not golds:
+            return None
+        return all(g in _ctx.corpus_ids for g in golds)
+    return _signal(record, "gold_in_corpus", compute)
 
 
 # ── tier3 · LLM/RAGAS (자원: STEP3-2 RAGAS 점수 · AspectCritic) ──
