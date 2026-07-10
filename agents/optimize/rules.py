@@ -49,7 +49,8 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
         "assigned": "이승준",
         "status": "ready",
-        "diagnosis_confidence": None,  # 숫자 튜닝 필요 
+        "diagnosis_confidence": None,  # 숫자 튜닝 필요
+        "target_metrics": ["context_precision"],  # gold는 검색됨, 순위 품질이 문제
         "prescriptions": [
             {
                 "id": "enable_reranker",
@@ -66,6 +67,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # dense가 놓친 gold를 검색결과에 포함시킴
         "prescriptions": [
             {
                 "id": "enable_hybrid",
@@ -82,6 +84,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # dense·BM25 둘 다 놓친 gold를 검색되게
 
         #   토픽클러스터 분석은 Eval 소관 → finding.metadata["topic_cluster"]로 넘어옴.
         #   rules는 후보만 나열 + applies_when 태그, 실제 선택은 planner가 수행.
@@ -132,6 +135,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 후보에 아예 없는 gold를 가져오게
         "prescriptions": [
             {
                 "id": "increase_top_k",
@@ -169,6 +173,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "draft",              # 3개 처방 다 스키마 미정, 실행은 아직 불가
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 나열형 gold 일부 누락(recall@k 부분) 보완
         "prescriptions": [
             {
                 "id": "dynamic_top_k",
@@ -203,6 +208,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # multi-hop query rewrite / max_hops 스키마 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 미검색된 hop2 gold를 가져오게
         "prescriptions": [
             {
                 #baseline이 single-shot 검색이라는 전제 하에 유효한 처방
@@ -235,6 +241,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # chunking_strategy 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 청크 경계에서 잘린 gold를 온전히 검색되게
         "prescriptions": [
             {
                 "id": "increase_chunk_overlap",
@@ -257,6 +264,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 과편화된 청크 → 완전한 gold 맥락 확보
         "prescriptions": [
             {
                 "id": "increase_chunk_size",
@@ -272,6 +280,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_precision"],  # 큰 청크에 섞인 무관 내용 → 유용성 개선
         "prescriptions": [
             {
                 "id": "decrease_chunk_size",
@@ -287,6 +296,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # reranker 필드가 아직 index_config에 없음
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 재랭커가 걸러낸 gold를 다시 살림
         "prescriptions": [
             {
                 "id": "widen_rerank_candidates",
@@ -309,6 +319,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # reranker 필드가 아직 index_config에 없음
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_precision"],  # 재랭커가 상위로 올린 무관 청크 억제
         "prescriptions": [
             {
                 "id": "swap_reranker_model",
@@ -337,6 +348,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "draft",              # 로직은 확정, generation_config 필드 부재로 블로킹
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["faithfulness"],  # context에 없는 내용 지어냄 → 근거성
         "prescriptions": [
             {
                 # MVP: temperature만 낮추는 게 제일 가벼움 (프롬프트 수정과 독립적인 레버)
@@ -371,6 +383,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["answer_relevancy"],  # 질문 요구 일부만 충족 → 완결성
         "prescriptions": [
             {
                 "id": "completeness_prompt",
@@ -393,6 +406,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "draft",              # 재실행형(LLM 재검증 패스), 실행 방식도 별도 확정 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["faithfulness"],  # 청크 간 모순을 못 풀고 답변 → 근거성
         "prescriptions": [
             {
                 "id": "llm_verification_pass",
@@ -410,6 +424,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["answer_relevancy"],  # 질문 조건 오독 → 질문 의도 반영도
         "prescriptions": [
             {
                 "id": "restate_question",
@@ -426,6 +441,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # generation_config 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["faithfulness"],  # 모른다고 해야 하는데 지어냄 → 근거성
         "prescriptions": [
             {
                 "id": "strengthen_abstention_prompt",
@@ -448,6 +464,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # generation_config 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["faithfulness"],  # 맞았지만 context 근거 없음(파라미터 의존) → 근거성
         "prescriptions": [
             {
                 "id": "strict_grounding_prompt",
@@ -470,6 +487,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # generation_config 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["faithfulness"],  # 숫자 계산/집계 오류 → 원문 근거성
         "prescriptions": [
             {
                 "id": "require_numeric_citation",
@@ -492,6 +510,9 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # multi-hop answer planning 스키마 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        # 각 fact는 근거 있어 faithfulness는 안 낮음 → 대신 결합 오류를 잡는
+        # answer_relevancy를 대표 지표로. 이상적으론 List-Component F1 같은 커스텀 채점.
+        "target_metrics": ["answer_relevancy"],
         "prescriptions": [
             {
                 "id": "force_hop_evidence_binding",
@@ -518,6 +539,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "이승준",
         "status": "ready",              # top_k 축소는 기존 키로 바로 실행 가능
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["noise_sensitivity"],  # 과다 context의 잡음에 답변이 흔들림
         "prescriptions": [
             {
                 "id": "decrease_top_k",
@@ -546,6 +568,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # context ordering 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_utilization"],  # 검색은 됐으나 중간 청크를 답변에 못 씀
         "prescriptions": [
             {
                 "id": "reorder_context_edges",
@@ -568,6 +591,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "assigned": "권성우",
         "status": "draft",              # filtering/MMR/reranker 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["noise_sensitivity"],  # 비-gold 상충 청크가 답변을 오염
         "prescriptions": [
             {
                 "id": "enable_noise_filter",

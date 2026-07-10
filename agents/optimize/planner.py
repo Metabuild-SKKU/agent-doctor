@@ -23,7 +23,7 @@ Optimize 모듈의 "결정" 계층.
       빈도   = len(finding.affected_probes) (최소 1)
       신뢰도 = rules.py diagnosis_confidence (None 이면 1.0 fallback)
       비용   = rules.py cost 가 None 이므로 reindex 로 유도 (런타임=1, 재색인=3)
-  - target_metrics 는 빈 리스트 (rules.py 에 채운 뒤 연결 예정).
+  - target_metrics 는 rules.py 라벨의 target_metrics 를 읽어 실어 보낸다.
     guardrail 은 폐기 — 롤백은 전역 하한선 체크 + 점수 비교로 대체(history.py).
   - propose_only(제안만) 모드는 뼈대만. 현재 기본은 apply_optimize.
 """
@@ -103,7 +103,7 @@ def plan(
 
     finding, rule, _score_val = picked
     candidates = _build_candidates(finding, rule, blacklist)
-    request = _build_request(finding, candidates, ranked, state)
+    request = _build_request(finding, rule, candidates, ranked, state)
     decision.request_id = request.request_id
     return request, decision
 
@@ -266,6 +266,7 @@ def _build_candidates(
     블랙리스트에 걸린 처방은 제외한다.
     """
     candidates: list[PrescriptionCandidate] = []
+    target_metrics = list(rule.get("target_metrics", []))
     for pres in _available_prescriptions(rule, finding.label, blacklist):
         patch = ConfigPatch(
             changes=dict(pres.get("patch", {})),
@@ -288,7 +289,7 @@ def _build_candidates(
                 patch=patch,
                 cost=float(_derive_cost(pres)),
                 priority=0.0,          # 후보 개별 우선순위는 MVP 미사용
-                target_metrics=[],     # rules.py 에 채운 뒤 연결 예정 (Eval 합의)
+                target_metrics=list(target_metrics),  # rules.py 라벨의 target_metrics
                 reason=finding.description,
                 metadata=meta,
             )
@@ -300,6 +301,7 @@ def _build_candidates(
 
 def _build_request(
     finding: Finding,
+    rule: dict,
     candidates: list[PrescriptionCandidate],
     ranked: list[tuple[Finding, dict, float]],
     state: AgentDoctorState,
@@ -313,7 +315,7 @@ def _build_request(
         failure_label=finding.label,
         related_failure_labels=related,
         candidates=candidates,
-        target_metrics=[],     # rules.py 에 채운 뒤 연결 예정 (Eval 합의)
+        target_metrics=list(rule.get("target_metrics", [])),  # 라벨의 target_metrics
         target_profile="balanced",
         optimizer="internal",
         max_trials=1,
