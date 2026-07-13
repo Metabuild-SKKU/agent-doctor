@@ -32,4 +32,4 @@ tiktoken
 ragas
 
 # Optimize Agent
-ragbuilder
+ragbuilder==0.1.6       # adapter contract 검증 버전

@@ -5,119 +5,89 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from agents.optimize.config_mapper import map_prescriptions_to_config
+from agents.optimize.config_mapper import (
+    apply_best_config,
+    apply_config_patch,
+    get_current_value,
+    map_changes_to_index_config,
+)
+from agents.optimize.schemas import ConfigPatch
 
 
 class ConfigMapperTest(unittest.TestCase):
-    def test_increase_top_k_uses_current_value(self):
-        result = map_prescriptions_to_config(
-            ["increase_top_k"],
-            {"top_k": 4},
-        )
+    def test_get_current_value_reads_flat_aliases(self):
+        current = {"top_k": 4, "use_hybrid": True, "chunk_size": 512}
 
-        self.assertEqual(result.search_space["retriever.top_k"], [6, 8, 10])
-        self.assertEqual(
-            [patch.changes for patch in result.patches],
-            [
-                {"retriever.top_k": 6},
-                {"retriever.top_k": 8},
-                {"retriever.top_k": 10},
-            ],
-        )
-        self.assertEqual(
-            [patch.metadata["prescription_ids"] for patch in result.patches],
-            [["increase_top_k"], ["increase_top_k"], ["increase_top_k"]],
-        )
+        self.assertEqual(get_current_value(current, "retriever.top_k"), 4)
+        self.assertEqual(get_current_value(current, "retriever.search_type"), "hybrid")
+        self.assertEqual(get_current_value(current, "chunker.chunk_size"), 512)
 
-    def test_rules_ids_are_primary_inputs(self):
-        result = map_prescriptions_to_config(
-            ["enable_hybrid", "context_compression", "shrink_chunk_size"],
-            {"use_hybrid": False, "context_compression": False, "chunk_size": 500},
-            capabilities={"context_compression": True},
-        )
-
-        self.assertEqual(result.search_space["retriever.search_type"], ["hybrid"])
-        self.assertEqual(result.search_space["context.compression.enabled"], [True])
-        self.assertEqual(result.search_space["chunker.chunk_size"], [350, 250])
-
-    def test_capability_skip(self):
-        result = map_prescriptions_to_config(
-            ["enable_reranker"],
-            {"use_reranker": False},
-            capabilities={"reranker": False},
-        )
-
-        self.assertEqual(result.patches, [])
-        self.assertEqual(result.skipped[0].reason, "unsupported_capability")
-
-    def test_reranker_requires_explicit_capability(self):
-        result = map_prescriptions_to_config(
-            ["enable_reranker"],
-            {"use_reranker": False},
-        )
-
-        self.assertEqual(result.patches, [])
-        self.assertEqual(result.skipped[0].reason, "unsupported_capability")
-
-        supported = map_prescriptions_to_config(
-            ["enable_reranker"],
-            {"use_reranker": False},
-            capabilities={"reranker": True},
+    def test_map_changes_to_index_config_translates_canonical_paths(self):
+        mapped, ignored, warnings = map_changes_to_index_config(
+            {
+                "retriever.top_k": 8,
+                "retriever.search_type": "hybrid",
+                "chunker.chunk_size": 400,
+            }
         )
 
         self.assertEqual(
-            [patch.changes for patch in supported.patches],
-            [{"reranker.enabled": True}],
+            mapped,
+            {
+                "top_k": 8,
+                "use_hybrid": True,
+                "chunk_size": 400,
+            },
+        )
+        self.assertEqual(ignored, [])
+        self.assertEqual(warnings, [])
+
+    def test_apply_config_patch_mutates_index_config_and_returns_diff(self):
+        index_config = {"top_k": 4, "chunk_size": 512, "use_hybrid": False}
+        patch = ConfigPatch(
+            changes={
+                "retriever.top_k": 8,
+                "retriever.search_type": "hybrid",
+                "reranker.enabled": True,
+            },
+            metadata={"source": "test"},
         )
 
-    def test_constraints_filter_candidates(self):
-        result = map_prescriptions_to_config(
-            ["increase_top_k"],
-            {"top_k": 4},
-            constraints={"retriever.top_k": {"min": 1, "max": 8}},
+        diff = apply_config_patch(index_config, patch)
+
+        self.assertEqual(index_config["top_k"], 8)
+        self.assertEqual(index_config["use_hybrid"], True)
+        self.assertNotIn("reranker.enabled", index_config)
+        self.assertEqual(diff.changed_keys, ["top_k", "use_hybrid"])
+        self.assertEqual(diff.ignored_keys, ["reranker.enabled"])
+        self.assertTrue(diff.warnings)
+        self.assertEqual(diff.metadata["source"], "test")
+
+    def test_apply_best_config_can_run_without_mutation(self):
+        index_config = {"chunk_overlap": 50}
+
+        diff = apply_best_config(
+            index_config,
+            {"chunker.chunk_overlap": 100},
+            mutate=False,
         )
 
-        self.assertEqual(result.search_space["retriever.top_k"], [6, 8])
+        self.assertEqual(index_config, {"chunk_overlap": 50})
+        self.assertEqual(diff.after_config, {"chunk_overlap": 100})
+        self.assertEqual(diff.changed_keys, ["chunk_overlap"])
 
-    def test_conflicting_directions_are_skipped(self):
-        result = map_prescriptions_to_config(
-            ["increase_top_k", "decrease_top_k"],
-            {"top_k": 4},
+    def test_non_index_config_target_is_ignored(self):
+        index_config = {"chunk_size": 512}
+        patch = ConfigPatch(
+            changes={"temperature": 0.0},
+            target="generation_config",
         )
 
-        self.assertEqual(result.patches, [])
-        self.assertEqual(
-            sorted(item.prescription_id for item in result.skipped),
-            ["decrease_top_k", "increase_top_k"],
-        )
-        self.assertTrue(result.warnings)
+        diff = apply_config_patch(index_config, patch)
 
-    def test_same_direction_top_k_prescriptions_are_not_conflicts(self):
-        result = map_prescriptions_to_config(
-            ["increase_top_k", "dynamic_top_k"],
-            {"top_k": 4},
-        )
-
-        self.assertEqual(result.search_space["retriever.top_k"], [6, 8, 10])
-        self.assertEqual(len(result.patches), 3)
-        self.assertEqual(
-            [patch.metadata["prescription_ids"] for patch in result.patches],
-            [
-                ["increase_top_k", "dynamic_top_k"],
-                ["increase_top_k", "dynamic_top_k"],
-                ["increase_top_k", "dynamic_top_k"],
-            ],
-        )
-
-    def test_unknown_prescription_is_skipped_without_aliasing(self):
-        result = map_prescriptions_to_config(
-            ["enable_hybrid_search"],
-            {"use_hybrid": False},
-        )
-
-        self.assertEqual(result.patches, [])
-        self.assertEqual(result.skipped[0].prescription_id, "enable_hybrid_search")
-        self.assertEqual(result.skipped[0].reason, "unsupported_prescription")
+        self.assertEqual(index_config, {"chunk_size": 512})
+        self.assertEqual(diff.ignored_keys, ["temperature"])
+        self.assertTrue(diff.warnings)
 
 
 if __name__ == "__main__":

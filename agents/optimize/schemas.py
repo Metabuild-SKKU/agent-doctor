@@ -91,7 +91,6 @@ class PrescriptionCandidate:
         cost: 처방 비용. 낮을수록 우선 시도하기 쉽다.
         priority: planner가 계산한 후보 우선순위 점수.
         target_metrics: 이 처방으로 개선하려는 주요 지표 목록.
-        guardrails: 악화 여부를 감시해야 하는 보호 지표 목록.
         applies_when: 이 처방이 적용되는 조건(신호 기반 택1).
             예: {"topic_cluster": ["spread", "concentrated"]}.
             Eval이 finding.metadata로 주는 신호와 optimizer가 대조해 후보를
@@ -110,7 +109,6 @@ class PrescriptionCandidate:
     cost: float | None = None
     priority: float = 0.0
     target_metrics: list[str] = field(default_factory=list)
-    guardrails: list[str] = field(default_factory=list)
     applies_when: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
     tradeoffs: list[str] = field(default_factory=list)
@@ -218,7 +216,6 @@ class OptimizationRequest:
         search_space: optimizer가 탐색할 수 있는 config 후보 범위.
         fixed_config: 최적화 중 고정해야 하는 config 값.
         target_metrics: 개선해야 하는 목표 지표 목록.
-        guardrails: 성능 악화를 막기 위해 감시할 지표 목록.
         target_profile: 사용자의 최적화 성향. 예: accuracy, speed, cost, balanced.
         optimizer: 사용할 backend. 예: internal, ragbuilder, autorag.
         max_trials: 최대 탐색/시도 횟수.
@@ -236,7 +233,6 @@ class OptimizationRequest:
     search_space: dict[str, Any] = field(default_factory=dict)
     fixed_config: dict[str, Any] = field(default_factory=dict)
     target_metrics: list[str] = field(default_factory=list)
-    guardrails: list[str] = field(default_factory=list)
     target_profile: TargetProfile = "balanced"
     optimizer: OptimizerBackend = "internal"
     max_trials: int = 1
@@ -387,8 +383,7 @@ class OptimizationHistoryItem:
     """
     최적화 1회 시도에 대한 이력 기록.
 
-    같은 처방을 반복 적용하지 않도록 하거나, guardrail 및 전역 하한선 위반,
-    점수 하락으로
+    같은 처방을 반복 적용하지 않도록 하거나, 전역 하한선 위반/점수 하락으로
     rollback할 때 필요한 정보를 저장한다. 초기 구현에서는 state에 dict로 저장하더라도,
     이 모델을 기준으로 history.py에서 직렬화하면 된다.
 
@@ -405,7 +400,6 @@ class OptimizationHistoryItem:
         before_metrics: 처방 적용 전 평가 지표.
         after_metrics: 처방 적용 후 평가 지표.
         target_metrics: 개선 목표였던 지표 목록.
-        guardrail_metrics: rollback 판단에 사용한 보호 지표 목록.
         reason: 해당 시도를 수행한 이유.
         rollback_reason: rollback했다면 그 이유.
         created_at: 이력 생성 시각.
@@ -424,7 +418,6 @@ class OptimizationHistoryItem:
     before_metrics: dict[str, Any] = field(default_factory=dict)
     after_metrics: dict[str, Any] = field(default_factory=dict)
     target_metrics: list[str] = field(default_factory=list)
-    guardrail_metrics: list[str] = field(default_factory=list)
     reason: str = ""
     rollback_reason: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
