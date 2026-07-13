@@ -328,6 +328,9 @@ class OptimizeDecision:
         request_id: 연결된 OptimizationRequest ID. 없을 수 있다.
         next_route: 다음 그래프 흐름. index, serve, end 중 하나.
         reason: 이 결정을 내린 이유.
+        manual_labels: 이번 진단에서 함께 발견된 D그룹(manual) 라벨들.
+            apply_optimize로 자동 처방이 진행되는 경우에도, 별도로 사람이
+            확인해야 할 문제가 있으면 여기 담아 reporter가 사용자에게 알린다.
     """
 
     mode: DecisionMode
@@ -335,6 +338,31 @@ class OptimizeDecision:
     requires_user_confirmation: bool
     request_id: str | None = None
     next_route: NextRoute = "serve"
+    reason: str = ""
+    manual_labels: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Verdict:
+    """
+    history.judge가 내리는 처방 유지/롤백 판정 결과.
+
+    OptimizeDecision이 planner의 흐름 결정 봉투인 것과 대응된다. 한 처방을
+    적용해 재측정한 뒤, 그 처방을 유지할지 되돌릴지를 담는다. agent.py가 이
+    값을 보고 실제 롤백(config 복원)·블랙리스트 등록을 수행한다.
+
+    Attributes:
+        keep: True면 유지, False면 롤백.
+        before_score: 처방 전 단일 점수(Eval overall_score).
+        after_score: 처방 후 단일 점수(Eval overall_score).
+        floor_violations: 하한선을 위반한 지표명 목록. 있으면 무조건 롤백.
+        reason: 이 판정을 내린 이유(사람이 읽는 설명).
+    """
+
+    keep: bool
+    before_score: float
+    after_score: float
+    floor_violations: list[str] = field(default_factory=list)
     reason: str = ""
 
 
