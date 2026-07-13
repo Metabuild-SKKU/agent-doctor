@@ -20,8 +20,8 @@ RAGAS 4개 지표 + AspectCritic 을 **LLM-as-Judge** 로 측정한다.
     환경이 ragas 를 지원하면 라이브러리 호출로 교체해도 결과가 동일하다.
 
 비용·재현성:
-    - 실행 게이트는 호출부(agent._evaluate_probe)가 담당: `EVAL_ENABLE_LLM=1` + `EVAL_MODE≥deep`
-      + 진단 대상 브랜치일 때만 evaluate() 를 호출한다(기본 비활성).
+    - 실행 게이트는 호출부(agent._ragas_track + signals RAGAS 신호)가 담당: `EVAL_ENABLE_LLM=1`
+      + `EVAL_MODE≥deep` 일 때만 evaluate_real_track/oracle_track 을 호출한다(기본 비활성).
     - 응답 모델 ≠ 평가 모델(EVAL_JUDGE_MODEL, 기본 gpt-4o), temperature=0.
     - 키 없음·호출/파싱 실패 → 조용히 건너뛰고(폴백) 규칙 지표(STEP3-1)로 진행.
 """
@@ -31,10 +31,19 @@ import json
 import math
 import os
 
-from agents.eval.types import Branch, EvalRecord
+from agents.eval.types import EvalRecord
+
+
+def _env_int(name: str, default: int) -> int:
+    """환경변수 정수 파싱 — 비정수/음수면 기본값(≥1)으로 폴백. import 시점 크래시 방지."""
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
 
 # RAGAS AnswerRelevancy 기본 strictness (생성 질문 개수)
-RELEVANCY_STRICTNESS = int(os.getenv("EVAL_RELEVANCY_STRICTNESS", "3"))
+RELEVANCY_STRICTNESS = _env_int("EVAL_RELEVANCY_STRICTNESS", 3)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -194,60 +203,16 @@ def _judge():
 
 
 # ══════════════════════════════════════════════════════════════════
-#  메인 진입
-# ══════════════════════════════════════════════════════════════════
-
-def evaluate(record: EvalRecord) -> None:
-    """
-    브랜치에 따라 실제/오라클 트랙 RAGAS 지표와 AspectCritic 을 계산해
-    record.ragas / record.oracle_ragas / record.aspect 에 채운다.
-    실패 시 아무것도 채우지 않는다(폴백).
-
-    활성화(EVAL_ENABLE_LLM)·모드(EVAL_MODE≥deep)·브랜치 게이트는 **호출부(agent._evaluate_probe)**
-    가 담당한다. 여기서는 키 없음(_judge=None)만 방어하고 RAGAS 실행에만 집중한다.
-    (직접 호출·테스트는 게이트 없이 바로 RAGAS 를 돌린다.)
-    """
-
-    judge = _judge()
-    if judge is None:
-        print("[Eval] STEP3-2: 평가 LLM 미설정(OPENAI_API_KEY) → RAGAS 스킵")
-        return
-
-    run_real, run_oracle = _tracks_for(record.branch)
-    try:
-        if run_real:
-            record.ragas = evaluate_real_track(record, judge)
-        if run_oracle and record.oracle_answer is not None:
-            record.oracle_ragas = evaluate_oracle_track(record, judge)
-        record.aspect = evaluate_aspect_critics(record, judge)
-    except Exception as e:  # 폴백: 어떤 실패도 파이프라인을 멈추지 않음
-        print(f"[Eval] STEP3-2: RAGAS 측정 실패({e}) → 규칙 지표로 진행")
-
-
-def _tracks_for(branch: str) -> tuple[bool, bool]:
-    """
-    트랙 선택(설계 STEP3-2 표):
-        성공/검색실패              → 스킵
-        검색+생성실패/애매함(생성)   → 오라클 트랙
-        검색 부분실패/애매함(컨텍스트) → 실제 트랙 (+ 오라클)
-    """
-    real = branch in (
-        Branch.RETRIEVAL_PARTIAL, Branch.RETRIEVAL_PARTIAL_GEN_FAIL,
-        Branch.AMBIGUOUS_CONTEXT, Branch.NO_ANSWER_VIOLATION,
-    )
-    oracle = branch in (
-        Branch.RETRIEVAL_GEN_FAIL, Branch.RETRIEVAL_PARTIAL_GEN_FAIL,
-        Branch.AMBIGUOUS_CONTEXT, Branch.AMBIGUOUS_GEN,
-    )
-    return real, oracle
-
-
-# ══════════════════════════════════════════════════════════════════
 #  트랙별 측정
+#    diagnose(signals)가 트랙별로 필요한 것만 lazy 호출한다(agent._ragas_track 경유).
+#    실제 트랙 = 검색결과 컨텍스트, 오라클 트랙 = gold 컨텍스트.
 # ══════════════════════════════════════════════════════════════════
 
 def evaluate_real_track(record: EvalRecord, judge) -> dict:
-    """실제 결과 지표. faithfulness, response_relevancy, (+정답 있으면) context_precision, context_recall."""
+    """실제 결과 지표. faithfulness, response_relevancy, (+정답 있으면) context_precision, context_recall.
+
+    [TODO 비용] DEEP 트랙 1개당 LLM 호출 ~11회(faithfulness 2 + precision top_k개 + recall 1 +
+    relevancy strictness). precision 청크별 호출을 배치/병렬화하거나 strictness↓로 절감 여지."""
     q = record.probe.question
     ans = record.generated_answer
     ctx = record.retrieved_context
@@ -275,7 +240,9 @@ def evaluate_oracle_track(record: EvalRecord, judge) -> dict:
 
 
 def evaluate_aspect_critics(record: EvalRecord, judge) -> dict:
-    """커스텀 AspectCritic(이진): contradiction."""
+    """커스텀 AspectCritic(이진): contradiction.
+    [예약] 현재 라이브 진단 경로는 record.aspect 를 소비하지 않는다 — diagnose.generation_contradiction
+    라벨(주석처리, '나중에 개발')이 이 값을 쓸 예정. 그 라벨을 켤 때 함께 배선한다."""
     q = record.probe.question
     ans = record.generated_answer
     ctx = record.retrieved_context
@@ -302,7 +269,7 @@ def _faithfulness(judge, question: str, answer: str, contexts: list[str]):
     context_str = "\n".join(contexts)
     d2 = _chat(judge, _ragas_prompt(_FAITH_NLI_INSTRUCTION, _SCHEMA_NLI,
                                     _FAITH_NLI_EXAMPLES, {"context": context_str, "statements": statements}))
-    verdicts = _as_list(d2, "statements")
+    verdicts = [v for v in _as_list(d2, "statements") if isinstance(v, dict)]
     if not verdicts:
         return None
     supported = sum(1 for v in verdicts if _truthy(v.get("verdict")))
@@ -405,7 +372,7 @@ def _ragas_prompt(instruction: str, output_schema: str, examples: list, input_ob
 
 
 def _average_precision(verdicts: list[int]) -> float:
-    """순위 가중 평균"""
+    """순위 가중 평균. [TODO] 부분합을 매 스텝 재계산해 O(n^2) — top_k(≈5) 작아 무시 가능."""
     denominator = sum(verdicts) + 1e-10
     numerator = sum(
         (sum(verdicts[: i + 1]) / (i + 1)) * verdicts[i]

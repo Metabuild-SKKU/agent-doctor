@@ -10,8 +10,7 @@ from agents.index.qdrant_store import embed
 from agents.eval.agent import run
 
 # ── 1) 순수 규칙 지표 단위 확인 (의존성 0, 결정적) ────────────────
-from agents.eval.metrics import token_f1, recall_at_k, decide_branch, is_abstention
-from agents.eval.types import Branch
+from agents.eval.metrics import token_f1, recall_at_k, is_abstention
 
 print("=" * 50)
 print("Eval Agent 테스트 - (1) 규칙 지표 단위 확인")
@@ -22,14 +21,8 @@ assert token_f1("전혀 다른 문장", "재택근무 규정") == 0.0
 assert recall_at_k(["c1"], ["c1", "c2"]) == 1.0
 assert recall_at_k(["c1", "c3"], ["c1", "c2"]) == 0.5
 assert recall_at_k([], ["c1"]) == -1.0            # gold 없음
-assert decide_branch(1.0, 0.9, 0.0, True, False) == Branch.SUCCESS
-assert decide_branch(0.0, 0.0, 0.9, True, False) == Branch.RETRIEVAL_FAIL
-assert decide_branch(0.0, 0.0, 0.0, True, False) == Branch.RETRIEVAL_GEN_FAIL
-assert decide_branch(1.0, 0.2, 0.9, True, False) == Branch.AMBIGUOUS_CONTEXT
-assert decide_branch(1.0, 0.2, 0.2, True, False) == Branch.AMBIGUOUS_GEN
-assert decide_branch(0.0, 0.0, 0.0, False, True) == Branch.NO_ANSWER_OK
-assert decide_branch(0.0, 0.9, 0.0, False, False) == Branch.NO_ANSWER_VIOLATION
 assert is_abstention("제공된 정보로는 알 수 없습니다") is True
+assert is_abstention("제공된 컨텍스트에 따르면 재택근무는 주 2일입니다") is False  # 근거 인용은 기권 아님(오탐 회귀)
 print("규칙 지표 단위 확인 통과 [OK]")
 
 # ── 2) Mock Chunks (Index 결과 시뮬레이션) ───────────────────────

@@ -1,10 +1,11 @@
 """
 agents/eval/metrics.py
-STEP3-1: 규칙 기반(LLM 불필요) 지표 계산 및 브랜치 판정
+STEP3-1: 규칙 기반(LLM 불필요) 지표 계산
 
 설계 문서 'STEP3-1: Metric 진단' 구현.
-세 지표(Recall@k, token F1, Oracle F1)를 계산하고, 그 조합으로 진단 브랜치를 정한다.
-전량 순수 파이썬이라 외부 API·모델 없이 항상 동작한다.
+세 지표(Recall@k, token F1, Oracle F1)와 무응답 판별을 제공한다. 이 지표들의 조합으로
+원인을 판정하는 로직은 signals/diagnose 로 이관됐다(브랜치리스). 전량 순수 파이썬이라
+외부 API·모델 없이 항상 동작한다.
 
 [구현 포인트]
   - 토큰화가 공백 기준이라 한국어 조사/어미를 분리하지 못한다.
@@ -15,8 +16,7 @@ STEP3-1: 규칙 기반(LLM 불필요) 지표 계산 및 브랜치 판정
 from __future__ import annotations
 
 import re
-
-from agents.eval.types import Branch, F1_PASS_THRESHOLD
+from collections import Counter
 
 
 # ── 토큰화 ────────────────────────────────────────────────────────
@@ -48,7 +48,6 @@ def token_f1(prediction: str, reference: str) -> float:
         return 0.0
 
     # 다중 등장 토큰까지 고려한 겹침 수(멀티셋 교집합)
-    from collections import Counter
     common = Counter(pred_tokens) & Counter(ref_tokens)
     overlap = sum(common.values())
     if overlap == 0:
@@ -78,7 +77,7 @@ def recall_at_k(gold_chunk_ids: list[str], retrieved_chunk_ids: list[str]) -> fl
 
 _ABSTENTION_MARKERS = (
     "모른다", "모르겠", "알 수 없", "답변할 수 없", "답변하기 어렵",
-    "정보가 없", "정보를 찾을 수 없", "제공된 컨텍스트", "확인할 수 없",
+    "정보가 없", "정보를 찾을 수 없", "제공된 정보로는 알 수 없", "확인할 수 없",
     "don't know", "do not know", "cannot answer", "no information",
     "not available", "unable to answer",
 )
@@ -93,52 +92,3 @@ def is_abstention(answer: str) -> bool:
         return True
     low = answer.lower()
     return any(m in low for m in _ABSTENTION_MARKERS)
-
-
-# ── 브랜치 판정 ───────────────────────────────────────────────────
-
-def decide_branch(
-    recall: float,
-    f1: float,
-    oracle_f1: float,
-    answer_exists: bool,
-    abstained: bool,
-) -> str:
-    """
-    설계 STEP3-1 표에 따라 진단 브랜치를 결정한다.
-
-    | 브랜치 | recall@k | F1 | oracle |
-    |--------|----------|----|--------|
-    | 성공            | 1        | 통과 | (스킵)  |
-    | 검색 실패        | 0        | -   | 통과   |
-    | 검색+생성 실패    | 0        | -   | 실패   |
-    | 검색 부분 실패    | 0<x<1    | -   | 통과   |
-    | 부분+생성 실패    | 0<x<1    | -   | 실패   |
-    | 애매함(컨텍스트)  | 1        | 실패 | 통과   |
-    | 애매함(생성)     | 1        | 실패 | 실패   |
-
-    무응답(answer_exists=False)은 별도 처리: 기권했으면 성공, 답을 냈으면 위반.
-    """
-    # 엣지 케이스: 무응답(정답이 코퍼스에 없어야 하는) probe
-    if not answer_exists:
-        return Branch.NO_ANSWER_OK if abstained else Branch.NO_ANSWER_VIOLATION
-
-    f1_pass = f1 >= F1_PASS_THRESHOLD
-    oracle_pass = oracle_f1 >= F1_PASS_THRESHOLD
-
-    # gold 미보유(recall 계산 불가)는 F1/oracle 기준으로만 대략 판정
-    if recall < 0:
-        if f1_pass:
-            return Branch.SUCCESS
-        return Branch.AMBIGUOUS_GEN if not oracle_pass else Branch.AMBIGUOUS_CONTEXT
-
-    if recall <= 0.0:  # 검색 완전 실패
-        return Branch.RETRIEVAL_FAIL if oracle_pass else Branch.RETRIEVAL_GEN_FAIL
-
-    if recall >= 1.0:  # gold 전부 검색됨
-        if f1_pass:
-            return Branch.SUCCESS
-        return Branch.AMBIGUOUS_CONTEXT if oracle_pass else Branch.AMBIGUOUS_GEN
-
-    # 0 < recall < 1: 부분 검색
-    return Branch.RETRIEVAL_PARTIAL if oracle_pass else Branch.RETRIEVAL_PARTIAL_GEN_FAIL

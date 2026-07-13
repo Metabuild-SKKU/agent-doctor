@@ -89,6 +89,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             return state
 
         # 검색 인덱스 준비(임시): Index 리트리버 미개발 → retrieval_temp 로 state.chunks 재적재
+        # [TODO 비효율] eval 실행마다 전체 청크를 재인덱싱(재임베딩 upsert). Optimize 루프 시 반복 비용.
+        #   → Index Agent 가 검색 리트리버를 제공하면 retrieval_temp 와 함께 제거하고 인덱스를 재사용.
         client = build_eval_index(state.chunks)
         # client = build_eval_index(state.chunks)
         chunk_text = {c.chunk_id: c.text for c in state.chunks}

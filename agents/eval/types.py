@@ -101,25 +101,8 @@ def resolve_mode() -> int:
 
 def llm_eval_enabled() -> bool:
     """STEP3-2 RAGAS(LLM-as-Judge) 진단 활성화 여부. 기본 꺼짐(EVAL_ENABLE_LLM=1/true/yes/on).
-    모드(EVAL_MODE≥deep)·브랜치 게이트와 함께 agent._evaluate_probe 가 RAGAS 실행 여부를 정한다."""
+    실제 실행은 signals 의 RAGAS 신호(_faith 등)가 `EVAL_MODE≥deep` 게이트와 AND 로 정한다."""
     return os.getenv("EVAL_ENABLE_LLM", "").strip().lower() in ("1", "true", "yes", "on")
-
-
-class Branch:
-    """
-    STEP3-1 규칙 지표(recall@k / F1 / oracle_F1)로 결정되는 진단 브랜치.
-    설계 문서 STEP3-1 표의 각 행에 대응한다. STEP3-2(LLM 진단)와 STEP4(원인 판정)의
-    실행 경로를 이 값으로 분기한다.
-    """
-    SUCCESS = "success"                                # 성공: 스킵
-    RETRIEVAL_FAIL = "retrieval_fail"                  # 검색 실패 (oracle 통과)
-    RETRIEVAL_GEN_FAIL = "retrieval_fail_gen_fail"     # 검색 실패 + 생성 실패
-    RETRIEVAL_PARTIAL = "retrieval_partial"            # 검색 부분 실패 (oracle 통과)
-    RETRIEVAL_PARTIAL_GEN_FAIL = "retrieval_partial_gen_fail"  # 부분 실패 + 생성 실패
-    AMBIGUOUS_CONTEXT = "ambiguous_context"            # 애매함, 컨텍스트 원인
-    AMBIGUOUS_GEN = "ambiguous_gen"                    # 애매함, 생성 원인
-    NO_ANSWER_OK = "no_answer_ok"                      # 무응답 정답: 올바른 기권
-    NO_ANSWER_VIOLATION = "no_answer_violation"        # 무응답인데 답을 지어냄
 
 
 # ── 내부 결과 자료구조 ────────────────────────────────────────────
@@ -130,7 +113,7 @@ class EvalRecord:
     probe 1개에 대한 평가 파이프라인 전 과정의 중간·최종 결과.
 
     STEP2  → retrieved_*, generated_answer, oracle_answer
-    STEP3-1 → recall_at_k, f1_score, oracle_f1, branch
+    STEP3-1 → recall_at_k, f1_score, oracle_f1
     STEP3-2 → ragas, oracle_ragas, aspect
     STEP4  → findings
     """
@@ -152,7 +135,10 @@ class EvalRecord:
     # STEP3-2: LLM(RAGAS) 지표 — diagnose 가 lazy 로 채움
     ragas: dict = field(default_factory=dict)          # 실제 트랙
     oracle_ragas: dict = field(default_factory=dict)   # 오라클 트랙
-    aspect: dict = field(default_factory=dict)         # AspectCritic 결과
+    aspect: dict = field(default_factory=dict)         # AspectCritic 결과 — generation_contradiction(주석처리) 용 예약, 현 라이브 미사용
+    # RAGAS lazy 계산 여부(트랙별). 빈 결과({})여도 '시도함'으로 남겨 같은 트랙 재-LLM호출을 막는다.
+    ragas_done: bool = False
+    oracle_ragas_done: bool = False
 
     # STEP4: 원인 판정
     findings: list[Finding] = field(default_factory=list)

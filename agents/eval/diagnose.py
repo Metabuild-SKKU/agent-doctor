@@ -34,7 +34,7 @@ from agents.eval.types import (
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
 )
 from agents.eval.signals import (
-    set_mode, set_context, _cache, _compute_metrics, _no_diagnosis,
+    set_mode, set_context, _compute_metrics, _no_diagnosis,
     _retrieval_failed, _generation_failed, _context_applicable,
     _is_multi_hop, _enumeration_cache,
     _gold_in_wider_candidates, _bm25_hits_gold, _gold_in_corpus,

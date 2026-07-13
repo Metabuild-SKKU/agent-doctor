@@ -32,7 +32,7 @@ os.environ["EVAL_ENABLE_LLM"] = "1"   # RAGAS 진단 활성화
 
 import agents.eval.metrics_ragas as R
 from core.schema import Probe
-from agents.eval.types import Branch, EvalRecord
+from agents.eval.types import EvalRecord
 
 judge = R._judge()
 assert judge is not None, "심판 LLM 로드 실패"
@@ -100,21 +100,22 @@ recall = R._context_recall(judge, "Where is the Eiffel Tower?",
 show("context_recall", recall, "기대: 높음(1.0 근처)")
 assert recall is not None and recall > 0.5
 
-# ── 5) evaluate() 엔드투엔드 (실제+오라클+aspect) ──────────────
-print("\n[5] evaluate() 엔드투엔드")
+# ── 5) 트랙 함수 엔드투엔드 (실제+오라클+aspect) ──────────────
+print("\n[5] 트랙 함수 엔드투엔드")
 probe = Probe(probe_id="t0", question="Where is the Eiffel Tower located?",
               source="llm_generated", ground_truth="The Eiffel Tower is in Paris.",
               gold_chunk_ids=["c0"])
 rec = EvalRecord(probe=probe)
-rec.branch = Branch.AMBIGUOUS_CONTEXT           # 실제+오라클 트랙 모두 실행
 rec.retrieved_context = ["The Eiffel Tower is in Paris.", "Berlin is in Germany."]
 rec.generated_answer = "The Eiffel Tower is in Paris."
 rec.oracle_context = ["The Eiffel Tower is in Paris."]
 rec.oracle_answer = "The Eiffel Tower is in Paris."
-R.evaluate(rec)
+rec.ragas = R.evaluate_real_track(rec, judge)
+rec.oracle_ragas = R.evaluate_oracle_track(rec, judge) if rec.oracle_answer is not None else {}
+rec.aspect = R.evaluate_aspect_critics(rec, judge)
 print(f"  ragas        = { {k: round(v, 3) for k, v in rec.ragas.items()} }")
 print(f"  oracle_ragas = { {k: round(v, 3) for k, v in rec.oracle_ragas.items()} }")
 print(f"  aspect       = {rec.aspect}")
-assert rec.ragas, "evaluate() 가 ragas 를 채워야 함"
+assert rec.ragas, "트랙 함수가 ragas 를 채워야 함"
 
 print("\n실측 테스트 통과 [OK]")

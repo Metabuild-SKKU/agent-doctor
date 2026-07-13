@@ -219,14 +219,17 @@ def _gold_in_corpus(record: EvalRecord):
 # 생성 원인(hallucination/hop_binding/partial)은 항상 오라클, bad_gold만 각 트랙 사용.
 
 def _ensure_ragas(record: EvalRecord, track: str):
-    """트랙 RAGAS 점수를 record 에 lazy 계산·저장(있으면 유지=memoize). agent 가 미리 안 돌리고
-    diagnose 가 필요할 때 _ctx.ragas_fn 으로 계산 → '진단 계산은 전부 diagnose 안'."""
+    """트랙 RAGAS 점수를 record 에 lazy 계산·저장(트랙별 1회만). agent 가 미리 안 돌리고
+    diagnose 가 필요할 때 _ctx.ragas_fn 으로 계산 → '진단 계산은 전부 diagnose 안'.
+    빈 결과({})여도 *_done 플래그로 '시도함'을 기록해 같은 트랙 재-LLM호출(수 번의 LLM콜)을 막는다."""
     if _ctx.ragas_fn is None:
         return
     if track == "oracle":
-        if not record.oracle_ragas:
+        if not record.oracle_ragas_done:
+            record.oracle_ragas_done = True
             record.oracle_ragas = _ctx.ragas_fn(record, "oracle") or {}
-    elif not record.ragas:
+    elif not record.ragas_done:
+        record.ragas_done = True
         record.ragas = _ctx.ragas_fn(record, "real") or {}
 
 
