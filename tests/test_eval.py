@@ -4,10 +4,18 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# .env 로딩(EVAL_MODE / EVAL_ENABLE_LLM 등). agents import 전에 실행해야 import 시점 env 읽기에도 반영됨.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from core.schema import Chunk
 from core.state import AgentDoctorState
 from agents.index.qdrant_store import embed
 from agents.eval.agent import run
+from agents.eval.types import resolve_mode
 
 # ── 1) 순수 규칙 지표 단위 확인 (의존성 0, 결정적) ────────────────
 from agents.eval.metrics import token_f1, recall_at_k, is_abstention
@@ -83,6 +91,6 @@ assert fs["total"] == len(report.findings) == fs["confirmed"] + fs["preliminary"
 # 확정 우선 정렬: 확정 findings 가 예비보다 앞
 confirmed_flags = [f.confirmed for f in report.findings]
 assert confirmed_flags == sorted(confirmed_flags, reverse=True), "확정 우선 정렬이 아님"
-# 기본 FAST 모드: 생성 실패 브랜치는 예비 generation_failure 로 롤업
-assert fs["mode"] == 1, "기본 EVAL_MODE 는 FAST(1)"
+# 진단 모드는 EVAL_MODE(.env/환경변수)로 정해진다 — 하드코딩 대신 resolve_mode 로 대조.
+assert fs["mode"] == resolve_mode(), "findings_summary.mode 가 EVAL_MODE 와 일치해야 함"
 print("\n전체 파이프라인 스모크 테스트 통과 [OK]")
