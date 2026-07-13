@@ -44,6 +44,31 @@ RAGAS_WEIGHTS = {
     "response_relevancy": 0.20,
 }
 
+# STEP1 Probe 생성 믹스 비율 (설계 §STEP1, 합=1.0)
+RAGAS_MIX_RATIO = 0.75
+DATAMORGANA_MIX_RATIO = 0.20
+NO_ANSWER_MIX_RATIO = 0.05
+
+# STEP1 지식그래프 엣지 임계값 (이 이상이면 두 청크를 연결)
+KG_ENTITY_OVERLAP_MIN = 0.2     # 키워드/entity Jaccard 유사도
+KG_EMBEDDING_SIM_MIN = 0.5      # chunk.embedding 코사인 유사도
+
+# STEP1 시나리오 샘플링 후보 (RAGAS Scenario 파라미터)
+PERSONAS = ["신입사원", "실무 담당자"]
+QUERY_STYLES = ["web_search", "conversational", "imperative"]
+QUERY_LENGTHS = ["short", "medium", "long"]
+EVOL_DIRECTIONS = ["depth", "breadth", "reasoning", "conditioning"]
+
+# STEP1 RAGAS 4분면 배분 비율 (합=1.0). 멀티홉 엣지가 없으면 multi_* 몫은
+# single_* 쪽으로 접힌다(agents/eval/probe_gen.py::_allocate_ragas_quadrants).
+RAGAS_QUADRANT_WEIGHTS = {
+    "single_specific": 0.4,
+    "single_abstract": 0.3,
+    "multi_specific": 0.2,
+    "multi_abstract": 0.1,
+}
+MULTIHOP_SUBTYPES = ["bridge", "comparison", "aggregation"]
+
 
 # ── 진단 모드 (비용 tier) ─────────────────────────────────────────
 # 사용자가 고르는 '진단 깊이'. 값 = 그 모드가 감당하는 최대 자원 tier.
