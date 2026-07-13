@@ -320,7 +320,7 @@ def _build_request(
         candidates=candidates,
         target_metrics=list(rule.get("target_metrics", [])),  # 라벨의 target_metrics
         target_profile="balanced",
-        optimizer="internal",
+        optimizer="rules",  # rules.py 처방을 검증·적용하는 MVP 기본 backend
         max_trials=1,
         reason=f"우선순위 최상위 라벨: {finding.label}",
         propose_only=False,
