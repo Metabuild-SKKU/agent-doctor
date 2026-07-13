@@ -18,7 +18,6 @@ graph.route_after_eval() 이 report.pass_threshold 로 Serve/Optimize 분기를 
 from __future__ import annotations
 
 import uuid
-from collections import Counter
 
 from core.schema import DiagnosticReport
 from agents.eval.types import (
@@ -64,7 +63,7 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     report = DiagnosticReport(
         report_id=f"report_{uuid.uuid4().hex[:8]}",
         findings=findings,
-        findings_summary=_findings_summary(findings, mode),
+        findings_summary=_findings_summary(records, mode),
         ragas_scores=scores,
         oracle_accuracy=oracle_acc,
         overall_score=overall_val,
@@ -78,22 +77,42 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
 
 # ── 집계 헬퍼 ─────────────────────────────────────────────────────
 
-def _findings_summary(findings: list, mode: int) -> dict:
+def _findings_summary(records: list[EvalRecord], mode: int) -> dict:
     """Finding 들을 확정/예비·라벨로 집계. Optimize 가 확정건 우선 처리하도록 요약 제공.
 
+    라벨 분포는 **테스트셋(probe)당 1로 정규화**해 가중 집계한다: 한 probe 에서 finding 이
+    N개 나오면 각 finding 은 1/N 로 계산된다(예: 3개 → 각 0.333). 특정 probe 가 여러 원인을
+    동시에 내도, 원인별 분포·우선순위가 그 probe 하나에 의해 과대 계상되지 않게 하기 위함.
+
       mode              : 이 진단이 실행된 모드(1~4). 예비가 왜 예비인지의 맥락.
-      confirmed/preliminary : 확정·예비 개수 (confirmed=False 는 상위 모드에서 확정 필요)
-      confirmed_labels / preliminary_labels : 라벨별 개수(확정/예비 분리)
+      total/confirmed/preliminary : finding **원시 개수**(정수).
+      weighted_total    : probe당 정규화 합 = finding 이 1개 이상 나온 probe 수(라벨 가중합의 총계).
+      confirmed_labels / preliminary_labels : 라벨별 **가중 개수**(probe당 1/N, 소수 3자리).
     """
-    confirmed = [f for f in findings if f.confirmed]
-    preliminary = [f for f in findings if not f.confirmed]
+    all_findings = [f for r in records for f in r.findings]
+    confirmed = [f for f in all_findings if f.confirmed]
+    preliminary = [f for f in all_findings if not f.confirmed]
+
+    # probe당 정규화 가중치 w=1/N 로 라벨 분포를 가중 집계 (N = 그 probe 의 finding 수)
+    conf_w: dict[str, float] = {}
+    prelim_w: dict[str, float] = {}
+    for r in records:
+        n = len(r.findings)
+        if not n:
+            continue
+        w = 1.0 / n
+        for f in r.findings:
+            bucket = conf_w if f.confirmed else prelim_w
+            bucket[f.label] = bucket.get(f.label, 0.0) + w
+
     return {
         "mode": mode,
-        "total": len(findings),
+        "total": len(all_findings),
         "confirmed": len(confirmed),
         "preliminary": len(preliminary),
-        "confirmed_labels": dict(Counter(f.label for f in confirmed)),
-        "preliminary_labels": dict(Counter(f.label for f in preliminary)),
+        "weighted_total": round(sum(conf_w.values()) + sum(prelim_w.values()), 3),
+        "confirmed_labels": {k: round(v, 3) for k, v in conf_w.items()},
+        "preliminary_labels": {k: round(v, 3) for k, v in prelim_w.items()},
     }
 
 
@@ -164,8 +183,16 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     print(f"[Eval] STEP5: 리포트 생성 - probe {n}개, 실패 {fail}개, "
           f"overall={report.overall_score}, pass={report.pass_threshold} (모드 {fs.get('mode')})")
     if report.findings:
-        by_type = Counter(f.type for f in report.findings)
+        # 타입 분포도 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
+        by_type: dict[str, float] = {}
+        for r in records:
+            k = len(r.findings)
+            if not k:
+                continue
+            for f in r.findings:
+                by_type[f.type] = round(by_type.get(f.type, 0.0) + 1.0 / k, 3)
         print(f"[Eval]        Finding {len(report.findings)}개 "
-              f"(확정 {fs.get('confirmed', 0)} / 예비 {fs.get('preliminary', 0)}): {dict(by_type)}")
+              f"(확정 {fs.get('confirmed', 0)} / 예비 {fs.get('preliminary', 0)}), "
+              f"가중 타입분포 {by_type}")
         if fs.get("preliminary"):
             print(f"[Eval]        예비 {fs['preliminary']}개는 더 깊은 모드(EVAL_MODE=deep/full)에서 확정 가능")
