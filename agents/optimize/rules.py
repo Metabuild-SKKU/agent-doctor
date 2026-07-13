@@ -625,6 +625,8 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "prescriptions": [],            # config 처방 없음. 튜닝 루프에서 제외, 리포트만.
+        # reporter가 사용자에게 보여줄 조치 문구. (config로 못 고치는 D그룹 전용)
+        "manual_action": "질문에 답할 근거 문서가 코퍼스에 없습니다. 해당 주제를 다루는 문서를 추가로 수집·인덱싱해 주세요.",
         # 처방: 사용자에게 관련 문서 추가 수집 요청. Optimize 우회.
     },
 
@@ -634,6 +636,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "prescriptions": [],
+        "manual_action": "다단계(multi-hop) 질문의 중간 단계를 뒷받침하는 문서가 일부 누락됐습니다. 빠진 hop과 관련된 문서를 추가로 수집해 주세요.",
         # corpus_gap과 동일 처리 + 어느 hop이 빠졌는지 리포트에 구체적으로 명시.
     },
 
@@ -643,6 +646,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "prescriptions": [],
+        "manual_action": "RAG 파이프라인이 아니라 평가셋(정답) 문제로 보입니다. 해당 질문의 ground_truth를 검수·수정하거나 평가셋에서 제외해 주세요.",
         # RAG pipeline 결함이 아니라 평가셋 문제. Probe ground_truth 수정/제거 또는 사람 검수 큐로 전달.
     },
 }
