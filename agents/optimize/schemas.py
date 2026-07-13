@@ -26,7 +26,7 @@ PrescriptionStatus = Literal["ready", "draft", "unassigned", "manual"]
 TargetProfile = Literal["accuracy", "speed", "cost", "balanced"]
 
 # optimizer.py가 선택할 수 있는 최적화 backend 종류.
-OptimizerBackend = Literal["internal", "ragbuilder", "autorag"]
+OptimizerBackend = Literal["rules", "internal", "ragbuilder", "autorag"]
 
 # optimize를 제안만 할지, 실제 적용할지, 수동 처리할지 결정하는 모드.
 DecisionMode = Literal[
@@ -202,9 +202,9 @@ class OptimizationRequest:
 
     Eval 결과에서 우선순위가 가장 높은 failure label 하나를 고른 뒤,
     현재 baseline config, 처방 후보, search space를 하나로 묶은 wrapper다.
-    internal adapter는 candidates를
-    직접 사용하고, RAGBuilder/AutoRAG adapter는 search_space와 fixed_config를
-    외부 도구 입력 형식으로 변환한다.
+    rules backend는 candidates와 search_space에서 검증된 단일 변경을 고르고,
+    RAGBuilder/AutoRAG adapter는 search_space와 fixed_config를 외부 도구 입력
+    형식으로 변환한다. internal은 향후 자체 탐색 backend용으로 예약한다.
 
     Attributes:
         request_id: 최적화 요청 고유 ID.
@@ -217,7 +217,7 @@ class OptimizationRequest:
         fixed_config: 최적화 중 고정해야 하는 config 값.
         target_metrics: 개선해야 하는 목표 지표 목록.
         target_profile: 사용자의 최적화 성향. 예: accuracy, speed, cost, balanced.
-        optimizer: 사용할 backend. 예: internal, ragbuilder, autorag.
+        optimizer: 사용할 backend. 예: rules, internal, ragbuilder, autorag.
         max_trials: 최대 탐색/시도 횟수.
         reason: 요청 생성 이유.
         propose_only: True이면 실제 적용하지 않고 제안만 생성한다.
@@ -234,7 +234,7 @@ class OptimizationRequest:
     fixed_config: dict[str, Any] = field(default_factory=dict)
     target_metrics: list[str] = field(default_factory=list)
     target_profile: TargetProfile = "balanced"
-    optimizer: OptimizerBackend = "internal"
+    optimizer: OptimizerBackend = "rules"
     max_trials: int = 1
     reason: str = ""
     propose_only: bool = False
