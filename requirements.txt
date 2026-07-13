@@ -30,3 +30,6 @@ tiktoken
 
 # Eval Agent (팀원 B)
 ragas
+
+# Optimize Agent
+ragbuilder==0.1.6       # adapter contract 검증 버전
