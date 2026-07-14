@@ -194,7 +194,7 @@ _SCHEMA_RECALL = '{"properties": {"classifications": {"items": {"properties": {"
 # ══════════════════════════════════════════════════════════════════
 
 def _judge():
-    """평가(심판) LLM 사용 가능 여부(OpenAI/Gemini, EVAL_LLM_PROVIDER로 선택). 키 없으면 None."""
+    """평가(심판) LLM 사용 가능 여부(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택). 키 없으면 None."""
     if not llm_provider.has_key():
         return None
     # 설계 원칙: 응답 모델과 다른 모델로 채점 (모델 선택은 llm_provider 내부에서 처리)

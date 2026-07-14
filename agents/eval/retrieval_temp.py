@@ -103,7 +103,7 @@ def generate_answer(question: str, contexts: list[str]) -> str:
     검색된 컨텍스트로 답변 생성.
 
     [구현 포인트] 실제 RAG 생성기로 교체.
-        - LLM(OpenAI/Gemini) 프롬프트: 컨텍스트만 근거로 답하고, 없으면 기권하도록.
+        - LLM(OpenAI/Gemini/GitHub Models) 프롬프트: 컨텍스트만 근거로 답하고, 없으면 기권하도록.
         - 응답 모델 ≠ 평가 모델 원칙(설계 §LLM-as-Judge) 유지.
     폴백: LLM 키 없거나 실패하면 top 컨텍스트를 그대로 돌려주는 추출식.
     """
@@ -115,7 +115,7 @@ def generate_answer(question: str, contexts: list[str]) -> str:
 
 
 def _llm_generate(question: str, contexts: list[str]) -> str | None:
-    """LLM(OpenAI/Gemini, EVAL_LLM_PROVIDER로 선택)으로 답변 생성. 키 없거나 실패하면 None."""
+    """LLM(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택)으로 답변 생성. 키 없거나 실패하면 None."""
     context_block = "\n\n".join(f"- {c}" for c in contexts)
     system = ("너는 사내 문서 QA 어시스턴트다. 아래 컨텍스트만 근거로 한국어로 "
               "간결히 답하라. 컨텍스트에 근거가 없으면 '제공된 정보로는 알 수 없습니다'라고 답하라.")

@@ -10,29 +10,31 @@ Probe 소스별 신뢰도 (설계 §3):
 
 생성 우선순위:
     1) state.user_questions 가 있으면 → user_log Probe
-    2) 없으면 → 청크 기반 자동 생성(llm_generated)
+    2) 없으면 → 지식그래프(knowledge_graph) 기반 RAGAS 스타일 4분면
+       (단일/멀티홉 × 구체/추상) 생성. 그래프에 쓸 청크/엣지가 부족해
+       결과가 비면 → Single-Hop Specific 단일홉 폴백(_from_chunks).
 
-현재 구현: Single-Hop Specific(단일 청크·사실 기반) 질문만 LLM으로 생성한다
-(청크 내용을 그대로 베끼지 않도록 질문·정답을 LLM이 새로 구성 — retrieval_temp.py의
-_llm_generate 와 동일한 폴백 규칙: OPENAI_API_KEY 없거나 호출 실패 시 휴리스틱 추출로 대체).
+현재 구현: RAGAS 4분면(75%) + DataMorgana-lite(20%) + 무응답(5%, Held-out·False
+Premise 반씩)을 _allocate_budget 비율대로 섞어 생성한다(질문 모두 LLM으로 생성 —
+청크 내용을 그대로 베끼지 않도록 질문·정답을 LLM이 새로 구성. 실제 호출은
+agents/eval/llm_provider.py 가 담당(OpenAI 기본, EVAL_LLM_PROVIDER=gemini 로
+대체 가능) — retrieval_temp.py 와 동일한 폴백 규칙: 키 없거나 호출 실패 시
+휴리스틱 추출로 대체). testset_size(n) < 8 이면 5%/20%가 0~1개로 반올림돼 통계적
+의미가 없으므로 _allocate_budget 이 전부 RAGAS 로 몰아준다(무응답/DataMorgana 없음).
+gold_spans 가 채워진 probe(taxonomy 등 외부 소스)는 _resync_gold_chunk_ids 로
+재청킹 후에도 gold_chunk_ids 를 다시 맞춘다.
 
 [구현 포인트]  (다음 단계로 남겨둠)
-    - Single-Hop Abstract / Multi-Hop(bridge·comparison·aggregation) 추가.
-    - DataMorgana 20%, 무응답(Held-out·False Premise) 5% 비중 혼합.
-    - RAGAS TestsetGenerator 식 지식그래프(청크 간 관계) 기반 시나리오 생성으로 확장.
     - eval_probes.json 영속화 + 문서 diff 기반 증분 생성(골든 테스트셋 재사용).
-    - gold_doc_id/gold_char_span 스키마 추가(재청킹에도 안 깨지는 기준).
 """
 from __future__ import annotations
 
-import json
-import os
 import random
 import re
 
 from core.schema import Chunk, Document, Probe
 from core.state import AgentDoctorState
-from agents.eval import knowledge_graph
+from agents.eval import knowledge_graph, llm_provider
 from agents.eval.knowledge_graph import KGNode
 from agents.eval.types import (
     EVOL_DIRECTIONS,
@@ -54,18 +56,37 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
     """
     state 를 보고 Probe 리스트를 생성한다.
 
-    읽기: state.user_questions, state.chunks
+    우선순위 (설계 §3, 소스 신뢰도 user_log > taxonomy > llm_generated):
+        1) state.user_questions 있으면 → user_log Probe
+        2) 없으면 → _allocate_budget 비율(RAGAS/DataMorgana/무응답)대로
+           지식그래프 기반 4분면 + DataMorgana-lite + 무응답 Probe를 섞어 생성.
+           RAGAS 몫이 그래프 부족으로 비면(단일 폴백만 있는 경우) → 단일홉
+           폴백(_from_chunks)으로 전체를 대체(비중 섞기보다 최소 동작 보장 우선).
+
+    읽기: state.user_questions, state.chunks, state.documents
     """
-    """
-    user log 기반 프로브 생성
     if state.user_questions:
         probes = _from_user_questions(state.user_questions)
         print(f"[Eval] STEP1: user_log Probe {len(probes)}개 생성")
         return probes
-    """
-        
-    probes = _from_chunks(state.chunks, DEFAULT_TESTSET_SIZE)
-    print(f"[Eval] STEP1: llm_generated(폴백) Probe {len(probes)}개 생성")
+
+    graph = knowledge_graph.build_graph(state.chunks)
+    budget = _allocate_budget(DEFAULT_TESTSET_SIZE)
+
+    ragas_probes = _generate_ragas_probes(graph, budget["ragas"])
+    if not ragas_probes:
+        probes = _from_chunks(state.chunks, DEFAULT_TESTSET_SIZE)
+        print(f"[Eval] STEP1: llm_generated(폴백) Probe {len(probes)}개 생성")
+        return probes
+
+    datamorgana_probes = _generate_datamorgana_probes(graph, budget["datamorgana"])
+    no_answer_probes = _generate_no_answer_probes(state.chunks, graph, budget["no_answer"])
+
+    probes = ragas_probes + datamorgana_probes + no_answer_probes
+    probes = _resync_gold_chunk_ids(probes, state.chunks, state.documents)
+    print(f"[Eval] STEP1: llm_generated Probe {len(probes)}개 생성 "
+          f"(ragas={len(ragas_probes)}, datamorgana={len(datamorgana_probes)}, "
+          f"no_answer={len(no_answer_probes)})")
     return probes
 
 
@@ -130,35 +151,22 @@ def _heuristic_single_hop(text: str) -> tuple[str, str]:
 
 def _llm_generate_single_hop(chunk_text: str) -> tuple[str, str] | None:
     """
-    OpenAI 로 Single-Hop Specific (질문, 정답) 쌍을 생성한다.
-    청크 문장을 그대로 베끼지 않도록 질문·정답 모두 새로 구성하게 지시한다.
-    키/라이브러리 없거나 호출·파싱 실패 시 None(호출부가 휴리스틱으로 대체).
+    LLM(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택)으로 Single-Hop Specific (질문, 정답)
+    쌍을 생성한다. 청크 문장을 그대로 베끼지 않도록 질문·정답 모두 새로 구성하게 지시한다.
+    키 없거나 호출·파싱 실패 시 None(호출부가 휴리스틱으로 대체).
     """
-    if not os.getenv("OPENAI_API_KEY"):
+    if not llm_provider.has_key():
         return None
     try:
-        from openai import OpenAI
-    except ImportError:
-        return None
-    try:
-        client = OpenAI()
-        model = os.getenv("EVAL_GEN_MODEL", "gpt-4o-mini")
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content":
-                    "너는 RAG 파이프라인 평가용 테스트 질문을 설계하는 평가자다. "
+        data = llm_provider.chat_json(
+            system=("너는 RAG 파이프라인 평가용 테스트 질문을 설계하는 평가자다. "
                     "주어진 문서 조각(컨텍스트) 하나만으로 답할 수 있는, 실제 사용자가 물어볼 법한 "
                     "구체적인 사실 기반 질문(Single-Hop Specific) 하나와 그 정답을 만들어라. "
                     "질문과 정답 모두 컨텍스트 문장을 그대로 베끼지 말고 자기 말로 다시 구성하되, "
                     "정답은 컨텍스트에 있는 사실에서 벗어나면 안 된다. "
-                    "반드시 {\"question\": str, \"ground_truth\": str} 형태의 JSON으로만 답하라."},
-                {"role": "user", "content": f"[컨텍스트]\n{chunk_text}"},
-            ],
+                    "반드시 {\"question\": str, \"ground_truth\": str} 형태의 JSON으로만 답하라."),
+            user=f"[컨텍스트]\n{chunk_text}",
         )
-        data = json.loads(resp.choices[0].message.content or "{}")
         question = (data.get("question") or "").strip()
         ground_truth = (data.get("ground_truth") or "").strip()
         if not question or not ground_truth:
@@ -178,13 +186,14 @@ def _topic_of(text: str) -> str:
     return first[:40] if len(first) > 40 else first
 
 
-# ── gold span / 위치-인덱스 유틸 (다음 단계에서 사용 예정, 아직 미배선) ──
+# ── gold span / 위치-인덱스 유틸 ──────────────────────────────────
 #
 # RAGAS 스타일 재구현(STEP1)에서 gold_char_span/gold_spans 로 정답 위치를
 # 원문(Document.content) 절대 좌표로 저장해두면, Optimize→Index 재청킹 후에도
 # (chunk_size/overlap이 달라져도) probe.gold_chunk_ids 를 다시 맞출 수 있다.
-# 여기서는 그 순수 계산 로직만 둔다 — generate_probes() 는 아직 이 함수들을
-# 호출하지 않는다(호출부 배선은 이후 단계에서 실측 생성기와 함께 연결).
+# generate_probes() 가 마지막 단계에서 _resync_gold_chunk_ids 를 호출한다
+# (gold_spans 가 없는 probe는 그대로 통과 — _generate_ragas_probes 가 만드는
+# probe는 아직 gold_spans 를 채우지 않으므로 현재는 사실상 no-op).
 #
 # 전제: Chunk.text 는 Document.content 의 앞에서부터 순서대로 나온 부분 문자열이다
 # (agents/index/agent.py::_chunk_text 가 고정 크기로 슬라이스하는 방식과, 향후
@@ -278,12 +287,12 @@ def _resync_gold_chunk_ids(
     return probes
 
 
-# ── RAGAS 스타일 시나리오 합성 (다음 단계에서 배선 예정, 아직 미배선) ──
+# ── RAGAS 스타일 시나리오 합성 ────────────────────────────────────
 #
 # knowledge_graph.build_graph()가 만든 그래프를 입력으로 받아 단일홉(구체/추상)
-# + 멀티홉(bridge/comparison/aggregation) Probe를 생성한다. generate_probes()는
-# 아직 이 함수들을 호출하지 않는다 — 실제 배선(state.documents 유무에 따른 분기,
-# gold_spans 채우기, probe_store 영속화)은 이후 단계에서 처리한다.
+# + 멀티홉(bridge/comparison/aggregation) Probe를 생성한다.
+# generate_probes()가 이를 호출하며, 결과가 비면(그래프에 쓸 청크/엣지 부족)
+# 단일홉 폴백(_from_chunks)으로 대체한다. probe_store 영속화는 이후 단계.
 #
 # RAGAS의 "KG 구축 -> 시나리오 샘플링 -> 질문 합성" 3단계를 _synthesize_query()
 # 하나의 LLM 호출로 압축했다 - testset_size당 호출 수를 3배로 늘리지 않기 위한
@@ -389,6 +398,149 @@ def _generate_ragas_probes(graph: knowledge_graph.KGraph, n: int) -> list[Probe]
     return probes
 
 
+# ── DataMorgana-lite (예산 20%) ───────────────────────────────────
+#
+# 풀 DataMorgana(설정 가능한 페르소나/스타일 조합의 별도 파이프라인) 대신,
+# 이미 있는 _llm_synthesize_query 시나리오 파라미터 중 "질문자가 덜 친절하게
+# 묻는" 조합(비격식·긴 길이·breadth 확장)을 강제해 좀 더 거친 질문을 만드는
+# 최소 버전으로 축소했다(설계 문서도 "시간 남으면 구체화" 항목으로 분류).
+
+def _generate_datamorgana_probes(graph: knowledge_graph.KGraph, n: int) -> list[Probe]:
+    """단일홉 노드에서 거친 스타일(conversational/long/breadth)로 질문을 합성한다."""
+    if n <= 0:
+        return []
+    usable = [node for node in graph.nodes.values() if node.text and len(node.text.strip()) >= 20]
+    probes: list[Probe] = []
+    for i in range(n):
+        if not usable:
+            break
+        node = random.choice(usable)
+        result = _llm_synthesize_query(
+            node.text, "single_specific", None,
+            persona=random.choice(PERSONAS), style="conversational",
+            length="long", evol_dir="breadth",
+        )
+        if result is None:
+            result = _heuristic_synthesize_query([node])
+        question, ground_truth = result
+        if not question or not ground_truth:
+            continue
+        probes.append(Probe(
+            probe_id=f"probe_datamorgana_{i:03d}",
+            question=question,
+            source="llm_generated",
+            expected_difficulty="medium",
+            answer_exists=True,
+            ground_truth=ground_truth,
+            gold_chunk_ids=[node.chunk_id],
+            qtype=None,
+            metadata={"gen_method": "datamorgana_lite", "style": "conversational"},
+        ))
+    return probes
+
+
+# ── 무응답 Probe (예산 5%, Held-out·False Premise 절반씩) ─────────
+#
+# 목적: diagnose.py 의 _no_diagnosis/is_abstention 게이팅이 "정답 없음을 올바르게
+# 기권하는 경우"와 "무응답인데 답을 지어내는 생성 실패"를 구분해 진단할 수 있으려면,
+# answer_exists=False 인 probe가 최소한 존재해야 한다. 두 방식 모두 정답(ground_truth)
+# 없이 answer_exists=False 로 표시해 STEP2 가 "기권해야 정상"인 질문으로 다룬다.
+
+def _generate_no_answer_probes(chunks: list[Chunk], graph: knowledge_graph.KGraph, n: int) -> list[Probe]:
+    """Held-out(전반) / False Premise(후반)로 절반씩 나눠 생성. n=1이면 Held-out 하나만."""
+    if n <= 0:
+        return []
+    n_held_out = (n + 1) // 2
+    n_false_premise = n - n_held_out
+    probes = _generate_held_out_probes(chunks, n_held_out)
+    probes += _generate_false_premise_probes(graph, n_false_premise, start_index=len(probes))
+    return probes
+
+
+def _generate_held_out_probes(chunks: list[Chunk], n: int) -> list[Probe]:
+    """
+    코퍼스에 없는 정보를 묻는 질문. 실제 청크 하나를 주제로 삼되 gold_chunk_ids 를
+    비워(코퍼스에서 답을 찾을 수 없는 것처럼) 검색이 반드시 실패하게 만든다
+    (완전한 코퍼스 제외는 Index Agent 쪽 정보가 필요해 Eval 단독으로는 시뮬레이션만 가능).
+    """
+    usable = [c for c in chunks if c.text and len(c.text.strip()) >= 20]
+    probes: list[Probe] = []
+    for i in range(n):
+        if not usable:
+            break
+        chunk = random.choice(usable)
+        topic = _topic_of(chunk.text)
+        probes.append(Probe(
+            probe_id=f"probe_held_out_{i:03d}",
+            question=f"{topic}과 관련해 아직 공개되지 않은 세부 내규는 무엇인가요?",
+            source="llm_generated",
+            expected_difficulty="medium",
+            answer_exists=False,
+            ground_truth=None,
+            gold_chunk_ids=[],
+            qtype=None,
+            metadata={"gen_method": "no_answer_held_out"},
+        ))
+    return probes
+
+
+def _generate_false_premise_probes(graph: knowledge_graph.KGraph, n: int, start_index: int = 0) -> list[Probe]:
+    """
+    질문 자체에 컨텍스트와 모순되는 잘못된 전제를 심는다(예: 실제로는 존재하지 않는
+    정책이 있다고 전제하고 세부사항을 묻기) — LLM 이 그 전제를 그대로 받아 답을
+    지어내면 생성 실패(hallucination 계열)로 잡혀야 한다.
+    """
+    if n <= 0:
+        return []
+    usable = [node for node in graph.nodes.values() if node.text and len(node.text.strip()) >= 20]
+    probes: list[Probe] = []
+    for i in range(n):
+        if not usable:
+            break
+        node = random.choice(usable)
+        question = _false_premise_question(node.text)
+        if question is None:
+            continue
+        probes.append(Probe(
+            probe_id=f"probe_false_premise_{start_index + i:03d}",
+            question=question,
+            source="llm_generated",
+            expected_difficulty="medium",
+            answer_exists=False,
+            ground_truth=None,
+            gold_chunk_ids=[node.chunk_id],
+            qtype=None,
+            metadata={"gen_method": "no_answer_false_premise"},
+        ))
+    return probes
+
+
+def _false_premise_question(chunk_text: str) -> str | None:
+    """
+    LLM(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택)으로 잘못된 전제가 담긴 질문을
+    만든다. 키 없거나 실패 시 휴리스틱(고정 템플릿)으로 대체 — LLM 없이도
+    answer_exists=False probe가 최소 동작하도록 폴백을 항상 값 있게 유지한다
+    (_llm_synthesize_query 와의 차이).
+    """
+    if llm_provider.has_key():
+        try:
+            data = llm_provider.chat_json(
+                system=("너는 RAG 파이프라인 평가용 테스트 질문을 설계하는 평가자다. "
+                        "주어진 컨텍스트와 모순되거나 컨텍스트에 없는 사실을 전제로 깔고, "
+                        "그 전제가 사실인 것처럼 세부사항을 캐묻는 질문 하나를 한국어로 만들어라 "
+                        "(예: 컨텍스트에 없는 제도가 있다고 가정하고 조건을 묻기). "
+                        "반드시 {\"question\": str} 형태의 JSON으로만 답하라."),
+                user=f"[컨텍스트]\n{chunk_text}",
+            )
+            question = (data.get("question") or "").strip()
+            if question:
+                return question
+        except Exception as e:
+            print(f"[Eval] STEP1: False Premise 질문 생성 실패({e}) → 휴리스틱 폴백")
+    topic = _topic_of(chunk_text)
+    return f"{topic}과 관련된 특별 예외 규정은 정확히 몇 조 몇 항에 명시되어 있나요?"
+
+
 def _make_ragas_probe(
     nodes: list[KGNode], quadrant: str, subtype: str | None, index: int
 ) -> Probe | None:
@@ -450,37 +602,25 @@ def _llm_synthesize_query(
     evol_dir: str,
 ) -> tuple[str, str] | None:
     """
-    RAGAS 시나리오(quadrant/subtype/persona/style/length/evol_direction)를 OpenAI
-    호출 1번으로 합성한다. 기존 _llm_generate_single_hop과 동일한 폴백 규칙:
-    키/라이브러리 없거나 호출·파싱 실패 시 None(호출부가 휴리스틱으로 대체).
+    RAGAS 시나리오(quadrant/subtype/persona/style/length/evol_direction)를
+    LLM(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택) 호출 1번으로 합성한다. 기존
+    _llm_generate_single_hop과 동일한 폴백 규칙: 키 없거나 호출·파싱 실패 시
+    None(호출부가 휴리스틱으로 대체).
     """
-    if not os.getenv("OPENAI_API_KEY"):
+    if not llm_provider.has_key():
         return None
     try:
-        from openai import OpenAI
-    except ImportError:
-        return None
-    try:
-        client = OpenAI()
-        model = os.getenv("EVAL_GEN_MODEL", "gpt-4o-mini")
         instruction = _quadrant_instruction(quadrant, subtype)
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content":
-                    "너는 RAG 파이프라인 평가용 테스트 질문을 설계하는 평가자다. "
+        data = llm_provider.chat_json(
+            system=("너는 RAG 파이프라인 평가용 테스트 질문을 설계하는 평가자다. "
                     f"{instruction} "
                     f"질문자의 페르소나는 '{persona}', 어투는 '{style}', 길이는 '{length}' 이며 "
                     f"'{evol_dir}' 방향으로 질문의 난이도·범위를 조정해라. "
                     "질문과 정답 모두 컨텍스트 문장을 그대로 베끼지 말고 자기 말로 다시 구성하되, "
                     "정답은 컨텍스트에 있는 사실에서 벗어나면 안 된다. "
-                    "반드시 {\"question\": str, \"ground_truth\": str} 형태의 JSON으로만 답하라."},
-                {"role": "user", "content": f"[컨텍스트]\n{context}"},
-            ],
+                    "반드시 {\"question\": str, \"ground_truth\": str} 형태의 JSON으로만 답하라."),
+            user=f"[컨텍스트]\n{context}",
         )
-        data = json.loads(resp.choices[0].message.content or "{}")
         question = (data.get("question") or "").strip()
         ground_truth = (data.get("ground_truth") or "").strip()
         if not question or not ground_truth:
