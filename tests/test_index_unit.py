@@ -1,4 +1,4 @@
-"""Index Module의 외부 모델·서버 의존성 없는 단위 테스트."""
+# 외부 모델이나 Qdrant 서버 없이 Index 계약만 확인하는 테스트.
 from __future__ import annotations
 
 import tempfile
@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from agents.index.agent import CHUNK_STRATEGIES, _chunk_document, _chunk_text, run
+from agents.index.agent import CHUNK_STRATEGIES, IndexTools, _chunk_document, _chunk_text, run
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
     build_client,
@@ -27,6 +27,19 @@ def _document(doc_id: str, content: str) -> Document:
         format="md",
         content=content,
         metadata={"title": doc_id},
+    )
+
+
+def _index_tools() -> IndexTools:
+    return IndexTools(
+        build_client=lambda **_: object(),
+        ensure_collection=lambda *_args, **_kwargs: None,
+        delete_document_chunks=lambda *_args, **_kwargs: None,
+        upsert_chunks=lambda *_args, **_kwargs: None,
+        embed=lambda _text, **_kwargs: [1.0, 0.0, 0.0, 0.0],
+        count_tokens=lambda _text, **_kwargs: 3,
+        build_sparse_vector=lambda _text: {"indices": [], "values": []},
+        build_graph_artifacts=lambda _chunks, _config: {},
     )
 
 
@@ -81,6 +94,22 @@ class ChunkingTests(unittest.TestCase):
         self.assertTrue(all(len(chunk.text) <= 40 for chunk in recursive))
         self.assertTrue(all(chunk.section is not None for chunk in combined))
         self.assertTrue(all(len(chunk.text) <= 40 for chunk in combined))
+
+    def test_numbered_chunk_stages_are_supported(self):
+        document = _document(
+            "guide",
+            "# 설치\n" + ("설치 설명 문장입니다. " * 8)
+            + "\n## Windows\n" + ("PowerShell 설명입니다. " * 8),
+        )
+
+        stage_1 = _chunk_document(document, 40, 8, strategy=1)
+        stage_2 = _chunk_document(document, 40, 8, strategy=2)
+        stage_3 = _chunk_document(document, 40, 8, strategy=3)
+
+        self.assertTrue(all(chunk.section is None for chunk in stage_1))
+        self.assertTrue(all(chunk.section is None for chunk in stage_2))
+        self.assertTrue(all(chunk.section is not None for chunk in stage_3))
+        self.assertTrue(all(len(chunk.text) <= 40 for chunk in stage_3))
 
 
 class IndexRunTests(unittest.TestCase):
@@ -146,6 +175,45 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(second.index_artifacts["reused_embeddings"], 1)
         second_embed.assert_not_called()
 
+    def test_reused_chunks_refresh_retrieval_metadata(self):
+        state = self._state()
+        state.documents = [_document("doc-1", "metadata refresh target")]
+        first = run(state, tools=_index_tools())
+
+        first.index_config["top_k"] = 9
+        first.index_config["use_reranker"] = True
+        second = run(first, tools=_index_tools())
+
+        self.assertEqual(second.status, "indexed")
+        self.assertEqual(second.index_artifacts["reused_embeddings"], 1)
+        self.assertEqual(second.chunks[0].metadata["top_k"], 9)
+        self.assertTrue(second.chunks[0].metadata["use_reranker"])
+
+    def test_reused_chunks_still_seed_chunk_deduplication(self):
+        state = self._state()
+        state.index_config.update(
+            {
+                "chunk_size": 6,
+                "chunk_overlap": 0,
+                "chunk_stage": 1,
+            }
+        )
+        state.documents = [_document("doc-a", "shared")]
+        first = run(state, tools=_index_tools())
+
+        first.documents = [
+            _document("doc-a", "shared"),
+            _document("doc-b", "sharedzz"),
+        ]
+        second = run(first, tools=_index_tools())
+
+        self.assertEqual(second.status, "indexed")
+        self.assertEqual(second.index_artifacts["reused_embeddings"], 1)
+        self.assertEqual(
+            [(chunk.doc_id, chunk.text) for chunk in second.chunks],
+            [("doc-a", "shared"), ("doc-b", "zz")],
+        )
+
     def test_invalid_overlap_returns_error_state(self):
         state = self._state()
         state.documents = [_document("doc-1", "본문")]
@@ -165,6 +233,45 @@ class IndexRunTests(unittest.TestCase):
 
         self.assertEqual(result.status, "error")
         self.assertIn("chunk_strategy", result.error)
+
+    @patch("agents.index.agent.upsert_chunks")
+    @patch("agents.index.agent.ensure_collection")
+    @patch("agents.index.agent.build_client", return_value=Mock())
+    @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
+    def test_chunk_stage_config_overrides_default_strategy(
+        self, _mock_embed, _mock_client, _mock_collection, _mock_upsert
+    ):
+        state = self._state()
+        state.documents = [_document("doc-1", "# 제목\n" + ("본문입니다. " * 8))]
+        state.index_config["chunk_stage"] = 1
+
+        result = run(state)
+
+        self.assertEqual(result.status, "indexed")
+        self.assertEqual(result.index_artifacts["chunk_strategy"], "fixed")
+        self.assertTrue(all(chunk.section is None for chunk in result.chunks))
+
+    def test_run_accepts_swapped_index_tools(self):
+        state = self._state()
+        state.documents = [_document("doc-1", "도구 교체 테스트 본문입니다.")]
+        upserted: list[list[Chunk]] = []
+        tools = IndexTools(
+            build_client=lambda **_: object(),
+            ensure_collection=lambda *_args, **_kwargs: None,
+            delete_document_chunks=lambda *_args, **_kwargs: None,
+            upsert_chunks=lambda _client, chunks: upserted.append(chunks),
+            embed=lambda _text, **_kwargs: [0.0, 1.0, 0.0, 0.0],
+            count_tokens=lambda _text, **_kwargs: 7,
+            build_sparse_vector=lambda _text: {"indices": [], "values": []},
+            build_graph_artifacts=lambda _chunks, _config: {},
+        )
+
+        result = run(state, tools=tools)
+
+        self.assertEqual(result.status, "indexed")
+        self.assertEqual(result.chunks[0].embedding, [0.0, 1.0, 0.0, 0.0])
+        self.assertEqual(result.chunks[0].token_count, 7)
+        self.assertEqual(len(upserted[0]), len(result.chunks))
 
     def test_blank_document_fails_pydantic_validation(self):
         state = self._state()

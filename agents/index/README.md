@@ -41,6 +41,11 @@ state.index_config["chunk_strategy"] = "fixed"
 state.index_config["chunk_strategy"] = "markdown"
 state.index_config["chunk_strategy"] = "recursive"
 state.index_config["chunk_strategy"] = "markdown_recursive"
+
+# 번호 단계로도 선택 가능
+state.index_config["chunk_stage"] = 1  # fixed
+state.index_config["chunk_stage"] = 2  # recursive
+state.index_config["chunk_stage"] = 3  # markdown_recursive
 ```
 
 | 전략 | 동작 | 용도 |
@@ -52,6 +57,36 @@ state.index_config["chunk_strategy"] = "markdown_recursive"
 
 한 번의 Index 실행에서는 한 전략을 선택한다. Eval 결과가 낮으면 Optimize가
 `chunk_strategy`를 바꾸고 Index를 재실행할 수 있다.
+
+실험용 청킹 함수를 추가할 때는 `agent.py`의 `register_chunk_strategy()`로 등록한다.
+각 함수는 `Document, chunk_size, chunk_overlap`을 받아 `ChunkDraft(text, section, start, end)`
+계약을 지키면 된다.
+
+## 도구 교체 지점
+
+Index 전체를 갈아엎지 않고 외부 도구만 바꾸려면 `agent.py`의 `IndexTools`를 사용한다.
+기본값은 현재 `qdrant_store.py`와 `graph_index.py` 구현을 그대로 묶는다.
+
+```python
+from agents.index.agent import IndexTools, run
+
+state = run(
+    state,
+    tools=IndexTools(
+        build_client=my_vector_client,
+        ensure_collection=my_collection_setup,
+        delete_document_chunks=my_delete,
+        upsert_chunks=my_upsert,
+        embed=my_embed,
+        count_tokens=my_token_counter,
+        build_sparse_vector=my_sparse_encoder,
+        build_graph_artifacts=my_graph_builder,
+    ),
+)
+```
+
+운영 설정으로 바꿀 때는 `core/state.py`의 `index_config` 기본값과 `agents/serve/api.py`의
+검색 호출부도 같은 provider/모델 계약을 보도록 맞춰야 한다.
 
 ## 파일
 

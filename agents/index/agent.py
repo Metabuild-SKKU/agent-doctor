@@ -1,9 +1,6 @@
-"""
-Index Agent — 문서 검증·중복 제거·청킹·임베딩·Qdrant 저장.
-
-읽기: state.documents, state.index_config
-쓰기: state.chunks, state.index_artifacts, state.status, state.error
-"""
+# Index 단계에서 만지는 상태:
+# - read: state.documents, state.index_config
+# - write: state.chunks, state.index_artifacts, state.status, state.error
 from __future__ import annotations
 
 import hashlib
@@ -11,7 +8,7 @@ import json
 import os
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -45,9 +42,22 @@ class _SectionDraft:
     start: int
     end: int
 
-class _DocumentSchema(BaseModel):
-    """Ingest의 dataclass를 Index 경계에서 다시 검증하는 Pydantic schema."""
 
+@dataclass(frozen=True)
+class IndexTools:
+    # 실험/테스트 때 저장소, 임베딩, 그래프 구현만 바꿔 끼우기 위한 얇은 묶음.
+    build_client: Callable[..., Any]
+    ensure_collection: Callable[..., Any]
+    delete_document_chunks: Callable[..., Any]
+    upsert_chunks: Callable[..., Any]
+    embed: Callable[..., list[float]]
+    count_tokens: Callable[..., int]
+    build_sparse_vector: Callable[..., dict]
+    build_graph_artifacts: Callable[..., dict]
+
+
+# Ingest가 넘겨준 Document도 Index 경계에서 한 번 더 확인한다.
+class _DocumentSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     doc_id: str = Field(min_length=1)
@@ -65,7 +75,6 @@ class _DocumentSchema(BaseModel):
 
 
 def _normalize_text(text: str) -> str:
-    """Unicode와 줄바꿈을 통일하되 문단 구조는 보존한다."""
     text = unicodedata.normalize("NFKC", text or "")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = "\n".join(line.rstrip() for line in text.splitlines())
@@ -74,7 +83,6 @@ def _normalize_text(text: str) -> str:
 
 
 def _validate_document(document: Document) -> None:
-    """Index가 처리하기 전에 공통 Document 계약을 확인한다."""
     if not isinstance(document, Document):
         raise TypeError(f"Document 타입이 아닙니다: {type(document).__name__}")
     try:
@@ -95,8 +103,8 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# char_span이 원문 좌표를 가리키도록 앞뒤 공백만 보정한다.
 def _trimmed_slice(text: str, start: int, end: int) -> tuple[str, int, int]:
-    """원문 slice의 공백을 제거하고 보정된 원문 좌표를 함께 반환한다."""
     raw = text[start:end]
     left = len(raw) - len(raw.lstrip())
     right = len(raw.rstrip())
@@ -105,8 +113,8 @@ def _trimmed_slice(text: str, start: int, end: int) -> tuple[str, int, int]:
     return text[trimmed_start:trimmed_end], trimmed_start, trimmed_end
 
 
+# Markdown 제목은 section 이름으로 남기고, 위치값은 원문 기준을 유지한다.
 def _split_markdown_sections(text: str) -> list[_SectionDraft]:
-    """Markdown 제목 경계를 찾되 모든 위치는 원본 Document 좌표로 유지한다."""
     heading_pattern = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
     heading_path: list[str] = []
     sections: list[_SectionDraft] = []
@@ -147,8 +155,8 @@ def _split_markdown_sections(text: str) -> list[_SectionDraft]:
     return [_SectionDraft(text=body, section=None, start=start, end=end)] if body else []
 
 
+# recursive chunker가 문맥 경계에서 끊도록 후보 순서를 둔다.
 def _preferred_boundary(text: str, start: int, hard_end: int) -> int:
-    """문단→줄→문장→공백 순서로 가장 가까운 경계를 찾는다."""
     minimum = start + max(1, (hard_end - start) // 2)
     for separator in ("\n\n", "\n", ". ", "。", "? ", "! ", " "):
         position = text.rfind(separator, minimum, hard_end)
@@ -165,7 +173,6 @@ def _fixed_chunks(
     base_offset: int = 0,
     section: str | None = None,
 ) -> list[_ChunkDraft]:
-    """문장 경계를 고려하지 않고 일정 글자 수로 분할한다."""
     if not text:
         return []
     chunks: list[_ChunkDraft] = []
@@ -195,7 +202,6 @@ def _recursive_chunks(
     base_offset: int = 0,
     section: str | None = None,
 ) -> list[_ChunkDraft]:
-    """문맥 경계를 우선하고 각 결과의 원문 char span을 보존한다."""
     if not text:
         return []
     if len(text) <= chunk_size:
@@ -251,7 +257,6 @@ def _markdown_strategy(
     _chunk_size: int,
     _chunk_overlap: int,
 ) -> list[_ChunkDraft]:
-    """Markdown 제목 단위만 사용하며 긴 섹션도 추가로 자르지 않는다."""
     return [
         _ChunkDraft(
             text=section.text,
@@ -282,7 +287,6 @@ def _markdown_recursive_strategy(
     chunk_size: int,
     chunk_overlap: int,
 ) -> list[_ChunkDraft]:
-    """Markdown 섹션으로 1차 분리한 뒤 긴 섹션만 recursive로 나눈다."""
     drafts: list[_ChunkDraft] = []
     for section in _split_markdown_sections(document.content):
         drafts.extend(
@@ -306,13 +310,67 @@ CHUNK_STRATEGIES: dict[str, ChunkStrategy] = {
     "markdown_recursive": _markdown_recursive_strategy,
 }
 
+CHUNK_STAGE_ALIASES: dict[str | int, str] = {
+    1: "fixed",
+    "1": "fixed",
+    "stage_1": "fixed",
+    2: "recursive",
+    "2": "recursive",
+    "stage_2": "recursive",
+    3: "markdown_recursive",
+    "3": "markdown_recursive",
+    "stage_3": "markdown_recursive",
+}
 
+
+# Notion의 (1)(2)(3) 외 실험 chunker를 붙일 때 쓴다.
+def register_chunk_strategy(name: str, strategy: ChunkStrategy) -> None:
+    normalized = name.strip()
+    if not normalized:
+        raise ValueError("chunk_strategy 이름은 빈 문자열일 수 없습니다.")
+    CHUNK_STRATEGIES[normalized] = strategy
+
+
+def _resolve_chunk_strategy(strategy: str | int) -> str:
+    resolved = CHUNK_STAGE_ALIASES.get(strategy, strategy)
+    if isinstance(resolved, str):
+        resolved = resolved.strip()
+    if resolved in CHUNK_STRATEGIES:
+        return str(resolved)
+    choices = ", ".join(CHUNK_STRATEGIES)
+    stages = "1=fixed, 2=recursive, 3=markdown_recursive"
+    raise ValueError(
+        f"지원하지 않는 chunk_strategy입니다: {strategy}. 선택값: {choices}; 단계: {stages}"
+    )
+
+
+def _configured_chunk_strategy(config: dict) -> str:
+    raw_strategy = config.get(
+        "chunk_stage",
+        config.get("chunk_strategy", "markdown_recursive"),
+    )
+    return _resolve_chunk_strategy(raw_strategy)
+
+
+def _default_tools() -> IndexTools:
+    return IndexTools(
+        build_client=build_client,
+        ensure_collection=ensure_collection,
+        delete_document_chunks=delete_document_chunks,
+        upsert_chunks=upsert_chunks,
+        embed=embed,
+        count_tokens=count_tokens,
+        build_sparse_vector=build_sparse_vector,
+        build_graph_artifacts=build_graph_artifacts,
+    )
+
+
+# 예전 fixed-size 호출부는 깨지지 않게 그대로 둔다.
 def _chunk_text(
     text: str,
     chunk_size: int,
     chunk_overlap: int,
 ) -> list[tuple[str, int, int]]:
-    """기존 fixed-size 청킹 계약과 원본 기준 위치를 유지하는 공개 함수."""
     trimmed, start, _ = _trimmed_slice(text, 0, len(text))
     return [
         (draft.text, draft.start, draft.end)
@@ -325,29 +383,24 @@ def _chunk_text(
     ]
 
 
+# Index 본문에서는 여기만 호출해서 chunking 전략을 교체한다.
 def _chunk_document(
     document: Document,
     chunk_size: int,
     chunk_overlap: int,
-    strategy: str = "markdown_recursive",
+    strategy: str | int = "markdown_recursive",
 ) -> list[_ChunkDraft]:
-    """동일한 출력 계약으로 등록된 청킹 전략을 실행한다."""
-    try:
-        chunker = CHUNK_STRATEGIES[strategy]
-    except KeyError as exc:
-        choices = ", ".join(CHUNK_STRATEGIES)
-        raise ValueError(
-            f"지원하지 않는 chunk_strategy입니다: {strategy}. 선택값: {choices}"
-        ) from exc
+    resolved_strategy = _resolve_chunk_strategy(strategy)
+    chunker = CHUNK_STRATEGIES[resolved_strategy]
     return chunker(document, chunk_size, chunk_overlap)
 
 
+# 청크/임베딩 결과를 바꾸는 설정만 재사용 판단에 반영한다.
 def _index_signature(config: dict) -> str:
-    """청크나 임베딩 결과에 영향을 주는 설정만 fingerprint에 포함한다."""
     relevant = {
         "chunk_size": config["chunk_size"],
         "chunk_overlap": config["chunk_overlap"],
-        "chunk_strategy": config.get("chunk_strategy", "markdown_recursive"),
+        "chunk_strategy": _configured_chunk_strategy(config),
         "embedding_model": config["embedding_model"],
         "embedding_dimension": config.get("embedding_dimension", 1024),
         "use_hybrid": config.get("use_hybrid", False),
@@ -362,15 +415,92 @@ def _validate_config(config: dict) -> None:
         raise ValueError("chunk_size는 1 이상의 정수여야 합니다.")
     if not isinstance(overlap, int) or overlap < 0 or overlap >= chunk_size:
         raise ValueError("chunk_overlap은 0 이상 chunk_size 미만이어야 합니다.")
-    strategy = config.get("chunk_strategy", "markdown_recursive")
-    if strategy not in CHUNK_STRATEGIES:
-        choices = ", ".join(CHUNK_STRATEGIES)
-        raise ValueError(
-            f"지원하지 않는 chunk_strategy입니다: {strategy}. 선택값: {choices}"
-        )
+    _configured_chunk_strategy(config)
     top_k = config.get("top_k", 5)
     if not isinstance(top_k, int) or top_k <= 0:
         raise ValueError("top_k는 1 이상의 정수여야 합니다.")
+
+
+def _chunk_metadata(
+    document: Document,
+    config: dict,
+    *,
+    chunk_index: int,
+    document_hash: str,
+    chunk_hash: str,
+    char_span: tuple[int, int],
+    chunk_strategy: str,
+    signature: str,
+    embedding_dimension: int,
+) -> dict[str, Any]:
+    # Serve는 Qdrant payload만 보고 검색 옵션을 복원하므로 retrieval 설정도 같이 저장한다.
+    return {
+        **document.metadata,
+        "chunk_index": chunk_index,
+        "source": document.source,
+        "document_hash": document_hash,
+        "chunk_hash": chunk_hash,
+        "char_span": [char_span[0], char_span[1]],
+        "chunk_strategy": chunk_strategy,
+        "index_signature": signature,
+        "embedding_model": config["embedding_model"],
+        "embedding_dimension": embedding_dimension,
+        "use_hybrid": bool(config.get("use_hybrid", False)),
+        "hybrid_dense_weight": float(config.get("hybrid_dense_weight", 0.7)),
+        "use_reranker": bool(config.get("use_reranker", False)),
+        "reranker_model": config.get("reranker_model"),
+        "top_k": int(config.get("top_k", 5)),
+    }
+
+
+def _span_from_chunk(chunk: Chunk) -> tuple[int, int]:
+    if chunk.char_span:
+        return int(chunk.char_span[0]), int(chunk.char_span[1])
+    raw_span = chunk.metadata.get("char_span")
+    if isinstance(raw_span, (list, tuple)) and len(raw_span) == 2:
+        return int(raw_span[0]), int(raw_span[1])
+    return 0, len(chunk.text)
+
+
+def _parent_id(document: Document, section: str | None) -> str:
+    if section:
+        return f"{document.doc_id}:section:{_sha256(section)[:12]}"
+    return document.doc_id
+
+
+def _refresh_reused_chunk(
+    chunk: Chunk,
+    document: Document,
+    config: dict,
+    *,
+    chunk_index: int,
+    document_hash: str,
+    chunk_hash: str,
+    chunk_strategy: str,
+    signature: str,
+) -> Chunk:
+    # 임베딩은 재사용하되, top_k 같은 실험값은 최신 config로 맞춘다.
+    char_span = _span_from_chunk(chunk)
+    vector_dim = len(chunk.embedding or []) or int(config.get("embedding_dimension", 1024))
+    return replace(
+        chunk,
+        chunk_id=f"{document.doc_id}_chunk_{chunk_index:03d}",
+        doc_id=document.doc_id,
+        char_span=char_span,
+        parent_id=_parent_id(document, chunk.section),
+        hash=chunk_hash[:16],
+        metadata=_chunk_metadata(
+            document,
+            config,
+            chunk_index=chunk_index,
+            document_hash=document_hash,
+            chunk_hash=chunk_hash,
+            char_span=char_span,
+            chunk_strategy=chunk_strategy,
+            signature=signature,
+            embedding_dimension=vector_dim,
+        ),
+    )
 
 
 def _previous_chunks_by_document(chunks: list[Chunk]) -> dict[tuple[str, str], list[Chunk]]:
@@ -383,8 +513,9 @@ def _previous_chunks_by_document(chunks: list[Chunk]) -> dict[tuple[str, str], l
     return grouped
 
 
-def run(state: AgentDoctorState) -> AgentDoctorState:
-    """Notion에서 정한 Index 파이프라인을 실행하고 항상 state를 반환한다."""
+# Eval/Optimize가 config를 바꿔 다시 호출하는 흐름을 전제로 둔 Index 본체.
+def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctorState:
+    tools = tools or _default_tools()
     state.current_agent = "index"
     state.error = None
     print(f"[Index] 문서 {len(state.documents)}개 처리 시작")
@@ -404,6 +535,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     try:
         _validate_config(config)
+        chunk_strategy = _configured_chunk_strategy(config)
         signature = _index_signature(config)
         previous = _previous_chunks_by_document(state.chunks)
         seen_documents: set[str] = set()
@@ -429,21 +561,39 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
             reusable = previous.get((document_hash, signature), [])
             if reusable:
-                all_chunks.extend(reusable)
-                reused_count += len(reusable)
-                print(f"[Index] 기존 임베딩 재사용: {document.doc_id} ({len(reusable)}개)")
+                document_chunks: list[Chunk] = []
+                for chunk in reusable:
+                    chunk_hash = _sha256(chunk.text)
+                    if config.get("deduplicate", True) and chunk_hash in seen_chunks:
+                        continue
+                    seen_chunks.add(chunk_hash)
+                    document_chunks.append(
+                        _refresh_reused_chunk(
+                            chunk,
+                            document,
+                            config,
+                            chunk_index=len(document_chunks),
+                            document_hash=document_hash,
+                            chunk_hash=chunk_hash,
+                            chunk_strategy=chunk_strategy,
+                            signature=signature,
+                        )
+                    )
+                all_chunks.extend(document_chunks)
+                reused_count += len(document_chunks)
+                print(f"[Index] 기존 임베딩 재사용: {document.doc_id} ({len(document_chunks)}개)")
                 continue
 
             drafts = _chunk_document(
                 document,
                 chunk_size=config["chunk_size"],
                 chunk_overlap=config["chunk_overlap"],
-                strategy=config.get("chunk_strategy", "markdown_recursive"),
+                strategy=chunk_strategy,
             )
             title = document.metadata.get("title", document.doc_id)
             print(
                 f"[Index] └ '{title}' → {len(drafts)}개 청크 후보 "
-                f"(strategy={config.get('chunk_strategy', 'markdown_recursive')})"
+                f"(strategy={chunk_strategy})"
             )
 
             document_chunks: list[Chunk] = []
@@ -453,47 +603,39 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     continue
                 seen_chunks.add(chunk_hash)
 
-                vector = embed(
+                vector = tools.embed(
                     draft.text,
                     model_name=config["embedding_model"],
                     vector_dim=config.get("embedding_dimension"),
                 )
                 chunk_index = len(document_chunks)
-                metadata = {
-                    **document.metadata,
-                    "chunk_index": chunk_index,
-                    "source": document.source,
-                    "document_hash": document_hash,
-                    "chunk_hash": chunk_hash,
-                    "char_span": [draft.start, draft.end],
-                    "index_signature": signature,
-                    "embedding_model": config["embedding_model"],
-                    "embedding_dimension": len(vector),
-                    "use_hybrid": bool(config.get("use_hybrid", False)),
-                    "hybrid_dense_weight": float(config.get("hybrid_dense_weight", 0.7)),
-                    "use_reranker": bool(config.get("use_reranker", False)),
-                    "reranker_model": config.get("reranker_model"),
-                    "top_k": int(config.get("top_k", 5)),
-                }
+                char_span = (draft.start, draft.end)
+                metadata = _chunk_metadata(
+                    document,
+                    config,
+                    chunk_index=chunk_index,
+                    document_hash=document_hash,
+                    chunk_hash=chunk_hash,
+                    char_span=char_span,
+                    chunk_strategy=chunk_strategy,
+                    signature=signature,
+                    embedding_dimension=len(vector),
+                )
                 chunk = Chunk(
                     chunk_id=f"{document.doc_id}_chunk_{chunk_index:03d}",
                     doc_id=document.doc_id,
                     text=draft.text,
                     section=draft.section,
-                    char_span=(draft.start, draft.end),
-                    token_count=count_tokens(
+                    char_span=char_span,
+                    token_count=tools.count_tokens(
                         draft.text,
                         model_name=config["embedding_model"],
                     ),
-                    parent_id=(
-                        f"{document.doc_id}:section:{_sha256(draft.section)[:12]}"
-                        if draft.section
-                        else document.doc_id
-                    ),
+                    parent_id=_parent_id(document, draft.section),
                     hash=chunk_hash[:16],
                     embedding=vector,
                     sparse_vector=(
-                        build_sparse_vector(draft.text)
+                        tools.build_sparse_vector(draft.text)
                         if config.get("use_hybrid", False)
                         else None
                     ),
@@ -506,23 +648,23 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             raise ValueError("검증과 중복 제거 후 저장할 청크가 없습니다.")
 
         vector_dim = len(next(chunk.embedding for chunk in all_chunks if chunk.embedding))
-        client = build_client(
+        client = tools.build_client(
             url=os.getenv("QDRANT_URL", ":memory:"),
             api_key=os.getenv("QDRANT_API_KEY"),
         )
-        ensure_collection(
+        tools.ensure_collection(
             client,
             vector_dim=vector_dim,
             recreate_on_mismatch=bool(
                 config.get("recreate_collection_on_dimension_mismatch", False)
             ),
         )
-        delete_document_chunks(client, list(seen_doc_ids))
-        upsert_chunks(client, all_chunks)
+        tools.delete_document_chunks(client, list(seen_doc_ids))
+        tools.upsert_chunks(client, all_chunks)
 
         state.chunks = all_chunks
         if config.get("graph_enabled", True):
-            state.index_artifacts = build_graph_artifacts(all_chunks, config)
+            state.index_artifacts = tools.build_graph_artifacts(all_chunks, config)
         else:
             state.index_artifacts = {}
         state.index_artifacts.update(
@@ -530,6 +672,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 "documents": len(seen_documents),
                 "chunks": len(all_chunks),
                 "reused_embeddings": reused_count,
+                "chunk_strategy": chunk_strategy,
                 "embedding_model": config["embedding_model"],
                 "embedding_dimension": vector_dim,
             }

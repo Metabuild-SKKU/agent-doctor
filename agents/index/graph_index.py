@@ -1,4 +1,4 @@
-"""Chunk에서 문서-청크-개념 관계를 만들고 시각화 파일로 저장한다."""
+# chunk-document-entity 관계 그래프를 만드는 쪽. 검색보다는 구조 확인/시각화용이다.
 from __future__ import annotations
 
 import hashlib
@@ -18,6 +18,7 @@ _STOPWORDS = {
 }
 
 
+# OPENAI_API_KEY가 없어도 그래프 산출물이 나오도록 keyword 방식으로 대체한다.
 def _keyword_entities(text: str, limit: int = 8) -> tuple[list[str], list[dict]]:
     tokens = re.findall(r"[가-힣A-Za-z][가-힣A-Za-z0-9_+.-]{1,}", text)
     counts = Counter(token for token in tokens if token.lower() not in _STOPWORDS)
@@ -29,6 +30,7 @@ def _keyword_entities(text: str, limit: int = 8) -> tuple[list[str], list[dict]]
     return entities, relations
 
 
+# LLM을 쓸 수 있으면 entity/relation JSON만 받아온다.
 def _llm_entities(text: str, model: str) -> tuple[list[str], list[dict]]:
     from openai import OpenAI
 
@@ -62,6 +64,7 @@ def _llm_entities(text: str, model: str) -> tuple[list[str], list[dict]]:
     return entities[:12], relations[:20]
 
 
+# 설정과 API key 상태에 따라 LLM/keyword 추출을 고른다.
 def _extract(chunk: Chunk, config: dict) -> tuple[list[str], list[dict], str]:
     mode = config.get("graph_extraction", "auto")
     if mode in {"auto", "llm"} and os.getenv("OPENAI_API_KEY"):
@@ -90,6 +93,7 @@ def _safe_id(value: str) -> str:
     return "n" + hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
 
 
+# README나 Notion에 붙여 보기 쉽게 Mermaid 파일도 남긴다.
 def _write_mermaid(graph: Any, path: Path) -> None:
     lines = ["```mermaid", "graph LR"]
     for node, data in graph.nodes(data=True):
@@ -111,8 +115,8 @@ def _write_mermaid(graph: Any, path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+# NetworkX 그래프와 export 파일들을 한 번에 만든다.
 def build_graph_artifacts(chunks: list[Chunk], config: dict) -> dict:
-    """NetworkX 그래프와 Mermaid/PyVis 산출물을 만든다."""
     import networkx as nx
 
     output_dir = Path(config.get("graph_output_dir", "output/index_graph"))
