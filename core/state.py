@@ -43,6 +43,10 @@ class AgentDoctorState:
     # Eval Agent 결과
     probes: list[Probe] = field(default_factory=list)
     report: Optional[DiagnosticReport] = None
+    # 진단 신호 캐시: {probe_id: {signal_name: value}}. 같은 파이프라인 버전 내 재진단 시 재사용.
+    # 버전(index_config+코퍼스)이 바뀌면 Eval 진입 시 무효화한다.
+    diagnosis_cache: dict = field(default_factory=dict)
+    diagnosis_cache_version: str = ""
 
     # 반복 제어
     iteration: int = 0
