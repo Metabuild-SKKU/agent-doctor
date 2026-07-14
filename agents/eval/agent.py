@@ -29,6 +29,7 @@ from core.state import AgentDoctorState
 
 from agents.eval.types import EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled
 from agents.eval.probe_gen import generate_probes
+from agents.eval.probe_store import save_probes, load_probes
 # ⚠️ 임시: Index Agent가 검색 리트리버를 제공하기 전까지만 retrieval_temp 사용.
 #     Index 검색이 준비되면 retrieval_temp 를 삭제하고 여기 import 를 교체할 것.
 from agents.eval.retrieval_temp import build_eval_index, retrieve, generate_answer, _keyword_search
@@ -80,7 +81,18 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
-        probes = generate_probes(state)
+        # user_questions 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
+        # LLM 생성(llm_generated) 경로만 영속화 대상 — 코퍼스 버전이 그대로면 이전에
+        # 만든 골든 테스트셋을 재사용해 매 Optimize 반복마다 LLM 재호출을 피한다.
+        if state.user_questions:
+            probes = generate_probes(state)
+        else:
+            probes = load_probes(version)
+            if probes is None:
+                probes = generate_probes(state)
+                save_probes(probes, version)
+            else:
+                print(f"[Eval] STEP1: 저장된 Probe {len(probes)}개 재사용(버전 일치)")
         if not probes:
             print("[Eval] 경고: Probe 0개 생성 → 평가 불가, 통과 처리")
             state.probes = []
