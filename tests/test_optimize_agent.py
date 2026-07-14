@@ -114,6 +114,42 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(state.status, "rolled_back")
 
 
+class OptimizeReportWiringTest(unittest.TestCase):
+    """agent.py 가 매 방문마다 state.optimization_report 를 알맞게 채우는지 검증."""
+
+    def test_apply_stores_pending_report(self):
+        state = agent.run(make_state())                     # 방문1: 적용
+        report = state.optimization_report
+        self.assertIsNotNone(report)
+        self.assertEqual(report.status, "proposed")          # 검증 대기
+        self.assertTrue(report.config_changes)               # 변경 내역 담김
+
+    def test_keep_stores_applied_trial_report(self):
+        # 방문2가 '판정만' 하도록 예산을 소진시킨다(예산이 남으면 새 처방 적용이 headline).
+        state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
+        state.report = make_report(75.0)                     # 개선
+        state = agent.run(state)                             # 방문2: 예산소진 → 유지 판정만
+        report = state.optimization_report
+        self.assertEqual(report.status, "applied")
+        self.assertIn("유지", report.summary)
+
+    def test_rollback_stores_failed_trial_report(self):
+        state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
+        state.report = make_report(50.0)                     # 악화
+        state = agent.run(state)                             # 방문2: 예산소진 → 판정만(롤백)
+        report = state.optimization_report
+        self.assertEqual(report.status, "failed")
+        self.assertIn("되돌렸", report.summary)
+        self.assertGreater(len(report.metadata.get("floor_violations", [])) +
+                           int("점수" in report.summary), 0)  # 롤백 사유가 실림
+
+    def test_manual_stores_decision_report(self):
+        state = agent.run(make_state(label="corpus_gap"))    # 수동 라벨
+        report = state.optimization_report
+        self.assertEqual(report.status, "manual_required")
+        self.assertTrue(report.manual_actions)
+
+
 class GraphRoutingTest(unittest.TestCase):
     @staticmethod
     def _pending():

@@ -54,6 +54,10 @@ class AgentDoctorState:
     # blacklist: 롤백된 (label, prescription_id) 조합. planner가 재시도에서 제외.
     optimization_history: list = field(default_factory=list)
     blacklist: set = field(default_factory=set)
+    # optimization_report: 이번 Optimize 방문의 사용자용 처방 리포트.
+    #   원소 타입은 OptimizationReport(agents/optimize/schemas.py). core가 optimize를
+    #   import하지 않도록 타입은 느슨하게 둔다. Serve가 마지막 방문 리포트를 읽는다.
+    optimization_report: Optional[object] = None
 
     # Serve Agent 결과
     mcp_endpoint: Optional[str] = None
