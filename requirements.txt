@@ -29,7 +29,9 @@ llama-index-llms-openai
 tiktoken
 
 # Eval Agent (member B)
-ragas
+# NOTE: the `ragas` library is intentionally NOT listed. eval reimplements RAGAS
+#   prompts/algorithms in metrics_ragas.py because ragas conflicts with langchain 1.x / langgraph
+#   (installing it causes pip ResolutionImpossible).
 google-genai            # only when EVAL_LLM_PROVIDER=gemini (temp bridge before OpenAI token approval)
 
 # Optimize Agent
