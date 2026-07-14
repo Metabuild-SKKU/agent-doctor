@@ -1,19 +1,42 @@
 # Optimize 파트 진행상황
 
-작성 기준: `feature/optimize_Sungwoo` 브랜치의 현재 워킹트리  
-작성일: 2026-07-10
+작성 기준: `feature/optimize_Sungwoo` 브랜치의 현재 워킹트리
+작성일: 2026-07-10 (초안, 아래 섹션 대부분은 이 시점 기준)
 
-## 1. 한눈에 보는 현재 상태
+## 0. 2026-07-14 업데이트 — agent.py/history.py/reporter.py/graph.py 완료
 
-Optimize 파트는 **규칙·데이터 모델·계획 수립·설정 변환·RAGBuilder 어댑터의 하위 부품은 상당 부분 작성됐지만, 이를 실제 파이프라인으로 묶는 진입점은 아직 미구현** 상태다.
+아래 1~7절은 2026-07-10 스냅샷이라 agent.py/history/reporter/graph.py를
+"미구현"으로 서술하지만, 그 뒤 이 4개 파일이 모두 구현·테스트·통합됐다.
+최신 상태는 이 절만 보면 된다(1~7절은 그 이전 하위 부품 진행상황 기록으로만 참고).
+
+- **완료**: `agent.py`(Phase 1 순방향 실행 + Phase 2 방문 간 판정·롤백), `history.py`
+  (하한선 검사, judge, pending→확정 2단계 이력), `reporter.py`(decision/verdict 기반
+  사용자 리포트 생성), `graph.py` 라우팅(`route_after_optimize`, 예산 소진 시 마지막
+  처방 판정 위해 optimize 재진입)
+- **완료**: `state.optimization_report` 필드 추가 — 매 Optimize 방문마다 채워지고
+  Serve/사용자가 마지막 방문 리포트를 읽을 수 있음
+- **완료(성우님)**: `optimizer.py` backend dispatch, `planner.py`의 search_space 생성
+- **팀 결정 완료(코드 변경 없음)**: manual+actionable 동시 발생 시 MVP대로
+  자동 진행 + manual_labels 곁들이기 유지. FLOORS 하한선은 지금은 더미값 유지,
+  실제 파이프라인을 돌려보고 얻은 실험 결과로 나중에 튜닝
+- **남은 것**: `rules.py`의 다수 처방(reranker/mmr/query_rewrite/adaptive_retrieval/
+  context_compression/chunking_strategy 등)이 index_config에 해당 필드가 없어
+  `draft`/`unassigned` 상태 — Index 팀과 필드 합의가 선행돼야 `ready`로 승격 가능.
+  현재 자동 적용되는 처방은 사실상 chunk_size 계열 위주.
+- 테스트 현황: Optimize 관련 단위/통합 테스트 59개 통과
+  (`test_config_mapper`, `test_optimizer`, `test_ragbuilder_adapter`, `test_optimize_agent`)
+
+## 1. 한눈에 보는 현재 상태 (2026-07-10 시점 스냅샷)
+
+Optimize 파트는 **규칙·데이터 모델·계획 수립·설정 변환·RAGBuilder 어댑터의 하위 부품은 상당 부분 작성됐지만, 이를 실제 파이프라인으로 묶는 진입점은 아직 미구현** 상태다. *(0절 참고 — 이 진입점은 이후 완료됨)*
 
 - 구현됨: 진단 라벨 규칙, planner의 우선순위/요청 생성, Optimize 내부 schema, config 적용과 diff, RAGBuilder mock·client 주입 경로
 - 구현 중: optimizer의 capability/constraint 정책, RAGBuilder mapping 책임 분리, 관련 단위 테스트
-- 미구현: `agent.py`, history, reporter, optimizer backend dispatch
+- 미구현: `agent.py`, history, reporter, optimizer backend dispatch *(이후 모두 완료, 0절 참고)*
 - 의도적 유보: `internal_adapter.py`는 향후 자체 search space 최적화 backend를 구현할 때 사용하기 위해 빈 파일로 유지
-- 통합 차단 요인: `agent.py`의 `run()`이 `pass`여서 Optimize 노드가 `None`을 반환함
+- 통합 차단 요인: `agent.py`의 `run()`이 `pass`여서 Optimize 노드가 `None`을 반환함 *(해소됨)*
 - 규칙 현황: 총 25개 라벨 중 `ready` 5개, `draft` 17개, `manual` 3개
-- 테스트 현황: Optimize 관련 단위 테스트 11개 통과. 실제 LangGraph 왕복, planner, history/rollback, 실제 RAGBuilder 실행 테스트는 없음
+- 테스트 현황: Optimize 관련 단위 테스트 11개 통과. 실제 LangGraph 왕복, planner, history/rollback, 실제 RAGBuilder 실행 테스트는 없음 *(이후 agent/graph 통합 테스트 추가됨, 0절 참고)*
 
 상태 표시는 다음 기준을 사용한다.
 
@@ -55,7 +78,7 @@ Eval report
   -> agent: state 갱신, iteration 증가, index 재진입
 ```
 
-현재 연결 상태는 아래와 같다.
+2026-07-10 시점 연결 상태(스냅샷)는 아래와 같았다.
 
 ```text
 Eval report
@@ -65,11 +88,12 @@ Eval report
   -X-> history/reporter (미구현)
 ```
 
-즉, 개별 부품의 단위 테스트 성공과 별개로 Optimize 노드 전체는 아직 실행할 수 없다.
+*(0절 업데이트: 이후 전 구간이 연결됐다 — planner → optimizer → config_mapper →
+history → reporter → agent.py → graph.py 라우팅까지 실행 가능하다.)*
 
 ## 4. 파일별 역할, 진행상황, 해야 할 일
 
-### `agent.py` — 미구현, 최우선
+### `agent.py` — 완료 (Phase 1 + Phase 2)
 
 역할:
 
@@ -78,20 +102,16 @@ Eval report
 - planner, optimizer, mapper, history, reporter를 순서대로 호출
 - `state.index_config`, `state.iteration`, `state.status`, `state.error`, `state.current_agent`를 갱신하고 반드시 `state`를 반환
 
-현재 상태:
+현재 상태(0절 업데이트로 반영):
 
-- `run()`이 `pass`만 포함한다.
-- LangGraph가 Optimize 경로에 진입하면 `None`이 반환되어 상태 계약이 깨진다.
-- 파일 상단의 읽기/쓰기 상태 필드 docstring도 없다.
+- `run()`이 매 방문마다 2단계로 동작한다: (1) 지난 처방 판정(`_judge_pending_trial`) →
+  나빴으면 config 롤백 + blacklist 등록, (2) 새 처방 선택·적용 → pending 이력 생성.
+- `use_current`/`manual_required`/`apply_optimize`/optimizer 실패 분기를 모두 처리한다.
+- 매 방문마다 `state.optimization_report`를 채운다(판정은 `reporter.build_trial_report`,
+  새 적용/수동/유지는 `reporter.build_report`로 분리해 처방-점수 불일치를 방지).
+- 예외는 밖으로 전파하지 않고 `state.status="error"` + `state.error`로 기록한다.
 
-해야 할 일:
-
-1. AGENTS.md 계약에 맞는 `run(state) -> state` 구현
-2. `state.current_agent = "optimize"` 설정과 예외의 `status/error` 변환
-3. `planner.plan()` 결과의 `use_current`, `manual_required`, `apply_optimize` 분기 처리
-4. optimizer 결과를 mapper로 적용하고 `iteration` 증가
-5. history와 reporter 결과를 state에 보관할 방식 확정
-6. Optimize 노드 단위 테스트와 `eval -> optimize -> index` 통합 테스트 추가
+남은 것: 없음(팀 트랙이었던 FLOORS/manual+actionable 정책은 결정 완료, 코드 변경 불필요).
 
 ### `planner.py` — 초안 구현
 
@@ -281,7 +301,7 @@ Eval report
 4. 외부 실패를 optimizer의 검증된 처방 후보 선택 경로로 fallback할지 정책 확정
 5. 실제 실행을 선택적 integration test로 추가
 
-### `history.py` — 미구현
+### `history.py` — 완료
 
 역할:
 
@@ -289,37 +309,36 @@ Eval report
 - 실패한 `(label, prescription_id)` blacklist 관리
 - 성능 하락 시 rollback 판단과 이전 config 복원 지원
 
-현재 상태:
+현재 상태(0절 업데이트로 반영):
 
-- 빈 파일이다.
-- schema에 `OptimizationHistoryItem`만 정의돼 있다.
+- `check_floor`(하한선 위반 검사) + `judge`(단일 점수 비교로 유지/롤백 판정) 구현.
+- 판정이 다음 Eval 재측정 후에야 가능한 시점 문제 때문에, 이력을 pending(적용 시점,
+  before만)→`finalize_item`(다음 방문에서 after+verdict 확정) 2단계로 기록한다.
+- 단일 점수(`overall_score`)는 Eval이 계산한 값을 그대로 읽기만 한다(재계산 안 함).
+- FLOORS는 여전히 더미값(팀 결정: 실제 파이프라인 실험 데이터로 나중에 튜닝).
 
-해야 할 일:
+남은 것: FLOORS 실제값 튜닝(실험 후, 코드 구조 변경 없음).
 
-1. history 저장 위치를 `AgentDoctorState` 정식 필드로 둘지 결정
-2. append/query/blacklist 생성 함수 구현
-3. baseline 대비 metric 개선·악화 판정 규칙 확정
-4. rollback과 iteration 간 관계 구현
-5. 같은 처방 무한 반복 방지 테스트 추가
-
-### `reporter.py` — 미구현
+### `reporter.py` — 완료
 
 역할:
 
 - decision/result/diff/history를 사용자용 `OptimizationReport`로 변환
 - 적용 내용, 무시된 설정, trade-off, 수동 조치, 다음 단계를 설명
 
-현재 상태:
+현재 상태(0절 업데이트로 반영):
 
-- 빈 파일이다.
-- schema에 `OptimizationReport`만 정의돼 있다.
+- `build_report(decision, request, verdict, diff)`로 apply/manual/propose/use_current
+  4갈래 리포트를 만든다.
+- `build_trial_report(item, verdict)`로 "판정"(지난 처방 유지/롤백) 전용 리포트를 만든다
+  — decision 기반 함수와 분리해, 판정 리포트가 새로 고르는 처방이 아니라 판정 대상
+  처방의 이름·점수를 정확히 가리키게 한다.
+- manual 라벨 조치 문구는 `rules.py`의 `manual_action` 필드에서 읽는다.
+- `agent.py`가 매 방문마다 `state.optimization_report`에 결과를 저장 — CLI/API/Serve가
+  이 필드를 읽으면 된다.
 
-해야 할 일:
-
-1. applied/proposed/manual/failed별 report builder 구현
-2. ignored key와 warning을 사용자에게 숨기지 않고 요약
-3. ready가 아닌 finding에 대한 수동 안내 문구 정의
-4. CLI/API가 report를 노출할 state 필드 또는 출력 계약 연결
+남은 것: `selected_prescription`이 항상 첫 후보 기준(실제 적용 처방 추적 정밀도는
+optimizer 쪽 선택 로직이 더 발전하면 개선 여지).
 
 ### `README.md` — 문서 초안, 현재 코드와 일부 불일치
 
@@ -426,18 +445,20 @@ Eval report
 
 ## 6. 권장 구현 순서
 
-1. `planner.py`에서 `applies_when`과 finding signal 대조 및 후보 순서 확정
-2. `optimizer.py`의 기본 후보 선택, RAGBuilder dispatch, 공통 결과 정규화 구현
-3. `agent.py`에서 planner → optimizer → mapper를 연결하고 항상 state 반환
-4. state에 decision/result/report/history 필드를 정식 추가할지 결정
-5. `history.py`의 append와 blacklist부터 구현
-6. `reporter.py`의 applied/manual/failed 요약 구현
-7. Optimize 노드와 반복 그래프 통합 테스트 추가
-8. 실제 RAGBuilder 호환성 검증
-9. `rules.py`의 draft 라벨을 Eval/Index 계약에 맞춰 단계적으로 ready로 승격
-10. 자체 search space 최적화 요구사항이 확정되면 `internal_adapter.py` 구현
+1. ~~`planner.py`에서 `applies_when`과 finding signal 대조 및 후보 순서 확정~~ 완료
+2. ~~`optimizer.py`의 기본 후보 선택, RAGBuilder dispatch, 공통 결과 정규화 구현~~ 완료(성우님)
+3. ~~`agent.py`에서 planner → optimizer → mapper를 연결하고 항상 state 반환~~ 완료
+4. ~~state에 decision/result/report/history 필드를 정식 추가할지 결정~~ 완료
+   (`optimization_history`, `blacklist`, `optimization_report`)
+5. ~~`history.py`의 append와 blacklist부터 구현~~ 완료
+6. ~~`reporter.py`의 applied/manual/failed 요약 구현~~ 완료
+7. ~~Optimize 노드와 반복 그래프 통합 테스트 추가~~ 완료(`test_optimize_agent.py`)
+8. 실제 RAGBuilder 호환성 검증 — 미착수
+9. `rules.py`의 draft 라벨을 Eval/Index 계약에 맞춰 단계적으로 ready로 승격 — 미착수,
+   Index 팀과 config 필드 합의 선행 필요
+10. 자체 search space 최적화 요구사항이 확정되면 `internal_adapter.py` 구현 — 미착수
 
-## 7. 검증 기록
+## 7. 검증 기록 (2026-07-10 시점)
 
 Optimize 관련 테스트 실행:
 
@@ -457,3 +478,18 @@ python -m unittest discover -s tests -p test_ragbuilder_adapter.py -v
 - `tests/test_pipeline.py`가 Ingest 실패 시 import 도중 종료
 
 따라서 현재 확인 가능한 결론은 **Optimize 하위 모듈 3개 영역의 단위 테스트는 통과하지만, 전체 pipeline 성공을 증명하지는 않는다**는 것이다.
+
+### 7-1. 2026-07-14 업데이트
+
+`agent.py`/`graph.py` 완료 이후 통합 테스트가 추가됐다(`tests/test_optimize_agent.py`).
+qdrant_client 등 Index 팀 의존성이 미설치인 환경에서도 `graph.py`를 import할 수 있도록
+스텁을 주입해 라우팅 함수까지 검증한다.
+
+```powershell
+python -m pytest tests/test_optimize_agent.py tests/test_optimizer.py tests/test_config_mapper.py tests/test_ragbuilder_adapter.py -q
+```
+
+결과: 총 59개 테스트 통과(agent 순방향 3 + 롤백 3 + 리포트 연결 4 + graph 라우팅 5,
+나머지는 기존 하위 모듈 테스트). 여전히 실제 LangGraph `eval → optimize → index → eval`
+왕복 전체를 도는 end-to-end 테스트는 없다 — Ingest/Index의 외부 의존성(Notion, qdrant)
+때문에 이 환경에서 실행이 어렵다.
