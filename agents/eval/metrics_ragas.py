@@ -24,6 +24,8 @@ RAGAS 4개 지표 + AspectCritic 을 **LLM-as-Judge** 로 측정한다.
       + `EVAL_MODE≥deep` 일 때만 evaluate_real_track/oracle_track 을 호출한다(기본 비활성).
     - 응답 모델 ≠ 평가 모델(EVAL_JUDGE_MODEL, 기본 gpt-4o), temperature=0.
     - 키 없음·호출/파싱 실패 → 조용히 건너뛰고(폴백) 규칙 지표(STEP3-1)로 진행.
+    - 실제 LLM 호출은 agents/eval/llm_provider.py 가 담당 (OpenAI 기본, EVAL_LLM_PROVIDER=gemini로
+      Google AI Studio 무료 API 임시 대체 가능 — OpenAI 토큰 승인 전 브릿지).
 """
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ import json
 import math
 import os
 
+from agents.eval import llm_provider
 from agents.eval.types import EvalRecord
 
 
@@ -191,15 +194,11 @@ _SCHEMA_RECALL = '{"properties": {"classifications": {"items": {"properties": {"
 # ══════════════════════════════════════════════════════════════════
 
 def _judge():
-    """평가(심판)용 OpenAI 클라이언트와 모델명. 키·라이브러리 없으면 None."""
-    if not os.getenv("OPENAI_API_KEY"):
+    """평가(심판) LLM 사용 가능 여부(OpenAI/Gemini, EVAL_LLM_PROVIDER로 선택). 키 없으면 None."""
+    if not llm_provider.has_key():
         return None
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return None
-    # 설계 원칙: 응답 모델(gpt-4o-mini)과 다른 모델로 채점
-    return OpenAI(), os.getenv("EVAL_JUDGE_MODEL", "gpt-4o")
+    # 설계 원칙: 응답 모델과 다른 모델로 채점 (모델 선택은 llm_provider 내부에서 처리)
+    return True
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -382,27 +381,12 @@ def _average_precision(verdicts: list[int]) -> float:
 
 def _chat(judge, prompt: str) -> dict:
     """RAGAS 형식 단일 프롬프트를 JSON 강제로 호출 → dict. 실패 시 {}."""
-    client, model = judge
-    resp = client.chat.completions.create(
-        model=model,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": prompt}],
-    )
-    content = resp.choices[0].message.content or "{}"
-    try:
-        obj = json.loads(content)
-        return obj if isinstance(obj, dict) else {}
-    except json.JSONDecodeError:
-        return {}
+    return llm_provider.chat_json("", prompt)
 
 
 def _embed(judge, texts: list[str]) -> list[list[float]]:
-    """텍스트 리스트 → 임베딩 벡터 리스트. (심판 클라이언트 재사용)"""
-    client, _ = judge
-    model = os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small")
-    resp = client.embeddings.create(model=model, input=texts)
-    return [d.embedding for d in resp.data]
+    """텍스트 리스트 → 임베딩 벡터 리스트."""
+    return llm_provider.embed_texts(texts)
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

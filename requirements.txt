@@ -30,3 +30,4 @@ tiktoken
 
 # Eval Agent (팀원 B)
 ragas
+google-genai            # EVAL_LLM_PROVIDER=gemini 일 때만 필요 (OpenAI 토큰 승인 전 임시 대체)

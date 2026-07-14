@@ -17,13 +17,14 @@ STEP2: 각 Probe로 검색 + 답변 생성  ── ⚠️ 임시 파일(TEMPORAR
 
 폴백 설계 (AGENTS.md): 라이브러리 미설치·검색 실패 시 조용히 대체 경로로.
     - 임베딩 없음/벡터 검색 실패 → 키워드 검색
-    - LLM 미설정(OPENAI_API_KEY 없음) → 추출식(top 컨텍스트) 답변
+    - LLM 미설정(OPENAI_API_KEY/GEMINI_API_KEY 없음) → 추출식(top 컨텍스트) 답변
 """
 from __future__ import annotations
 
 import os
 
 from core.schema import Chunk
+from agents.eval import llm_provider
 from agents.index.qdrant_store import (
     build_client, ensure_collection, upsert_chunks, embed, search, VECTOR_DIM,
 )
@@ -102,9 +103,9 @@ def generate_answer(question: str, contexts: list[str]) -> str:
     검색된 컨텍스트로 답변 생성.
 
     [구현 포인트] 실제 RAG 생성기로 교체.
-        - LLM(OpenAI 등) 프롬프트: 컨텍스트만 근거로 답하고, 없으면 기권하도록.
+        - LLM(OpenAI/Gemini) 프롬프트: 컨텍스트만 근거로 답하고, 없으면 기권하도록.
         - 응답 모델 ≠ 평가 모델 원칙(설계 §LLM-as-Judge) 유지.
-    폴백: OPENAI_API_KEY 없거나 실패하면 top 컨텍스트를 그대로 돌려주는 추출식.
+    폴백: LLM 키 없거나 실패하면 top 컨텍스트를 그대로 돌려주는 추출식.
     """
     answer = _llm_generate(question, contexts)
     if answer is not None:
@@ -114,28 +115,9 @@ def generate_answer(question: str, contexts: list[str]) -> str:
 
 
 def _llm_generate(question: str, contexts: list[str]) -> str | None:
-    """OpenAI 로 답변 생성. 키/라이브러리 없거나 실패하면 None."""
-    if not os.getenv("OPENAI_API_KEY"):
-        return None
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return None
-    try:
-        client = OpenAI()
-        context_block = "\n\n".join(f"- {c}" for c in contexts)
-        model = os.getenv("EVAL_GEN_MODEL", "gpt-4o-mini")
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=0,
-            messages=[
-                {"role": "system", "content":
-                    "너는 사내 문서 QA 어시스턴트다. 아래 컨텍스트만 근거로 한국어로 "
-                    "간결히 답하라. 컨텍스트에 근거가 없으면 '제공된 정보로는 알 수 없습니다'라고 답하라."},
-                {"role": "user", "content": f"[컨텍스트]\n{context_block}\n\n[질문]\n{question}"},
-            ],
-        )
-        return (resp.choices[0].message.content or "").strip()
-    except Exception as e:
-        print(f"[Eval] LLM 생성 실패({e}) → 추출식 폴백")
-        return None
+    """LLM(OpenAI/Gemini, EVAL_LLM_PROVIDER로 선택)으로 답변 생성. 키 없거나 실패하면 None."""
+    context_block = "\n\n".join(f"- {c}" for c in contexts)
+    system = ("너는 사내 문서 QA 어시스턴트다. 아래 컨텍스트만 근거로 한국어로 "
+              "간결히 답하라. 컨텍스트에 근거가 없으면 '제공된 정보로는 알 수 없습니다'라고 답하라.")
+    user = f"[컨텍스트]\n{context_block}\n\n[질문]\n{question}"
+    return llm_provider.generate_text(system, user)
