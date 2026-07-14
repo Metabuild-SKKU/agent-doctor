@@ -1,36 +1,36 @@
-# 코어
+# Core
 langgraph
 python-dotenv
 pyyaml
 
 # Ingest Agent
-notion-client          # Notion 연결
-requests               # OAuth 토큰 교환
-google-api-python-client  # Google Drive 연결
+notion-client          # Notion connector
+requests               # OAuth token exchange
+google-api-python-client  # Google Drive connector
 google-auth
-pdfplumber             # PDF 파싱
-python-docx            # DOCX 파싱
-openpyxl               # XLSX 파싱
-hwp5                   # HWP 파싱
+pdfplumber             # PDF parsing
+python-docx            # DOCX parsing
+openpyxl               # XLSX parsing
+hwp5                   # HWP parsing
 
 # Serve Agent
-mcp[cli]               # MCP 서버 (FastMCP 포함)
+mcp[cli]               # MCP server (incl. FastMCP)
 fastapi
 uvicorn
 openai
 
 # Index Agent
-sentence-transformers  # 임베딩 (테스트용, 무료 로컬)
-qdrant-client          # 벡터 DB 클라이언트
+sentence-transformers  # embeddings (local, free, for testing)
+qdrant-client          # vector DB client
 
-# Index Agent (팀원 A)
+# Index Agent (member A)
 llama-index
 llama-index-llms-openai
 tiktoken
 
-# Eval Agent (팀원 B)
+# Eval Agent (member B)
 ragas
-google-genai            # EVAL_LLM_PROVIDER=gemini 일 때만 필요 (OpenAI 토큰 승인 전 임시 대체)
+google-genai            # only when EVAL_LLM_PROVIDER=gemini (temp bridge before OpenAI token approval)
 
 # Optimize Agent
-ragbuilder==0.1.6       # adapter contract 검증 버전
+ragbuilder==0.1.6       # version pinned for adapter contract checks
