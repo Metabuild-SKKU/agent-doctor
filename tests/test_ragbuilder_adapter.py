@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from importlib.util import find_spec
 
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -367,8 +368,10 @@ class RAGBuilderAdapterTest(unittest.TestCase):
                 payload,
                 reranker_enabled,
                 trial_budget=None,
+                retriever_type=None,
             ):
                 return {
+                    "retriever_type": retriever_type,
                     "reranker_enabled": reranker_enabled,
                     "trial_budget": trial_budget,
                 }
@@ -389,8 +392,16 @@ class RAGBuilderAdapterTest(unittest.TestCase):
         self.assertEqual(
             builder.retrieval_calls,
             [
-                {"reranker_enabled": False, "trial_budget": 2},
-                {"reranker_enabled": True, "trial_budget": 2},
+                {
+                    "retriever_type": "dense",
+                    "reranker_enabled": False,
+                    "trial_budget": 2,
+                },
+                {
+                    "retriever_type": "dense",
+                    "reranker_enabled": True,
+                    "trial_budget": 2,
+                },
             ],
         )
         self.assertEqual(raw_result["best_score"], 0.9)
@@ -429,6 +440,110 @@ class RAGBuilderAdapterTest(unittest.TestCase):
         self.assertEqual(
             result.best_config,
             {"retriever.search_type": "hybrid"},
+        )
+
+    def test_strict_hybrid_is_single_custom_retriever_option(self):
+        adapter = RAGBuilderAdapter()
+
+        options = adapter._retriever_options(["hybrid"], retriever_k=20)
+
+        self.assertEqual(len(options), 1)
+        self.assertEqual(options[0]["type"], "custom")
+        self.assertEqual(
+            options[0]["custom_class"],
+            "agents.optimize.adapters.ragbuilder_hybrid.StrictHybridRetriever",
+        )
+        self.assertEqual(options[0]["retriever_kwargs"], {"retriever_k": 20})
+
+    def test_retriever_and_reranker_scenarios_are_separated(self):
+        adapter = RAGBuilderAdapter()
+        request = self.make_request(
+            search_space={
+                "retriever.search_type": ["dense", "bm25", "hybrid"],
+                "reranker.enabled": [False, True],
+            },
+            max_trials=6,
+        )
+        mapping = adapter.build_mapping(request)
+        payload = adapter.build_payload(request, mapping)
+
+        scenarios = adapter._retrieval_scenarios(payload)
+
+        self.assertEqual(
+            scenarios,
+            [
+                ("dense", False),
+                ("dense", True),
+                ("bm25", False),
+                ("bm25", True),
+                ("hybrid", False),
+                ("hybrid", True),
+            ],
+        )
+
+    def test_dense_result_is_rejected_when_only_hybrid_was_requested(self):
+        def fake_client(payload):
+            return {
+                "best_config": {
+                    "retrievers": [{"type": "vector_similarity"}],
+                },
+                "best_score": 0.9,
+            }
+
+        request = self.make_request(
+            search_space={"retriever.search_type": ["hybrid"]},
+            metadata={"ragbuilder_client": fake_client},
+        )
+
+        result = RAGBuilderAdapter().run(request)
+
+        self.assertIsNone(result.best_config)
+        self.assertIsNone(result.best_score)
+        self.assertEqual(result.trial_results[0].status, "unsupported")
+        self.assertIn(
+            "outside_search_space:retriever.search_type:dense",
+            result.trial_results[0].unsupported_reasons,
+        )
+
+    @unittest.skipUnless(find_spec("ragbuilder"), "ragbuilder optional dependency 필요")
+    def test_strict_hybrid_factory_builds_real_ensemble_retriever(self):
+        from langchain_community.retrievers import BM25Retriever
+        from langchain_core.documents import Document
+        from ragbuilder.core.config_store import ConfigStore
+
+        from agents.optimize.adapters.ragbuilder_hybrid import StrictHybridRetriever
+
+        documents = [
+            Document(page_content="dense and lexical retrieval"),
+            Document(page_content="strict hybrid search"),
+        ]
+
+        class FakeIngestPipeline:
+            def ingest(self, status=None):
+                return documents
+
+        class FakeVectorStore:
+            def __init__(self):
+                self.calls = []
+
+            def as_retriever(self, **kwargs):
+                self.calls.append(kwargs)
+                return BM25Retriever.from_documents(documents, k=kwargs["search_kwargs"]["k"])
+
+        previous_pipeline = ConfigStore._best_data_ingest_pipeline
+        vectorstore = FakeVectorStore()
+        try:
+            ConfigStore._best_data_ingest_pipeline = FakeIngestPipeline()
+
+            retriever = StrictHybridRetriever(vectorstore, retriever_k=7)
+        finally:
+            ConfigStore._best_data_ingest_pipeline = previous_pipeline
+
+        self.assertEqual(len(retriever.retrievers), 2)
+        self.assertEqual(retriever.weights, [0.5, 0.5])
+        self.assertEqual(
+            vectorstore.calls,
+            [{"search_type": "similarity", "search_kwargs": {"k": 7}}],
         )
 
 
