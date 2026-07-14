@@ -34,6 +34,9 @@ RAGAS_RESPONSE_RELEVANCY_MIN = 0.7
 
 # STEP5 최종 판정
 # graph.route_after_eval() 이 이 값 기반 pass_threshold 로 Serve/Optimize 를 분기한다.
+# 스케일 주의: overall_score 는 0~1 (RAGAS 가중 평균 또는 규칙 지표 평균). 설계 문서가 언급하는
+# "100점 환산"과는 다른 스케일이다 — 100점 환산이 필요한 소비처(대시보드 등)가 생기면 그 표시
+# 계층에서 *100 하고, 이 임계값·overall_score 자체는 0~1로 유지한다(report.py 참고).
 PASS_SCORE_THRESHOLD = 0.8
 
 # 가중 평균 가중치 (합=1.0). 없는 지표는 build_report 에서 재정규화.

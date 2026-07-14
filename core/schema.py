@@ -73,7 +73,12 @@ class Finding:
     Eval Agent가 생성 → Optimize Agent가 소비.
     """
     finding_id: str
-    type: str    # "gap" | "contradiction" | "duplicate" | "staleness" | "retrieval_failure" | "generation_failure"
+    # "gap" | "retrieval_failure" | "generation_failure" (agents/eval/diagnose.py::_group_of 가
+    # type 과 label 접두어로 A/B/C/D 그룹(처방 순서 정렬용)을 파생: type=="gap"→D,
+    # label이 "retrieval_"로 시작→A, "generation_"으로 시작→B, 그 외(컨텍스트 구조 라벨)→C).
+    # "contradiction"/"duplicate"/"staleness"는 예약(미사용) — metrics_ragas.py 가 aspect.contradiction
+    # 을 계산은 해두지만 diagnose.py 는 아직 소비하지 않는다("나중에 개발" 주석 참고).
+    type: str
     severity: str  # "critical" | "warning" | "info"
     description: str
     label: Optional[str] = None          # 세분화 진단명(처방 파일 라벨). Optimize가 label→처방 매핑에 사용

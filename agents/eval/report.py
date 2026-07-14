@@ -54,6 +54,11 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
 
     # 평가 신호(GT 규칙지표/RAGAS)가 전혀 없으면 진단 불가 →
     # eval 한계로 파이프라인을 막지 않도록 통과 처리(overall_score=None).
+    # [설계 결정] 이건 "판정 보류"이지 "품질 확인"이 아니다 — ground_truth 없는 probe만 있거나
+    # (예: user_log 소스) RAGAS 미실행(EVAL_MODE<deep)이면 애초에 점수를 낼 근거 자체가 없다.
+    # 근거 없이 fail 로 강제하면 Optimize 가 존재하지도 않는 문제를 잡으러 무한 루프를 돌 수
+    # 있으므로, "판단 불가 → 막지 않음"을 택했다(Serve 이후에도 report.overall_score is None
+    # 으로 이 상태는 추적 가능하다).
     if overall is None:
         overall_val, pass_thr = None, True
         print("[Eval] 경고: 평가 신호 없음(GT·RAGAS 부재) → 통과 처리")
