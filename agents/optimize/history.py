@@ -5,10 +5,14 @@ Optimize 모듈의 "판정·기록" 계층.
 [역할]
   planner 가 고른 처방이 실제로 적용된 뒤(Index→Eval 재측정 후) 다시 Optimize 로
   돌아왔을 때, 지난 처방이 좋았는지 나빴는지 판정하고 이력 항목을 만들어 준다.
-    1) check_floor        : 모든 지표가 하한선 위인지 검사 (위반 지표 반환)
-    2) judge              : 하한선 위반 → 무조건 롤백, 아니면 점수 비교로 유지/롤백
-    3) build_history_item : 이번 시도를 OptimizationHistoryItem 으로 만들어 반환
+    1) check_floor         : 모든 지표가 하한선 위인지 검사 (위반 지표 반환)
+    2) judge               : 하한선 위반 → 무조건 롤백, 아니면 점수 비교로 유지/롤백
+    3) create_pending_item : 처방 적용 시점의 pending 이력 항목 생성(before 만 채움)
+    4) finalize_item       : 다음 방문에서 판정 결과로 pending 항목 확정(after+verdict)
+    5) find_pending        : 판정 대기 중(pending)인 최근 이력 항목 조회
 
+  판정이 다음 Eval 재측정 후에야 가능하므로(시점 문제), 이력은 두 단계로 기록한다.
+  적용 시점엔 before 만 담은 pending 항목을 만들고, 다음 방문에서 확정한다.
   "판정과 이력 항목 생성"까지가 history 의 책임이다. state 를 직접 수정하지 않고
   값만 반환하며, 실제 반영(블랙리스트 추가·이력 append·config 롤백)은 agent.py 가 한다.
   (planner 가 (request, decision) 만 반환하고 state 는 안 건드린 것과 같은 방식.)
@@ -119,42 +123,70 @@ def judge(
     )
 
 
-# ── 3. 이력 항목 생성 ─────────────────────────────────────────────
-# 블랙리스트 추가·이력 append 는 여기서 하지 않는다. agent.py 가 반환값을 받아
-#   state.blacklist.add((label, prescription_id))
-#   state.optimization_history.append(item)
-# 형태로 직접 반영한다. (판정만 하고 반영은 조율자가 — planner 와 같은 규칙)
+# ── 3. 이력 항목: pending 생성 → 확정 (2단계) ──────────────────────
+# 처방이 좋았는지는 다음 Eval 재측정 후에야 알 수 있어(시점 문제) 이력을 두 단계로
+# 나눈다. 적용 시점엔 create_pending_item(before 만), 다음 방문에서 finalize_item
+# (after+verdict)으로 확정한다. state.optimization_history 에 append/수정하는 것은
+# agent.py 가 한다(판정만 하고 반영은 조율자가 — planner 와 같은 규칙).
 
-def build_history_item(
+def create_pending_item(
     state: AgentDoctorState,
     request: OptimizationRequest,
     prescription_id: str,
-    verdict: Verdict,
     before_config: dict,
-    after_config: dict,
-    before_metrics: dict[str, float],
-    after_metrics: dict[str, float],
+    before_report: DiagnosticReport | None,
 ) -> OptimizationHistoryItem:
-    """이번 처방 시도를 OptimizationHistoryItem 으로 만들어 반환한다.
-    state 에 append 하지 않는다 — 반영은 agent.py 가 한다."""
+    """처방 적용 시점의 'pending' 이력 항목을 만든다.
+    after/verdict 는 아직 없다 — 다음 방문에서 finalize_item 으로 채운다.
+    before_report 는 다음 방문의 judge 에 쓰려고 metadata 에 잠시 보관한다."""
+    before_scores = dict(before_report.ragas_scores) if before_report else {}
     return OptimizationHistoryItem(
         trial_id=str(uuid.uuid4()),
         request_id=request.request_id,
         iteration=state.iteration,
         failure_labels=[request.failure_label],
         optimizer=request.optimizer,
-        status="applied" if verdict.keep else "failed",
+        status="applied",   # config 적용됨, 다음 Eval 검증 대기 (AGENTS.md §8)
         selected_prescription_id=prescription_id,
         before_config=dict(before_config),
-        after_config=dict(after_config),
-        before_metrics=dict(before_metrics),
-        after_metrics=dict(after_metrics),
+        after_config={},           # 미확정
+        before_metrics=before_scores,
+        after_metrics={},          # 비어있음
         target_metrics=list(request.target_metrics),
         reason=request.reason,
-        rollback_reason=None if verdict.keep else verdict.reason,
+        rollback_reason=None,
         metadata={
-            "before_score": verdict.before_score,
-            "after_score": verdict.after_score,
-            "floor_violations": verdict.floor_violations,
+            "pending": True,               # 아직 판정되지 않음
+            "before_report": before_report,  # judge 용(MVP: 객체 참조 보관)
         },
     )
+
+
+def find_pending(
+    history: list[OptimizationHistoryItem],
+) -> OptimizationHistoryItem | None:
+    """판정 대기 중(pending)인 가장 최근 이력 항목을 찾는다. 없으면 None."""
+    for item in reversed(history):
+        if item.metadata.get("pending"):
+            return item
+    return None
+
+
+def finalize_item(
+    item: OptimizationHistoryItem,
+    verdict: Verdict,
+    after_config: dict,
+    after_report: DiagnosticReport | None,
+) -> None:
+    """pending 항목을 판정 결과로 확정한다(제자리 수정).
+    유지면 status='applied', 롤백이면 'failed'+rollback_reason 을 기록한다.
+    after_config 는 롤백 전의 '실제 적용된(=측정된)' config 다."""
+    item.after_config = dict(after_config)
+    item.after_metrics = dict(after_report.ragas_scores) if after_report else {}
+    item.status = "applied" if verdict.keep else "failed"
+    item.rollback_reason = None if verdict.keep else verdict.reason
+    item.metadata["pending"] = False
+    item.metadata["before_score"] = verdict.before_score
+    item.metadata["after_score"] = verdict.after_score
+    item.metadata["floor_violations"] = verdict.floor_violations
+    item.metadata.pop("before_report", None)   # 판정 끝 — 무거운 참조 제거
