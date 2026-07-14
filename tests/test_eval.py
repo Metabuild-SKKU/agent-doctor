@@ -15,7 +15,8 @@ from core.schema import Chunk
 from core.state import AgentDoctorState
 from agents.index.qdrant_store import embed
 from agents.eval.agent import run
-from agents.eval.types import resolve_mode
+from agents.eval.types import resolve_mode, DEFAULT_TOP_K
+from agents.eval.retrieval_temp import build_eval_index, retrieve, generate_answer
 
 # ── 1) 순수 규칙 지표 단위 확인 (의존성 0, 결정적) ────────────────
 from agents.eval.metrics import token_f1, recall_at_k, is_abstention
@@ -55,6 +56,20 @@ state = AgentDoctorState()
 state.chunks = mock_chunks
 
 result = run(state)
+
+print("\n── 생성된 Probe(질문/정답) + STEP2 검색·답변 재현 ──")
+# STEP2(검색+답변 생성)는 run() 내부 지역 변수(EvalRecord)라 state 밖으로 안 나온다.
+# agent.py 가 실제로 쓰는 retrieve/generate_answer 를 그대로 재호출해 같은 결과를 보여준다.
+_client = build_eval_index(mock_chunks)
+for p in result.probes:
+    print(f"\n[{p.metadata.get('gen_method', p.source)}] qtype={p.qtype}")
+    print(f"  질문:      {p.question}")
+    print(f"  정답:      {p.ground_truth}")
+    hits = retrieve(_client, mock_chunks, p.question, DEFAULT_TOP_K)
+    contexts = [h.get("text", "") for h in hits]
+    answer = generate_answer(p.question, contexts)
+    print(f"  검색결과:  {[h.get('chunk_id') for h in hits]}")
+    print(f"  생성답변:  {answer}")
 
 print(f"\n상태:        {result.status}")
 print(f"반복:        {result.iteration}")
