@@ -222,7 +222,8 @@ Eval Agent가 생성. 진단용 질문.
 Eval Agent가 생성. 진단 결과 단위.
 ```python
 # type: "gap" | "contradiction" | "duplicate" | "staleness" | "retrieval_failure" | "generation_failure"
-Finding(finding_id, type, severity, description, affected_chunks, prescription)
+# label: 세분화 진단명(처방 파일 라벨) — Optimize가 label→처방 매핑에 사용
+Finding(finding_id, type, severity, description, label, affected_chunks, prescription)
 ```
 
 ### DiagnosticReport
