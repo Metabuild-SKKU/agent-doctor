@@ -38,6 +38,11 @@ class Chunk:
     text: str
     page: Optional[int] = None
     section: Optional[str] = None
+    char_span: Optional[tuple[int, int]] = None  # (start, end) — 부모 Document.content 기준 위치.
+    # 재청킹돼도 안 깨지는 기준. Eval이 gold_char_span과 겹치는 청크를 찾아 gold를 재판정하는 데 씀.
+    token_count: Optional[int] = None            # 실제 임베딩 모델 토크나이저 기준 토큰 수
+    parent_id: Optional[str] = None              # Small-to-Big(부모 섹션) 확장 대비. 현재는 미사용
+    hash: Optional[str] = None                   # sha256(text) 앞부분. 중복 판별/증분 인덱싱용
     embedding: Optional[list[float]] = None    # dense 벡터
     sparse_vector: Optional[dict] = None       # BM25 sparse
     metadata: dict = field(default_factory=dict)
@@ -55,6 +60,15 @@ class Probe:
     expected_difficulty: str = "medium"
     answer_exists: Optional[bool] = None
     ground_truth: Optional[str] = None
+    # ── Eval Agent 확장 필드 (설계 문서 'Probe 스키마' / 옵셔널·하위호환) ──
+    gold_chunk_ids: list[str] = field(default_factory=list)  # [캐시] Recall@k 계산용 정답 청크.
+    # gold_spans 기준으로 재계산되는 캐시 — 재청킹(Optimize→Index) 후에는 무효화될 수 있음.
+    qtype: Optional[str] = None          # 멀티홉 유형: "bridge" | "comparison" | "aggregation" | None
+    metadata: dict = field(default_factory=dict)   # 생성 출처(gen_method/persona/style/length 등)
+    gold_doc_id: Optional[str] = None              # 정답이 있는 원본 문서 ID (재청킹에도 안 깨지는 기준)
+    gold_char_span: Optional[tuple[int, int]] = None  # 원문 내 정답 위치 (start, end). 단일 대표 span.
+    gold_spans: list[dict] = field(default_factory=list)
+    # gold_spans 항목 예: {"doc_id": str, "start": int, "end": int}. 멀티홉 probe는 여러 개 가짐.
 
 
 @dataclass
@@ -64,10 +78,16 @@ class Finding:
     Eval Agent가 생성 → Optimize Agent가 소비.
     """
     finding_id: str
-    type: str    # "gap" | "contradiction" | "duplicate" | "staleness" | "retrieval_failure" | "generation_failure"
+    # "gap" | "retrieval_failure" | "generation_failure" (agents/eval/diagnose.py::_group_of 가
+    # type 과 label 접두어로 A/B/C/D 그룹(처방 순서 정렬용)을 파생: type=="gap"→D,
+    # label이 "retrieval_"로 시작→A, "generation_"으로 시작→B, 그 외(컨텍스트 구조 라벨)→C).
+    # "contradiction"/"duplicate"/"staleness"는 예약(미사용) — metrics_ragas.py 가 aspect.contradiction
+    # 을 계산은 해두지만 diagnose.py 는 아직 소비하지 않는다("나중에 개발" 주석 참고).
+    type: str
     severity: str  # "critical" | "warning" | "info"
     description: str
     label: Optional[str] = None          # 세분화 진단명(처방 파일 라벨). Optimize가 label→처방 매핑에 사용
+    confirmed: bool = True               # 확정 판정 여부. False=예비(더 높은 진단 모드에서 확정 필요)
     affected_chunks: list[str] = field(default_factory=list)
     affected_probes: list[str] = field(default_factory=list)
     prescription: Optional[str] = None
@@ -81,6 +101,7 @@ class DiagnosticReport:
     """
     report_id: str
     findings: list[Finding] = field(default_factory=list)
+    findings_summary: dict = field(default_factory=dict)  # 확정/예비·라벨 집계(진단 모드 포함). Optimize 소비용
     ragas_scores: dict = field(default_factory=dict)
     oracle_accuracy: Optional[float] = None
     overall_score: Optional[float] = None

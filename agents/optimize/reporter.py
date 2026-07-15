@@ -28,6 +28,7 @@ import uuid
 from agents.optimize import rules
 from agents.optimize.schemas import (
     ConfigDiff,
+    OptimizationHistoryItem,
     OptimizationReport,
     OptimizationRequest,
     OptimizeDecision,
@@ -54,6 +55,48 @@ def build_report(
         return _report_use_current(decision)
     # 예상 못한 mode는 조용히 넘기지 않고 바로 드러낸다(planner 버그 조기 발견).
     raise ValueError(f"알 수 없는 decision.mode: {decision.mode}")
+
+
+def build_trial_report(
+    item: OptimizationHistoryItem,
+    verdict: Verdict,
+) -> OptimizationReport:
+    """판정이 끝난(finalize된) 처방 하나를 사용자 리포트로 번역한다.
+
+    build_report 가 planner 의 '흐름 결정(decision)'을 번역하는 것과 달리,
+    이쪽은 history 의 '유지/롤백 판정(verdict)'을 번역한다. 판정은 지난 방문에
+    적용한 처방(=이력 항목)을 대상으로 하므로, 리포트가 설명하는 처방 이름과
+    점수가 서로 어긋나지 않도록 입력을 이력 항목에서만 뽑는다.
+    """
+    prescription = item.selected_prescription_id
+    label = item.failure_labels[0] if item.failure_labels else ""
+
+    if verdict.keep:
+        status = "applied"
+        summary = (
+            f"'{prescription}' 처방으로 점수가 "
+            f"{verdict.before_score:.1f}→{verdict.after_score:.1f}로 올라 적용을 유지했습니다."
+        )
+    else:
+        status = "failed"
+        summary = (
+            f"'{prescription}' 처방을 시도했으나 개선되지 않아 되돌렸습니다. "
+            f"({verdict.reason})"
+        )
+
+    return OptimizationReport(
+        report_id=_new_id(),
+        request_id=item.request_id,
+        status=status,
+        summary=summary,
+        problem=item.reason or label,
+        selected_prescription=prescription,
+        config_changes=_config_changes_from_configs(
+            item.before_config, item.after_config
+        ),
+        next_steps=_next_steps_apply(verdict.keep),
+        metadata=_score_metadata(verdict),
+    )
 
 
 # ── 상황별 리포트 ─────────────────────────────────────────────────
@@ -206,6 +249,21 @@ def _config_changes(
     if patch is None:
         return []
     return [f"{k}: {v}" for k, v in patch.changes.items()]
+
+
+def _config_changes_from_configs(
+    before: dict, after: dict
+) -> list[str]:
+    """before/after config 두 dict를 비교해 사람이 읽는 변경 목록으로.
+    이력 항목은 ConfigDiff 대신 before/after config를 통째로 들고 있어 여기서 비교한다.
+    롤백된 경우 after_config == before_config 라 목록이 비고, 그게 정상이다."""
+    lines: list[str] = []
+    for key in after:
+        if key not in before:
+            lines.append(f"{key}: (신규) {after[key]}")
+        elif before[key] != after[key]:
+            lines.append(f"{key}: {before[key]} → {after[key]}")
+    return lines
 
 
 def _tradeoffs(request: OptimizationRequest | None) -> list[str]:

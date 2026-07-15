@@ -42,7 +42,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 ---
 
-## 4. 코드 컨벤션
+## 2. 코드 컨벤션
 
 - **주석·docstring은 한국어로 작성**합니다. 기존 코드 스타일과 일치시키세요.
 - 각 `agent.py` 상단에는 그 에이전트의 **읽기/쓰기 상태 필드**를 docstring으로 명시합니다 (기존 파일 참고).
@@ -57,7 +57,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 ---
 
-## 5. 아키텍처 요약
+## 3. 아키텍처 요약
 
 데이터 소스를 연결하면 자동으로 RAG를 구성·진단·최적화하고, 완성된 검색을 MCP 서버로 외부 AI에 제공하는 LangGraph 멀티 에이전트 파이프라인입니다.
 

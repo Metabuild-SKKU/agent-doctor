@@ -30,6 +30,7 @@ Optimize 모듈의 "결정" 계층.
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from core.state import AgentDoctorState
 from core.schema import Finding
@@ -51,6 +52,20 @@ _GROUP_ORDER: dict[str, int] = {"A": 0, "C": 1, "B": 2, "D": 3}
 _DEFAULT_CONFIDENCE = 1.0
 _COST_RUNTIME = 1
 _COST_REINDEX = 3
+
+# search_space 변환용 상수
+# 방향 키워드("increase"/"decrease")를 구체 숫자로 바꿀 때 쓰는 배수.
+# increase = 현재값 × STEP, decrease = 현재값 ÷ STEP.
+# min/max 안전 검사는 optimizer 소관이라 여기서는 현재값만 알면 된다(계층 분리).
+_DIRECTION_STEP = 2
+
+# 방향 키워드를 계산할 때 baseline_config 에 해당 키가 없을 경우의 기본 현재값.
+_DEFAULT_CURRENT: dict[str, int] = {
+    "top_k": 5,
+    "chunk_size": 512,
+    "chunk_overlap": 50,
+    "rerank_candidates": 20,
+}
 
 
 # ── 진입점 ────────────────────────────────────────────────────────
@@ -103,7 +118,7 @@ def plan(
         )
 
     finding, rule, _score_val = picked
-    candidates = _build_candidates(finding, rule, blacklist)
+    candidates = _build_candidates(finding, rule, blacklist, state.index_config)
     request = _build_request(finding, rule, candidates, ranked, state)
     decision.request_id = request.request_id
     return request, decision
@@ -262,10 +277,42 @@ def _pick_top(
 
 # ── 5. 처방 후보 생성 (rules.py → PrescriptionCandidate) ──────────
 
+def _concrete_values(
+    key: str, patch_value: Any, baseline_config: dict
+) -> list[Any] | None:
+    """
+    rules.py patch 값 하나를 optimizer 가 쓸 구체 후보값 리스트로 변환한다.
+      - "increase"/"decrease" : 현재값 × 또는 ÷ _DIRECTION_STEP (정수)
+      - 그 외(True, 숫자, "recursive_sentence" 등) : 그대로 [값]
+    현재값이 숫자가 아니거나 없어 계산이 불가하면 None(→ 해당 키 제외).
+    """
+    if patch_value in ("increase", "decrease"):
+        current = baseline_config.get(key, _DEFAULT_CURRENT.get(key))
+        if isinstance(current, bool) or not isinstance(current, (int, float)):
+            return None  # 현재값을 숫자로 알 수 없으면 방향 계산 불가
+        if patch_value == "increase":
+            return [int(round(current * _DIRECTION_STEP))]
+        return [int(round(current / _DIRECTION_STEP))]
+    # 방향 키워드가 아니면 이미 구체값으로 본다.
+    return [patch_value]
+
+
+def _build_search_space(changes: dict, baseline_config: dict) -> dict[str, list]:
+    """patch 변경 묶음을 optimizer 용 search_space({경로: [구체값]})로 변환한다.
+    변환 불가한 키(방향 계산 실패 등)는 제외한다."""
+    space: dict[str, list] = {}
+    for key, patch_value in changes.items():
+        values = _concrete_values(key, patch_value, baseline_config)
+        if values is not None:
+            space[key] = values
+    return space
+
+
 def _build_candidates(
     finding: Finding,
     rule: dict,
     blacklist: set[tuple[str, str]],
+    baseline_config: dict,
 ) -> list[PrescriptionCandidate]:
     """
     rules.py 의 raw dict 처방들을 PrescriptionCandidate 객체로 변환한다.
@@ -275,8 +322,9 @@ def _build_candidates(
     candidates: list[PrescriptionCandidate] = []
     target_metrics = list(rule.get("target_metrics", []))
     for pres in _available_prescriptions(rule, finding.label, blacklist):
+        changes = dict(pres.get("patch", {}))
         patch = ConfigPatch(
-            changes=dict(pres.get("patch", {})),
+            changes=changes,
             reindex_required=bool(pres.get("reindex")),
             description=f"{finding.label} → {pres['id']}",
             metadata={"prescription_id": pres["id"]},
@@ -288,6 +336,8 @@ def _build_candidates(
                 group=rule.get("group"),
                 status=rule.get("status"),
                 patch=patch,
+                # optimizer 가 소비할 구체 후보값. 방향 키워드→숫자 변환은 여기서.
+                search_space=_build_search_space(changes, baseline_config),
                 cost=float(_derive_cost(pres)),
                 priority=0.0,          # 후보 개별 우선순위는 MVP 미사용
                 target_metrics=list(target_metrics),  # rules.py 라벨의 target_metrics
@@ -320,7 +370,7 @@ def _build_request(
         candidates=candidates,
         target_metrics=list(rule.get("target_metrics", [])),  # 라벨의 target_metrics
         target_profile="balanced",
-        optimizer="internal",
+        optimizer="rules",  # rules.py 처방을 검증·적용하는 MVP 기본 backend
         max_trials=1,
         reason=f"우선순위 최상위 라벨: {finding.label}",
         propose_only=False,
