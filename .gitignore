@@ -29,5 +29,8 @@ results/
 .idea/
 *.DS_Store
 
+# Claude Code
+CLAUDE.md
+
 # 벡터 DB
 qdrant_storage/
