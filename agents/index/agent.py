@@ -1,6 +1,5 @@
-# Index 단계에서 만지는 상태:
-# - read: state.documents, state.index_config
-# - write: state.chunks, state.index_artifacts, state.status, state.error
+# Index는 Ingest가 만든 document를 검색 가능한 chunk로 바꾸는 단계다.
+# Optimize가 index_config를 바꾼 뒤 다시 호출할 수 있으므로 설정값은 여기서만 해석한다.
 from __future__ import annotations
 
 import hashlib
@@ -42,10 +41,9 @@ class _SectionDraft:
     start: int
     end: int
 
-
+# 테스트나 실험에서 embedding, Qdrant, graph 구현만 바꿔 끼우기 위한 묶음.
 @dataclass(frozen=True)
 class IndexTools:
-    # 실험/테스트 때 저장소, 임베딩, 그래프 구현만 바꿔 끼우기 위한 얇은 묶음.
     build_client: Callable[..., Any]
     ensure_collection: Callable[..., Any]
     delete_document_chunks: Callable[..., Any]
@@ -56,7 +54,7 @@ class IndexTools:
     build_graph_artifacts: Callable[..., dict]
 
 
-# Ingest가 넘겨준 Document도 Index 경계에서 한 번 더 확인한다.
+# Ingest 출력이 흔들리면 뒤 단계가 전부 깨져서 Index 경계에서 한 번 더 막는다.
 class _DocumentSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -73,7 +71,7 @@ class _DocumentSchema(BaseModel):
             raise ValueError("빈 문자열일 수 없습니다.")
         return value
 
-
+# 해시와 char_span이 흔들리지 않도록 최소한의 정규화만 한다.
 def _normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text or "")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -81,7 +79,7 @@ def _normalize_text(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
-
+# Index가 처리하기 전에 공통 Document 계약을 확인한다.
 def _validate_document(document: Document) -> None:
     if not isinstance(document, Document):
         raise TypeError(f"Document 타입이 아닙니다: {type(document).__name__}")
@@ -99,11 +97,11 @@ def _validate_document(document: Document) -> None:
         raise ValueError(f"{document.doc_id or '(doc_id 없음)'}: 문서 검증 실패: {exc}") from exc
 
 
+# 문서와 chunk 중복 판별에 같은 해시 함수를 쓴다.
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-
-# char_span이 원문 좌표를 가리키도록 앞뒤 공백만 보정한다.
+# Eval이 원문 위치를 다시 찾을 수 있어야 해서 char_span은 원문 기준으로 유지한다.
 def _trimmed_slice(text: str, start: int, end: int) -> tuple[str, int, int]:
     raw = text[start:end]
     left = len(raw) - len(raw.lstrip())
@@ -112,8 +110,7 @@ def _trimmed_slice(text: str, start: int, end: int) -> tuple[str, int, int]:
     trimmed_end = start + right
     return text[trimmed_start:trimmed_end], trimmed_start, trimmed_end
 
-
-# Markdown 제목은 section 이름으로 남기고, 위치값은 원문 기준을 유지한다.
+# 제목 구조는 section으로 남기고, start/end는 Document.content 기준 좌표로 둔다.
 def _split_markdown_sections(text: str) -> list[_SectionDraft]:
     heading_pattern = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
     heading_path: list[str] = []
@@ -154,8 +151,7 @@ def _split_markdown_sections(text: str) -> list[_SectionDraft]:
     body, start, end = _trimmed_slice(text, 0, len(text))
     return [_SectionDraft(text=body, section=None, start=start, end=end)] if body else []
 
-
-# recursive chunker가 문맥 경계에서 끊도록 후보 순서를 둔다.
+# recursive chunking에서 문단이 깨지는 것을 줄이기 위한 경계 우선순위.
 def _preferred_boundary(text: str, start: int, hard_end: int) -> int:
     minimum = start + max(1, (hard_end - start) // 2)
     for separator in ("\n\n", "\n", ". ", "。", "? ", "! ", " "):
@@ -165,6 +161,7 @@ def _preferred_boundary(text: str, start: int, hard_end: int) -> int:
     return hard_end
 
 
+# fixed strategy는 가장 단순한 baseline이라 의도적으로 문맥 경계를 보지 않는다.
 def _fixed_chunks(
     text: str,
     chunk_size: int,
@@ -194,6 +191,7 @@ def _fixed_chunks(
     return chunks
 
 
+# chunk_size는 맞추되 가능하면 문단이나 문장 경계에서 끊는다.
 def _recursive_chunks(
     text: str,
     chunk_size: int,
@@ -238,6 +236,7 @@ def _recursive_chunks(
     return chunks
 
 
+# fixed chunker를 Document 단위 strategy 인터페이스에 맞춘 wrapper.
 def _fixed_strategy(
     document: Document,
     chunk_size: int,
@@ -252,6 +251,7 @@ def _fixed_strategy(
     )
 
 
+# 구조 보존만 확인할 때 쓰는 markdown-only 전략.
 def _markdown_strategy(
     document: Document,
     _chunk_size: int,
@@ -268,6 +268,7 @@ def _markdown_strategy(
     ]
 
 
+# recursive chunker를 Document 단위 strategy 인터페이스에 맞춘 wrapper.
 def _recursive_strategy(
     document: Document,
     chunk_size: int,
@@ -282,6 +283,7 @@ def _recursive_strategy(
     )
 
 
+# 기본 전략: 문서 구조를 먼저 살리고, 긴 섹션만 다시 자른다.
 def _markdown_recursive_strategy(
     document: Document,
     chunk_size: int,
@@ -323,7 +325,7 @@ CHUNK_STAGE_ALIASES: dict[str | int, str] = {
 }
 
 
-# Notion의 (1)(2)(3) 외 실험 chunker를 붙일 때 쓴다.
+# Notion의 (1)(2)(3) 외 전략을 비교할 때 여기로 등록한다.
 def register_chunk_strategy(name: str, strategy: ChunkStrategy) -> None:
     normalized = name.strip()
     if not normalized:
@@ -331,6 +333,7 @@ def register_chunk_strategy(name: str, strategy: ChunkStrategy) -> None:
     CHUNK_STRATEGIES[normalized] = strategy
 
 
+# 숫자 stage와 문자열 strategy 이름을 실제 strategy key로 통일한다.
 def _resolve_chunk_strategy(strategy: str | int) -> str:
     resolved = CHUNK_STAGE_ALIASES.get(strategy, strategy)
     if isinstance(resolved, str):
@@ -344,6 +347,7 @@ def _resolve_chunk_strategy(strategy: str | int) -> str:
     )
 
 
+# Optimize가 chunk_stage나 chunk_strategy 중 무엇을 바꿔도 같은 경로로 처리한다.
 def _configured_chunk_strategy(config: dict) -> str:
     raw_strategy = config.get(
         "chunk_stage",
@@ -352,6 +356,7 @@ def _configured_chunk_strategy(config: dict) -> str:
     return _resolve_chunk_strategy(raw_strategy)
 
 
+# 기본 구현은 현재 index module 안의 Qdrant, embedding, graph 함수를 그대로 쓴다.
 def _default_tools() -> IndexTools:
     return IndexTools(
         build_client=build_client,
@@ -365,7 +370,7 @@ def _default_tools() -> IndexTools:
     )
 
 
-# 예전 fixed-size 호출부는 깨지지 않게 그대로 둔다.
+# 예전 테스트/호출부가 쓰는 fixed-size helper라 인터페이스를 유지한다.
 def _chunk_text(
     text: str,
     chunk_size: int,
@@ -383,7 +388,7 @@ def _chunk_text(
     ]
 
 
-# Index 본문에서는 여기만 호출해서 chunking 전략을 교체한다.
+# 실제 Index 흐름은 이 함수만 통해 chunking 전략을 갈아끼운다.
 def _chunk_document(
     document: Document,
     chunk_size: int,
@@ -395,7 +400,7 @@ def _chunk_document(
     return chunker(document, chunk_size, chunk_overlap)
 
 
-# 청크/임베딩 결과를 바꾸는 설정만 재사용 판단에 반영한다.
+# 이 값이 같으면 기존 embedding을 재사용할 수 있다.
 def _index_signature(config: dict) -> str:
     relevant = {
         "chunk_size": config["chunk_size"],
@@ -408,6 +413,7 @@ def _index_signature(config: dict) -> str:
     return _sha256(json.dumps(relevant, sort_keys=True, ensure_ascii=False))
 
 
+# Optimize가 잘못된 값을 넣었을 때 Index 초입에서 바로 멈춘다.
 def _validate_config(config: dict) -> None:
     chunk_size = config["chunk_size"]
     overlap = config["chunk_overlap"]
@@ -421,6 +427,7 @@ def _validate_config(config: dict) -> None:
         raise ValueError("top_k는 1 이상의 정수여야 합니다.")
 
 
+# Serve는 Qdrant payload만 보고 검색 옵션을 복원하므로 retrieval 설정도 chunk에 저장한다.
 def _chunk_metadata(
     document: Document,
     config: dict,
@@ -433,7 +440,6 @@ def _chunk_metadata(
     signature: str,
     embedding_dimension: int,
 ) -> dict[str, Any]:
-    # Serve는 Qdrant payload만 보고 검색 옵션을 복원하므로 retrieval 설정도 같이 저장한다.
     return {
         **document.metadata,
         "chunk_index": chunk_index,
@@ -453,6 +459,7 @@ def _chunk_metadata(
     }
 
 
+# 예전 chunk에 char_span 필드가 없으면 metadata에 남은 값으로 복구한다.
 def _span_from_chunk(chunk: Chunk) -> tuple[int, int]:
     if chunk.char_span:
         return int(chunk.char_span[0]), int(chunk.char_span[1])
@@ -462,12 +469,14 @@ def _span_from_chunk(chunk: Chunk) -> tuple[int, int]:
     return 0, len(chunk.text)
 
 
+# section이 있으면 나중에 parent-child retrieval로 확장할 수 있게 parent_id를 분리한다.
 def _parent_id(document: Document, section: str | None) -> str:
     if section:
         return f"{document.doc_id}:section:{_sha256(section)[:12]}"
     return document.doc_id
 
 
+# embedding은 재사용하되 top_k 같은 실험값은 최신 config로 맞춘다.
 def _refresh_reused_chunk(
     chunk: Chunk,
     document: Document,
@@ -479,7 +488,6 @@ def _refresh_reused_chunk(
     chunk_strategy: str,
     signature: str,
 ) -> Chunk:
-    # 임베딩은 재사용하되, top_k 같은 실험값은 최신 config로 맞춘다.
     char_span = _span_from_chunk(chunk)
     vector_dim = len(chunk.embedding or []) or int(config.get("embedding_dimension", 1024))
     return replace(
@@ -503,6 +511,7 @@ def _refresh_reused_chunk(
     )
 
 
+# 이전 실행에서 같은 문서와 같은 Index 설정으로 만든 chunk를 찾기 위한 lookup.
 def _previous_chunks_by_document(chunks: list[Chunk]) -> dict[tuple[str, str], list[Chunk]]:
     grouped: dict[tuple[str, str], list[Chunk]] = {}
     for chunk in chunks:
@@ -513,7 +522,7 @@ def _previous_chunks_by_document(chunks: list[Chunk]) -> dict[tuple[str, str], l
     return grouped
 
 
-# Eval/Optimize가 config를 바꿔 다시 호출하는 흐름을 전제로 둔 Index 본체.
+# Optimize가 config를 바꾼 뒤 다시 들어오는 Index Agent의 진입점.
 def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctorState:
     tools = tools or _default_tools()
     state.current_agent = "index"
