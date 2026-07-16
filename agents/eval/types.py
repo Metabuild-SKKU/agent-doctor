@@ -102,6 +102,24 @@ def resolve_mode() -> int:
     return _MODE_ALIASES.get(raw, DEFAULT_MODE)
 
 
+# ── Probe 소스 (STEP1) ────────────────────────────────────────────
+# 실사용 질문(user_log) vs 지식그래프 기반 자동 생성(auto) 중 무엇으로 진단할지 강제하는 스위치.
+#   auto     : 항상 자동 생성(state.user_questions 무시). GT·gold 포함 → recall/F1/RAGAS 전량 평가.
+#   user_log : 항상 user_questions 사용(질문 없으면 auto 폴백). GT 없음 → reference-free RAGAS만.
+#   made     : 이미 만들어 둔 Probe(eval_probes.json)를 코퍼스 버전과 무관하게 그대로 재사용
+#              (파일 없음/비었으면 auto 로 폴백해 생성 후 저장). LLM 재호출 없이 고정 테스트셋으로 진단.
+#   미지정   : 자동 판별 — questions 있으면 user_log, 없으면 auto (기존 동작, 단 버전 일치 시 캐시 재사용).
+PROBE_SOURCE_AUTO = "auto"
+PROBE_SOURCE_USER_LOG = "user_log"
+PROBE_SOURCE_MADE = "made"
+
+
+def resolve_probe_source() -> str:
+    """Probe 소스 스위치. 환경변수 EVAL_PROBE_SOURCE(auto|user_log|made), 미지정/오타면 "" (자동 판별)."""
+    raw = os.getenv("EVAL_PROBE_SOURCE", "").strip().lower()
+    return raw if raw in (PROBE_SOURCE_AUTO, PROBE_SOURCE_USER_LOG, PROBE_SOURCE_MADE) else ""
+
+
 def llm_eval_enabled() -> bool:
     """STEP3-2 RAGAS(LLM-as-Judge) 진단 활성화 여부. 기본 꺼짐(EVAL_ENABLE_LLM=1/true/yes/on).
     실제 실행은 signals 의 RAGAS 신호(_faith 등)가 `EVAL_MODE≥deep` 게이트와 AND 로 정한다."""

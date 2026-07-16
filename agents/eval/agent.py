@@ -27,7 +27,10 @@ import json
 from core.schema import Probe
 from core.state import AgentDoctorState
 
-from agents.eval.types import EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled
+from agents.eval.types import (
+    EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled,
+    resolve_probe_source, PROBE_SOURCE_MADE,
+)
 from agents.eval.probe_gen import generate_probes
 from agents.eval.probe_store import save_probes, load_probes
 # ⚠️ 임시: Index Agent가 검색 리트리버를 제공하기 전까지만 retrieval_temp 사용.
@@ -58,7 +61,7 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
-    print(f"[Eval] 시작 - 청크 {len(state.chunks)}개, 반복 {state.iteration + 1}/{state.max_iterations}")
+    print(f"[Eval] 청크 {len(state.chunks)}개, 반복 {state.iteration + 1}/{state.max_iterations}")
 
     if not state.chunks:
         state.status = "error"
@@ -84,7 +87,17 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # user_questions 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
         # LLM 생성(llm_generated) 경로만 영속화 대상 — 코퍼스 버전이 그대로면 이전에
         # 만든 골든 테스트셋을 재사용해 매 Optimize 반복마다 LLM 재호출을 피한다.
-        if state.user_questions:
+        # made: 코퍼스 버전과 무관하게 이미 만들어 둔 eval_probes.json 을 그대로 재사용
+        # (파일 없음/비었으면 자동 생성으로 폴백해 저장). user_questions 보다 우선한다.
+        if resolve_probe_source() == PROBE_SOURCE_MADE:
+            probes = load_probes(version, ignore_version=True)
+            if probes:
+                print(f"[Eval] STEP1: made 소스 — 저장된 Probe {len(probes)}개 재사용")
+            else:
+                print("[Eval] STEP1: made 소스지만 저장된 Probe 없음 → 자동 생성 후 저장")
+                probes = generate_probes(state)
+                save_probes(probes, version)
+        elif state.user_questions:
             probes = generate_probes(state)
         else:
             probes = load_probes(version)
@@ -116,11 +129,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
         #   진단 중 계산한 비싼 신호가 state 에 누적되어 재진단 시 재사용된다.
-        records = [
-            _evaluate_probe(p, client, state.chunks, chunk_text, top_k, mode,
-                            state.diagnosis_cache.setdefault(p.probe_id, {}))
-            for p in probes
-        ]
+        print(f"\n[Eval] STEP2-4: probe별 평가 ({len(probes)}개)\n")
+        records = []
+        for i, p in enumerate(probes, 1):
+            rec = _evaluate_probe(p, client, state.chunks, chunk_text, top_k, mode,
+                                  state.diagnosis_cache.setdefault(p.probe_id, {}))
+            _log_probe(i, len(probes), rec)
+            records.append(rec)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
         state.probes = probes
@@ -136,6 +151,50 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 
 # ── probe 1개 평가 (STEP2 → STEP3 → STEP4) ───────────────────────
+
+def _clip(text: str, n: int = 50) -> str:
+    """로그용 한 줄 축약(줄바꿈 제거 + n자 컷)."""
+    t = " ".join((text or "").split())
+    return t if len(t) <= n else t[:n] + "…"
+
+
+def _fmt_metric(v, applicable: bool = True) -> str:
+    """지표 포맷: 미측정/미해당(-1·None·비적용)이면 '-'."""
+    if not applicable or v is None or (isinstance(v, (int, float)) and v < 0):
+        return "-"
+    return f"{v:.2f}" if isinstance(v, (int, float)) else str(v)
+
+
+def _short_cid(cid: str) -> str:
+    """로그용 청크 id 축약: '<doc-uuid>_chunk_016' → 'chunk_016', 그 외는 원본."""
+    i = cid.rfind("_chunk_")
+    return cid[i + 1:] if i != -1 else cid
+
+
+def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
+    """probe 1개 평가 결과를 블록 형태로 출력(STEP2~4 진행 가시성용).
+    질문·답변·검색/gold·지표·판정 라벨을 한 블록으로 남기고 빈 줄로 구분한다."""
+    p = rec.probe
+    meta = "·".join(filter(None, [p.source, p.qtype or "single"]))
+    recall = _fmt_metric(rec.recall_at_k)
+    f1 = _fmt_metric(rec.f1_score, bool(p.ground_truth))
+    oracle = _fmt_metric(rec.oracle_f1, rec.oracle_answer is not None)
+    retrieved = ", ".join(_short_cid(c) for c in rec.retrieved_chunk_ids)
+    gold = ", ".join(_short_cid(c) for c in p.gold_chunk_ids)
+    if rec.findings:
+        labels = ", ".join(f"{f.label}{'' if f.confirmed else '(예비)'}" for f in rec.findings)
+    else:
+        labels = "없음(정상)"
+
+    print(f"[{idx}/{total}] {p.probe_id}  ({meta})")
+    print(f"Q: {_clip(p.question, 80)}")
+    print(f"A: {_clip(rec.generated_answer, 80) if rec.generated_answer else '-'}")
+    print(f"검색: [{retrieved}]")
+    print(f"골드: [{gold}]")
+    print(f"메트릭 결과: recall@k={recall}  f1={f1}  oracle_f1={oracle}")
+    print(f"Findings({len(rec.findings)}): {labels}")
+    print()  # 블록 구분 빈 줄
+
 
 def _pipeline_version(state: AgentDoctorState) -> str:
     """진단 신호 캐시 무효화 키. index_config(Optimize가 바꿈)+코퍼스가 바뀌면 값이 달라진다.

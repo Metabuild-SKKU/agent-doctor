@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 
@@ -30,23 +31,75 @@ def has_key() -> bool:
     return bool(os.getenv("OPENAI_API_KEY"))
 
 
+# ── rate limit(429) 재시도 ────────────────────────────────────────
+# Gemini 무료 티어 등에서 "too many requests"(429)가 나면 잠시 대기 후 재시도한다.
+#   EVAL_LLM_RETRY_WAIT   대기 시간(초, 기본 5)
+#   EVAL_LLM_MAX_RETRIES  재시도 횟수 상한(기본 5). 소진하면 마지막 예외를 그대로 올린다.
+# rate limit 이 아닌 예외(인증 실패·잘못된 모델명 등)는 재시도 없이 즉시 전파한다.
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    """rate limit(429/quota/RESOURCE_EXHAUSTED) 계열 예외인지 status/메시지로 느슨히 판별.
+    provider별 예외 타입을 직접 import 하지 않기 위함."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status == 429:
+        return True
+    msg = str(exc).lower()
+    markers = ("429", "too many requests", "rate limit", "ratelimit",
+               "resource_exhausted", "resourceexhausted", "quota", "exceeded")
+    return any(m in msg for m in markers)
+
+
+def _run_with_retry(fn, label: str = "LLM"):
+    """fn()을 호출하되 rate limit 예외면 EVAL_LLM_RETRY_WAIT초 대기 후 재시도.
+    최대 EVAL_LLM_MAX_RETRIES회까지 재시도하고, 그래도 실패하면 마지막 예외를 전파한다."""
+    max_retries = _env_int("EVAL_LLM_MAX_RETRIES", 5)
+    wait = _env_float("EVAL_LLM_RETRY_WAIT", 5.0)
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except Exception as e:
+            if not _is_rate_limit(e) or attempt >= max_retries:
+                raise
+            attempt += 1
+            print(f"[Eval] {label} rate limit(429) — {wait:.0f}초 대기 후 재시도 ({attempt}/{max_retries})")
+            time.sleep(wait)
+
+
 # ── 답변 생성 (retrieval_temp.py 가 사용) ─────────────────────────
 
 def generate_text(system: str, user: str, model: str | None = None) -> str | None:
     """일반 텍스트 응답 생성. 키/라이브러리 없거나 호출 실패 시 None."""
     if not has_key():
         return None
-    try:
+
+    def _do():
         provider = _provider()
         if provider == "gemini":
-            text = _gemini_generate(
+            return _gemini_generate(
                 system, user, model or os.getenv("EVAL_GEN_MODEL_GEMINI", "gemini-flash-latest"))
         elif provider == "github":
-            text = _github_generate(
+            return _github_generate(
                 system, user, model or os.getenv("EVAL_GEN_MODEL_GITHUB", "openai/gpt-4o-mini"))
-        else:
-            text = _openai_generate(
-                system, user, model or os.getenv("EVAL_GEN_MODEL", "gpt-4o-mini"))
+        return _openai_generate(
+            system, user, model or os.getenv("EVAL_GEN_MODEL", "gpt-4o-mini"))
+
+    try:
+        text = _run_with_retry(_do, "생성")
         return (text or "").strip()
     except ImportError:
         return None
@@ -59,19 +112,21 @@ def generate_text(system: str, user: str, model: str | None = None) -> str | Non
 
 def chat_json(system: str, user: str, model: str | None = None) -> dict:
     """JSON 응답 강제 chat 호출 → dict. JSON 파싱 실패 시 {} (API 예외는 호출부로 전파)."""
-    provider = _provider()
-    if provider == "gemini":
-        raw = _gemini_generate(
-            system, user, model or os.getenv("EVAL_JUDGE_MODEL_GEMINI", "gemini-flash-latest"),
-            json_mode=True)
-    elif provider == "github":
-        raw = _github_generate(
-            system, user, model or os.getenv("EVAL_JUDGE_MODEL_GITHUB", "openai/gpt-4o"),
-            json_mode=True)
-    else:
-        raw = _openai_generate(
+    def _do():
+        provider = _provider()
+        if provider == "gemini":
+            return _gemini_generate(
+                system, user, model or os.getenv("EVAL_JUDGE_MODEL_GEMINI", "gemini-flash-latest"),
+                json_mode=True)
+        elif provider == "github":
+            return _github_generate(
+                system, user, model or os.getenv("EVAL_JUDGE_MODEL_GITHUB", "openai/gpt-4o"),
+                json_mode=True)
+        return _openai_generate(
             system, user, model or os.getenv("EVAL_JUDGE_MODEL", "gpt-4o"),
             json_mode=True)
+
+    raw = _run_with_retry(_do, "심판")
     try:
         obj = json.loads(raw or "{}")
         return obj if isinstance(obj, dict) else {}
@@ -85,10 +140,13 @@ def chat_json(system: str, user: str, model: str | None = None) -> dict:
 # except 로 잡아 스킵(response_relevancy 등 임베딩 의존 지표만 빠짐).
 
 def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
-    """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파)"""
-    if _provider() == "gemini":
-        return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
-    return _openai_embed(texts, model or os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small"))
+    """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파; rate limit 은 재시도)"""
+    def _do():
+        if _provider() == "gemini":
+            return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
+        return _openai_embed(texts, model or os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small"))
+
+    return _run_with_retry(_do, "임베딩")
 
 
 # ── OpenAI 구현 ───────────────────────────────────────────────────
