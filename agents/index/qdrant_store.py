@@ -85,6 +85,7 @@ def upsert_chunks(client: QdrantClient, chunks: list) -> None:
     for chunk in chunks:
         if not chunk.embedding:
             continue
+        metadata = chunk.metadata or {}
         points.append(
             PointStruct(
                 id=_point_id(chunk.chunk_id),
@@ -98,8 +99,9 @@ def upsert_chunks(client: QdrantClient, chunks: list) -> None:
                     "token_count": chunk.token_count,
                     "parent_id": chunk.parent_id,
                     "hash": chunk.hash,
-                    "metadata": chunk.metadata,
+                    "metadata": metadata,
                     "sparse_vector": chunk.sparse_vector,
+                    "retrieval_scope_id": metadata.get("retrieval_scope_id"),
                 },
             )
         )
@@ -145,20 +147,37 @@ def search(
     client: QdrantClient,
     query_vector: list[float],
     top_k: int = 5,
+    retrieval_scope_id: str | None = None,
 ) -> list[dict]:
+    query_filter = None
+    if retrieval_scope_id:
+        query_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="retrieval_scope_id",
+                    match=MatchValue(value=retrieval_scope_id),
+                )
+            ]
+        )
     # dense 검색 결과를 Serve가 쓰는 공통 dict 모양으로 맞춘다.
     try:
-        hits = client.query_points(
-            collection_name=COLLECTION,
-            query=query_vector,
-            limit=top_k,
-        ).points
+        kwargs = {
+            "collection_name": COLLECTION,
+            "query": query_vector,
+            "limit": top_k,
+        }
+        if query_filter is not None:
+            kwargs["query_filter"] = query_filter
+        hits = client.query_points(**kwargs).points
     except AttributeError:
-        hits = client.search(
-            collection_name=COLLECTION,
-            query_vector=query_vector,
-            limit=top_k,
-        )
+        kwargs = {
+            "collection_name": COLLECTION,
+            "query_vector": query_vector,
+            "limit": top_k,
+        }
+        if query_filter is not None:
+            kwargs["query_filter"] = query_filter
+        hits = client.search(**kwargs)
     return [
         {
             "score": float(hit.score),
@@ -171,6 +190,7 @@ def search(
             "token_count": hit.payload.get("token_count"),
             "parent_id": hit.payload.get("parent_id"),
             "hash": hit.payload.get("hash"),
+            "retrieval_scope_id": hit.payload.get("retrieval_scope_id"),
         }
         for hit in hits
     ]
@@ -203,8 +223,57 @@ def _keyword_score(query: str, text: str) -> float:
     text_terms = Counter(_tokens(text))
     if not query_terms or not text_terms:
         return 0.0
-    matched = sum(min(count, text_terms.get(term, 0)) for term, count in query_terms.items())
+    matched = 0
+    for term, count in query_terms.items():
+        hits = text_terms.get(term, 0)
+        if not re.fullmatch(r"[a-z0-9_+.-]+", term):
+            hits += sum(
+                text_count
+                for token, text_count in text_terms.items()
+                if token != term and term in token
+            )
+        matched += min(count, hits)
     return matched / max(1, sum(query_terms.values()))
+
+
+def _field(chunk: Any, name: str, default: Any = None) -> Any:
+    if isinstance(chunk, dict):
+        return chunk.get(name, default)
+    return getattr(chunk, name, default)
+
+
+def keyword_search(
+    chunks: list[Any],
+    query: str,
+    top_k: int = 5,
+) -> list[dict]:
+    """Dependency-light lexical fallback used by Eval, Serve, and RAG."""
+    if top_k <= 0 or not query.strip():
+        return []
+
+    scored = []
+    for chunk in chunks:
+        text = _field(chunk, "text", "") or ""
+        score = _keyword_score(query, text)
+        if score <= 0:
+            continue
+        scored.append(
+            {
+                "score": float(score),
+                "text": text,
+                "metadata": _field(chunk, "metadata", {}) or {},
+                "chunk_id": _field(chunk, "chunk_id", "") or "",
+                "doc_id": _field(chunk, "doc_id", "") or "",
+                "section": _field(chunk, "section"),
+                "char_span": _field(chunk, "char_span"),
+                "token_count": _field(chunk, "token_count"),
+                "parent_id": _field(chunk, "parent_id"),
+                "hash": _field(chunk, "hash"),
+            }
+        )
+
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    return scored[:top_k]
 
 
 def hybrid_search(
@@ -214,10 +283,16 @@ def hybrid_search(
     chunks: list[dict],
     top_k: int = 5,
     dense_weight: float = 0.7,
+    retrieval_scope_id: str | None = None,
 ) -> list[dict]:
     # dense 점수와 lexical 점수를 chunk_id 기준으로 합친다.
     dense_weight = min(1.0, max(0.0, float(dense_weight)))
-    dense_results = search(client, query_vector, top_k=max(top_k * 4, 20))
+    dense_results = search(
+        client,
+        query_vector,
+        top_k=max(top_k * 4, 20),
+        retrieval_scope_id=retrieval_scope_id,
+    )
     dense_by_id = {item["chunk_id"]: item for item in dense_results}
 
     lexical_by_id: dict[str, tuple[float, dict]] = {}

@@ -84,6 +84,37 @@ def search_docs(query: str) -> str:
 
 
 @mcp.tool()
+def ask_docs(question: str) -> str:
+    """Answer a question using the indexed documents."""
+    try:
+        resp = requests.get(
+            f"{API_URL}/answer",
+            params={"query": question, "top_k": 3},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        return f"Answer generation failed: {e}"
+
+    answer = data.get("answer", "")
+    citations = data.get("citations", [])
+    if not answer:
+        return "No answer could be generated from the indexed documents."
+
+    sources = []
+    for citation in citations:
+        title = citation.get("title") or citation.get("doc_id", "")
+        chunk_id = citation.get("chunk_id", "")
+        if title or chunk_id:
+            sources.append(f"- {title} ({chunk_id})")
+
+    if sources:
+        return answer + "\n\nSources:\n" + "\n".join(sources)
+    return answer
+
+
+@mcp.tool()
 def list_documents() -> str:
     """인덱싱된 문서 목록을 반환합니다."""
     try:
