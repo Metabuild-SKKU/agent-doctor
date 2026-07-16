@@ -40,6 +40,9 @@ class AgentDoctorState:
         # SentenceTransformer()에 그대로 전달되어 로드가 멈출 수 있음
         "embedding_model": "BAAI/bge-m3",
         "use_hybrid": True,
+        # 임베딩 모델 교체로 벡터 차원이 달라졌을 때 Qdrant 컬렉션을 재생성할지 여부.
+        # False(기본)면 차원 불일치 시 ensure_collection이 ValueError로 막는다.
+        "recreate_collection_on_dimension_mismatch": False,
     })
     # 인덱싱 부산물(청크/문서 수, 그래프 파일 경로, failed_documents 등).
     # 선언 없이 동적 속성으로 쓰면 LangGraph가 노드 간 상태 복사 시 유실할 수 있다.
