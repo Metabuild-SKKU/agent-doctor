@@ -35,6 +35,7 @@ from typing import Any
 from core.state import AgentDoctorState
 from core.schema import Finding
 from agents.optimize import rules
+from agents.optimize.config_mapper import canonicalize_path
 from agents.optimize.schemas import (
     ConfigPatch,
     OptimizationRequest,
@@ -143,7 +144,7 @@ def _split_findings(
             continue  # 세분화 라벨이 없으면 rules.py 매핑 불가
         if rules.is_manual(label):
             manual.append(f)
-        elif rules.is_actionable(label):
+        elif rules.is_actionable(label) and f.confirmed:
             actionable.append(f)
         # draft/unassigned 은 의도적으로 스킵
     return manual, actionable
@@ -308,6 +309,39 @@ def _build_search_space(changes: dict, baseline_config: dict) -> dict[str, list]
     return space
 
 
+def _finding_search_space(
+    finding: Finding,
+    changes: dict,
+    baseline_config: dict,
+) -> dict[str, list]:
+    """Eval/Planner가 계산한 후보가 있으면 기존 단일 방향값보다 우선한다.
+
+    합의된 임시 입력 키는 ``Finding.metadata['parameter_candidates']``다.
+    값은 ``{canonical_path: [후보값...]}`` 형식이며, 이 계약이 정식 Eval
+    필드로 승격되기 전까지 metadata 확장점으로 유지한다.
+    """
+
+    fallback = _build_search_space(changes, baseline_config)
+    supplied = finding.metadata.get("parameter_candidates")
+    if not isinstance(supplied, dict):
+        return fallback
+
+    supplied_by_path = {
+        canonicalize_path(path): values
+        for path, values in supplied.items()
+        if isinstance(path, str)
+    }
+    resolved: dict[str, list] = {}
+    for raw_path, fallback_values in fallback.items():
+        path = canonicalize_path(raw_path)
+        raw_values = supplied_by_path.get(path)
+        if isinstance(raw_values, (list, tuple)) and raw_values:
+            resolved[path] = list(raw_values)
+        else:
+            resolved[path] = list(fallback_values)
+    return resolved
+
+
 def _build_candidates(
     finding: Finding,
     rule: dict,
@@ -337,7 +371,11 @@ def _build_candidates(
                 status=rule.get("status"),
                 patch=patch,
                 # optimizer 가 소비할 구체 후보값. 방향 키워드→숫자 변환은 여기서.
-                search_space=_build_search_space(changes, baseline_config),
+                search_space=_finding_search_space(
+                    finding,
+                    changes,
+                    baseline_config,
+                ),
                 cost=float(_derive_cost(pres)),
                 priority=0.0,          # 후보 개별 우선순위는 MVP 미사용
                 target_metrics=list(target_metrics),  # rules.py 라벨의 target_metrics
@@ -361,6 +399,26 @@ def _build_request(
 ) -> OptimizationRequest:
     """선택된 라벨과 처방 후보를 OptimizationRequest 로 묶는다."""
     related = [f.label for f, _rule, _s in ranked if f.label != finding.label]
+    selected_space = candidates[0].search_space if candidates else {}
+    candidate_count = (
+        len(next(iter(selected_space.values())))
+        if len(selected_space) == 1
+        and isinstance(next(iter(selected_space.values())), (list, tuple))
+        else 1
+    )
+    use_internal = candidate_count > 1
+    metadata: dict[str, Any] = {
+        # 후보별 trade-off의 최종 심판은 항상 Eval의 단일 overall_score다.
+        "primary_metric": "overall_score",
+        "study_baseline_config": dict(state.index_config),
+        "baseline_metrics": _report_metrics(state),
+        "trial_results": [],
+    }
+    if use_internal and _space_path(selected_space) in {
+        "chunker.chunk_size",
+        "chunker.chunk_overlap",
+    }:
+        metadata["chunk_precheck_context"] = _chunk_precheck_context(state)
     return OptimizationRequest(
         request_id=str(uuid.uuid4()),
         iteration=state.iteration,
@@ -368,10 +426,65 @@ def _build_request(
         failure_label=finding.label,
         related_failure_labels=related,
         candidates=candidates,
+        search_space={
+            path: list(values) if isinstance(values, (list, tuple)) else [values]
+            for path, values in selected_space.items()
+        },
         target_metrics=list(rule.get("target_metrics", [])),  # 라벨의 target_metrics
         target_profile="balanced",
-        optimizer="rules",  # rules.py 처방을 검증·적용하는 MVP 기본 backend
-        max_trials=1,
+        optimizer="internal" if use_internal else "rules",
+        max_trials=candidate_count,
         reason=f"우선순위 최상위 라벨: {finding.label}",
         propose_only=False,
+        metadata=metadata,
     )
+
+
+def _space_path(search_space: dict[str, Any]) -> str | None:
+    """단일 축 search space의 canonical 경로를 반환한다."""
+
+    if len(search_space) != 1:
+        return None
+    path = next(iter(search_space))
+    return canonicalize_path(path) if isinstance(path, str) else None
+
+
+def _report_metrics(state: AgentDoctorState) -> dict[str, Any]:
+    """Internal Adapter가 고정 baseline으로 사용할 Eval 지표를 복사한다."""
+
+    if state.report is None:
+        return {}
+    metrics: dict[str, Any] = dict(state.report.ragas_scores)
+    if state.report.overall_score is not None:
+        metrics["overall_score"] = state.report.overall_score
+    metrics["pass_threshold"] = state.report.pass_threshold
+    return metrics
+
+
+def _chunk_precheck_context(state: AgentDoctorState) -> dict[str, Any]:
+    """Chunk 사전검증에 필요한 원문과 이미 준비된 gold span만 전달한다."""
+
+    gold_spans = [
+        dict(span)
+        for probe in state.probes
+        for span in probe.gold_spans
+        if isinstance(span, dict)
+    ]
+    affected_doc_ids = {
+        span.get("doc_id")
+        for span in gold_spans
+        if isinstance(span.get("doc_id"), str)
+    }
+    documents = [
+        document
+        for document in state.documents
+        if not affected_doc_ids or document.doc_id in affected_doc_ids
+    ]
+    return {
+        "documents": documents,
+        "gold_spans": gold_spans,
+        "chunk_strategy": state.index_config.get(
+            "chunk_strategy",
+            state.index_config.get("chunk_stage", "markdown_recursive"),
+        ),
+    }

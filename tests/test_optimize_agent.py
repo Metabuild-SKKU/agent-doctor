@@ -56,7 +56,7 @@ def make_state(overall=60.0, chunk_size=512, iteration=0, max_iterations=3,
                label="too_long_context"):
     return AgentDoctorState(
         report=make_report(overall, label=label),
-        index_config={"chunk_size": chunk_size, "chunk_overlap": 50},
+        index_config={"top_k": 4, "chunk_size": chunk_size, "chunk_overlap": 50},
         iteration=iteration, max_iterations=max_iterations,
     )
 
@@ -67,7 +67,7 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertEqual(state.status, "applied")
         self.assertEqual(state.iteration, 1)
         self.assertEqual(state.current_agent, "optimize")
-        self.assertNotEqual(state.index_config["chunk_size"], 512)  # 실제 적용됨
+        self.assertEqual(state.index_config["top_k"], 2)  # 가장 싼 top-k 처방이 먼저 적용됨
         self.assertIsNotNone(history.find_pending(state.optimization_history))
 
     def test_manual_label_makes_no_change(self):
@@ -94,24 +94,112 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(len(state.blacklist), 0)
 
     def test_worse_rolls_back_and_blacklists(self):
-        state = agent.run(make_state(overall=60.0))         # 방문1: 512 -> 256
-        self.assertEqual(state.index_config["chunk_size"], 256)
+        state = agent.run(make_state(overall=60.0))         # 방문1: top_k 4 -> 2
+        self.assertEqual(state.index_config["top_k"], 2)
         state.report = make_report(50.0)                    # Eval: 악화
         state = agent.run(state)                            # 방문2: 판정 → 롤백
-        self.assertEqual(state.status, "rolled_back")
-        self.assertEqual(state.index_config["chunk_size"], 512)  # 복원
+        self.assertEqual(state.status, "applied")           # 같은 라벨의 다음 처방은 계속 진행
+        self.assertEqual(state.index_config["top_k"], 4)    # 첫 후보는 baseline으로 복원
+        self.assertEqual(state.index_config["chunk_size"], 256)
         self.assertEqual(len(state.blacklist), 1)
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
 
-    def test_budget_exhausted_judges_only(self):
+    def test_budget_exhausted_allows_same_label_without_increment(self):
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
         self.assertEqual(state.iteration, 3)                # 방문1: 2 -> 3
         state.report = make_report(50.0)                    # 악화
-        state = agent.run(state)                            # 방문2: 예산소진 → 판정만
-        self.assertEqual(state.iteration, 3)                # iteration 증가 안 함
-        self.assertEqual(state.index_config["chunk_size"], 512)  # 롤백까지 정상
+        state = agent.run(state)                            # 방문2: 같은 라벨의 다음 처방
+        self.assertEqual(state.iteration, 3)                # 후보/처방 전환은 증가 없음
+        self.assertEqual(state.index_config["chunk_size"], 256)
+        self.assertEqual(state.status, "applied")
+
+
+class OptimizeTopKSweepTest(unittest.TestCase):
+    @staticmethod
+    def _report(score):
+        finding = Finding(
+            finding_id="sweep", type="retrieval_failure", severity="warning",
+            description="gold가 검색 결과에 없음", label="retrieval_missing_gold",
+            affected_probes=["p1"],
+            metadata={"parameter_candidates": {"retriever.top_k": [3, 7, 9]}},
+        )
+        return DiagnosticReport(
+            report_id="sweep-report", findings=[finding], overall_score=score,
+            ragas_scores={
+                "context_recall": 0.7,
+                "faithfulness": 0.7,
+                "noise_sensitivity": 0.2,
+            },
+            pass_threshold=False,
+        )
+
+    def _state(self):
+        return AgentDoctorState(
+            report=self._report(60.0),
+            index_config={"top_k": 5, "chunk_size": 512, "chunk_overlap": 50},
+            iteration=0,
+            max_iterations=1,
+        )
+
+    def test_candidates_share_one_iteration_and_best_is_selected(self):
+        state = agent.run(self._state())
+        self.assertEqual((state.index_config["top_k"], state.iteration), (3, 1))
+
+        state.report = self._report(55.0)
+        state = agent.run(state)
+        self.assertEqual((state.index_config["top_k"], state.iteration), (7, 1))
+
+        state.report = self._report(70.0)
+        state = agent.run(state)
+        self.assertEqual((state.index_config["top_k"], state.iteration), (9, 1))
+
+        state.report = self._report(65.0)
+        state = agent.run(state)
+        self.assertEqual(state.index_config["top_k"], 7)
+        self.assertEqual(state.iteration, 1)
+        self.assertIsNone(history.find_pending(state.optimization_history))
+        self.assertEqual(len(state.optimization_history[0].metadata["trial_results"]), 4)
+
+    def test_baseline_is_restored_only_after_all_candidates(self):
+        state = self._state()
+        state.report.findings[0].metadata["parameter_candidates"] = {
+            "retriever.top_k": [3, 7]
+        }
+        state = agent.run(state)
+
+        state.report = self._report(55.0)
+        state.report.findings[0].metadata["parameter_candidates"] = {
+            "retriever.top_k": [3, 7]
+        }
+        state = agent.run(state)
+        self.assertEqual(state.index_config["top_k"], 7)
+        self.assertFalse(state.blacklist)
+
+        state.report = self._report(58.0)
+        state.report.findings[0].metadata["parameter_candidates"] = {
+            "retriever.top_k": [3, 7]
+        }
+        state = agent.run(state)
+        self.assertEqual(state.index_config["top_k"], 5)
         self.assertEqual(state.status, "rolled_back")
+        self.assertIn(
+            ("retrieval_missing_gold", "increase_top_k"),
+            state.blacklist,
+        )
+
+    def test_broken_active_study_restores_baseline_and_blacklists(self):
+        state = agent.run(self._state())
+        state.optimization_history[0].metadata.pop("study_request")
+
+        state = agent.run(state)
+
+        self.assertEqual(state.index_config["top_k"], 5)
+        self.assertEqual(state.status, "rolled_back")
+        self.assertIn(
+            ("retrieval_missing_gold", "increase_top_k"),
+            state.blacklist,
+        )
 
 
 class OptimizeReportWiringTest(unittest.TestCase):
@@ -127,7 +215,7 @@ class OptimizeReportWiringTest(unittest.TestCase):
     def test_keep_stores_applied_trial_report(self):
         # 방문2가 '판정만' 하도록 예산을 소진시킨다(예산이 남으면 새 처방 적용이 headline).
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
-        state.report = make_report(75.0)                     # 개선
+        state.report = make_report(75.0, label="retrieval_missing_gold")  # 개선 + 다음 라벨
         state = agent.run(state)                             # 방문2: 예산소진 → 유지 판정만
         report = state.optimization_report
         self.assertEqual(report.status, "applied")
@@ -135,7 +223,7 @@ class OptimizeReportWiringTest(unittest.TestCase):
 
     def test_rollback_stores_failed_trial_report(self):
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
-        state.report = make_report(50.0)                     # 악화
+        state.report = make_report(50.0, label="retrieval_missing_gold")  # 악화 + 다음 라벨
         state = agent.run(state)                             # 방문2: 예산소진 → 판정만(롤백)
         report = state.optimization_report
         self.assertEqual(report.status, "failed")

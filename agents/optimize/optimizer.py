@@ -7,7 +7,8 @@ OptimizationRequest를 검증하고 실행 backend를 조율하는 계층이다.
   - Planner가 만든 search space를 canonical 경로로 정규화한다.
   - 사용자 pipeline capability와 backend capability의 교집합만 허용한다.
   - 안전 범위와 현재 config를 기준으로 실행 가능한 후보만 남긴다.
-  - rules 직접 경로 또는 RAGBuilder를 실행하고 OptimizationResult로 정규화한다.
+  - 파라미터 경로에 맞는 internal 정책, rules 또는 RAGBuilder를 실행한다.
+  - backend별 반환값을 OptimizationResult로 정규화한다.
   - 외부 backend 실패 시 이미 검증된 rules 후보로만 안전하게 fallback한다.
 
 [중요한 입력 계약]
@@ -29,6 +30,7 @@ from typing import Any, Callable
 from agents.optimize.config_mapper import canonicalize_path, get_current_value
 from agents.optimize.schemas import (
     ConfigPatch,
+    InternalAdapterResult,
     OptimizationRequest,
     OptimizationResult,
     PrescriptionCandidate,
@@ -53,7 +55,8 @@ DEFAULT_CONSTRAINTS: dict[str, dict[str, Any]] = {
 # RAGBuilder가 탐색할 수 있다는 사실과 사용자 pipeline이 적용할 수 있다는 사실은
 # 다르므로, 외부 backend 지원 범위와 이 capability를 별도로 검사한다.
 DEFAULT_CAPABILITIES: dict[str, bool] = {
-    "retriever.top_k": False,
+    # Eval Agent가 state.index_config.top_k를 실제 검색 개수로 사용한다.
+    "retriever.top_k": True,
     "hybrid_search": False,
     "chunking": True,
     "embedding_model": False,
@@ -92,6 +95,11 @@ STATE_MAPPABLE_PATHS: set[str] = {
 # STATE_MAPPABLE_PATHS와 사용자 pipeline capability도 모두 통과해야 한다.
 BACKEND_SUPPORTED_PATHS: dict[str, set[str]] = {
     "rules": set(STATE_MAPPABLE_PATHS),
+    "internal": {
+        "retriever.top_k",
+        "chunker.chunk_size",
+        "chunker.chunk_overlap",
+    },
     "ragbuilder": {
         "retriever.top_k",
         "retriever.search_type",
@@ -123,7 +131,7 @@ def run(
     if backend not in {"rules", "internal", "ragbuilder", "autorag"}:
         return _failed_result(request, "unsupported_backend", f"지원하지 않는 backend: {backend}")
 
-    if backend in {"internal", "autorag"}:
+    if backend == "autorag":
         return _failed_result(
             request,
             "backend_not_implemented",
@@ -152,6 +160,15 @@ def run(
 
     if backend == "rules":
         return _run_rules(request, candidate, search_space, skipped=skipped)
+
+    if backend == "internal":
+        return _run_internal(
+            request,
+            candidate,
+            search_space,
+            skipped=skipped,
+            backend_runners=backend_runners,
+        )
 
     return _run_ragbuilder(
         request,
@@ -397,6 +414,242 @@ def _run_rules(
         message="검증된 rules 후보 하나를 선택했습니다.",
         metadata=metadata,
     )
+
+
+# internal backend ----------------------------------------------------------
+def _run_internal(
+    request: OptimizationRequest,
+    candidate: PrescriptionCandidate | None,
+    search_space: dict[str, list[Any]],
+    *,
+    skipped: list[dict[str, Any]],
+    backend_runners: dict[str, BackendRunner] | None,
+) -> OptimizationResult:
+    """파라미터 경로별 internal 실행 결과를 공통 결과로 변환한다."""
+
+    path = next(iter(search_space))
+    runner = (backend_runners or {}).get("internal")
+    if runner is None:
+        if path in {"chunker.chunk_size", "chunker.chunk_overlap"}:
+            from agents.optimize.adapters.chunk_prescreener import run as runner
+        else:
+            from agents.optimize.adapters.internal_adapter import run as runner
+
+    prepared_request = replace(
+        request,
+        candidates=[candidate] if candidate else [],
+        search_space={key: list(values) for key, values in search_space.items()},
+    )
+
+    try:
+        adapter_result = runner(prepared_request)
+    except Exception as exc:  # backend 주입 경계의 마지막 안전망
+        return _failed_result(
+            request,
+            "internal_exception",
+            f"internal backend 실행 실패: {exc}",
+        )
+
+    if not isinstance(adapter_result, InternalAdapterResult):
+        return _failed_result(
+            request,
+            "invalid_internal_result_type",
+            "internal backend가 InternalAdapterResult를 반환하지 않았습니다.",
+        )
+
+    metadata = _internal_result_metadata(
+        request=request,
+        result=adapter_result,
+        path=path,
+        search_space=search_space,
+        skipped=skipped,
+    )
+
+    if adapter_result.status == "needs_evaluation":
+        next_config = _validate_internal_config(
+            adapter_result.next_config,
+            search_space,
+            request.baseline_config,
+            allow_baseline=False,
+        )
+        if next_config is None:
+            return _failed_result(
+                request,
+                "invalid_internal_next_config",
+                "internal backend의 next_config가 검증된 후보 범위 밖입니다.",
+            )
+        return _internal_proposed_result(
+            request=request,
+            candidate=candidate,
+            config=next_config,
+            metadata=metadata,
+            message="다음 실제 Eval이 필요한 internal 후보를 선택했습니다.",
+        )
+
+    if adapter_result.status == "completed":
+        best_config = _validate_internal_config(
+            adapter_result.best_config,
+            search_space,
+            request.baseline_config,
+            allow_baseline=True,
+        )
+        if best_config is None:
+            return _failed_result(
+                request,
+                "invalid_internal_best_config",
+                "internal backend의 best_config가 후보 또는 baseline 범위 밖입니다.",
+            )
+
+        if _is_baseline_config(best_config, request.baseline_config):
+            metadata["error_code"] = "baseline_selected"
+            return OptimizationResult(
+                request_id=request.request_id,
+                status="skipped",
+                optimizer="internal",
+                selected_candidate=candidate,
+                best_config=best_config,
+                improved=False,
+                message="후보가 baseline을 개선하지 못해 현재 설정을 유지합니다.",
+                metadata=metadata,
+            )
+
+        return _internal_proposed_result(
+            request=request,
+            candidate=candidate,
+            config=best_config,
+            metadata=metadata,
+            message="internal 평가에서 선택한 best 후보를 제안합니다.",
+        )
+
+    if adapter_result.status == "skipped":
+        metadata["error_code"] = adapter_result.metadata.get(
+            "error_code",
+            "internal_skipped",
+        )
+        return OptimizationResult(
+            request_id=request.request_id,
+            status="skipped",
+            optimizer="internal",
+            selected_candidate=candidate,
+            improved=None,
+            message=adapter_result.error or "internal 평가를 건너뜁니다.",
+            metadata=metadata,
+        )
+
+    return OptimizationResult(
+        request_id=request.request_id,
+        status="failed",
+        optimizer="internal",
+        selected_candidate=candidate,
+        improved=None,
+        message=adapter_result.error or "internal 평가에 실패했습니다.",
+        error=adapter_result.error or "internal 평가에 실패했습니다.",
+        metadata={**metadata, "error_code": "internal_failed"},
+    )
+
+
+def _internal_proposed_result(
+    *,
+    request: OptimizationRequest,
+    candidate: PrescriptionCandidate | None,
+    config: dict[str, Any],
+    metadata: dict[str, Any],
+    message: str,
+) -> OptimizationResult:
+    """검증된 internal config 하나를 실제 적용 전 제안으로 만든다."""
+
+    path, value = next(iter(config.items()))
+    needs_reindex = path in REINDEX_PATHS
+    if candidate and candidate.patch and candidate.patch.reindex_required:
+        needs_reindex = True
+    prescription_id = candidate.id if candidate else None
+    patch = ConfigPatch(
+        changes={path: value},
+        reindex_required=needs_reindex,
+        description=(
+            candidate.patch.description
+            if candidate and candidate.patch and candidate.patch.description
+            else f"{path} 값을 {value!r}(으)로 변경"
+        ),
+        metadata={"prescription_id": prescription_id} if prescription_id else {},
+    )
+    return OptimizationResult(
+        request_id=request.request_id,
+        status="proposed",
+        optimizer="internal",
+        selected_candidate=candidate,
+        config_patch=patch,
+        best_config=dict(config),
+        improved=None,
+        needs_reindex=needs_reindex,
+        message=message,
+        metadata=metadata,
+    )
+
+
+def _internal_result_metadata(
+    *,
+    request: OptimizationRequest,
+    result: InternalAdapterResult,
+    path: str,
+    search_space: dict[str, list[Any]],
+    skipped: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """다음 Optimize 방문에 필요한 internal 상태만 복사한다."""
+
+    return {
+        "requested_backend": request.optimizer,
+        "effective_backend": "internal",
+        "parameter_path": path,
+        "filtered_search_space": {
+            key: list(values) for key, values in search_space.items()
+        },
+        "skipped_candidates": list(skipped),
+        "adapter_status": result.status,
+        "adapter_warnings": list(result.warnings),
+        "trial_results": list(result.trial_results),
+        "study_baseline_config": dict(
+            request.metadata.get("study_baseline_config", request.baseline_config)
+        ),
+        "objective_metric": result.objective_metric,
+        "direction": result.direction,
+        "best_score": result.best_score,
+        "propose_only": request.propose_only,
+        **dict(result.metadata),
+    }
+
+
+def _validate_internal_config(
+    config: dict[str, Any] | None,
+    search_space: dict[str, list[Any]],
+    baseline_config: dict[str, Any],
+    *,
+    allow_baseline: bool,
+) -> dict[str, Any] | None:
+    """internal config가 요청 후보 또는 허용된 baseline 값인지 확인한다."""
+
+    if not isinstance(config, dict) or len(config) != 1:
+        return None
+    raw_path, value = next(iter(config.items()))
+    path = canonicalize_path(raw_path)
+    allowed_values = search_space.get(path)
+    if allowed_values is None:
+        return None
+    if value in allowed_values:
+        return {path: value}
+    if allow_baseline and value == get_current_value(baseline_config, path):
+        return {path: value}
+    return None
+
+
+def _is_baseline_config(
+    config: dict[str, Any],
+    baseline_config: dict[str, Any],
+) -> bool:
+    """단일 축 config가 study 시작 baseline과 같은지 확인한다."""
+
+    path, value = next(iter(config.items()))
+    return value == get_current_value(baseline_config, path)
 
 
 # RAGBuilder backend --------------------------------------------------------

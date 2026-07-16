@@ -3,7 +3,7 @@ agents/eval/agent.py
 Eval Agent — RAG 파이프라인 품질 진단
 
 읽기: state.chunks, state.user_questions, state.index_config, state.iteration
-쓰기: state.probes, state.report, state.iteration, state.status, state.error, state.current_agent
+쓰기: state.probes, state.report, state.status, state.error, state.current_agent
 
 설계 문서(Evaluate Module)의 STEP 1~5 를 순서대로 실행한다:
     STEP1  Probe 생성            → probe_gen.generate_probes
@@ -14,7 +14,8 @@ Eval Agent — RAG 파이프라인 품질 진단
     STEP5  DiagnosticReport 생성  → report.build_report
 
 그 뒤 graph.route_after_eval() 이 report.pass_threshold 로 Serve/Optimize 를 정한다.
-반복 카운터(state.iteration)는 이 에이전트가 증가시킨다(측정 시점 = 반복 경계).
+반복 카운터(state.iteration)는 Optimize가 새 라벨 study를 시작할 때만 증가시킨다.
+Eval은 같은 라벨의 후보별 측정에서 카운터를 바꾸지 않는다.
 
 계약(AGENTS.md): run() 은 반드시 state 를 반환한다. 오류는 예외를 던지지 말고
 state.status="error" / state.error 에 기록하고 state 를 반환한다.
@@ -58,16 +59,13 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
-    print(f"[Eval] 시작 - 청크 {len(state.chunks)}개, 반복 {state.iteration + 1}/{state.max_iterations}")
+    print(f"[Eval] 시작 - 청크 {len(state.chunks)}개, 라벨 반복 {state.iteration}/{state.max_iterations}")
 
     if not state.chunks:
         state.status = "error"
         state.error = "청크가 없습니다. Index Agent 완료 여부를 확인하세요."
         print(f"[Eval] 오류: {state.error}")
         return state
-
-    # 반복 카운터 증가 (route_after_eval 의 종료 조건)
-    state.iteration += 1
 
     # 진단 모드(비용 tier 상한): EVAL_MODE 환경변수. STEP3-2/STEP4/리포트가 이 값으로 게이팅된다.
     mode = resolve_mode()
