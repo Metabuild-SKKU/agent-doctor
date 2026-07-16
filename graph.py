@@ -13,7 +13,6 @@ Agent Doctor v2 메인 LangGraph 그래프
 """
 
 from __future__ import annotations
-
 from langgraph.graph import StateGraph, END
 
 from core.state import AgentDoctorState
@@ -21,25 +20,50 @@ from agents.ingest.agent import run as ingest_run
 from agents.index.agent import run as index_run
 from agents.eval.agent import run as eval_run
 from agents.optimize.agent import run as optimize_run
+from agents.optimize import history   # 판정 대기(pending) 처방 조회용
 from agents.serve.agent import run as serve_run
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 def route_after_eval(state: AgentDoctorState) -> str:
     """
     Eval 결과를 보고 다음 에이전트 결정.
-      품질 통과 or 최대 반복 초과 → Serve
-      품질 미달                 → Optimize
+      품질 통과                       → Serve
+      반복 예산 소진 + 판정 대기 처방  → Optimize (마지막 처방 판정 기회)
+      반복 예산 소진 + 대기 없음       → Serve
+      품질 미달(예산 남음)            → Optimize
     """
-    if state.iteration >= state.max_iterations:
-        print(f"[Orchestrator] 최대 반복 {state.max_iterations}회 도달 → Serve")
-        return "serve"
-
     if state.report and state.report.pass_threshold:
         print(f"[Orchestrator] 품질 통과 ({state.report.overall_score}점) → Serve")
         return "serve"
 
+    if state.iteration >= state.max_iterations:
+        # 예산은 다 썼지만 마지막 처방이 아직 판정(유지/롤백) 안 됐으면 한 번 더 보낸다.
+        if history.find_pending(state.optimization_history):
+            print("[Orchestrator] 반복 예산 소진 — 마지막 처방 판정 위해 → Optimize")
+            return "optimize"
+        print(f"[Orchestrator] 최대 반복 {state.max_iterations}회 도달 → Serve")
+        return "serve"
+
     print(f"[Orchestrator] 품질 미달 → Optimize (반복 {state.iteration}/{state.max_iterations})")
     return "optimize"
+
+
+def route_after_optimize(state: AgentDoctorState) -> str:
+    """
+    Optimize 결과를 보고 다음 흐름 결정.
+      config 변경(새 처방 적용 또는 롤백) → Index (재색인 후 재검증)
+      변경 없음(제안/유지/수동/스킵)      → Serve
+    """
+    if state.status in ("applied", "rolled_back"):
+        print(f"[Orchestrator] config 변경({state.status}) → Index 재색인")
+        return "index"
+    print(f"[Orchestrator] config 변경 없음({state.status}) → Serve")
+    return "serve"
 
 
 def build_graph():
@@ -54,8 +78,14 @@ def build_graph():
     graph.set_entry_point("ingest")
     graph.add_edge("ingest",   "index")
     graph.add_edge("index",    "eval")
-    graph.add_edge("optimize", "index")   # Optimize 후 Index부터 재실행
     graph.add_edge("serve",    END)
+
+    # Optimize 후: config가 바뀌었으면 Index 재색인, 아니면 바로 Serve.
+    graph.add_conditional_edges(
+        "optimize",
+        route_after_optimize,
+        {"index": "index", "serve": "serve"},
+    )
 
     graph.add_conditional_edges(
         "eval",
@@ -79,6 +109,9 @@ def run_pipeline(
         source_type:    "notion" | "gdrive" | "file" | "slack"
         user_questions: 테스트 질문 (없으면 자동 생성)
     """
+    from core.run_logger import setup_run_logging
+    setup_run_logging(prefix="pipeline")  # 이후 모든 print 를 콘솔+로그파일에 동시 출력
+
     graph = build_graph()
 
     initial_state = AgentDoctorState(
@@ -94,6 +127,10 @@ def run_pipeline(
     print("=" * 60)
 
     final_state = graph.invoke(initial_state)
+    # LangGraph 는 dataclass state 를 dict 로 반환한다 → 속성 접근 위해 dataclass 로 복원
+    # (노드 안에서는 AgentDoctorState 객체지만 invoke() 최종 반환은 dict).
+    if isinstance(final_state, dict):
+        final_state = AgentDoctorState(**final_state)
 
     print("=" * 60)
     print("완료")

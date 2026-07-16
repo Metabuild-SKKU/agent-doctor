@@ -26,11 +26,15 @@ agents/ingest/tokens.json
 
 # 결과물
 results/
+output/
 
 # IDE
 .vscode/
 .idea/
 *.DS_Store
+
+# Claude Code
+CLAUDE.md
 
 # 벡터 DB
 qdrant_storage/
