@@ -513,6 +513,14 @@ def _previous_chunks_by_document(chunks: list[Chunk]) -> dict[tuple[str, str], l
     return grouped
 
 
+@dataclass(frozen=True)
+class _DocResult:
+    chunks: list[Chunk]        # 이 문서에서 새로 만든/재사용한 청크
+    new_hashes: set[str]       # 성공 시에만 seen_chunks에 커밋할 청크 해시
+    document_hash: str
+    reused: int                # 재사용 임베딩 개수 (신규는 0)
+
+
 # 문서 하나를 청크 리스트로 변환한다. 공유 상태(seen_*)는 읽기만 하고,
 # 새로 본 청크 해시는 반환값으로 돌려줘서 호출자가 성공 시에만 커밋한다 —
 # 처리 도중 실패한 문서의 흔적이 dedup 집합에 남으면 다른 문서의 동일 청크가
@@ -528,7 +536,7 @@ def _process_document(
     seen_chunks: set[str],
     seen_doc_ids: dict[str, str],
     seen_documents: set[str],
-) -> tuple[list[Chunk], set[str], str, int]:
+) -> _DocResult:
     _validate_document(document)
     normalized = _normalize_text(document.content)
     document_hash = _sha256(normalized)
@@ -539,7 +547,7 @@ def _process_document(
         )
     if config.get("deduplicate", True) and document_hash in seen_documents:
         print(f"[Index] 중복 문서 제외: {document.doc_id}")
-        return [], set(), document_hash, 0
+        return _DocResult([], set(), document_hash, 0)
 
     new_hashes: set[str] = set()
 
@@ -569,7 +577,7 @@ def _process_document(
                 )
             )
         print(f"[Index] 기존 임베딩 재사용: {document.doc_id} ({len(document_chunks)}개)")
-        return document_chunks, new_hashes, document_hash, len(document_chunks)
+        return _DocResult(document_chunks, new_hashes, document_hash, len(document_chunks))
 
     drafts = _chunk_document(
         document,
@@ -629,7 +637,7 @@ def _process_document(
             metadata=metadata,
         )
         document_chunks.append(chunk)
-    return document_chunks, new_hashes, document_hash, 0
+    return _DocResult(document_chunks, new_hashes, document_hash, 0)
 
 
 # Eval/Optimize가 config를 바꿔 다시 호출하는 흐름을 전제로 둔 Index 본체.
@@ -667,7 +675,7 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
 
         for document in state.documents:
             try:
-                document_chunks, new_hashes, document_hash, reused = _process_document(
+                res = _process_document(
                     document,
                     config=config,
                     tools=tools,
@@ -687,11 +695,11 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
             # 성공한 문서만 공유 상태에 반영한다. 실패 문서의 doc_id가 seen_doc_ids에
             # 남으면 아래 delete_document_chunks가 기존 벡터를 지우는데 새 청크는
             # upsert되지 않아 벡터 스토어에서 그 문서가 통째로 사라진다.
-            seen_chunks |= new_hashes
-            seen_doc_ids[document.doc_id] = document_hash
-            seen_documents.add(document_hash)
-            all_chunks.extend(document_chunks)
-            reused_count += reused
+            seen_chunks |= res.new_hashes
+            seen_doc_ids[document.doc_id] = res.document_hash
+            seen_documents.add(res.document_hash)
+            all_chunks.extend(res.chunks)
+            reused_count += res.reused
 
         if not all_chunks:
             failure_summary = (
