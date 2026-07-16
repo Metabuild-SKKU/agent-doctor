@@ -9,7 +9,7 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from agents.index.retriever import Retriever
+from agents.rag.retriever import Retriever
 
 # 답변, context, citation, 검색 상세 정보 보관 
 @dataclass

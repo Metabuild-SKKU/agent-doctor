@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from agents.index.retriever import build_retriever
+from agents.rag.retriever import build_retriever
 from agents.rag.generator import answer_question, answer_text, generate_answer
 from core.schema import Chunk
 
@@ -57,7 +57,7 @@ class RetrieverTests(unittest.TestCase):
             },
         )
 
-        with patch("agents.index.retriever.embed", return_value=[1.0, 0.0]):
+        with patch("agents.rag.retriever.embed", return_value=[1.0, 0.0]):
             response = retriever.search_with_details("재택근무", top_k=1)
 
         self.assertFalse(response["fallback_used"])
