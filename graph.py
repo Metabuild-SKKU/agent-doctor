@@ -13,7 +13,6 @@ Agent Doctor v2 메인 LangGraph 그래프
 """
 
 from __future__ import annotations
-
 from langgraph.graph import StateGraph, END
 
 from core.state import AgentDoctorState
@@ -24,6 +23,11 @@ from agents.optimize.agent import run as optimize_run
 from agents.optimize import history   # 판정 대기(pending) 처방 조회용
 from agents.serve.agent import run as serve_run
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 def route_after_eval(state: AgentDoctorState) -> str:
     """
@@ -120,6 +124,10 @@ def run_pipeline(
     print("=" * 60)
 
     final_state = graph.invoke(initial_state)
+    # LangGraph 는 dataclass state 를 dict 로 반환한다 → 속성 접근 위해 dataclass 로 복원
+    # (노드 안에서는 AgentDoctorState 객체지만 invoke() 최종 반환은 dict).
+    if isinstance(final_state, dict):
+        final_state = AgentDoctorState(**final_state)
 
     print("=" * 60)
     print("완료")
