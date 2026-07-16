@@ -204,7 +204,50 @@ def _keyword_score(query: str, text: str) -> float:
     if not query_terms or not text_terms:
         return 0.0
     matched = sum(min(count, text_terms.get(term, 0)) for term, count in query_terms.items())
+    text_lower = text.lower()
+    substring_matched = sum(count for term, count in query_terms.items() if term in text_lower)
+    matched = max(matched, substring_matched)
     return matched / max(1, sum(query_terms.values()))
+
+
+def _field(chunk: Any, name: str, default: Any = None) -> Any:
+    if isinstance(chunk, dict):
+        return chunk.get(name, default)
+    return getattr(chunk, name, default)
+
+
+def keyword_search(
+    chunks: list[Any],
+    query: str,
+    top_k: int = 5,
+) -> list[dict]:
+    """Dependency-light lexical fallback used by Eval, Serve, and RAG."""
+    if top_k <= 0 or not query.strip():
+        return []
+
+    scored = []
+    for chunk in chunks:
+        text = _field(chunk, "text", "") or ""
+        score = _keyword_score(query, text)
+        if score <= 0:
+            continue
+        scored.append(
+            {
+                "score": float(score),
+                "text": text,
+                "metadata": _field(chunk, "metadata", {}) or {},
+                "chunk_id": _field(chunk, "chunk_id", "") or "",
+                "doc_id": _field(chunk, "doc_id", "") or "",
+                "section": _field(chunk, "section"),
+                "char_span": _field(chunk, "char_span"),
+                "token_count": _field(chunk, "token_count"),
+                "parent_id": _field(chunk, "parent_id"),
+                "hash": _field(chunk, "hash"),
+            }
+        )
+
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    return scored[:top_k]
 
 
 def hybrid_search(
