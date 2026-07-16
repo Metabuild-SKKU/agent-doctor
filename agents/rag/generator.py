@@ -250,15 +250,10 @@ def _llm_generate(
                 if result:
                     return result
             if name in {"github", "github_models"}:
-                github_key = _github_api_key(allow_repo_token=selected != "auto")
-                if github_key:
-                    result = _github_generate(
-                        system,
-                        user,
-                        model=selected_model,
-                        config=config,
-                        api_key=github_key,
-                    )
+                # auto 모드에선 전용 토큰(GITHUB_MODELS_TOKEN)이 있을 때만 GitHub를 시도한다
+                # (범용 GITHUB_TOKEN이 우연히 있다고 auto가 GitHub로 새지 않도록).
+                if _github_api_key(allow_repo_token=selected != "auto"):
+                    result = _github_generate(system, user, model=selected_model, config=config)
                     if result:
                         return result
         except Exception as exc:
@@ -291,25 +286,20 @@ def _build_prompt(
     return system, user
 
 
+# OpenAI (openai SDK)
 def _openai_generate(
     system: str,
     user: str,
     *,
     model: str | None = None,
-    config: dict | None = None,
+    config: dict | None = None,   # 미사용(호출부 시그니처 호환용)
 ) -> str | None:
     from openai import OpenAI
 
-    client_kwargs: dict[str, Any] = {"api_key": os.getenv("OPENAI_API_KEY")}
-    base_url = (
-        _config_value(config, "rag_openai_base_url", "openai_base_url")
-        or os.getenv("RAG_OPENAI_BASE_URL")
-        or os.getenv("OPENAI_BASE_URL")
-    )
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    client = OpenAI(**client_kwargs)
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
 
+    client = OpenAI()
     response = client.chat.completions.create(
         model=model or os.getenv("RAG_OPENAI_MODEL", "gpt-4o"),
         temperature=0,
@@ -322,30 +312,25 @@ def _openai_generate(
     return content.strip() if content else None
 
 
-# GitHub Models
+# GitHub Models (OpenAI 호환 API, GitHub PAT 인증)
+GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
+
 def _github_generate(
     system: str,
     user: str,
     *,
     model: str | None = None,
-    config: dict | None = None,
-    api_key: str | None = None,
+    config: dict | None = None,   # 미사용(호출부 시그니처 호환용)
 ) -> str | None:
     from openai import OpenAI
 
-    api_key = api_key or _github_api_key(allow_repo_token=True)
+    # 토큰 해석: GITHUB_MODELS_TOKEN 우선, 없으면 GITHUB_TOKEN.
+    # (auto 모드에서 GITHUB_TOKEN으로 새는 것은 위 호출부 가드가 이미 막는다)
+    api_key = _github_api_key(allow_repo_token=True)
     if not api_key:
         return None
 
-    client = OpenAI(
-        api_key=api_key,
-        base_url=(
-            _config_value(config, "rag_github_base_url", "github_models_base_url")
-            or os.getenv("RAG_GITHUB_BASE_URL")
-            or os.getenv("GITHUB_MODELS_BASE_URL")
-            or "https://models.github.ai/inference"
-        ),
-    )
+    client = OpenAI(base_url=GITHUB_MODELS_BASE_URL, api_key=api_key)
     response = client.chat.completions.create(
         model=model or os.getenv("RAG_GITHUB_MODEL", "openai/gpt-4o"),
         temperature=0,
@@ -358,48 +343,25 @@ def _github_generate(
     return content.strip() if content else None
 
 
-# Gemini REST API
+# Gemini (google-genai SDK)
 def _gemini_generate(
     system: str,
     user: str,
     *,
     model: str | None = None,
-    config: dict | None = None,
+    config: dict | None = None,   # base_url 등은 SDK가 처리하므로 현재 미사용(시그니처 호환용)
 ) -> str | None:
-    import requests
+    from google import genai
 
     api_key = os.getenv("GEMINI_API_KEY")
-    selected_model = model or os.getenv("RAG_GEMINI_MODEL", "gemini-1.5-flash")
-    api_base = (
-        _config_value(config, "rag_gemini_base_url", "gemini_base_url")
-        or os.getenv("RAG_GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
-    )
-    url = f"{api_base}/models/{selected_model}:generateContent"
-    response = requests.post(
-        url,
-        params={"key": api_key},
-        json={
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": f"{system}\n\n{user}"}],
-                }
-            ],
-            "generationConfig": {"temperature": 0},
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    data = response.json()
-    candidates = data.get("candidates") or []
+    if not api_key:
+        return None
+    selected_model = model or os.getenv("RAG_GEMINI_MODEL", "gemini-flash-latest")
 
-    # 하나의 문자열로 합치기
-    parts = (
-        candidates[0]
-        .get("content", {})
-        .get("parts", [])
-        if candidates
-        else []
+    client = genai.Client(api_key=api_key)
+    resp = client.models.generate_content(
+        model=selected_model,
+        contents=user,
+        config={"temperature": 0, "system_instruction": system},
     )
-    text = "".join(str(part.get("text", "")) for part in parts).strip()
-    return text or None
+    return (resp.text or "").strip() or None
