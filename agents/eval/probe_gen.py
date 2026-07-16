@@ -52,7 +52,7 @@ from agents.eval.types import (
 )
 
 # 자동 생성 기본 개수 (설계: testset_size=5~10 으로 시작해 비용 확인 후 확대)
-DEFAULT_TESTSET_SIZE = 50
+DEFAULT_TESTSET_SIZE = 10
 
 
 def generate_probes(state: AgentDoctorState) -> list[Probe]:
