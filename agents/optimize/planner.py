@@ -71,9 +71,13 @@ _DIRECTION_STEP = 2
 # 무릎(knee) 분석 임계값: "probe 1개를 더 커버하려고 파라미터를 이만큼 넘게
 # 올리지는 않는다". 커버리지를 넓히면 노이즈·비용이 늘고 too_long_context /
 # lost_in_the_middle 을 유발하므로, 넘치는 쪽에 실제 벌점이 있다.
-# 못 커버한 probe 는 다음 Eval 이 재진단한다 — 한 방에 100% 커버하려는 것이
-# 오히려 오진이다(다른 원인일 수 있음).
+# 이 값은 노이즈와 커버리지의 교환비에 대한 '추측'이므로 최종 답이 아니라 sweep
+# 구간의 시작점을 고르는 데만 쓴다 — 맞았는지는 실측(overall_score)이 판정한다.
 _MAX_STEP_PER_PROBE = 2.0
+
+# sweep 후보 상한. 후보 1개당 파이프라인 전체 재평가(LLM 호출 다수)가 들어가므로
+# 무릎에서 위로 이만큼만 시도한다. (OPTIMIZER_IMPLEMENTATION_PLAN.md §2.3)
+_MAX_SWEEP_CANDIDATES = 3
 
 # 방향 키워드를 계산할 때 baseline_config 에 해당 키가 없을 경우의 기본 현재값.
 _DEFAULT_CURRENT: dict[str, int] = {
@@ -349,6 +353,24 @@ def _knee(required: list[int]) -> int:
     return best
 
 
+def _knee_candidates(required: list[int]) -> list[int]:
+    """무릎과 그 위 지점들을 sweep 후보로 낸다(싼 것부터, 최대 _MAX_SWEEP_CANDIDATES 개).
+
+    무릎 아래는 후보로 내지 않는다 — 그 구간은 값을 1 올릴 때마다 probe 를 1개쯤
+    회수하므로 무릎이 지배한다(커버리지는 더 높고 노이즈 차이는 작다).
+    무릎 위는 _MAX_STEP_PER_PROBE 라는 '추측'이 밑진다고 본 구간이라, 그 추측이
+    맞았는지 실측으로 확인할 가치가 있다 → sweep 대상.
+
+    예) [3,4,4,5,6,7,8,12,15,100] → 무릎 8 → [8, 12, 15]
+        (100 은 상한 초과라 optimizer 안전범위가 걸러낸다.)
+    후보가 1개면 sweep 할 게 없어 optimizer 는 rules 로 1회만 검증한다.
+    """
+    values = sorted(set(required))
+    knee = _knee(required)
+    start = values.index(knee)
+    return values[start:start + _MAX_SWEEP_CANDIDATES]
+
+
 def _ground_enumeration_top_k(
     findings: list[Finding], baseline_config: dict
 ) -> list[int] | None:
@@ -361,7 +383,7 @@ def _ground_enumeration_top_k(
     counts = [len(f.affected_chunks) for f in findings if f.affected_chunks]
     if not counts:
         return None  # 측정값 없음 → 방향 키워드 폴백
-    return [_knee(counts)]
+    return _knee_candidates(counts)
 
 
 # 라벨 → 근거값 계산 함수. 여기 없는 라벨은 방향 키워드(추측)로 폴백한다.

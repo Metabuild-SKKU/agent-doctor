@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from core.schema import DiagnosticReport, Document, Finding, Probe
 from core.state import AgentDoctorState
 from agents.optimize import planner
-from agents.optimize.planner import _knee
+from agents.optimize.planner import _knee, _knee_candidates
 
 
 def make_finding(probe_id, label, gold_n=0, confirmed=True, candidates=None):
@@ -79,6 +79,25 @@ class KneeTest(unittest.TestCase):
         self.assertEqual(_knee([2, 2, 2, 2, 50]), 2)
 
 
+class KneeCandidatesTest(unittest.TestCase):
+    """sweep 후보: 무릎 위 구간은 '추측이 밑진다고 본' 곳이라 실측으로 확인한다."""
+
+    def test_candidates_start_at_knee_and_go_up(self):
+        # 무릎 아래(6,7)는 무릎(8)이 지배하므로 후보에 없다.
+        self.assertEqual(_knee_candidates([3, 4, 4, 5, 6, 7, 8, 12, 15, 100]),
+                         [8, 12, 15])
+
+    def test_single_candidate_when_knee_covers_everything(self):
+        # 더 올릴 이유가 없으면 후보 1개 → sweep 불필요(rules 로 1회 검증)
+        self.assertEqual(_knee_candidates([3, 4, 5]), [5])
+        self.assertEqual(_knee_candidates([7]), [7])
+
+    def test_candidate_count_is_capped(self):
+        # 후보 1개당 파이프라인 전체 재평가가 드므로 상한을 넘지 않는다.
+        self.assertLessEqual(len(_knee_candidates(list(range(1, 30)))),
+                             planner._MAX_SWEEP_CANDIDATES)
+
+
 class GroundedValueTest(unittest.TestCase):
     """근거값: 방향 키워드(×2 추측) 대신 진단 측정값에서 계산한다."""
 
@@ -93,8 +112,11 @@ class GroundedValueTest(unittest.TestCase):
         self.assertEqual(decision.mode, "apply_optimize")
         first = request.candidates[0]
         self.assertEqual(first.id, "dynamic_top_k")
-        # ×2 추측이면 10 이 나왔을 것. 측정 기반 무릎은 8.
-        self.assertEqual(first.search_space, {"retriever.top_k": [8]})
+        # ×2 추측이면 [10] 하나가 나왔을 것. 측정 기반은 무릎(8)부터 그 위로.
+        self.assertEqual(first.search_space, {"retriever.top_k": [8, 12, 15]})
+        # 후보가 여러 개 → internal 이 방문에 걸쳐 sweep 하고 실측으로 승자를 고른다.
+        self.assertEqual(request.optimizer, "internal")
+        self.assertEqual(request.max_trials, 3)
 
     def test_falls_back_to_direction_keyword_without_evidence(self):
         # gold 개수가 없으면(affected_chunks 비어있음) 계산 불가 → ×2 폴백
