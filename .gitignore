@@ -23,6 +23,7 @@ data/
 
 # 결과물
 results/
+output/
 
 # IDE
 .vscode/
