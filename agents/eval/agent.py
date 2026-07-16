@@ -33,12 +33,16 @@ from agents.eval.types import (
 )
 from agents.eval.probe_gen import generate_probes
 from agents.eval.probe_store import save_probes, load_probes
-# ⚠️ 임시: Index Agent가 검색 리트리버를 제공하기 전까지만 retrieval_temp 사용.
-#     Index 검색이 준비되면 retrieval_temp 를 삭제하고 여기 import 를 교체할 것.
-from agents.eval.retrieval_temp import build_eval_index, retrieve, generate_answer, _keyword_search
+from agents.index.qdrant_store import keyword_search
+from agents.rag.generator import generate_answer
+from agents.rag.retriever import Retriever, build_retriever
 from agents.eval.metrics_ragas import evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge
 from agents.eval.diagnose import diagnose, set_context as set_diag_context
 from agents.eval.report import build_report
+
+
+def _retrieve_with_rag(retriever: Retriever, chunks, question: str, top_k: int) -> list[dict]:
+    return retriever.search(question, top_k=top_k)
 
 
 def _ragas_track(record: EvalRecord, track: str) -> dict:
@@ -113,17 +117,15 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             state.status = "evaluated"
             return state
 
-        # 검색 인덱스 준비(임시): Index 리트리버 미개발 → retrieval_temp 로 state.chunks 재적재
-        # [TODO 비효율] eval 실행마다 전체 청크를 재인덱싱(재임베딩 upsert). Optimize 루프 시 반복 비용.
-        #   → Index Agent 가 검색 리트리버를 제공하면 retrieval_temp 와 함께 제거하고 인덱스를 재사용.
-        client = build_eval_index(state.chunks)
-        # client = build_eval_index(state.chunks)
+        # 검색 인덱스 준비: 공통 RAG retriever가 Qdrant/keyword fallback을 오케스트레이션한다.
+        # Eval은 검색 구현을 직접 들고 있지 않고, RAG 모듈의 동일한 검색 규칙을 재사용한다.
+        retriever = build_retriever(state.chunks, state.index_config)
         chunk_text = {c.chunk_id: c.text for c in state.chunks}
         top_k = int(state.index_config.get("top_k", DEFAULT_TOP_K))
 
         # tier2/tier4 판별 훅(재검색·코퍼스·재생성)이 쓸 자원 주입
-        set_diag_context(client=client, chunks=state.chunks,
-                         retrieve_fn=retrieve, keyword_fn=_keyword_search,
+        set_diag_context(client=retriever, chunks=state.chunks,
+                         retrieve_fn=_retrieve_with_rag, keyword_fn=keyword_search,
                          generate_fn=generate_answer, ragas_fn=_ragas_track)
 
         # ── STEP2~4: probe 별 평가 ────────────────────────────
@@ -132,7 +134,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         print(f"\n[Eval] STEP2-4: probe별 평가 ({len(probes)}개)\n")
         records = []
         for i, p in enumerate(probes, 1):
-            rec = _evaluate_probe(p, client, state.chunks, chunk_text, top_k, mode,
+            rec = _evaluate_probe(p, retriever, state.chunks, chunk_text, top_k, mode,
                                   state.diagnosis_cache.setdefault(p.probe_id, {}))
             _log_probe(i, len(probes), rec)
             records.append(rec)
@@ -206,7 +208,7 @@ def _pipeline_version(state: AgentDoctorState) -> str:
 
 def _evaluate_probe(
     probe: Probe,
-    client,
+    retriever: Retriever,
     chunks: list,
     chunk_text: dict[str, str],
     top_k: int,
@@ -217,8 +219,8 @@ def _evaluate_probe(
     sig_cache 는 state.diagnosis_cache[probe_id] 뷰 — 진단 신호 memoize 가 여기(=state)에 누적된다."""
     rec = EvalRecord(probe=probe, signals=sig_cache)
 
-    # STEP2: 검색(임시): Index 리트리버 미개발 → retrieval_temp.retrieve 사용
-    hits = retrieve(client, chunks, probe.question, top_k)
+    # STEP2: 공통 RAG retriever로 검색
+    hits = retriever.search(probe.question, top_k=top_k)
     rec.retrieved = hits
     rec.retrieved_context = [h.get("text", "") for h in hits]
     rec.retrieved_chunk_ids = [h.get("chunk_id", "") for h in hits]
