@@ -171,7 +171,11 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     "retrieval_incomplete_enumeration": {
         "group": "A",
         "assigned": "이승준",
-        "status": "draft",              # 3개 처방 다 스키마 미정, 실행은 아직 불가
+        # dynamic_top_k 하나가 실행 가능해져 ready 로 승격(나머지 2개는 여전히 스키마 미정).
+        # top_k 는 STATE_MAPPABLE_PATHS 에 있고 Eval 이 index_config["top_k"] 를 실제로
+        # 읽어 검색에 쓴다. mmr/adaptive_retrieval 은 매핑 불가라 optimizer 가 후보
+        # 단계에서 자동으로 걸러내므로, 그 둘 때문에 라벨 전체를 막아둘 이유는 없다.
+        "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 나열형 gold 일부 누락(recall@k 부분) 보완
         "prescriptions": [

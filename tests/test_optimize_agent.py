@@ -52,11 +52,11 @@ def make_report(overall, pass_threshold=False, label="too_long_context"):
     )
 
 
-def make_state(overall=60.0, chunk_size=512, iteration=0, max_iterations=3,
+def make_state(overall=60.0, chunk_size=512, top_k=5, iteration=0, max_iterations=3,
                label="too_long_context"):
     return AgentDoctorState(
         report=make_report(overall, label=label),
-        index_config={"chunk_size": chunk_size, "chunk_overlap": 50},
+        index_config={"chunk_size": chunk_size, "chunk_overlap": 50, "top_k": top_k},
         iteration=iteration, max_iterations=max_iterations,
     )
 
@@ -67,7 +67,8 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertEqual(state.status, "applied")
         self.assertEqual(state.iteration, 1)
         self.assertEqual(state.current_agent, "optimize")
-        self.assertNotEqual(state.index_config["chunk_size"], 512)  # 실제 적용됨
+        # too_long_context 의 첫(가장 가벼운) 처방 decrease_top_k 가 실제로 적용된다.
+        self.assertNotEqual(state.index_config["top_k"], 5)
         self.assertIsNotNone(history.find_pending(state.optimization_history))
 
     def test_manual_label_makes_no_change(self):
@@ -85,32 +86,44 @@ class OptimizeAgentForwardTest(unittest.TestCase):
 
 class OptimizeAgentRollbackTest(unittest.TestCase):
     def test_improved_keeps_config(self):
-        state = agent.run(make_state(overall=60.0))         # 방문1: 적용
-        applied = state.index_config["chunk_size"]
+        # 방문2가 '판정만' 하도록 예산을 소진시킨다(예산이 남으면 새 처방을 또 적용해
+        # top_k 가 다시 줄어들어 '유지됐는지'를 볼 수 없다).
+        state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
+        applied = state.index_config["top_k"]
         state.report = make_report(75.0)                    # Eval: 개선
         state = agent.run(state)                            # 방문2: 판정 → 유지
-        self.assertEqual(state.index_config["chunk_size"], applied)  # 유지됨
+        self.assertEqual(state.index_config["top_k"], applied)  # 유지됨
         self.assertEqual(state.optimization_history[0].status, "applied")
         self.assertEqual(len(state.blacklist), 0)
 
     def test_worse_rolls_back_and_blacklists(self):
-        state = agent.run(make_state(overall=60.0))         # 방문1: 512 -> 256
-        self.assertEqual(state.index_config["chunk_size"], 256)
+        # 예산이 남은 방문2는 '롤백 + 다음 처방 적용'을 한 번에 한다.
+        state = agent.run(make_state(overall=60.0))         # 방문1: top_k 5 -> 2
+        self.assertEqual(state.index_config["top_k"], 2)
         state.report = make_report(50.0)                    # Eval: 악화
-        state = agent.run(state)                            # 방문2: 판정 → 롤백
-        self.assertEqual(state.status, "rolled_back")
-        self.assertEqual(state.index_config["chunk_size"], 512)  # 복원
-        self.assertEqual(len(state.blacklist), 1)
+        state = agent.run(state)                            # 방문2: 롤백 후 다음 처방
+
+        # 롤백: top_k 가 되돌려지고, 실패 이력·블랙리스트가 남는다.
+        self.assertEqual(state.index_config["top_k"], 5)
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
+        self.assertIn(("too_long_context", "decrease_top_k"), state.blacklist)
+
+        # 블랙리스트가 같은 처방 재시도를 막아 다음 후보로 넘어간다.
+        self.assertEqual(state.status, "applied")
+        self.assertEqual(
+            state.optimization_history[1].selected_prescription_id, "shrink_chunk_size"
+        )
+        self.assertEqual(state.index_config["chunk_size"], 256)
 
     def test_budget_exhausted_judges_only(self):
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
         self.assertEqual(state.iteration, 3)                # 방문1: 2 -> 3
+        self.assertEqual(state.index_config["top_k"], 2)    # 적용됨
         state.report = make_report(50.0)                    # 악화
         state = agent.run(state)                            # 방문2: 예산소진 → 판정만
         self.assertEqual(state.iteration, 3)                # iteration 증가 안 함
-        self.assertEqual(state.index_config["chunk_size"], 512)  # 롤백까지 정상
+        self.assertEqual(state.index_config["top_k"], 5)    # 롤백까지 정상
         self.assertEqual(state.status, "rolled_back")
 
 

@@ -53,7 +53,9 @@ DEFAULT_CONSTRAINTS: dict[str, dict[str, Any]] = {
 # RAGBuilder가 탐색할 수 있다는 사실과 사용자 pipeline이 적용할 수 있다는 사실은
 # 다르므로, 외부 backend 지원 범위와 이 capability를 별도로 검사한다.
 DEFAULT_CAPABILITIES: dict[str, bool] = {
-    "retriever.top_k": False,
+    # Eval(agents/eval/agent.py)이 index_config["top_k"] 를 읽어 실제 검색에 쓰고,
+    # Index 도 청크 metadata 에 기록한다. 소비처가 확인돼 허용으로 전환.
+    "retriever.top_k": True,
     "hybrid_search": False,
     "chunking": True,
     "embedding_model": False,

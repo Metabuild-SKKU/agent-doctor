@@ -46,11 +46,14 @@ class OptimizerPolicyTest(unittest.TestCase):
         self.assertFalse(supported)
         self.assertEqual(reason, "unsupported_capability")
 
-    def test_top_k_is_not_enabled_by_default(self):
+    def test_top_k_is_enabled_by_default(self):
+        # Eval 이 index_config["top_k"] 를 읽어 실제 검색에 쓰고 Index 도 청크
+        # metadata 에 기록한다 — 소비처가 확인돼 기본 허용으로 전환했다.
+        # (보수적 기본값 원칙 자체는 위 reranker 케이스가 계속 지킨다.)
         supported, reason = is_capability_supported("retriever.top_k")
 
-        self.assertFalse(supported)
-        self.assertEqual(reason, "unsupported_capability")
+        self.assertTrue(supported)
+        self.assertIsNone(reason)
 
     def test_merge_constraints_accepts_flat_alias(self):
         constraints = merge_constraints({"top_k": {"max": 8}})
@@ -145,13 +148,15 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertEqual(result.config_patch.changes, {"chunker.chunk_size": 400})
 
     def test_unsupported_pipeline_capability_is_skipped(self):
+        # embedding_model 은 아직 소비처가 확인되지 않아 기본 비허용이다.
+        # (top_k 는 소비처가 확인돼 허용으로 바뀌었으므로 이 케이스의 예시로 쓰지 않는다.)
         candidate = self.make_candidate(
-            prescription_id="increase_top_k",
-            search_space={"retriever.top_k": [5, 7]},
-            reindex=False,
+            prescription_id="swap_embedding_model",
+            search_space={"embedding.model": ["openai://text-embedding-3-large"]},
+            reindex=True,
         )
         request = self.make_request(
-            baseline_config={"top_k": 3},
+            baseline_config={"embedding_model": "openai://text-embedding-3-small"},
             candidates=[candidate],
         )
 
@@ -161,7 +166,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertEqual(result.metadata["error_code"], "unsupported_capability")
         self.assertEqual(
             result.metadata["skipped_candidates"][0]["prescription_id"],
-            "increase_top_k",
+            "swap_embedding_model",
         )
 
     def test_capability_can_be_explicitly_enabled(self):
