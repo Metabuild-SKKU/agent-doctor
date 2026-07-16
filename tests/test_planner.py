@@ -1,9 +1,13 @@
 """
 tests/test_planner.py
-planner 의 라벨 묶음 처리 + 근거값 계산 검증.
+Planner 검증 — 후보값을 어떻게 정하고, 그걸 optimizer 요청으로 어떻게 넘기는지.
+
+두 축을 다룬다.
+  1. 후보 산출: 진단 측정값에서 후보를 계산한다(라벨 묶음 + 무릎 분석).
+  2. 후보 전달: 후보 수에 따라 rules/internal 요청을 만들고 sweep 입력을 싣는다.
 
 핵심 전제: Eval 은 Finding 을 probe 마다 따로 만든다(affected_probes 는 항상 1개).
-같은 원인이 probe N개에서 터지면 Finding 도 N개다. planner 는 이를 라벨로 묶어
+같은 원인이 probe N개에서 터지면 Finding 도 N개다. Planner 는 이를 라벨로 묶어
 점수(빈도)와 근거값(측정 기반 목표값)을 계산해야 한다.
 """
 import os
@@ -12,13 +16,13 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core.schema import DiagnosticReport, Finding
+from core.schema import DiagnosticReport, Document, Finding, Probe
 from core.state import AgentDoctorState
 from agents.optimize import planner
 from agents.optimize.planner import _knee
 
 
-def make_finding(probe_id, label, gold_n=0, confirmed=True):
+def make_finding(probe_id, label, gold_n=0, confirmed=True, candidates=None):
     """probe 1개에서 나온 Finding 하나. gold_n = 그 probe 가 필요로 하는 gold 청크 수."""
     return Finding(
         finding_id=f"{probe_id}:{label}",
@@ -29,19 +33,31 @@ def make_finding(probe_id, label, gold_n=0, confirmed=True):
         confirmed=confirmed,
         affected_chunks=[f"c{i}" for i in range(gold_n)],
         affected_probes=[probe_id],
+        metadata={"parameter_candidates": candidates} if candidates else {},
+    )
+
+
+def _report(findings) -> DiagnosticReport:
+    if isinstance(findings, Finding):
+        findings = [findings]
+    return DiagnosticReport(
+        report_id="report",
+        findings=findings,
+        overall_score=60.0,
+        ragas_scores={"context_recall": 0.6},
+        pass_threshold=False,
     )
 
 
 def make_state(findings, top_k=5):
     return AgentDoctorState(
-        report=DiagnosticReport(
-            report_id="r", findings=findings, overall_score=0.5,
-            ragas_scores={}, pass_threshold=False,
-        ),
+        report=_report(findings),
         index_config={"chunk_size": 512, "chunk_overlap": 50, "top_k": top_k},
         iteration=0, max_iterations=3,
     )
 
+
+# ── 1. 후보 산출 ──────────────────────────────────────────────────
 
 class KneeTest(unittest.TestCase):
     """한계비용 무릎 분석: 'probe 1개 더 커버하는 비용'이 급등하면 멈춘다."""
@@ -78,16 +94,25 @@ class GroundedValueTest(unittest.TestCase):
         first = request.candidates[0]
         self.assertEqual(first.id, "dynamic_top_k")
         # ×2 추측이면 10 이 나왔을 것. 측정 기반 무릎은 8.
-        self.assertEqual(first.search_space, {"top_k": [8]})
+        self.assertEqual(first.search_space, {"retriever.top_k": [8]})
 
     def test_falls_back_to_direction_keyword_without_evidence(self):
         # gold 개수가 없으면(affected_chunks 비어있음) 계산 불가 → ×2 폴백
+        findings = [make_finding("p1", "retrieval_incomplete_enumeration", gold_n=0)]
+        request, _decision = planner.plan(make_state(findings, top_k=5))
+
+        self.assertEqual(request.candidates[0].search_space, {"retriever.top_k": [10]})
+
+    def test_eval_supplied_candidates_win_over_computed(self):
+        # Eval 이 직접 후보를 주면 planner 계산보다 우선한다(후보 산출을 Eval 로
+        # 옮기더라도 planner 를 고치지 않게 하는 확장점).
         findings = [
-            make_finding("p1", "retrieval_incomplete_enumeration", gold_n=0)
+            make_finding("p1", "retrieval_incomplete_enumeration", gold_n=4,
+                         candidates={"top_k": [6, 9]})
         ]
         request, _decision = planner.plan(make_state(findings, top_k=5))
 
-        self.assertEqual(request.candidates[0].search_space, {"top_k": [10]})
+        self.assertEqual(request.search_space, {"retriever.top_k": [6, 9]})
 
 
 class GroupingTest(unittest.TestCase):
@@ -139,6 +164,72 @@ class ConfirmedGatingTest(unittest.TestCase):
         request, _decision = planner.plan(make_state(findings))
 
         self.assertEqual(request.failure_label, "retrieval_incomplete_enumeration")
+
+
+# ── 2. 후보 전달 (optimizer 요청 계약) ────────────────────────────
+
+class PlannerCandidateListTest(unittest.TestCase):
+    """후보 수에 따라 rules/internal 을 고르고 sweep 입력을 싣는다."""
+
+    def test_preliminary_finding_is_not_auto_applied(self):
+        finding = make_finding("p1", "retrieval_missing_gold", confirmed=False)
+        request, decision = planner.plan(AgentDoctorState(report=_report(finding)))
+
+        self.assertIsNone(request)
+        self.assertEqual(decision.status, "skipped")
+
+    def test_single_candidate_uses_rules_backend(self):
+        # 후보가 하나뿐이면 sweep 할 게 없어 rules 로 1회 검증한다.
+        findings = [make_finding("p1", "retrieval_incomplete_enumeration", gold_n=4)]
+        request, _decision = planner.plan(make_state(findings))
+
+        self.assertEqual(request.optimizer, "rules")
+        self.assertEqual(request.max_trials, 1)
+
+    def test_top_k_candidates_make_one_internal_request(self):
+        finding = make_finding(
+            "p1", "retrieval_missing_gold",
+            candidates={"top_k": [3, 7, 9]},
+        )
+        state = make_state([finding])
+        request, decision = planner.plan(state)
+
+        self.assertEqual(decision.mode, "apply_optimize")
+        self.assertEqual(request.optimizer, "internal")
+        self.assertEqual(request.search_space, {"retriever.top_k": [3, 7, 9]})
+        self.assertEqual(request.max_trials, 3)
+
+    def test_chunk_candidates_include_preview_inputs(self):
+        finding = make_finding(
+            "p1", "too_long_context",
+            candidates={"chunker.chunk_size": [400, 600]},
+        )
+        state = AgentDoctorState(
+            report=_report(finding),
+            documents=[Document("d1", "memory", "txt", "가" * 1000)],
+            probes=[
+                Probe(
+                    probe_id="p1",
+                    question="질문",
+                    source="taxonomy",
+                    gold_spans=[{"doc_id": "d1", "start": 100, "end": 180}],
+                )
+            ],
+            index_config={"top_k": 5, "chunk_size": 512, "chunk_overlap": 50},
+        )
+        request, _decision = planner.plan(
+            state,
+            blacklist={
+                ("too_long_context", "decrease_top_k"),
+                ("too_long_context", "context_compression"),
+            },
+        )
+
+        self.assertEqual(request.optimizer, "internal")
+        self.assertEqual(request.search_space, {"chunker.chunk_size": [400, 600]})
+        context = request.metadata["chunk_precheck_context"]
+        self.assertEqual(context["documents"][0].doc_id, "d1")
+        self.assertEqual(context["gold_spans"][0]["start"], 100)
 
 
 if __name__ == "__main__":

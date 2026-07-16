@@ -28,29 +28,34 @@ Optimize 노드의 진입점(오케스트레이션 계층).
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 from core.state import AgentDoctorState
 from agents.optimize import planner, optimizer, config_mapper, history, reporter
-from agents.optimize.schemas import OptimizationHistoryItem, Verdict
+from agents.optimize.schemas import (
+    OptimizationHistoryItem,
+    OptimizationRequest,
+    OptimizationResult,
+    OptimizeDecision,
+    Verdict,
+)
 
 
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Optimize 노드 진입점. 성공·스킵·수동·오류 어느 경로든 같은 state 를 반환한다."""
     state.current_agent = "optimize"
     try:
+        # top_k sweep는 후보 하나의 성공/실패를 곧바로 확정하지 않는다.
+        # 직전 후보의 Eval 결과를 같은 study에 넣고 다음 후보 또는 best를 고른다.
+        active_study = history.find_active_study(state.optimization_history)
+        if active_study is not None:
+            return _continue_internal_study(state, active_study)
+
         # (1) 지난 처방 판정 + (나빴으면) 롤백/블랙리스트
         judged_item, verdict = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
 
-        # (2) 반복 예산 소진: 판정만 하고 신규 처방은 시도하지 않는다.
-        #     (롤백했으면 재색인이 필요하므로 rolled_back 신호를 남긴다.)
-        if state.iteration >= state.max_iterations:
-            state.status = "rolled_back" if rolled_back else "verified"
-            if judged_item is not None:
-                # 마지막 방문의 headline = 방금 내린 판정(유지/롤백).
-                state.optimization_report = reporter.build_trial_report(judged_item, verdict)
-            return state
-
-        # (3) 새 처방 선택
+        # (2) 새 처방 선택. iteration 예산은 후보 수가 아니라 새 라벨 시작을 막는다.
         request, decision = planner.plan(state, blacklist=state.blacklist)
         if decision.mode != "apply_optimize" or request is None:
             state.status = "rolled_back" if rolled_back else decision.status
@@ -60,6 +65,14 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 if rolled_back
                 else reporter.build_report(decision, request)
             )
+            return state
+
+        previous_label = history.last_failure_label(state.optimization_history)
+        starts_new_label = previous_label is None or previous_label != request.failure_label
+        if starts_new_label and state.iteration >= state.max_iterations:
+            state.status = "rolled_back" if rolled_back else "verified"
+            if judged_item is not None:
+                state.optimization_report = reporter.build_trial_report(judged_item, verdict)
             return state
 
         result = optimizer.run(request)
@@ -88,7 +101,22 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             state, request, prescription_id, before_config, before_report
         )
         state.optimization_history.append(item)
-        state.iteration += 1
+        if starts_new_label:
+            state.iteration += 1
+
+        # 여러 top_k 후보의 첫 적용이면 같은 이력 항목을 active study로 사용한다.
+        # 후보별 결과는 다음 방문마다 metadata.trial_results에 누적한다.
+        if result.metadata.get("adapter_status") == "needs_evaluation":
+            item.metadata.update(
+                {
+                    "active_study": True,
+                    "study_request": request,
+                    "study_decision": decision,
+                    "trial_results": list(result.metadata.get("trial_results", [])),
+                    "current_candidate": dict(result.config_patch.changes),
+                    "study_baseline_config": dict(before_config),
+                }
+            )
         state.status = "applied"
         # 새 처방을 적용함 → "적용, 다음 검증 대기" 리포트(verdict 없음).
         state.optimization_report = reporter.build_report(decision, request)
@@ -98,6 +126,197 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.status = "error"
         state.error = f"optimize 실행 실패: {exc}"
         return state
+
+
+def _continue_internal_study(
+    state: AgentDoctorState,
+    item: OptimizationHistoryItem,
+) -> AgentDoctorState:
+    """직전 top_k 후보 결과를 기록하고 같은 라벨의 다음 후보를 진행한다."""
+    request = item.metadata.get("study_request")
+    if not isinstance(request, OptimizationRequest):
+        return _fail_active_study(
+            state,
+            item,
+            "active study에 원본 OptimizationRequest가 없습니다.",
+        )
+
+    current_candidate = item.metadata.get("current_candidate")
+    if not isinstance(current_candidate, dict) or len(current_candidate) != 1:
+        return _fail_active_study(
+            state,
+            item,
+            "active study의 현재 후보가 올바르지 않습니다.",
+        )
+
+    observed_trials = list(item.metadata.get("trial_results", []))
+    observed_trials.append(
+        {
+            "trial_id": f"{item.trial_id}:candidate:{len(observed_trials)}",
+            "config": dict(current_candidate),
+            "metrics": _report_metrics(state),
+            "status": "completed" if state.report is not None else "failed",
+            "error": None if state.report is not None else "Eval report가 없습니다.",
+        }
+    )
+    resumed_request = replace(
+        request,
+        metadata={
+            **dict(request.metadata),
+            "study_baseline_config": dict(item.before_config),
+            "trial_results": observed_trials,
+        },
+    )
+    result = optimizer.run(resumed_request)
+    item.metadata["trial_results"] = list(
+        result.metadata.get("trial_results", observed_trials)
+    )
+    item.metadata["adapter_status"] = result.metadata.get("adapter_status")
+
+    if (
+        result.status == "proposed"
+        and result.config_patch is not None
+        and result.metadata.get("adapter_status") == "needs_evaluation"
+    ):
+        config_mapper.apply_config_patch(state.index_config, result.config_patch)
+        item.metadata["current_candidate"] = dict(result.config_patch.changes)
+        item.after_config = dict(state.index_config)
+        state.status = "applied"
+        decision = item.metadata.get("study_decision")
+        if isinstance(decision, OptimizeDecision):
+            state.optimization_report = reporter.build_report(decision, resumed_request)
+        return state
+
+    if result.metadata.get("adapter_status") == "completed":
+        return _finish_internal_study(state, item, result)
+
+    return _fail_active_study(
+        state,
+        item,
+        result.error or result.message or "internal study를 완료하지 못했습니다.",
+    )
+
+
+def _finish_internal_study(
+    state: AgentDoctorState,
+    item: OptimizationHistoryItem,
+    result: OptimizationResult,
+) -> AgentDoctorState:
+    """모든 후보 평가 뒤 best를 적용하거나 study baseline을 복원한다."""
+    before_score = _report_score(item.metadata.get("before_report"))
+    best_score = result.metadata.get("best_score")
+    after_score = float(best_score) if isinstance(best_score, (int, float)) else before_score
+    baseline_selected = result.metadata.get("error_code") == "baseline_selected"
+
+    if baseline_selected:
+        changed = state.index_config != item.before_config
+        state.index_config = dict(item.before_config)
+        verdict = Verdict(
+            keep=False,
+            before_score=before_score,
+            after_score=after_score,
+            reason="모든 top_k 후보 평가 후 baseline이 가장 좋아 원래 설정을 유지",
+        )
+        label = item.failure_labels[0] if item.failure_labels else ""
+        if label and item.selected_prescription_id:
+            state.blacklist.add((label, item.selected_prescription_id))
+        state.status = "rolled_back" if changed else "verified"
+    elif result.status == "proposed" and result.config_patch is not None:
+        config_mapper.apply_config_patch(state.index_config, result.config_patch)
+        verdict = Verdict(
+            keep=True,
+            before_score=before_score,
+            after_score=after_score,
+            reason="모든 top_k 후보 평가 후 가장 좋은 후보를 선택",
+        )
+        state.status = (
+            "applied"
+            if state.index_config != item.after_config
+            else "verified"
+        )
+    else:
+        return _fail_active_study(
+            state,
+            item,
+            result.error or result.message or "best 후보를 적용할 수 없습니다.",
+        )
+
+    item.after_config = dict(state.index_config)
+    if baseline_selected:
+        baseline_report = item.metadata.get("before_report")
+        item.after_metrics = dict(getattr(baseline_report, "ragas_scores", {}) or {})
+    else:
+        item.after_metrics = _best_trial_metrics(
+            item.metadata.get("trial_results", []),
+            result,
+        )
+    item.status = "applied" if verdict.keep else "failed"
+    item.rollback_reason = None if verdict.keep else verdict.reason
+    item.metadata.update(
+        {
+            "pending": False,
+            "active_study": False,
+            "before_score": verdict.before_score,
+            "after_score": verdict.after_score,
+            "best_config": dict(result.best_config or {}),
+        }
+    )
+    item.metadata.pop("before_report", None)
+    state.optimization_report = reporter.build_trial_report(item, verdict)
+    return state
+
+
+def _fail_active_study(
+    state: AgentDoctorState,
+    item: OptimizationHistoryItem,
+    reason: str,
+) -> AgentDoctorState:
+    """study 계약 오류 시 baseline으로 안전하게 복원하고 실패를 기록한다."""
+    changed = state.index_config != item.before_config
+    state.index_config = dict(item.before_config)
+    item.status = "failed"
+    item.rollback_reason = reason
+    item.after_config = dict(state.index_config)
+    item.metadata["pending"] = False
+    item.metadata["active_study"] = False
+    item.metadata["study_error"] = reason
+    item.metadata.pop("before_report", None)
+    label = item.failure_labels[0] if item.failure_labels else ""
+    if label and item.selected_prescription_id:
+        state.blacklist.add((label, item.selected_prescription_id))
+    state.status = "rolled_back" if changed else "error"
+    state.error = reason
+    return state
+
+
+def _report_metrics(state: AgentDoctorState) -> dict:
+    """현재 Eval report를 internal trial 관측값으로 변환한다."""
+    if state.report is None:
+        return {}
+    metrics = dict(state.report.ragas_scores)
+    if state.report.overall_score is not None:
+        metrics["overall_score"] = state.report.overall_score
+    metrics["pass_threshold"] = state.report.pass_threshold
+    return metrics
+
+
+def _report_score(report) -> float:
+    """저장된 baseline report에서 overall_score를 안전하게 읽는다."""
+    score = getattr(report, "overall_score", None)
+    return float(score) if isinstance(score, (int, float)) else 0.0
+
+
+def _best_trial_metrics(trials: list, result: OptimizationResult) -> dict:
+    """adapter가 선택한 best trial의 지표를 이력에 남긴다."""
+    best_config = result.best_config or {}
+    for trial in trials:
+        trial_config = getattr(trial, "config", None)
+        trial_metrics = getattr(trial, "metrics", None)
+        if trial_config == best_config and isinstance(trial_metrics, dict):
+            return dict(trial_metrics)
+        if isinstance(trial, dict) and trial.get("config") == best_config:
+            return dict(trial.get("metrics") or {})
+    return {}
 
 
 def _judge_pending_trial(

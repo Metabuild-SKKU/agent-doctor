@@ -14,6 +14,7 @@ from agents.optimize.optimizer import (
 )
 from agents.optimize.schemas import (
     ConfigPatch,
+    InternalAdapterResult,
     OptimizationRequest,
     PrescriptionCandidate,
     RAGBuilderResult,
@@ -46,10 +47,8 @@ class OptimizerPolicyTest(unittest.TestCase):
         self.assertFalse(supported)
         self.assertEqual(reason, "unsupported_capability")
 
-    def test_top_k_is_enabled_by_default(self):
-        # Eval 이 index_config["top_k"] 를 읽어 실제 검색에 쓰고 Index 도 청크
-        # metadata 에 기록한다 — 소비처가 확인돼 기본 허용으로 전환했다.
-        # (보수적 기본값 원칙 자체는 위 reranker 케이스가 계속 지킨다.)
+    def test_top_k_is_enabled_because_eval_consumes_it(self):
+        # 보수적 기본값 원칙 자체는 위 reranker 케이스가 계속 지킨다.
         supported, reason = is_capability_supported("retriever.top_k")
 
         self.assertTrue(supported)
@@ -158,6 +157,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         request = self.make_request(
             baseline_config={"embedding_model": "openai://text-embedding-3-small"},
             candidates=[candidate],
+            metadata={"capabilities": {"retriever.top_k": False}},
         )
 
         result = run(request)
@@ -252,13 +252,92 @@ class OptimizerExecutionTest(unittest.TestCase):
             "enable_reranker",
         )
 
-    def test_internal_backend_is_reserved_and_not_implemented(self):
-        request = self.make_request(optimizer="internal")
+    def test_internal_next_candidate_is_normalized_to_patch(self):
+        candidate = self.make_candidate(
+            prescription_id="increase_top_k",
+            search_space={"retriever.top_k": [8, 12]},
+            reindex=False,
+        )
+        request = self.make_request(
+            optimizer="internal",
+            baseline_config={"top_k": 5},
+            candidates=[candidate],
+            max_trials=2,
+        )
 
-        result = run(request)
+        def runner(_request):
+            return InternalAdapterResult(
+                request_id="request-1",
+                status="needs_evaluation",
+                next_config={"retriever.top_k": 8},
+                search_space={"retriever.top_k": [8, 12]},
+                metadata={"stop_reason": "candidate_requires_evaluation"},
+            )
+
+        result = run(request, backend_runners={"internal": runner})
+
+        self.assertEqual(result.status, "proposed")
+        self.assertEqual(result.optimizer, "internal")
+        self.assertEqual(result.config_patch.changes, {"retriever.top_k": 8})
+        self.assertFalse(result.needs_reindex)
+        self.assertEqual(result.metadata["parameter_path"], "retriever.top_k")
+
+    def test_internal_completed_baseline_keeps_current_config(self):
+        candidate = self.make_candidate(
+            prescription_id="increase_top_k",
+            search_space={"retriever.top_k": [8, 12]},
+            reindex=False,
+        )
+        request = self.make_request(
+            optimizer="internal",
+            baseline_config={"top_k": 5},
+            candidates=[candidate],
+            max_trials=2,
+        )
+
+        def runner(_request):
+            return InternalAdapterResult(
+                request_id="request-1",
+                status="completed",
+                best_config={"retriever.top_k": 5},
+                best_score=0.7,
+                search_space={"retriever.top_k": [8, 12]},
+                metadata={"best_is_baseline": True},
+            )
+
+        result = run(request, backend_runners={"internal": runner})
+
+        self.assertEqual(result.status, "skipped")
+        self.assertIsNone(result.config_patch)
+        self.assertEqual(result.metadata["error_code"], "baseline_selected")
+
+    def test_internal_rejects_config_outside_filtered_candidates(self):
+        candidate = self.make_candidate(
+            prescription_id="increase_top_k",
+            search_space={"retriever.top_k": [8, 12]},
+            reindex=False,
+        )
+        request = self.make_request(
+            optimizer="internal",
+            baseline_config={"top_k": 5},
+            candidates=[candidate],
+            max_trials=2,
+        )
+
+        def runner(_request):
+            return InternalAdapterResult(
+                request_id="request-1",
+                status="needs_evaluation",
+                next_config={"retriever.top_k": 20},
+            )
+
+        result = run(request, backend_runners={"internal": runner})
 
         self.assertEqual(result.status, "failed")
-        self.assertEqual(result.metadata["error_code"], "backend_not_implemented")
+        self.assertEqual(
+            result.metadata["error_code"],
+            "invalid_internal_next_config",
+        )
 
     def test_ragbuilder_result_is_normalized(self):
         request = self.make_request(optimizer="ragbuilder")
