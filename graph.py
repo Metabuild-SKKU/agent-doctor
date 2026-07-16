@@ -109,6 +109,9 @@ def run_pipeline(
         source_type:    "notion" | "gdrive" | "file" | "slack"
         user_questions: 테스트 질문 (없으면 자동 생성)
     """
+    from core.run_logger import setup_run_logging
+    setup_run_logging(prefix="pipeline")  # 이후 모든 print 를 콘솔+로그파일에 동시 출력
+
     graph = build_graph()
 
     initial_state = AgentDoctorState(

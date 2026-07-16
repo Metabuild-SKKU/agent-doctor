@@ -21,6 +21,9 @@ try:
 except ImportError:
     pass
 
+from core.run_logger import setup_run_logging
+setup_run_logging(prefix="local_pipeline")  # 이후 모든 print 를 콘솔+로그파일에 동시 출력
+
 from core.state import AgentDoctorState
 from agents.ingest.agent import run as ingest_run
 from agents.index.agent import run as index_run

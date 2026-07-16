@@ -61,7 +61,7 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
-    print(f"[Eval] 시작 - 청크 {len(state.chunks)}개, 반복 {state.iteration + 1}/{state.max_iterations}")
+    print(f"[Eval] 청크 {len(state.chunks)}개, 반복 {state.iteration + 1}/{state.max_iterations}")
 
     if not state.chunks:
         state.status = "error"
@@ -129,7 +129,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
         #   진단 중 계산한 비싼 신호가 state 에 누적되어 재진단 시 재사용된다.
-        print(f"[Eval] STEP2-4: probe별 평가 시작 ({len(probes)}개)")
+        print(f"\n[Eval] STEP2-4: probe별 평가 ({len(probes)}개)\n")
         records = []
         for i, p in enumerate(probes, 1):
             rec = _evaluate_probe(p, client, state.chunks, chunk_text, top_k, mode,
@@ -165,24 +165,35 @@ def _fmt_metric(v, applicable: bool = True) -> str:
     return f"{v:.2f}" if isinstance(v, (int, float)) else str(v)
 
 
+def _short_cid(cid: str) -> str:
+    """로그용 청크 id 축약: '<doc-uuid>_chunk_016' → 'chunk_016', 그 외는 원본."""
+    i = cid.rfind("_chunk_")
+    return cid[i + 1:] if i != -1 else cid
+
+
 def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
-    """probe 1개 평가 결과를 probe별로 출력(STEP2~4 진행 가시성용).
-    검색 vs gold·규칙지표·판정 라벨을 한 블록으로 남긴다."""
+    """probe 1개 평가 결과를 블록 형태로 출력(STEP2~4 진행 가시성용).
+    질문·답변·검색/gold·지표·판정 라벨을 한 블록으로 남기고 빈 줄로 구분한다."""
     p = rec.probe
     meta = "·".join(filter(None, [p.source, p.qtype or "single"]))
     recall = _fmt_metric(rec.recall_at_k)
     f1 = _fmt_metric(rec.f1_score, bool(p.ground_truth))
     oracle = _fmt_metric(rec.oracle_f1, rec.oracle_answer is not None)
+    retrieved = ", ".join(_short_cid(c) for c in rec.retrieved_chunk_ids)
+    gold = ", ".join(_short_cid(c) for c in p.gold_chunk_ids)
     if rec.findings:
         labels = ", ".join(f"{f.label}{'' if f.confirmed else '(예비)'}" for f in rec.findings)
     else:
-        labels = "정상(findings 없음)"
-    print(f"[Eval]   [{idx}/{total}] {p.probe_id} ({meta}) | recall@k={recall} f1={f1} oracle_f1={oracle}")
-    print(f"[Eval]     Q: {_clip(p.question)}")
-    print(f"[Eval]     검색={rec.retrieved_chunk_ids} gold={p.gold_chunk_ids}")
-    if rec.generated_answer:
-        print(f"[Eval]     A: {_clip(rec.generated_answer)}")
-    print(f"[Eval]     findings({len(rec.findings)}): {labels}")
+        labels = "없음(정상)"
+
+    print(f"[{idx}/{total}] {p.probe_id}  ({meta})")
+    print(f"Q: {_clip(p.question, 80)}")
+    print(f"A: {_clip(rec.generated_answer, 80) if rec.generated_answer else '-'}")
+    print(f"검색: [{retrieved}]")
+    print(f"골드: [{gold}]")
+    print(f"메트릭 결과: recall@k={recall}  f1={f1}  oracle_f1={oracle}")
+    print(f"Findings({len(rec.findings)}): {labels}")
+    print()  # 블록 구분 빈 줄
 
 
 def _pipeline_version(state: AgentDoctorState) -> str:
