@@ -23,6 +23,7 @@ data/
 
 # 비밀 정보 — *.json 규칙이 바뀌어도 절대 커밋 금지
 agents/ingest/tokens.json
+eval_probes.json
 
 # 결과물
 results/
