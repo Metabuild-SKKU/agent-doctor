@@ -27,7 +27,10 @@ import json
 from core.schema import Probe
 from core.state import AgentDoctorState
 
-from agents.eval.types import EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled
+from agents.eval.types import (
+    EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled,
+    resolve_probe_source, PROBE_SOURCE_MADE,
+)
 from agents.eval.probe_gen import generate_probes
 from agents.eval.probe_store import save_probes, load_probes
 # ⚠️ 임시: Index Agent가 검색 리트리버를 제공하기 전까지만 retrieval_temp 사용.
@@ -84,7 +87,17 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # user_questions 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
         # LLM 생성(llm_generated) 경로만 영속화 대상 — 코퍼스 버전이 그대로면 이전에
         # 만든 골든 테스트셋을 재사용해 매 Optimize 반복마다 LLM 재호출을 피한다.
-        if state.user_questions:
+        # made: 코퍼스 버전과 무관하게 이미 만들어 둔 eval_probes.json 을 그대로 재사용
+        # (파일 없음/비었으면 자동 생성으로 폴백해 저장). user_questions 보다 우선한다.
+        if resolve_probe_source() == PROBE_SOURCE_MADE:
+            probes = load_probes(version, ignore_version=True)
+            if probes:
+                print(f"[Eval] STEP1: made 소스 — 저장된 Probe {len(probes)}개 재사용")
+            else:
+                print("[Eval] STEP1: made 소스지만 저장된 Probe 없음 → 자동 생성 후 저장")
+                probes = generate_probes(state)
+                save_probes(probes, version)
+        elif state.user_questions:
             probes = generate_probes(state)
         else:
             probes = load_probes(version)
@@ -116,11 +129,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
         #   진단 중 계산한 비싼 신호가 state 에 누적되어 재진단 시 재사용된다.
-        records = [
-            _evaluate_probe(p, client, state.chunks, chunk_text, top_k, mode,
-                            state.diagnosis_cache.setdefault(p.probe_id, {}))
-            for p in probes
-        ]
+        print(f"[Eval] STEP2-4: probe별 평가 시작 ({len(probes)}개)")
+        records = []
+        for i, p in enumerate(probes, 1):
+            rec = _evaluate_probe(p, client, state.chunks, chunk_text, top_k, mode,
+                                  state.diagnosis_cache.setdefault(p.probe_id, {}))
+            _log_probe(i, len(probes), rec)
+            records.append(rec)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
         state.probes = probes
@@ -136,6 +151,39 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 
 # ── probe 1개 평가 (STEP2 → STEP3 → STEP4) ───────────────────────
+
+def _clip(text: str, n: int = 50) -> str:
+    """로그용 한 줄 축약(줄바꿈 제거 + n자 컷)."""
+    t = " ".join((text or "").split())
+    return t if len(t) <= n else t[:n] + "…"
+
+
+def _fmt_metric(v, applicable: bool = True) -> str:
+    """지표 포맷: 미측정/미해당(-1·None·비적용)이면 '-'."""
+    if not applicable or v is None or (isinstance(v, (int, float)) and v < 0):
+        return "-"
+    return f"{v:.2f}" if isinstance(v, (int, float)) else str(v)
+
+
+def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
+    """probe 1개 평가 결과를 probe별로 출력(STEP2~4 진행 가시성용).
+    검색 vs gold·규칙지표·판정 라벨을 한 블록으로 남긴다."""
+    p = rec.probe
+    meta = "·".join(filter(None, [p.source, p.qtype or "single"]))
+    recall = _fmt_metric(rec.recall_at_k)
+    f1 = _fmt_metric(rec.f1_score, bool(p.ground_truth))
+    oracle = _fmt_metric(rec.oracle_f1, rec.oracle_answer is not None)
+    if rec.findings:
+        labels = ", ".join(f"{f.label}{'' if f.confirmed else '(예비)'}" for f in rec.findings)
+    else:
+        labels = "정상(findings 없음)"
+    print(f"[Eval]   [{idx}/{total}] {p.probe_id} ({meta}) | recall@k={recall} f1={f1} oracle_f1={oracle}")
+    print(f"[Eval]     Q: {_clip(p.question)}")
+    print(f"[Eval]     검색={rec.retrieved_chunk_ids} gold={p.gold_chunk_ids}")
+    if rec.generated_answer:
+        print(f"[Eval]     A: {_clip(rec.generated_answer)}")
+    print(f"[Eval]     findings({len(rec.findings)}): {labels}")
+
 
 def _pipeline_version(state: AgentDoctorState) -> str:
     """진단 신호 캐시 무효화 키. index_config(Optimize가 바꿈)+코퍼스가 바뀌면 값이 달라진다.

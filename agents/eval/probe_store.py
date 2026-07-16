@@ -36,10 +36,15 @@ def save_probes(probes: list[Probe], version: str, path: str = DEFAULT_STORE_PAT
         print(f"[Eval] STEP1: probe 저장 실패({e}) → 다음 실행에서 재생성됨")
 
 
-def load_probes(version: str, path: str = DEFAULT_STORE_PATH) -> list[Probe] | None:
+def load_probes(
+    version: str, path: str = DEFAULT_STORE_PATH, *, ignore_version: bool = False
+) -> list[Probe] | None:
     """
-    version 이 일치하면 저장된 Probe 리스트를 반환, 아니면(버전 불일치·파일 없음·손상) None
+    저장된 Probe 리스트를 반환, 없거나(파일 없음·손상·스키마 불일치) 버전이 어긋나면 None
     (호출부가 generate_probes 로 재생성하도록).
+
+    ignore_version=True 면 버전 검사를 건너뛰고 저장된 Probe 를 그대로 재사용한다
+    (EVAL_PROBE_SOURCE=made — 코퍼스가 바뀌어도 고정 테스트셋으로 진단하고 싶을 때).
     """
     if not os.path.exists(path):
         return None
@@ -47,7 +52,7 @@ def load_probes(version: str, path: str = DEFAULT_STORE_PATH) -> list[Probe] | N
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if data.get("version") != version:
+    if not ignore_version and data.get("version") != version:
         return None
     try:
         return [Probe(**p) for p in data.get("probes", [])]
