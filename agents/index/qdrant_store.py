@@ -38,7 +38,6 @@ def build_client(url: str = ":memory:", api_key: str | None = None) -> QdrantCli
     return QdrantClient(url=url, api_key=api_key)
 
 
-<<<<<<< Updated upstream
 # Qdrant client 버전별 응답 차이를 여기서만 흡수한다.
 def _collection_vector_size(client: QdrantClient) -> int | None:
     try:
@@ -48,23 +47,7 @@ def _collection_vector_size(client: QdrantClient) -> int | None:
     except Exception:
         return None
     return None
-=======
-def ensure_collection(client, vector_dim=VECTOR_DIM):
-    existing = [c.name for c in client.get_collections().collections]
->>>>>>> Stashed changes
 
-    if COLLECTION in existing:
-        client.delete_collection(COLLECTION)
-        print(f"[Qdrant] 기존 컬렉션 삭제: {COLLECTION}")
-
-    client.create_collection(
-        collection_name=COLLECTION,
-        vectors_config=VectorParams(
-            size=vector_dim,
-            distance=Distance.COSINE,
-        ),
-    )
-    print(f"[Qdrant] 컬렉션 생성: {COLLECTION} (dim={vector_dim})")
 
 def ensure_collection(
     client: QdrantClient,
