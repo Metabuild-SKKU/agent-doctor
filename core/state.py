@@ -39,6 +39,9 @@ class AgentDoctorState:
         "embedding_model": "openai://text-embedding-3-small",
         "use_hybrid": True,
     })
+    # 인덱싱 부산물(청크/문서 수, 그래프 파일 경로, failed_documents 등).
+    # 선언 없이 동적 속성으로 쓰면 LangGraph가 노드 간 상태 복사 시 유실할 수 있다.
+    index_artifacts: dict = field(default_factory=dict)
 
     # Eval Agent 결과
     probes: list[Probe] = field(default_factory=list)
