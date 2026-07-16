@@ -36,7 +36,9 @@ class AgentDoctorState:
     index_config: dict = field(default_factory=lambda: {
         "chunk_size": 512,
         "chunk_overlap": 50,
-        "embedding_model": "openai://text-embedding-3-small",
+        # Index가 실제 지원하는 모델만 지정할 것 — 미지원 문자열은
+        # SentenceTransformer()에 그대로 전달되어 로드가 멈출 수 있음
+        "embedding_model": "BAAI/bge-m3",
         "use_hybrid": True,
     })
 
