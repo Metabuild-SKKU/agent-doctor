@@ -283,7 +283,8 @@ class IndexRunTests(unittest.TestCase):
         self.assertIn("문서 검증 실패", result.error)
 
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
-    def test_same_doc_id_with_different_content_is_rejected(self, _mock_embed):
+    def test_same_doc_id_with_different_content_skips_conflicting_document(self, _mock_embed):
+        # 충돌 문서만 건너뛰고 먼저 들어온 문서는 정상 인덱싱되어야 한다.
         state = self._state()
         state.documents = [
             _document("same-id", "첫 번째 본문"),
@@ -292,8 +293,58 @@ class IndexRunTests(unittest.TestCase):
 
         result = run(state)
 
-        self.assertEqual(result.status, "error")
-        self.assertIn("같은 doc_id", result.error)
+        self.assertEqual(result.status, "indexed")
+        self.assertEqual(len(result.chunks), 1)
+        self.assertEqual(result.chunks[0].text, "첫 번째 본문")
+        failed = result.index_artifacts["failed_documents"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["doc_id"], "same-id")
+        self.assertIn("같은 doc_id", failed[0]["error"])
+
+    @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
+    def test_partial_failure_preserves_valid_documents(self, _mock_embed):
+        # 불량 문서 1개가 나머지 정상 문서들의 작업을 버리게 만들면 안 된다.
+        state = self._state()
+        state.documents = [
+            _document("doc-ok-1", "정상 문서 본문입니다."),
+            _document("doc-bad", "   \n"),  # 공백뿐 → pydantic 검증 실패
+            _document("doc-ok-2", "또 다른 정상 문서 본문입니다."),
+        ]
+
+        result = run(state)
+
+        self.assertEqual(result.status, "indexed")
+        indexed_doc_ids = {chunk.doc_id for chunk in result.chunks}
+        self.assertEqual(indexed_doc_ids, {"doc-ok-1", "doc-ok-2"})
+        failed = result.index_artifacts["failed_documents"]
+        self.assertEqual([f["doc_id"] for f in failed], ["doc-bad"])
+
+    def test_failed_document_does_not_pollute_chunk_dedup(self):
+        # 임베딩 도중 실패한 문서의 청크 해시가 dedup 집합에 남으면
+        # 뒤에 오는 동일 텍스트 청크가 중복으로 오인되어 누락된다.
+        state = self._state()
+        shared_text = "실패 후에도 인덱싱되어야 하는 본문입니다."
+        state.documents = [
+            _document("doc-fails", shared_text),
+            _document("doc-succeeds", shared_text),
+        ]
+
+        calls = {"n": 0}
+
+        def flaky_embed(text, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("임베딩 일시 실패")
+            return [1.0, 0.0, 0.0, 0.0]
+
+        with patch("agents.index.agent.embed", side_effect=flaky_embed):
+            result = run(state)
+
+        self.assertEqual(result.status, "indexed")
+        self.assertEqual({c.doc_id for c in result.chunks}, {"doc-succeeds"})
+        self.assertEqual(result.chunks[0].text, shared_text)
+        failed = result.index_artifacts["failed_documents"]
+        self.assertEqual([f["doc_id"] for f in failed], ["doc-fails"])
 
 
 class SearchAndGraphTests(unittest.TestCase):

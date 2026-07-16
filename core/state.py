@@ -36,9 +36,14 @@ class AgentDoctorState:
     index_config: dict = field(default_factory=lambda: {
         "chunk_size": 512,
         "chunk_overlap": 50,
-        "embedding_model": "openai://text-embedding-3-small",
+        # Index가 실제 지원하는 모델만 지정할 것 — 미지원 문자열은
+        # SentenceTransformer()에 그대로 전달되어 로드가 멈출 수 있음
+        "embedding_model": "BAAI/bge-m3",
         "use_hybrid": True,
     })
+    # 인덱싱 부산물(청크/문서 수, 그래프 파일 경로, failed_documents 등).
+    # 선언 없이 동적 속성으로 쓰면 LangGraph가 노드 간 상태 복사 시 유실할 수 있다.
+    index_artifacts: dict = field(default_factory=dict)
 
     # Eval Agent 결과
     probes: list[Probe] = field(default_factory=list)

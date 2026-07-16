@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import subprocess
+import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -38,11 +40,26 @@ def _load_all() -> dict:
     return {}
 
 
+def _restrict_permissions(path: Path) -> None:
+    """토큰 파일을 현재 사용자만 읽고 쓸 수 있게 제한"""
+    if sys.platform == "win32":
+        # Windows에서 os.chmod는 읽기전용 플래그만 바꾸므로 icacls로 ACL 제한
+        user = os.environ.get("USERNAME", "")
+        if user:
+            subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                capture_output=True,
+            )
+    else:
+        os.chmod(path, 0o600)
+
+
 def save_token(user_id: str, token: str) -> None:
     """이용자별 토큰 저장"""
     data = _load_all()
     data[user_id] = token
     TOKENS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _restrict_permissions(TOKENS_FILE)
 
 
 def load_token(user_id: str) -> str | None:
