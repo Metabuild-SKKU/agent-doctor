@@ -18,6 +18,7 @@ from pathlib import Path
 import requests
 
 from core.state import AgentDoctorState
+from agents.report import save_pipeline_report
 
 MCP_SERVER  = Path(__file__).parent / "mcp_server.py"
 API_SERVER  = Path(__file__).parent / "api.py"
@@ -129,17 +130,21 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         return state
 
     try:
-        # 1. 청크 저장
+        # 1. 최종 RAG before/after 리포트 저장
+        state.report_artifacts = save_pipeline_report(state)
+        print(f"[Serve] 성능 리포트 저장 → {state.report_artifacts.get('markdown')}")
+
+        # 2. 청크 저장
         CHUNKS_FILE.write_text(_serialize_chunks(state), encoding="utf-8")
         print(f"[Serve] 청크 저장 → {CHUNKS_FILE}")
 
-        # 2. FastAPI 서버 백그라운드 시작
+        # 3. FastAPI 서버 백그라운드 시작
         _start_api_server()
 
-        # 3. Claude Desktop 설정 자동 등록
+        # 4. Claude Desktop 설정 자동 등록
         _register_to_claude_desktop()
 
-        # 4. 완료
+        # 5. 완료
         state.mcp_endpoint = f"http://localhost:{API_PORT}"
         state.status = "done"
 

@@ -67,6 +67,8 @@ class AgentDoctorState:
     #   원소 타입은 OptimizationReport(agents/optimize/schemas.py). core가 optimize를
     #   import하지 않도록 타입은 느슨하게 둔다. Serve가 마지막 방문 리포트를 읽는다.
     optimization_report: Optional[object] = None
+    # Report Agent 결과. 최종 Serve 진입 시 before/after 성능 비교 리포트 파일 경로 등을 저장한다.
+    report_artifacts: dict = field(default_factory=dict)
 
     # Serve Agent 결과
     mcp_endpoint: Optional[str] = None
