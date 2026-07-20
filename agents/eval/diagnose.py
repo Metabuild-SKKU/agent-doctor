@@ -218,7 +218,8 @@ def generation_failure(record: EvalRecord) -> Optional[Finding]:
     if _generation_failed(record):
         return _finding(
             record, "generation_failure", "generation_failure", confirmed=False,
-            reason=f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, faithfulness=-, relevancy=-",
+            reason=f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, "
+                   f"faithfulness={_v(_faith_oracle(record))}, relevancy={_v(_rel_oracle(record))}",
         )
     return None
 
