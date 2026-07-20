@@ -60,18 +60,18 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
     state 를 보고 Probe 리스트를 생성한다.
 
     우선순위 (설계 §3, 소스 신뢰도 user_log > taxonomy > llm_generated):
-        1) user_log 경로(_use_user_log) → user_log Probe (GT 없음)
+        1) user_log 경로(uses_user_log) → user_log Probe (GT 없음)
         2) 아니면 → _allocate_budget 비율(RAGAS/DataMorgana/무응답)대로
            지식그래프 기반 4분면 + DataMorgana-lite + 무응답 Probe를 섞어 생성.
            RAGAS 몫이 그래프 부족으로 비면(단일 폴백만 있는 경우) → 단일홉
            폴백(_from_chunks)으로 전체를 대체(비중 섞기보다 최소 동작 보장 우선).
 
-    user_log/auto 선택은 _use_user_log 이 EVAL_PROBE_SOURCE(auto|user_log) 스위치와
+    user_log/auto 선택은 uses_user_log 이 EVAL_PROBE_SOURCE(auto|user_log) 스위치와
     state.user_questions 유무로 결정한다. 자동 생성 경로만 GT·gold 를 채운다.
 
     읽기: state.user_questions, state.chunks, state.documents
     """
-    if _use_user_log(state):
+    if uses_user_log(state):
         probes = _from_user_questions(state.user_questions)
         print(f"[Eval] STEP1: user_log Probe {len(probes)}개 생성")
         return probes
@@ -98,11 +98,14 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
 
 # ── probe 소스 선택 (EVAL_PROBE_SOURCE 스위치) ────────────────────
 
-def _use_user_log(state: AgentDoctorState) -> bool:
+def uses_user_log(state: AgentDoctorState) -> bool:
     """user_log 경로를 쓸지 결정.
     EVAL_PROBE_SOURCE(auto|user_log)가 지정되면 그걸 강제하고, 미지정이면 기존 자동
     판별(user_questions 유무)을 따른다. auto 는 질문이 있어도 무시하고 자동 생성으로 가며,
-    user_log 는 강제하되 질문이 없으면 자동 생성으로 폴백한다(빈 probe 방지)."""
+    user_log 는 강제하되 질문이 없으면 자동 생성으로 폴백한다(빈 probe 방지).
+
+    agent.py STEP1 도 이 술어로 캐시 여부를 정한다 — state.user_questions 유무만 보면
+    auto 일 때 실제로는 LLM 생성으로 가는데도 캐시를 건너뛴다."""
     source = resolve_probe_source()
     if source == PROBE_SOURCE_AUTO:
         return False

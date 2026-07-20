@@ -32,10 +32,7 @@ def _document(doc_id: str, content: str) -> Document:
 
 def _index_tools() -> IndexTools:
     return IndexTools(
-        build_client=lambda **_: object(),
-        ensure_collection=lambda *_args, **_kwargs: None,
-        delete_document_chunks=lambda *_args, **_kwargs: None,
-        upsert_chunks=lambda *_args, **_kwargs: None,
+        get_retriever=lambda *_args, **_kwargs: Mock(),
         embed=lambda _text, **_kwargs: [1.0, 0.0, 0.0, 0.0],
         count_tokens=lambda _text, **_kwargs: 3,
         build_sparse_vector=lambda _text: {"indices": [], "values": []},
@@ -126,12 +123,10 @@ class IndexRunTests(unittest.TestCase):
         )
         return state
 
-    @patch("agents.index.agent.upsert_chunks")
-    @patch("agents.index.agent.ensure_collection")
-    @patch("agents.index.agent.build_client", return_value=Mock())
+    @patch("agents.index.agent.get_retriever")
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
     def test_run_validates_deduplicates_and_writes_metadata(
-        self, mock_embed, _mock_client, _mock_collection, mock_upsert
+        self, mock_embed, mock_get_retriever
     ):
         state = self._state()
         content = "# 규정\n재택근무는 주 2일까지 가능합니다."
@@ -154,14 +149,12 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(result.chunks[0].metadata["embedding_model"], "test-model")
         self.assertIsNotNone(result.chunks[0].sparse_vector)
         self.assertEqual(mock_embed.call_count, len(result.chunks))
-        mock_upsert.assert_called_once()
+        mock_get_retriever.assert_called_once()
 
-    @patch("agents.index.agent.upsert_chunks")
-    @patch("agents.index.agent.ensure_collection")
-    @patch("agents.index.agent.build_client", return_value=Mock())
+    @patch("agents.index.agent.get_retriever")
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
     def test_same_signature_reuses_embeddings(
-        self, first_embed, _mock_client, _mock_collection, _mock_upsert
+        self, first_embed, _mock_get_retriever
     ):
         state = self._state()
         state.documents = [_document("doc-1", "동일한 문서 본문입니다.")]
@@ -234,12 +227,10 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertIn("chunk_strategy", result.error)
 
-    @patch("agents.index.agent.upsert_chunks")
-    @patch("agents.index.agent.ensure_collection")
-    @patch("agents.index.agent.build_client", return_value=Mock())
+    @patch("agents.index.agent.get_retriever")
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
     def test_chunk_stage_config_overrides_default_strategy(
-        self, _mock_embed, _mock_client, _mock_collection, _mock_upsert
+        self, _mock_embed, _mock_get_retriever
     ):
         state = self._state()
         state.documents = [_document("doc-1", "# 제목\n" + ("본문입니다. " * 8))]
@@ -256,10 +247,7 @@ class IndexRunTests(unittest.TestCase):
         state.documents = [_document("doc-1", "도구 교체 테스트 본문입니다.")]
         upserted: list[list[Chunk]] = []
         tools = IndexTools(
-            build_client=lambda **_: object(),
-            ensure_collection=lambda *_args, **_kwargs: None,
-            delete_document_chunks=lambda *_args, **_kwargs: None,
-            upsert_chunks=lambda _client, chunks: upserted.append(chunks),
+            get_retriever=lambda chunks, *_args, **_kwargs: upserted.append(chunks),
             embed=lambda _text, **_kwargs: [0.0, 1.0, 0.0, 0.0],
             count_tokens=lambda _text, **_kwargs: 7,
             build_sparse_vector=lambda _text: {"indices": [], "values": []},
