@@ -193,7 +193,7 @@ def render_html(payload: dict[str, Any]) -> str:
     overall_delta = overall_row.get("delta")
     overall_delta_class = _html_delta_class(overall_delta)
 
-    metric_cards = _html_metric_cards(metric_rows)
+    quality_section = _html_quality_metric_section(metric_rows)
     metric_table = _html_table(
         ["Metric", "Before", "After", "Change"],
         [
@@ -385,7 +385,7 @@ def render_html(payload: dict[str, Any]) -> str:
       line-height: 1;
       letter-spacing: 0;
     }}
-    .summary-grid, .metric-grid {{
+    .summary-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
@@ -455,6 +455,145 @@ def render_html(payload: dict[str, Any]) -> str:
       margin-bottom: 14px;
     }}
     .section-title h2 {{ margin-bottom: 0; }}
+    .section-kicker {{
+      color: var(--accent);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }}
+    .quality-section {{
+      margin-top: 18px;
+      padding: 28px 30px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.018));
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 16px 42px rgba(0, 0, 0, 0.22);
+    }}
+    .quality-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: center;
+      margin-bottom: 26px;
+    }}
+    .quality-title {{
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+    }}
+    .quality-title h2 {{
+      margin: 0;
+      font-size: 24px;
+    }}
+    .quality-count {{
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .quality-legend {{
+      display: inline-flex;
+      gap: 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .quality-legend span::before {{
+      content: "";
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      margin-right: 7px;
+      border-radius: 999px;
+      background: var(--before);
+    }}
+    .quality-legend span:last-child::before {{
+      background: var(--after);
+    }}
+    .quality-list {{
+      display: grid;
+      gap: 0;
+    }}
+    .quality-row {{
+      display: grid;
+      grid-template-columns: 240px 1fr 170px;
+      gap: 24px;
+      align-items: center;
+      padding: 21px 0;
+      border-top: 1px solid var(--line);
+    }}
+    .quality-row:last-child {{
+      border-bottom: 1px solid var(--line);
+    }}
+    .quality-name {{
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      min-width: 0;
+    }}
+    .quality-label {{
+      color: var(--text);
+      font-size: 19px;
+      font-weight: 700;
+      white-space: nowrap;
+    }}
+    .quality-code {{
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .quality-track {{
+      position: relative;
+      height: 32px;
+    }}
+    .quality-line {{
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 50%;
+      height: 4px;
+      transform: translateY(-50%);
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.20);
+    }}
+    .quality-range {{
+      position: absolute;
+      top: 50%;
+      height: 4px;
+      transform: translateY(-50%);
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--before), var(--after));
+    }}
+    .quality-dot {{
+      position: absolute;
+      top: 50%;
+      width: 13px;
+      height: 13px;
+      transform: translate(-50%, -50%);
+      border-radius: 999px;
+      background: var(--before);
+      box-shadow: 0 0 0 3px rgba(100, 116, 139, 0.16);
+    }}
+    .quality-dot.after {{
+      background: var(--after);
+      box-shadow: 0 0 0 4px rgba(129, 124, 248, 0.20);
+    }}
+    .quality-values {{
+      display: flex;
+      justify-content: flex-end;
+      gap: 7px;
+      align-items: baseline;
+      color: var(--text);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-weight: 700;
+      white-space: nowrap;
+    }}
+    .quality-values .from {{
+      color: var(--muted);
+    }}
+    .quality-values .delta-value {{
+      color: var(--positive);
+      font-size: 13px;
+    }}
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -579,6 +718,17 @@ def render_html(payload: dict[str, Any]) -> str:
       h1 {{ font-size: 24px; margin-bottom: 8px; }}
       .report-section {{ padding: 14px; }}
       .section-title {{ display: block; }}
+      .quality-section {{ padding: 18px 14px; }}
+      .quality-head {{ display: block; }}
+      .quality-legend {{ margin-top: 12px; }}
+      .quality-row {{
+        grid-template-columns: 1fr;
+        gap: 10px;
+        padding: 18px 0;
+      }}
+      .quality-name {{ display: block; }}
+      .quality-code {{ display: block; margin-top: 3px; }}
+      .quality-values {{ justify-content: flex-start; }}
       .footer {{ display: block; }}
     }}
   </style>
@@ -639,7 +789,7 @@ def render_html(payload: dict[str, Any]) -> str:
       </div>
     </div>
 
-    {metric_cards}
+    {quality_section}
 
     <section class="report-section">
       <div class="section-title">
@@ -852,6 +1002,107 @@ def _interpret(metric_rows: list[dict[str, Any]], has_comparison: bool) -> list[
     return messages
 
 
+# 주요 품질 metric을 처방 전후 가로 비교 섹션으로 만든다.
+def _html_quality_metric_section(metric_rows: list[dict[str, Any]]) -> str:
+    rows = _quality_metric_rows(metric_rows)
+    if not rows:
+        return (
+            '<section class="quality-section">'
+            '<div class="quality-head">'
+            '<div class="quality-title">'
+            '<span class="section-kicker">02</span>'
+            "<h2>품질 지표 · 처방 전후</h2>"
+            "</div>"
+            '<span class="quality-count">비교 가능한 지표 없음</span>'
+            "</div>"
+            '<p class="empty">숫자로 비교할 수 있는 before/after metric이 없습니다.</p>'
+            "</section>"
+        )
+
+    items = "\n".join(_html_quality_metric_row(row) for row in rows)
+    return (
+        '<section class="quality-section">'
+        '<div class="quality-head">'
+        '<div class="quality-title">'
+        '<span class="section-kicker">02</span>'
+        "<h2>품질 지표 · 처방 전후</h2>"
+        "</div>"
+        f'<span class="quality-count">RAGAS {len(rows)}개 지표</span>'
+        "</div>"
+        '<div class="quality-legend"><span>처방 전</span><span>처방 후</span></div>'
+        f'<div class="quality-list">{items}</div>'
+        "</section>"
+    )
+
+
+# 품질 비교 섹션에 보여줄 metric만 고른다.
+def _quality_metric_rows(metric_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    labels = {
+        "faithfulness": "충실도",
+        "context_recall": "정답 회수율",
+        "context_precision": "검색 정확도",
+        "response_relevancy": "답변 관련성",
+        "mean_recall_at_k": "정답 회수율",
+        "mean_f1": "답변 F1",
+        "oracle_accuracy": "Oracle 정확도",
+        "overall_score": "종합 점수",
+    }
+    preferred = [
+        "faithfulness",
+        "context_recall",
+        "context_precision",
+        "response_relevancy",
+        "mean_recall_at_k",
+        "mean_f1",
+        "oracle_accuracy",
+        "overall_score",
+    ]
+    by_name = {row["metric"]: row for row in metric_rows}
+    selected = []
+    for metric in preferred:
+        row = by_name.get(metric)
+        if row is None or not _is_number(row["before"]) or not _is_number(row["after"]):
+            continue
+        item = dict(row)
+        item["label"] = labels.get(metric, metric)
+        selected.append(item)
+        if len(selected) == 4:
+            break
+    return selected
+
+
+# 품질 metric 한 줄의 before/after 위치와 값을 만든다.
+def _html_quality_metric_row(row: dict[str, Any]) -> str:
+    before = row["before"]
+    after = row["after"]
+    left = _percent_position(min(before, after))
+    right = _percent_position(max(before, after))
+    before_pos = _percent_position(before)
+    after_pos = _percent_position(after)
+    delta = row["delta"]
+    delta_text = _fmt_delta(delta)
+    return (
+        '<div class="quality-row">'
+        '<div class="quality-name">'
+        f'<span class="quality-label">{_html_text(row["label"])}</span>'
+        f'<span class="quality-code">{_html_text(row["metric"])}</span>'
+        "</div>"
+        '<div class="quality-track">'
+        '<span class="quality-line"></span>'
+        f'<span class="quality-range" style="left: {left:.2f}%; width: {right - left:.2f}%"></span>'
+        f'<span class="quality-dot before" style="left: {before_pos:.2f}%"></span>'
+        f'<span class="quality-dot after" style="left: {after_pos:.2f}%"></span>'
+        "</div>"
+        '<div class="quality-values">'
+        f'<span class="from">{_html_value(before)}</span>'
+        "<span>-></span>"
+        f'<span>{_html_value(after)}</span>'
+        f'<span class="delta-value">{_html_text(delta_text)}</span>'
+        "</div>"
+        "</div>"
+    )
+
+
 # HTML 상단에 보여줄 주요 metric 카드를 만든다.
 def _html_metric_cards(metric_rows: list[dict[str, Any]]) -> str:
     if not metric_rows:
@@ -969,6 +1220,11 @@ def _delta(before: Any, after: Any) -> float | int | None:
 # bool을 제외한 숫자인지 확인한다.
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+# 0~1 점수를 가로 막대 위치 percent로 바꾼다.
+def _percent_position(value: float | int) -> float:
+    return min(100.0, max(0.0, float(value) * 100.0))
 
 
 # 리포트 출력용 값 포맷을 통일한다.
