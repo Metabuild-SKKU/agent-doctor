@@ -332,11 +332,16 @@ def _populate(
     settings: RetrievalSettings,
     client: QdrantClient | None,
     delete_doc_ids: list[str] | None,
-) -> tuple[list[dict], QdrantClient | None]:
-    """청크를 Qdrant 에 적재하고 (스코프가 찍힌 청크, 클라이언트) 를 돌려준다.
+) -> tuple[list[dict], QdrantClient | None, bool]:
+    """청크를 Qdrant 에 적재하고 (스코프가 찍힌 청크, 클라이언트, 캐시 가능 여부) 를 돌려준다.
 
     임베딩이 없거나 적재에 실패하면 client=None 으로 떨어지고, 호출부는
     keyword_search() 폴백으로 계속 동작한다. 이 함수가 Qdrant 쓰기의 유일한 지점이다.
+
+    세 번째 값은 이 결과를 캐시해도 되는지다. client=None 이 나오는 경우가 둘인데
+    성격이 다르다 — 임베딩이 아예 없으면 그게 정상 상태(keyword 전용)라 캐시해도 되지만,
+    적재에 실패해서 None 이면 다음 호출에서 다시 시도해야 한다. 실패를 캐시하면 그 프로세스
+    전체가 재시도 없이 keyword 로 굳는다.
     """
     embedded = [_chunk_from_dict(chunk) for chunk in raw_chunks if chunk.get("embedding")]
     if embedded:
@@ -360,8 +365,8 @@ def _populate(
             upsert_chunks(client, embedded)
         except Exception as exc:
             print(f"[Retriever] Qdrant setup failed, using keyword fallback: {exc}")
-            client = None
-    return raw_chunks, client
+            return raw_chunks, None, False
+    return raw_chunks, client, True
 
 
 def build_retriever(
@@ -381,7 +386,7 @@ def build_retriever(
     """
     settings = resolve_retrieval_settings(chunks, config)
     raw_chunks = [_chunk_to_dict(chunk) for chunk in chunks]
-    raw_chunks, client = _populate(
+    raw_chunks, client, _ = _populate(
         raw_chunks, _scope_id(raw_chunks), settings, client, delete_doc_ids
     )
     return Retriever(raw_chunks, settings, client=client)
@@ -401,12 +406,23 @@ def _population_key(
 ) -> tuple:
     """적재 결과를 좌우하는 값만 키에 넣는다.
 
-    청크 집합(scope_id)과 저장소 좌표만 보고, top_k 처럼 검색 시점에만 쓰는
-    설정은 넣지 않는다. Index 와 Eval 이 서로 다른 config dict(전자는 기본값이
+    청크 집합(scope_id)과 임베딩 정체성, 저장소 좌표만 보고, top_k 처럼 검색 시점에만
+    쓰는 설정은 넣지 않는다. Index 와 Eval 이 서로 다른 config dict(전자는 기본값이
     병합된 전체 config, 후자는 state.index_config)를 넘겨도 같은 키로 모이게 하려는 것.
+
+    embedding_model 이 키에 있어야 하는 이유: scope_id 는 chunk_id/doc_id/hash/text 만
+    해싱하는데 hash 는 sha256(text) 라 임베딩과 무관하다. Optimize 의
+    swap_embedding_model 처방(reindex=True)으로 같은 텍스트를 다른 모델로 재임베딩하면
+    scope_id 가 그대로고, 새 모델 차원까지 같으면 키가 완전히 일치해 upsert 를 건너뛴다.
+    그러면 질의만 새 모델로 임베딩되고 저장된 벡터는 옛 모델 것이라 유사도가 무의미해진다.
+
+    남는 구멍: 모델명이 같은데 벡터만 다른 경우(수동 재임베딩·모델 버전 변경)는 여전히
+    충돌한다. 임베딩 전체를 해싱하면 막을 수 있지만 청크 수에 비례해 매 호출 비용이 든다 —
+    그런 상황에서는 reset_retriever_cache() 로 비운다.
     """
     return (
         scope_id,
+        settings.embedding_model,
         _first_embedding_dim(raw_chunks) or settings.embedding_dimension,
         settings.qdrant_url,
         settings.qdrant_api_key,
@@ -428,6 +444,10 @@ def get_retriever(
 
     주의: 캐시가 맞으면 delete_doc_ids 도 건너뛴다. 청크 집합이 같다는 것은
     지우고 다시 넣어도 결과가 같다는 뜻이라 안전하다.
+
+    적재에 실패한 결과는 캐시하지 않는다 — 다음 호출에서 다시 시도한다. 이때 기존 캐시를
+    비우지는 않는다. 슬롯이 하나뿐이라도 방금 실패한 키와 앞서 성공한 키는 서로 다른 청크
+    집합이고, 그 키로 다시 들어오면 옛 항목은 여전히 유효하다.
     """
     global _cached_key, _cached_payload
 
@@ -440,11 +460,12 @@ def get_retriever(
         if _cached_key == key and _cached_payload is not None:
             raw_chunks, cached_client = _cached_payload
         else:
-            raw_chunks, cached_client = _populate(
+            raw_chunks, cached_client, cacheable = _populate(
                 raw_chunks, scope_id, settings, client, delete_doc_ids
             )
-            _cached_key = key
-            _cached_payload = (raw_chunks, cached_client)
+            if cacheable:
+                _cached_key = key
+                _cached_payload = (raw_chunks, cached_client)
 
     return Retriever(raw_chunks, settings, client=cached_client)
 
