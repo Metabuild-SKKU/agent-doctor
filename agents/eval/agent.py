@@ -180,7 +180,7 @@ def _short_cid(cid: str) -> str:
 
 def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
     """probe 1개 평가 결과를 블록 형태로 출력(STEP2~4 진행 가시성용).
-    질문·답변·검색/gold·지표·판정 라벨을 한 블록으로 남기고 빈 줄로 구분한다."""
+    질문(Q)·정답(A)·생성 답변(R)·검색/gold·지표·판정 라벨을 한 블록으로 남기고 빈 줄로 구분한다."""
     p = rec.probe
     meta = "·".join(filter(None, [p.source, p.qtype or "single"]))
     recall = _fmt_metric(rec.recall_at_k)
@@ -188,18 +188,21 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
     oracle = _fmt_metric(rec.oracle_f1, rec.oracle_answer is not None)
     retrieved = ", ".join(_short_cid(c) for c in rec.retrieved_chunk_ids)
     gold = ", ".join(_short_cid(c) for c in p.gold_chunk_ids)
-    if rec.findings:
-        labels = ", ".join(f"{f.label}{'' if f.confirmed else '(예비)'}" for f in rec.findings)
-    else:
-        labels = "없음(정상)"
 
     print(f"[{idx}/{total}] {p.probe_id}  ({meta})")
     print(f"Q: {_clip(p.question, 80)}")
-    print(f"A: {_clip(rec.generated_answer, 80) if rec.generated_answer else '-'}")
+    print(f"A: {_clip(p.ground_truth, 80) if p.ground_truth else '-'}")
+    print(f"R: {_clip(rec.generated_answer, 80) if rec.generated_answer else '-'}")
     print(f"검색: [{retrieved}]")
     print(f"골드: [{gold}]")
     print(f"메트릭 결과: recall@k={recall}  f1={f1}  oracle_f1={oracle}")
-    print(f"Findings({len(rec.findings)}): {labels}")
+    print(f"-Findings({len(rec.findings)})-")
+    if rec.findings:
+        for i, f in enumerate(rec.findings, 1):
+            mark = "" if f.confirmed else "(예비)"
+            print(f"[{i}] {f.label}{mark}: {f.metadata.get('reason') or '-'}")
+    else:
+        print("없음(정상)")
     print()  # 블록 구분 빈 줄
 
 
