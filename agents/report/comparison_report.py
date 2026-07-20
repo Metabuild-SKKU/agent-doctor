@@ -402,6 +402,169 @@ def render_html(payload: dict[str, Any]) -> str:
       line-height: 1;
       letter-spacing: 0;
     }}
+    .workspace {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+      gap: 14px;
+      margin-bottom: 18px;
+    }}
+    .workspace-panel {{
+      padding: 22px;
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }}
+    .workspace-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 16px;
+    }}
+    .workspace-title {{
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+    }}
+    .workspace-title h2 {{
+      margin: 0;
+      font-size: 24px;
+    }}
+    .workspace-tabs {{
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--line);
+    }}
+    .tab-button {{
+      border: 0;
+      border-bottom: 2px solid transparent;
+      padding: 0 4px 10px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+    }}
+    .tab-button[aria-pressed="true"] {{
+      border-bottom-color: var(--accent);
+      color: var(--text);
+    }}
+    .dropzone {{
+      display: grid;
+      min-height: 178px;
+      place-items: center;
+      padding: 26px;
+      border: 1px dashed rgba(14, 148, 136, 0.42);
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(237, 248, 245, 0.72), rgba(255, 255, 255, 0.58));
+      color: var(--text);
+      cursor: pointer;
+      text-align: center;
+    }}
+    .dropzone.is-dragover {{
+      border-color: var(--accent);
+      background: var(--surface-strong);
+    }}
+    .file-input {{
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }}
+    .upload-icon {{
+      display: inline-grid;
+      width: 38px;
+      height: 38px;
+      margin-bottom: 12px;
+      place-items: center;
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--accent);
+      box-shadow: 0 10px 24px rgba(31, 57, 88, 0.10);
+      font-size: 22px;
+      font-weight: 700;
+    }}
+    .upload-title {{
+      display: block;
+      font-size: 17px;
+      font-weight: 800;
+    }}
+    .upload-help {{
+      display: block;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .file-list {{
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .file-item {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 9px 11px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+    }}
+    .mode-grid {{
+      display: grid;
+      gap: 10px;
+      margin: 12px 0 18px;
+    }}
+    .mode-button {{
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 13px 14px;
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      text-align: left;
+    }}
+    .mode-button[aria-pressed="true"] {{
+      border-color: var(--line-strong);
+      background: var(--surface-soft);
+    }}
+    .mode-button span {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .start-button {{
+      width: 100%;
+      border: 0;
+      border-radius: 8px;
+      padding: 13px 16px;
+      background: var(--accent);
+      color: #ffffff;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 800;
+      box-shadow: 0 12px 24px rgba(54, 86, 212, 0.22);
+    }}
+    .start-button:hover {{
+      background: #2846bf;
+    }}
+    .upload-status {{
+      min-height: 38px;
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }}
     .summary-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -753,6 +916,9 @@ def render_html(payload: dict[str, Any]) -> str:
       .hero {{ display: block; min-height: 0; padding: 42px 0 26px; }}
       .hero-score {{ margin-top: 18px; min-width: 0; }}
       h1 {{ font-size: 24px; margin-bottom: 8px; }}
+      .workspace {{ grid-template-columns: 1fr; }}
+      .workspace-head {{ display: block; }}
+      .workspace-panel {{ padding: 16px; }}
       .report-section {{ padding: 14px; }}
       .section-title {{ display: block; }}
       .quality-section {{ padding: 18px 14px; }}
@@ -808,6 +974,48 @@ def render_html(payload: dict[str, Any]) -> str:
         </div>
       </div>
     </header>
+
+    <section class="workspace" aria-labelledby="workspace-title">
+      <div class="workspace-panel">
+        <div class="workspace-head">
+          <div class="workspace-title">
+            <span class="section-kicker">01</span>
+            <h2 id="workspace-title">문서 진단 시작</h2>
+          </div>
+          <span class="quality-count">PDF · MARKDOWN · TXT · DOCX · HTML</span>
+        </div>
+        <div class="workspace-tabs" aria-label="진단 입력 방식">
+          <button class="tab-button" type="button" aria-pressed="true" data-workspace-tab="upload">문서 올리기</button>
+          <button class="tab-button" type="button" aria-pressed="false" data-workspace-tab="existing">기존 RAG 연결</button>
+        </div>
+        <label class="dropzone" data-dropzone>
+          <input class="file-input" type="file" multiple accept=".pdf,.md,.markdown,.txt,.docx,.html" data-file-input>
+          <span>
+            <span class="upload-icon">↑</span>
+            <span class="upload-title">문서를 끌어다 놓거나 클릭해 업로드</span>
+            <span class="upload-help">진단할 지식 문서를 넣으면 검색 파이프라인을 만들어 검사합니다.</span>
+          </span>
+        </label>
+        <div class="file-list" data-file-list>선택된 문서가 없습니다.</div>
+      </div>
+
+      <aside class="workspace-panel">
+        <div class="label">진단 깊이</div>
+        <div class="mode-grid" aria-label="진단 깊이 선택">
+          <button class="mode-button" type="button" aria-pressed="false" data-mode="quick">
+            <strong>빠른 검진</strong><span>규칙 기반 · 약 30초</span>
+          </button>
+          <button class="mode-button" type="button" aria-pressed="true" data-mode="standard">
+            <strong>표준 검진</strong><span>재검색 분석 · 약 2분</span>
+          </button>
+          <button class="mode-button" type="button" aria-pressed="false" data-mode="deep">
+            <strong>정밀 검진</strong><span>LLM 검토 · 약 6분</span>
+          </button>
+        </div>
+        <button class="start-button" type="button" data-start-button>진단 시작</button>
+        <p class="upload-status" data-upload-status>문서를 선택하면 준비 상태가 표시됩니다.</p>
+      </aside>
+    </section>
 
     <div class="summary-grid">
       <div class="card summary-card">
@@ -871,6 +1079,49 @@ def render_html(payload: dict[str, Any]) -> str:
       const sortButton = document.querySelector("[data-quality-sort]");
       const copyButton = document.querySelector("[data-copy-summary]");
       const list = document.querySelector("[data-quality-list]");
+      const fileInput = document.querySelector("[data-file-input]");
+      const fileList = document.querySelector("[data-file-list]");
+      const dropzone = document.querySelector("[data-dropzone]");
+      const status = document.querySelector("[data-upload-status]");
+      const startButton = document.querySelector("[data-start-button]");
+      const modeButtons = Array.from(document.querySelectorAll("[data-mode]"));
+      const tabButtons = Array.from(document.querySelectorAll("[data-workspace-tab]"));
+      let selectedFiles = [];
+
+      function formatSize(bytes) {{
+        if (!bytes) return "0 KB";
+        const units = ["B", "KB", "MB", "GB"];
+        let size = bytes;
+        let unit = 0;
+        while (size >= 1024 && unit < units.length - 1) {{
+          size /= 1024;
+          unit += 1;
+        }}
+        return `${{size.toFixed(unit === 0 ? 0 : 1)}} ${{units[unit]}}`;
+      }}
+
+      function renderFiles(files) {{
+        selectedFiles = Array.from(files || []);
+        if (!fileList || !status) return;
+        if (!selectedFiles.length) {{
+          fileList.textContent = "선택된 문서가 없습니다.";
+          status.textContent = "문서를 선택하면 준비 상태가 표시됩니다.";
+          return;
+        }}
+        fileList.innerHTML = "";
+        selectedFiles.forEach((file) => {{
+          const item = document.createElement("div");
+          item.className = "file-item";
+          const name = document.createElement("span");
+          name.textContent = file.name;
+          const size = document.createElement("span");
+          size.textContent = formatSize(file.size);
+          item.append(name, size);
+          fileList.appendChild(item);
+        }});
+        const totalSize = selectedFiles.reduce((sum, file) => sum + file.size, 0);
+        status.textContent = `${{selectedFiles.length}}개 문서 준비됨 · 총 ${{formatSize(totalSize)}}`;
+      }}
 
       function setFilter(filter) {{
         rows.forEach((row) => {{
@@ -884,6 +1135,58 @@ def render_html(payload: dict[str, Any]) -> str:
       filterButtons.forEach((button) => {{
         button.addEventListener("click", () => setFilter(button.dataset.qualityFilter));
       }});
+
+      tabButtons.forEach((button) => {{
+        button.addEventListener("click", () => {{
+          tabButtons.forEach((item) => {{
+            item.setAttribute("aria-pressed", String(item === button));
+          }});
+          if (status) {{
+            status.textContent = button.dataset.workspaceTab === "existing"
+              ? "기존 RAG 인덱스를 연결해 비교 진단할 수 있습니다."
+              : selectedFiles.length
+                ? `${{selectedFiles.length}}개 문서 준비됨`
+                : "문서를 선택하면 준비 상태가 표시됩니다.";
+          }}
+        }});
+      }});
+
+      modeButtons.forEach((button) => {{
+        button.addEventListener("click", () => {{
+          modeButtons.forEach((item) => {{
+            item.setAttribute("aria-pressed", String(item === button));
+          }});
+        }});
+      }});
+
+      if (fileInput) {{
+        fileInput.addEventListener("change", () => renderFiles(fileInput.files));
+      }}
+
+      if (dropzone) {{
+        dropzone.addEventListener("dragover", (event) => {{
+          event.preventDefault();
+          dropzone.classList.add("is-dragover");
+        }});
+        dropzone.addEventListener("dragleave", () => {{
+          dropzone.classList.remove("is-dragover");
+        }});
+        dropzone.addEventListener("drop", (event) => {{
+          event.preventDefault();
+          dropzone.classList.remove("is-dragover");
+          renderFiles(event.dataTransfer.files);
+        }});
+      }}
+
+      if (startButton && status) {{
+        startButton.addEventListener("click", () => {{
+          const activeMode = modeButtons.find((button) => button.getAttribute("aria-pressed") === "true");
+          const mode = activeMode ? activeMode.textContent.trim().replace(/\\s+/g, " ") : "표준 검진";
+          status.textContent = selectedFiles.length
+            ? `${{mode}} 준비 완료 · 아래 리포트에서 기존/최적화 결과를 확인하세요.`
+            : "먼저 문서를 업로드하거나 기존 RAG 연결을 선택하세요.";
+        }});
+      }}
 
       if (sortButton && list) {{
         sortButton.addEventListener("click", () => {{
