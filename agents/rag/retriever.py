@@ -419,6 +419,13 @@ def _population_key(
     남는 구멍: 모델명이 같은데 벡터만 다른 경우(수동 재임베딩·모델 버전 변경)는 여전히
     충돌한다. 임베딩 전체를 해싱하면 막을 수 있지만 청크 수에 비례해 매 호출 비용이 든다 —
     그런 상황에서는 reset_retriever_cache() 로 비운다.
+
+    recreate_collection_on_dimension_mismatch 는 일부러 넣지 않는다. 이 플래그는 적재
+    "결과"가 아니라 mismatch 를 만났을 때의 처리 방식을 정할 뿐이고, Index 가 이 플래그를
+    one-shot 으로 소비해 끄기 때문에(index/agent.py) 키에 넣으면 Index(True)와
+    Eval(False)이 갈려 같은 청크를 두 번 적재하게 된다. 차원 자체는 이미 키에 있어
+    진짜 차원 변경은 어차피 새 키가 되고, 실패한 적재는 캐시되지 않으므로 플래그를 켠
+    재시도는 언제나 새로 적재된다.
     """
     return (
         scope_id,
@@ -426,7 +433,6 @@ def _population_key(
         _first_embedding_dim(raw_chunks) or settings.embedding_dimension,
         settings.qdrant_url,
         settings.qdrant_api_key,
-        settings.recreate_collection_on_dimension_mismatch,
     )
 
 

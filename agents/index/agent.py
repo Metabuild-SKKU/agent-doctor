@@ -708,7 +708,15 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
             )
 
         vector_dim = len(next(chunk.embedding for chunk in all_chunks if chunk.embedding))
+        # 컬렉션 준비·증분 삭제·upsert를 공통 retriever에 위임한다. 뒤이어 도는
+        # Eval/Serve가 같은 청크로 get_retriever를 부르면 이 적재 결과를 그대로 쓴다.
+        # 재생성 플래그는 config를 통해 ensure_collection까지 전달된다.
         tools.get_retriever(all_chunks, config, delete_doc_ids=list(seen_doc_ids))
+        # one-shot: 재생성 플래그는 소비 즉시 끈다. 켠 채로 두면 이후 모든
+        # 재색인과 retriever(resolve_retrieval_settings)까지 차원 가드가
+        # 풀린 채 남아, mismatch 시 에러 대신 컬렉션이 조용히 삭제된다.
+        if state.index_config.get("recreate_collection_on_dimension_mismatch"):
+            state.index_config["recreate_collection_on_dimension_mismatch"] = False
 
         state.chunks = all_chunks
         if config.get("graph_enabled", True):
