@@ -184,6 +184,10 @@ def render_html(payload: dict[str, Any]) -> str:
     metric_rows = comparison["metric_rows"]
     config_rows = comparison["config_rows"]
     trials = payload["optimization"]["trials"]
+    metric_by_name = {row["metric"]: row for row in metric_rows}
+    overall_row = metric_by_name.get("overall_score", {})
+    overall_delta = overall_row.get("delta")
+    overall_delta_class = _html_delta_class(overall_delta)
 
     metric_cards = _html_metric_cards(metric_rows)
     metric_table = _html_table(
@@ -236,60 +240,106 @@ def render_html(payload: dict[str, Any]) -> str:
   <style>
     :root {{
       color-scheme: light;
-      --bg: #f6f7fb;
+      --bg: #f4f7fb;
       --surface: #ffffff;
-      --text: #1f2937;
-      --muted: #6b7280;
-      --line: #d9dee8;
+      --surface-soft: #f8fafc;
+      --text: #152033;
+      --muted: #64748b;
+      --line: #d7e0ea;
+      --line-soft: #edf1f6;
       --before: #64748b;
-      --after: #2563eb;
-      --positive: #15803d;
-      --negative: #b91c1c;
+      --after: #0f766e;
+      --after-strong: #0b5f59;
+      --accent: #2563eb;
+      --warning: #b7791f;
+      --positive: #147a4a;
+      --negative: #ba1a1a;
+      --shadow: 0 18px 45px rgba(17, 24, 39, 0.08);
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      background: var(--bg);
+      background: linear-gradient(180deg, #f8fbff 0%, var(--bg) 48%, #f7f8fb 100%);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.5;
     }}
     main {{
-      width: min(1120px, calc(100% - 32px));
+      width: min(1160px, calc(100% - 32px));
       margin: 0 auto;
-      padding: 32px 0 48px;
+      padding: 30px 0 52px;
     }}
-    header {{
+    .hero {{
       display: flex;
       justify-content: space-between;
-      gap: 24px;
-      align-items: flex-end;
-      margin-bottom: 24px;
+      gap: 28px;
+      align-items: stretch;
+      margin-bottom: 18px;
+      padding: 28px;
+      background: rgba(255, 255, 255, 0.88);
+      border: 1px solid rgba(215, 224, 234, 0.92);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
     }}
     h1, h2 {{ margin: 0; line-height: 1.2; }}
-    h1 {{ font-size: 30px; }}
-    h2 {{ font-size: 18px; margin-bottom: 14px; }}
-    .subtle {{ color: var(--muted); }}
-    .grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 12px;
-      margin-bottom: 20px;
+    h1 {{
+      max-width: 720px;
+      font-size: 34px;
+      letter-spacing: 0;
     }}
-    .card, section {{
-      background: var(--surface);
+    h2 {{ font-size: 18px; margin-bottom: 16px; }}
+    .eyebrow {{
+      margin: 0 0 8px;
+      color: var(--after-strong);
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }}
+    .subtle {{
+      margin: 10px 0 0;
+      color: var(--muted);
+    }}
+    .hero-score {{
+      min-width: 250px;
+      padding: 22px;
+      background: var(--surface-soft);
       border: 1px solid var(--line);
       border-radius: 8px;
     }}
-    .card {{ padding: 14px 16px; }}
+    .hero-score .label {{ margin-bottom: 10px; }}
+    .hero-score .value {{
+      display: block;
+      font-size: 42px;
+      line-height: 1;
+      letter-spacing: 0;
+    }}
+    .summary-grid, .metric-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }}
+    .card {{
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 10px 25px rgba(17, 24, 39, 0.04);
+    }}
+    .card {{ padding: 16px; }}
+    .summary-card {{
+      position: relative;
+      overflow: hidden;
+    }}
     .label {{
       color: var(--muted);
       font-size: 13px;
-      margin-bottom: 4px;
+      margin-bottom: 6px;
     }}
     .value {{
       font-size: 24px;
       font-weight: 600;
+      letter-spacing: 0;
     }}
     .delta {{
       color: var(--muted);
@@ -297,11 +347,43 @@ def render_html(payload: dict[str, Any]) -> str:
     }}
     .delta.positive {{ color: var(--positive); }}
     .delta.negative {{ color: var(--negative); }}
-    section {{
-      padding: 18px;
-      margin-top: 16px;
+    .delta-pill {{
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      margin-top: 8px;
+      border-radius: 999px;
+      padding: 4px 9px;
+      background: #eef4ff;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .delta-pill.positive {{
+      background: #eaf7f0;
+      color: var(--positive);
+    }}
+    .delta-pill.negative {{
+      background: #fff1f1;
+      color: var(--negative);
+    }}
+    .report-section {{
+      margin-top: 18px;
+      padding: 22px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 12px 28px rgba(17, 24, 39, 0.05);
       overflow-x: auto;
     }}
+    .section-title {{
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 14px;
+    }}
+    .section-title h2 {{ margin-bottom: 0; }}
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -309,7 +391,7 @@ def render_html(payload: dict[str, Any]) -> str:
     }}
     th, td {{
       border-bottom: 1px solid var(--line);
-      padding: 10px 8px;
+      padding: 12px 8px;
       text-align: left;
       vertical-align: top;
     }}
@@ -317,15 +399,34 @@ def render_html(payload: dict[str, Any]) -> str:
       color: var(--muted);
       font-size: 13px;
       font-weight: 600;
+      text-transform: uppercase;
     }}
+    tbody tr:hover {{ background: #f8fbff; }}
     tr:last-child td {{ border-bottom: 0; }}
-    .metric-name {{ font-weight: 600; }}
-    .bar-wrap {{
-      min-width: 220px;
+    .metric-card {{
+      display: grid;
+      gap: 12px;
+    }}
+    .metric-top {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }}
+    .metric-name {{
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+    }}
+    .metric-value {{
+      margin-top: 4px;
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 0;
     }}
     .bar {{
       display: grid;
-      gap: 5px;
+      gap: 8px;
     }}
     .bar-line {{
       display: grid;
@@ -336,9 +437,9 @@ def render_html(payload: dict[str, Any]) -> str:
       color: var(--muted);
     }}
     .track {{
-      height: 8px;
+      height: 9px;
       border-radius: 999px;
-      background: #eef2f7;
+      background: #e8edf4;
       overflow: hidden;
     }}
     .fill {{
@@ -348,74 +449,118 @@ def render_html(payload: dict[str, Any]) -> str:
     }}
     .fill.before {{ background: var(--before); }}
     .fill.after {{ background: var(--after); }}
+    .legend {{
+      display: inline-flex;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .legend span::before {{
+      content: "";
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      margin-right: 5px;
+      border-radius: 999px;
+      background: var(--before);
+    }}
+    .legend span:last-child::before {{ background: var(--after); }}
     .pill {{
       display: inline-flex;
       align-items: center;
       border-radius: 999px;
-      padding: 3px 8px;
-      background: #eef2ff;
-      color: #3730a3;
+      padding: 5px 10px;
+      background: #eef7f5;
+      color: var(--after-strong);
       font-size: 12px;
       font-weight: 600;
     }}
     .empty {{ color: var(--muted); margin: 0; }}
-    ul {{ margin: 0; padding-left: 20px; }}
+    .insights {{
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }}
+    .insights li {{
+      padding: 12px 14px;
+      border-left: 4px solid var(--after);
+      background: var(--surface-soft);
+      border-radius: 8px;
+    }}
     @media (max-width: 720px) {{
       main {{ width: min(100% - 20px, 1120px); padding-top: 20px; }}
-      header {{ display: block; }}
+      .hero {{ display: block; padding: 20px; }}
+      .hero-score {{ margin-top: 18px; min-width: 0; }}
       h1 {{ font-size: 24px; margin-bottom: 8px; }}
-      section {{ padding: 14px; }}
+      .report-section {{ padding: 14px; }}
+      .section-title {{ display: block; }}
     }}
   </style>
 </head>
 <body>
   <main>
-    <header>
+    <header class="hero">
       <div>
-        <p class="subtle">Generated at {_html_text(payload["created_at"])}</p>
-        <h1>RAG Pipeline Before/After Report</h1>
+        <p class="eyebrow">RAG evaluation report</p>
+        <h1>Before/After Performance Report</h1>
+        <p class="subtle">Generated at {_html_text(payload["created_at"])} · {_html_text(comparison["basis"])}</p>
       </div>
-      <span class="pill">{_html_text(comparison["basis"])}</span>
+      <div class="hero-score">
+        <div class="label">Final overall score</div>
+        <strong class="value">{_html_value(final_eval.get("overall_score"))}</strong>
+        <span class="delta-pill {overall_delta_class}">{_html_text(_fmt_delta(overall_delta))} vs before</span>
+      </div>
     </header>
 
-    <div class="grid">
-      <div class="card">
+    <div class="summary-grid">
+      <div class="card summary-card">
         <div class="label">Pipeline status</div>
         <div class="value">{_html_text(pipeline["status"])}</div>
         <div class="delta">iteration {_html_value(pipeline["iteration"])} / {_html_value(pipeline["max_iterations"])}</div>
       </div>
-      <div class="card">
+      <div class="card summary-card">
         <div class="label">Documents / Chunks</div>
         <div class="value">{_html_value(pipeline["documents"])} / {_html_value(pipeline["chunks"])}</div>
         <div class="delta">probes {_html_value(pipeline["probes"])}</div>
       </div>
-      <div class="card">
-        <div class="label">Final overall score</div>
-        <div class="value">{_html_value(final_eval.get("overall_score"))}</div>
-        <div class="delta">pass threshold {_html_value(final_eval.get("pass_threshold"))}</div>
+      <div class="card summary-card">
+        <div class="label">Pass threshold</div>
+        <div class="value">{_html_value(final_eval.get("pass_threshold"))}</div>
+        <div class="delta">oracle accuracy {_html_value(final_eval.get("oracle_accuracy"))}</div>
       </div>
     </div>
 
     {metric_cards}
 
-    <section>
-      <h2>Metric Comparison</h2>
+    <section class="report-section">
+      <div class="section-title">
+        <h2>Metric Comparison</h2>
+        <div class="legend"><span>Before</span><span>After</span></div>
+      </div>
       {metric_table}
     </section>
 
-    <section>
-      <h2>Configuration Changes</h2>
+    <section class="report-section">
+      <div class="section-title">
+        <h2>Configuration Changes</h2>
+      </div>
       {config_table}
     </section>
 
-    <section>
-      <h2>Optimization Trials</h2>
+    <section class="report-section">
+      <div class="section-title">
+        <h2>Optimization Trials</h2>
+      </div>
       {trial_table}
     </section>
 
-    <section>
-      <h2>Interpretation</h2>
-      <ul>{interpretation}</ul>
+    <section class="report-section">
+      <div class="section-title">
+        <h2>Interpretation</h2>
+      </div>
+      <ul class="insights">{interpretation}</ul>
     </section>
   </main>
 </body>
@@ -599,14 +744,18 @@ def _html_metric_cards(metric_rows: list[dict[str, Any]]) -> str:
         delta_class = _html_delta_class(delta)
         bars = _html_metric_bars(row["before"], row["after"])
         cards.append(
-            '<div class="card">'
-            f'<div class="label">{_html_text(row["metric"])}</div>'
-            f'<div class="value">{_html_value(row["after"])}</div>'
-            f'<div class="delta {delta_class}">change {_html_text(_fmt_delta(delta))}</div>'
+            '<div class="card metric-card">'
+            '<div class="metric-top">'
+            "<div>"
+            f'<div class="metric-name">{_html_text(row["metric"])}</div>'
+            f'<div class="metric-value">{_html_value(row["after"])}</div>'
+            "</div>"
+            f'<span class="delta-pill {delta_class}">{_html_text(_fmt_delta(delta))}</span>'
+            "</div>"
             f"{bars}"
             "</div>"
         )
-    return '<div class="grid">' + "\n".join(cards) + "</div>"
+    return '<div class="metric-grid">' + "\n".join(cards) + "</div>"
 
 
 def _html_metric_bars(before: Any, after: Any) -> str:
