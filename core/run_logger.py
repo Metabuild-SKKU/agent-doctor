@@ -57,9 +57,16 @@ def setup_run_logging(log_dir: str = "output/logs", prefix: str = "run") -> str 
         print(f"[log] 파일 로깅 비활성(로그 파일 열기 실패: {e})")
         return None
 
-    sys.stdout = _Tee(sys.stdout, f)
-    sys.stderr = _Tee(sys.stderr, f)
-    atexit.register(f.close)
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    sys.stdout = _Tee(orig_stdout, f)
+    sys.stderr = _Tee(orig_stderr, f)
+
+    def _restore_and_close():
+        sys.stdout = orig_stdout
+        sys.stderr = orig_stderr
+        f.close()
+
+    atexit.register(_restore_and_close)
     _installed = True
     print(f"[log] 실행 로그 저장: {path}")
     return path
