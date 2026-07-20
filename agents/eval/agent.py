@@ -30,7 +30,7 @@ from core.state import AgentDoctorState
 
 from agents.eval.types import EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled
 from agents.eval.probe_gen import generate_probes
-from agents.eval.probe_store import save_probes, load_probes
+from agents.eval.probe_store import save_probes, load_probes, corpus_version
 # ⚠️ 임시: Index Agent가 검색 리트리버를 제공하기 전까지만 retrieval_temp 사용.
 #     Index 검색이 준비되면 retrieval_temp 를 삭제하고 여기 import 를 교체할 것.
 from agents.eval.retrieval_temp import build_eval_index, retrieve, generate_answer, _keyword_search
@@ -72,10 +72,16 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     print(f"[Eval] 진단 모드 = {mode} (1=fast·2=standard·3=deep·4=full)")
 
     # 진단 신호 캐시: 파이프라인 버전(index_config+코퍼스)이 바뀌면 무효화 → stale 재사용 방지.
+    # 진단 신호(예: gold_in_wider_candidates)는 top_k 로 검색한 결과에 의존하므로,
+    # 이 캐시는 index_config 를 포함하는 _pipeline_version 을 그대로 쓴다.
     version = _pipeline_version(state)
     if state.diagnosis_cache_version != version:
         state.diagnosis_cache = {}
         state.diagnosis_cache_version = version
+
+    # Probe(골든 테스트셋) 캐시는 코퍼스에만 의존한다(top_k 등 index_config 무관).
+    # top_k 만 바꾼 Optimize 재실행에서 probe 를 불필요하게 재생성하지 않도록 분리.
+    probe_version = corpus_version(state.chunks)
 
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
@@ -85,10 +91,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         if state.user_questions:
             probes = generate_probes(state)
         else:
-            probes = load_probes(version)
+            probes = load_probes(probe_version)
             if probes is None:
                 probes = generate_probes(state)
-                save_probes(probes, version)
+                save_probes(probes, probe_version)
             else:
                 print(f"[Eval] STEP1: 저장된 Probe {len(probes)}개 재사용(버전 일치)")
         if not probes:
