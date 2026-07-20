@@ -150,7 +150,7 @@ python tests/test_pipeline.py
       Notion API → 페이지 블록 파싱 → Document 객체 생성
         ↓
   [2] Index Agent
-      Document → 전략 청킹(기본 markdown_recursive, 600자/overlap 80) → BGE-M3 임베딩
+      Document → 전략 청킹(기본 markdown_recursive, 512자/overlap 50) → BGE-M3 임베딩
       → Qdrant(in-memory) upsert → state.chunks 업데이트
         ↓
   [3] Serve Agent
@@ -170,7 +170,7 @@ python tests/test_pipeline.py
 |------|------|------|
 | 문서 수집 | Notion API | 블록 단위 재귀 파싱, 페이지네이션 처리 |
 | 인증 | Access Token / OAuth2 | `.env` 토큰 또는 브라우저 OAuth 흐름 |
-| 청킹 | 전략 4종 (fixed/markdown/recursive/markdown_recursive) | 기본 markdown_recursive, 600자/overlap 80 — `register_chunk_strategy()`로 확장 |
+| 청킹 | 전략 4종 (fixed/markdown/recursive/markdown_recursive) | 기본 markdown_recursive, 512자/overlap 50 — `register_chunk_strategy()`로 확장 |
 | 임베딩 | sentence-transformers | `BAAI/bge-m3` (1024차원, 한국어 지원) |
 | 벡터 DB | Qdrant in-memory | 운영 시 `QDRANT_URL`로 Cloud 전환 |
 | 검색 API | FastAPI + uvicorn | `GET /search?query=...` → 벡터 검색 결과 반환 |
