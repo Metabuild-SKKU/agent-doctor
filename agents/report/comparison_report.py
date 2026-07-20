@@ -243,78 +243,145 @@ def render_html(payload: dict[str, Any]) -> str:
   <title>RAG Pipeline Before/After Report</title>
   <style>
     :root {{
-      color-scheme: light;
-      --bg: #f4f7fb;
-      --surface: #ffffff;
-      --surface-soft: #f8fafc;
-      --text: #152033;
-      --muted: #64748b;
-      --line: #d7e0ea;
-      --line-soft: #edf1f6;
+      color-scheme: dark;
+      --bg: #07080d;
+      --surface: #101116;
+      --surface-soft: #151722;
+      --surface-strong: #1b1d2b;
+      --text: #f5f7ff;
+      --muted: #9aa3b7;
+      --line: rgba(148, 163, 184, 0.18);
+      --line-strong: rgba(129, 124, 248, 0.55);
       --before: #64748b;
-      --after: #0f766e;
-      --after-strong: #0b5f59;
-      --accent: #2563eb;
-      --warning: #b7791f;
-      --positive: #147a4a;
-      --negative: #ba1a1a;
-      --shadow: 0 18px 45px rgba(17, 24, 39, 0.08);
+      --after: #817cf8;
+      --after-strong: #a5a1ff;
+      --accent: #817cf8;
+      --positive: #63e6a5;
+      --negative: #ff8a8a;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      background: linear-gradient(180deg, #f8fbff 0%, var(--bg) 48%, #f7f8fb 100%);
+      background:
+        radial-gradient(circle at 42% 12%, rgba(129, 124, 248, 0.18), transparent 28rem),
+        linear-gradient(180deg, #090a10 0%, var(--bg) 46%, #05060a 100%);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.5;
     }}
     main {{
-      width: min(1160px, calc(100% - 32px));
+      width: min(1120px, calc(100% - 32px));
       margin: 0 auto;
-      padding: 30px 0 52px;
+      padding: 26px 0 52px;
+    }}
+    .topbar {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 0 18px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+    }}
+    .brand {{
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text);
+      font-weight: 700;
+    }}
+    .brand-icon {{
+      display: inline-grid;
+      width: 24px;
+      height: 24px;
+      place-items: center;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      color: var(--after-strong);
+      font-size: 13px;
+    }}
+    .nav-links {{
+      display: inline-flex;
+      gap: 26px;
+      font-size: 13px;
     }}
     .hero {{
       display: flex;
       justify-content: space-between;
-      gap: 28px;
-      align-items: stretch;
-      margin-bottom: 18px;
-      padding: 28px;
-      background: rgba(255, 255, 255, 0.88);
-      border: 1px solid rgba(215, 224, 234, 0.92);
-      border-radius: 8px;
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(12px);
+      gap: 44px;
+      align-items: center;
+      min-height: 410px;
+      padding: 72px 0 54px;
     }}
     h1, h2 {{ margin: 0; line-height: 1.2; }}
     h1 {{
       max-width: 720px;
-      font-size: 34px;
+      font-size: clamp(42px, 5.2vw, 64px);
       letter-spacing: 0;
+      line-height: 1.02;
+    }}
+    h1 span {{
+      color: var(--after);
     }}
     h2 {{ font-size: 18px; margin-bottom: 16px; }}
     .eyebrow {{
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
       margin: 0 0 8px;
-      color: var(--after-strong);
+      color: var(--muted);
       font-size: 13px;
       font-weight: 700;
       text-transform: uppercase;
     }}
+    .dot {{
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--after);
+      box-shadow: 0 0 18px var(--after);
+    }}
     .subtle {{
-      margin: 10px 0 0;
+      max-width: 610px;
+      margin: 20px 0 0;
       color: var(--muted);
+      font-size: 17px;
+    }}
+    .hero-meta {{
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 26px;
+    }}
+    .hero-meta span {{
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: rgba(255, 255, 255, 0.03);
+      color: #dce0ef;
+      font-size: 13px;
+    }}
+    .pulse-line {{
+      width: min(420px, 100%);
+      color: rgba(129, 124, 248, 0.56);
+    }}
+    .pulse-line svg {{
+      display: block;
+      width: 100%;
+      height: 92px;
     }}
     .hero-score {{
-      min-width: 250px;
-      padding: 22px;
-      background: var(--surface-soft);
-      border: 1px solid var(--line);
+      min-width: 270px;
+      padding: 24px;
+      background: linear-gradient(180deg, rgba(129, 124, 248, 0.16), rgba(255, 255, 255, 0.04));
+      border: 1px solid var(--line-strong);
       border-radius: 8px;
+      box-shadow: var(--shadow);
     }}
     .hero-score .label {{ margin-bottom: 10px; }}
     .hero-score .value {{
       display: block;
-      font-size: 42px;
+      font-size: 48px;
       line-height: 1;
       letter-spacing: 0;
     }}
@@ -328,7 +395,7 @@ def render_html(payload: dict[str, Any]) -> str:
       background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 10px 25px rgba(17, 24, 39, 0.04);
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.22);
     }}
     .card {{ padding: 16px; }}
     .summary-card {{
@@ -358,17 +425,17 @@ def render_html(payload: dict[str, Any]) -> str:
       margin-top: 8px;
       border-radius: 999px;
       padding: 4px 9px;
-      background: #eef4ff;
+      background: rgba(129, 124, 248, 0.16);
       color: var(--accent);
       font-size: 12px;
       font-weight: 700;
     }}
     .delta-pill.positive {{
-      background: #eaf7f0;
+      background: rgba(99, 230, 165, 0.12);
       color: var(--positive);
     }}
     .delta-pill.negative {{
-      background: #fff1f1;
+      background: rgba(255, 138, 138, 0.12);
       color: var(--negative);
     }}
     .report-section {{
@@ -377,7 +444,7 @@ def render_html(payload: dict[str, Any]) -> str:
       background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 12px 28px rgba(17, 24, 39, 0.05);
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2);
       overflow-x: auto;
     }}
     .section-title {{
@@ -405,7 +472,7 @@ def render_html(payload: dict[str, Any]) -> str:
       font-weight: 600;
       text-transform: uppercase;
     }}
-    tbody tr:hover {{ background: #f8fbff; }}
+    tbody tr:hover {{ background: rgba(129, 124, 248, 0.06); }}
     tr:last-child td {{ border-bottom: 0; }}
     .metric-card {{
       display: grid;
@@ -443,7 +510,7 @@ def render_html(payload: dict[str, Any]) -> str:
     .track {{
       height: 9px;
       border-radius: 999px;
-      background: #e8edf4;
+      background: rgba(148, 163, 184, 0.16);
       overflow: hidden;
     }}
     .fill {{
@@ -474,7 +541,7 @@ def render_html(payload: dict[str, Any]) -> str:
       align-items: center;
       border-radius: 999px;
       padding: 5px 10px;
-      background: #eef7f5;
+      background: rgba(129, 124, 248, 0.14);
       color: var(--after-strong);
       font-size: 12px;
       font-weight: 600;
@@ -493,28 +560,64 @@ def render_html(payload: dict[str, Any]) -> str:
       background: var(--surface-soft);
       border-radius: 8px;
     }}
+    .footer {{
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 38px;
+      padding-top: 22px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }}
     @media (max-width: 720px) {{
       main {{ width: min(100% - 20px, 1120px); padding-top: 20px; }}
-      .hero {{ display: block; padding: 20px; }}
+      .topbar {{ align-items: flex-start; gap: 16px; }}
+      .nav-links {{ display: none; }}
+      .hero {{ display: block; min-height: 0; padding: 42px 0 26px; }}
       .hero-score {{ margin-top: 18px; min-width: 0; }}
       h1 {{ font-size: 24px; margin-bottom: 8px; }}
       .report-section {{ padding: 14px; }}
       .section-title {{ display: block; }}
+      .footer {{ display: block; }}
     }}
   </style>
 </head>
 <body>
   <main>
+    <nav class="topbar">
+      <div class="brand">
+        <span class="brand-icon">~</span>
+        <span>AgentDoctor</span>
+      </div>
+      <div class="nav-links">
+        <span>RAG 리포트</span>
+        <span>Before / After</span>
+        <span>Eval 결과</span>
+      </div>
+    </nav>
+
     <header class="hero">
       <div>
-        <p class="eyebrow">RAG evaluation report</p>
-        <h1>Before/After Performance Report</h1>
-        <p class="subtle">Generated at {_html_text(payload["created_at"])} · {_html_text(comparison["basis"])}</p>
+        <p class="eyebrow"><span class="dot"></span> RAG 파이프라인 성능 비교</p>
+        <h1>RAG 성능 개선을<br><span>전후 지표로 증명합니다</span></h1>
+        <p class="subtle">최적화 전 기준값과 최종 Eval 결과를 비교해 검색, 답변, 설정 변화가 실제로 좋아졌는지 보여줍니다.</p>
+        <div class="hero-meta">
+          <span>Generated at {_html_text(payload["created_at"])}</span>
+          <span>{_html_text(comparison["basis"])}</span>
+        </div>
       </div>
-      <div class="hero-score">
-        <div class="label">Final overall score</div>
-        <strong class="value">{_html_value(final_eval.get("overall_score"))}</strong>
-        <span class="delta-pill {overall_delta_class}">{_html_text(_fmt_delta(overall_delta))} vs before</span>
+      <div>
+        <div class="pulse-line" aria-hidden="true">
+          <svg viewBox="0 0 420 92" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M0 58H92L106 58L118 22L130 72L146 58H198C203 51 214 51 220 58H306L320 58L334 21L346 72L364 58H420" stroke="currentColor" stroke-width="2"/>
+          </svg>
+        </div>
+        <div class="hero-score">
+          <div class="label">Final overall score</div>
+          <strong class="value">{_html_value(final_eval.get("overall_score"))}</strong>
+          <span class="delta-pill {overall_delta_class}">{_html_text(_fmt_delta(overall_delta))} vs before</span>
+        </div>
       </div>
     </header>
 
@@ -566,6 +669,11 @@ def render_html(payload: dict[str, Any]) -> str:
       </div>
       <ul class="insights">{interpretation}</ul>
     </section>
+
+    <footer class="footer">
+      <span>AgentDoctor - RAG 성능 비교 리포트</span>
+      <span>Ingest -> Index -> RAG -> Eval -> Optimize</span>
+    </footer>
   </main>
 </body>
 </html>
