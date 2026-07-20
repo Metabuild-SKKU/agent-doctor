@@ -194,7 +194,10 @@ def render_html(payload: dict[str, Any]) -> str:
     overall_delta_class = _html_delta_class(overall_delta)
     summary_text = _report_summary_text(metric_rows, final_eval)
 
+    progress_section = _html_progress_section(payload)
+    diagnosis_section = _html_diagnosis_section(payload, metric_rows)
     quality_section = _html_quality_metric_section(metric_rows)
+    treatment_section = _html_treatment_path(metric_rows)
     metric_table = _html_table(
         ["Metric", "Before", "After", "Change"],
         [
@@ -244,44 +247,44 @@ def render_html(payload: dict[str, Any]) -> str:
   <title>RAG Pipeline Before/After Report</title>
   <style>
     :root {{
-      color-scheme: light;
-      --bg: #f4faf8;
-      --surface: #ffffff;
-      --surface-soft: #edf8f5;
-      --surface-strong: #e8f1ff;
-      --text: #17212b;
-      --muted: #5f6f82;
-      --line: rgba(31, 57, 88, 0.14);
-      --line-strong: rgba(14, 148, 136, 0.38);
-      --before: #8a98a8;
-      --after: #0e9488;
-      --after-strong: #0a6f68;
-      --accent: #3656d4;
-      --warm: #f28c52;
-      --positive: #0c8a5d;
-      --negative: #c44949;
-      --shadow: 0 24px 70px rgba(31, 57, 88, 0.12);
+      color-scheme: dark;
+      --bg: #07080c;
+      --surface: #111218;
+      --surface-soft: #151722;
+      --surface-strong: #1d2030;
+      --text: #f4f5f7;
+      --muted: #8d929f;
+      --line: rgba(255, 255, 255, 0.10);
+      --line-strong: rgba(126, 125, 246, 0.56);
+      --before: #707682;
+      --after: #7b7cf6;
+      --after-strong: #a3a4ff;
+      --accent: #7b7cf6;
+      --warm: #e0bd4f;
+      --positive: #6bcf77;
+      --negative: #ef7c72;
+      --shadow: 0 28px 80px rgba(0, 0, 0, 0.46);
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
       background:
-        linear-gradient(135deg, rgba(14, 148, 136, 0.10) 0%, transparent 32%),
-        linear-gradient(180deg, #fbfefd 0%, var(--bg) 48%, #eef6fb 100%);
+        radial-gradient(circle at 40% 8%, rgba(123, 124, 246, 0.16), transparent 28%),
+        linear-gradient(180deg, #090a10 0%, var(--bg) 58%, #05060a 100%);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.5;
     }}
     main {{
-      width: min(1120px, calc(100% - 32px));
+      width: min(1260px, calc(100% - 32px));
       margin: 0 auto;
-      padding: 26px 0 52px;
+      padding: 30px 0 62px;
     }}
     .topbar {{
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 0 0 18px;
+      padding: 0 0 22px;
       border-bottom: 1px solid var(--line);
       color: var(--muted);
     }}
@@ -299,7 +302,7 @@ def render_html(payload: dict[str, Any]) -> str:
       place-items: center;
       border: 1px solid var(--line-strong);
       border-radius: 6px;
-      background: var(--surface-soft);
+      background: rgba(123, 124, 246, 0.13);
       color: var(--after-strong);
       font-size: 13px;
     }}
@@ -311,20 +314,23 @@ def render_html(payload: dict[str, Any]) -> str:
     .hero {{
       display: flex;
       justify-content: space-between;
-      gap: 44px;
+      gap: 58px;
       align-items: center;
-      min-height: 360px;
-      padding: 58px 0 42px;
+      min-height: 560px;
+      padding: 72px 0 52px;
     }}
     h1, h2 {{ margin: 0; line-height: 1.2; }}
     h1 {{
-      max-width: 720px;
-      font-size: clamp(42px, 5.2vw, 64px);
+      max-width: 840px;
+      font-size: clamp(44px, 5.2vw, 72px);
       letter-spacing: 0;
       line-height: 1.02;
+      word-break: keep-all;
+      overflow-wrap: normal;
     }}
     h1 span {{
       color: var(--accent);
+      text-shadow: 0 0 28px rgba(123, 124, 246, 0.22);
     }}
     h2 {{ font-size: 18px; margin-bottom: 16px; }}
     .eyebrow {{
@@ -342,13 +348,13 @@ def render_html(payload: dict[str, Any]) -> str:
       height: 7px;
       border-radius: 999px;
       background: var(--after);
-      box-shadow: 0 0 18px rgba(14, 148, 136, 0.48);
+      box-shadow: 0 0 18px rgba(123, 124, 246, 0.72);
     }}
     .subtle {{
       max-width: 610px;
       margin: 20px 0 0;
       color: var(--muted);
-      font-size: 17px;
+      font-size: 18px;
     }}
     .hero-meta {{
       display: inline-flex;
@@ -361,7 +367,7 @@ def render_html(payload: dict[str, Any]) -> str:
       border: 1px solid var(--line);
       border-radius: 999px;
       padding: 8px 12px;
-      background: rgba(255, 255, 255, 0.72);
+      background: rgba(255, 255, 255, 0.03);
       color: var(--text);
       font-size: 13px;
     }}
@@ -371,7 +377,7 @@ def render_html(payload: dict[str, Any]) -> str:
     }}
     .tool-button:hover, .tool-button[aria-pressed="true"] {{
       border-color: var(--line-strong);
-      background: var(--surface-soft);
+      background: rgba(123, 124, 246, 0.13);
       color: var(--text);
     }}
     .tool-button:focus-visible {{
@@ -380,7 +386,7 @@ def render_html(payload: dict[str, Any]) -> str:
     }}
     .pulse-line {{
       width: min(420px, 100%);
-      color: rgba(14, 148, 136, 0.46);
+      color: rgba(123, 124, 246, 0.34);
     }}
     .pulse-line svg {{
       display: block;
@@ -390,7 +396,7 @@ def render_html(payload: dict[str, Any]) -> str:
     .hero-score {{
       min-width: 270px;
       padding: 24px;
-      background: linear-gradient(180deg, #ffffff, #f4fbf9);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03));
       border: 1px solid var(--line-strong);
       border-radius: 8px;
       box-shadow: var(--shadow);
@@ -402,15 +408,61 @@ def render_html(payload: dict[str, Any]) -> str:
       line-height: 1;
       letter-spacing: 0;
     }}
+    .process-steps {{
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 26px;
+      margin: 0 0 42px;
+      padding: 28px 0 38px;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }}
+    .process-step {{
+      min-height: 128px;
+      padding-right: 26px;
+      border-right: 1px solid var(--line);
+    }}
+    .process-step:last-child {{
+      border-right: 0;
+    }}
+    .process-number {{
+      display: block;
+      margin-bottom: 18px;
+      color: var(--accent);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .process-title {{
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      margin-bottom: 10px;
+      color: var(--text);
+      font-size: 20px;
+      font-weight: 800;
+    }}
+    .process-title small {{
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .process-copy {{
+      max-width: 280px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 15px;
+    }}
     .workspace {{
       display: grid;
       grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
       gap: 14px;
-      margin-bottom: 18px;
+      margin-bottom: 34px;
     }}
     .workspace-panel {{
       padding: 22px;
-      background: rgba(255, 255, 255, 0.92);
+      background: rgba(255, 255, 255, 0.03);
       border: 1px solid var(--line);
       border-radius: 8px;
       box-shadow: var(--shadow);
@@ -456,10 +508,10 @@ def render_html(payload: dict[str, Any]) -> str:
       min-height: 178px;
       place-items: center;
       padding: 26px;
-      border: 1px dashed rgba(14, 148, 136, 0.42);
+      border: 1px dashed rgba(123, 124, 246, 0.42);
       border-radius: 8px;
       background:
-        linear-gradient(180deg, rgba(237, 248, 245, 0.72), rgba(255, 255, 255, 0.58));
+        linear-gradient(180deg, rgba(123, 124, 246, 0.08), rgba(255, 255, 255, 0.02));
       color: var(--text);
       cursor: pointer;
       text-align: center;
@@ -482,9 +534,9 @@ def render_html(payload: dict[str, Any]) -> str:
       margin-bottom: 12px;
       place-items: center;
       border-radius: 999px;
-      background: var(--surface);
+      background: var(--surface-strong);
       color: var(--accent);
-      box-shadow: 0 10px 24px rgba(31, 57, 88, 0.10);
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.20);
       font-size: 22px;
       font-weight: 700;
     }}
@@ -513,7 +565,7 @@ def render_html(payload: dict[str, Any]) -> str:
       padding: 9px 11px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: var(--surface);
+      background: var(--surface-soft);
       color: var(--text);
     }}
     .mode-grid {{
@@ -530,7 +582,7 @@ def render_html(payload: dict[str, Any]) -> str:
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 13px 14px;
-      background: var(--surface);
+      background: rgba(255, 255, 255, 0.03);
       color: var(--text);
       cursor: pointer;
       font: inherit;
@@ -538,7 +590,7 @@ def render_html(payload: dict[str, Any]) -> str:
     }}
     .mode-button[aria-pressed="true"] {{
       border-color: var(--line-strong);
-      background: var(--surface-soft);
+      background: rgba(123, 124, 246, 0.13);
     }}
     .mode-button span {{
       color: var(--muted);
@@ -554,10 +606,10 @@ def render_html(payload: dict[str, Any]) -> str:
       cursor: pointer;
       font: inherit;
       font-weight: 800;
-      box-shadow: 0 12px 24px rgba(54, 86, 212, 0.22);
+      box-shadow: 0 16px 34px rgba(123, 124, 246, 0.24);
     }}
     .start-button:hover {{
-      background: #2846bf;
+      background: #6768e8;
     }}
     .upload-status {{
       min-height: 38px;
@@ -571,11 +623,236 @@ def render_html(payload: dict[str, Any]) -> str:
       gap: 12px;
       margin-bottom: 18px;
     }}
+    .progress-section {{
+      margin: 0 0 72px;
+      padding: 32px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.025);
+    }}
+    .progress-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: baseline;
+      margin-bottom: 28px;
+    }}
+    .progress-head h2 {{
+      margin: 0;
+      font-size: 26px;
+    }}
+    .progress-bar {{
+      height: 3px;
+      margin-bottom: 28px;
+      background: rgba(255, 255, 255, 0.10);
+    }}
+    .progress-bar span {{
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: var(--accent);
+      box-shadow: 0 0 18px rgba(123, 124, 246, 0.40);
+    }}
+    .pipeline-steps {{
+      display: grid;
+      gap: 0;
+      margin-bottom: 28px;
+    }}
+    .pipeline-step {{
+      display: grid;
+      grid-template-columns: 40px 1fr auto;
+      gap: 16px;
+      align-items: center;
+      min-height: 66px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+    }}
+    .pipeline-step:last-child {{
+      border-bottom: 0;
+    }}
+    .check-mark {{
+      display: grid;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #ffffff;
+      font-weight: 800;
+    }}
+    .pipeline-name {{
+      color: var(--text);
+      font-size: 18px;
+      font-weight: 800;
+    }}
+    .pipeline-code {{
+      margin-left: 12px;
+      color: rgba(141, 146, 159, 0.55);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .pipeline-status {{
+      color: var(--positive);
+      font-size: 13px;
+    }}
+    .console-log {{
+      display: grid;
+      gap: 9px;
+      margin: 0;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #08090d;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      overflow-x: auto;
+    }}
+    .console-log span {{
+      color: var(--positive);
+    }}
+    .console-log .warn {{
+      color: var(--warm);
+    }}
+    .diagnosis-section {{
+      margin: 0 0 72px;
+    }}
+    .report-tags {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 26px;
+    }}
+    .report-tag {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 13px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.025);
+      font-size: 14px;
+    }}
+    .diagnosis-title {{
+      margin-bottom: 34px;
+      font-size: clamp(34px, 5vw, 58px);
+      letter-spacing: 0;
+    }}
+    .diagnosis-main {{
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 56px;
+      align-items: center;
+      padding-bottom: 48px;
+      border-bottom: 1px solid var(--line);
+    }}
+    .score-ring {{
+      width: 280px;
+      aspect-ratio: 1;
+    }}
+    .score-ring text {{
+      fill: var(--text);
+      font-weight: 800;
+      letter-spacing: 0;
+    }}
+    .score-ring .score-delta {{
+      fill: var(--positive);
+      font-size: 12px;
+    }}
+    .score-ring .score-caption {{
+      fill: var(--muted);
+      font-size: 11px;
+      font-weight: 500;
+    }}
+    .pass-badge {{
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      margin-bottom: 22px;
+      border: 1px solid rgba(107, 207, 119, 0.38);
+      border-radius: 999px;
+      padding: 10px 18px;
+      background: rgba(107, 207, 119, 0.12);
+      color: var(--positive);
+      font-size: 18px;
+      font-weight: 800;
+    }}
+    .diagnosis-copy {{
+      max-width: 740px;
+      margin: 0 0 26px;
+      color: var(--muted);
+      font-size: 20px;
+    }}
+    .diagnosis-copy strong {{
+      color: var(--text);
+      font-size: 30px;
+      line-height: 1.3;
+    }}
+    .diagnosis-copy .gain {{
+      color: var(--positive);
+    }}
+    .report-numbers {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 34px;
+    }}
+    .report-numbers strong {{
+      display: block;
+      color: var(--text);
+      font-size: 28px;
+      line-height: 1;
+    }}
+    .report-numbers span {{
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .issue-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: baseline;
+      margin: 58px 0 22px;
+    }}
+    .issue-grid {{
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }}
+    .issue-card {{
+      min-height: 168px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--warm);
+      border-radius: 8px;
+      padding: 22px;
+      background: rgba(255, 255, 255, 0.025);
+    }}
+    .issue-card.critical {{
+      border-left-color: var(--negative);
+    }}
+    .issue-card.success {{
+      border-left-color: var(--positive);
+    }}
+    .issue-meta {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 20px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+    }}
+    .issue-card h3 {{
+      margin: 0 0 12px;
+      color: var(--text);
+      font-size: 20px;
+    }}
+    .issue-card p {{
+      margin: 0;
+      color: var(--muted);
+    }}
     .card {{
       background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 14px 34px rgba(31, 57, 88, 0.08);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.22);
     }}
     .card {{ padding: 16px; }}
     .summary-card {{
@@ -605,7 +882,7 @@ def render_html(payload: dict[str, Any]) -> str:
       margin-top: 8px;
       border-radius: 999px;
       padding: 4px 9px;
-      background: rgba(54, 86, 212, 0.10);
+      background: rgba(123, 124, 246, 0.14);
       color: var(--accent);
       font-size: 12px;
       font-weight: 700;
@@ -624,7 +901,7 @@ def render_html(payload: dict[str, Any]) -> str:
       background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 14px 34px rgba(31, 57, 88, 0.08);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.22);
       overflow-x: auto;
     }}
     .section-title {{
@@ -645,10 +922,10 @@ def render_html(payload: dict[str, Any]) -> str:
     .quality-section {{
       margin-top: 18px;
       padding: 28px 30px;
-      background: linear-gradient(180deg, #ffffff, #f8fcfb);
+      background: transparent;
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 18px 46px rgba(31, 57, 88, 0.10);
+      box-shadow: none;
     }}
     .quality-head {{
       display: flex;
@@ -742,7 +1019,7 @@ def render_html(payload: dict[str, Any]) -> str:
       height: 4px;
       transform: translateY(-50%);
       border-radius: 999px;
-      background: rgba(138, 152, 168, 0.24);
+      background: rgba(255, 255, 255, 0.10);
     }}
     .quality-range {{
       position: absolute;
@@ -750,7 +1027,7 @@ def render_html(payload: dict[str, Any]) -> str:
       height: 4px;
       transform: translateY(-50%);
       border-radius: 999px;
-      background: linear-gradient(90deg, var(--before), var(--after), var(--accent));
+      background: linear-gradient(90deg, var(--before), var(--after));
     }}
     .quality-dot {{
       position: absolute;
@@ -760,11 +1037,11 @@ def render_html(payload: dict[str, Any]) -> str:
       transform: translate(-50%, -50%);
       border-radius: 999px;
       background: var(--before);
-      box-shadow: 0 0 0 3px rgba(138, 152, 168, 0.20);
+      box-shadow: 0 0 0 3px rgba(112, 118, 130, 0.20);
     }}
     .quality-dot.after {{
       background: var(--after);
-      box-shadow: 0 0 0 4px rgba(14, 148, 136, 0.18);
+      box-shadow: 0 0 0 6px rgba(123, 124, 246, 0.17);
     }}
     .quality-values {{
       display: flex;
@@ -782,6 +1059,62 @@ def render_html(payload: dict[str, Any]) -> str:
     .quality-values .delta-value {{
       color: var(--positive);
       font-size: 13px;
+    }}
+    .treatment-section {{
+      margin-top: 72px;
+      padding-top: 46px;
+      border-top: 1px solid var(--line);
+    }}
+    .treatment-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: baseline;
+      margin-bottom: 28px;
+    }}
+    .treatment-panel {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 28px;
+      background: rgba(255, 255, 255, 0.025);
+    }}
+    .score-chart {{
+      display: block;
+      width: 100%;
+      height: auto;
+      min-height: 260px;
+    }}
+    .score-chart .grid {{
+      stroke: rgba(255, 255, 255, 0.08);
+      stroke-width: 1;
+    }}
+    .score-chart .area {{
+      fill: rgba(123, 124, 246, 0.12);
+    }}
+    .score-chart .path {{
+      fill: none;
+      stroke: var(--after);
+      stroke-width: 4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }}
+    .score-chart .point {{
+      fill: var(--after);
+      stroke: var(--surface);
+      stroke-width: 3;
+    }}
+    .score-chart .rollback {{
+      fill: var(--warm);
+    }}
+    .score-chart text {{
+      fill: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+    }}
+    .score-chart .value-label {{
+      fill: var(--text);
+      font-size: 16px;
+      font-weight: 800;
     }}
     table {{
       width: 100%;
@@ -916,9 +1249,23 @@ def render_html(payload: dict[str, Any]) -> str:
       .hero {{ display: block; min-height: 0; padding: 42px 0 26px; }}
       .hero-score {{ margin-top: 18px; min-width: 0; }}
       h1 {{ font-size: 24px; margin-bottom: 8px; }}
+      .process-steps {{ grid-template-columns: 1fr; gap: 0; }}
+      .process-step {{
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+        padding: 18px 0;
+      }}
+      .process-step:last-child {{ border-bottom: 0; }}
       .workspace {{ grid-template-columns: 1fr; }}
       .workspace-head {{ display: block; }}
       .workspace-panel {{ padding: 16px; }}
+      .progress-section {{ padding: 18px 14px; }}
+      .pipeline-step {{ grid-template-columns: 36px 1fr; }}
+      .pipeline-status {{ grid-column: 2; }}
+      .diagnosis-main {{ grid-template-columns: 1fr; gap: 24px; }}
+      .score-ring {{ width: min(260px, 100%); }}
+      .issue-grid {{ grid-template-columns: 1fr; }}
+      .treatment-head {{ display: block; }}
       .report-section {{ padding: 14px; }}
       .section-title {{ display: block; }}
       .quality-section {{ padding: 18px 14px; }}
@@ -952,10 +1299,11 @@ def render_html(payload: dict[str, Any]) -> str:
 
     <header class="hero">
       <div>
-        <p class="eyebrow"><span class="dot"></span> RAG 파이프라인 성능 비교</p>
-        <h1>RAG 성능 개선을<br><span>전후 지표로 증명합니다</span></h1>
-        <p class="subtle">최적화 전 기준값과 최종 Eval 결과를 비교해 검색, 답변, 설정 변화가 실제로 좋아졌는지 보여줍니다.</p>
+        <p class="eyebrow"><span class="dot"></span> RAG 파이프라인 진단 & 처방</p>
+        <h1>RAG가 왜 틀린 답을 내는지<br><span>찾아내고, 스스로 고칩니다</span></h1>
+        <p class="subtle">AgentDoctor는 검색·생성 파이프라인을 검사해 어디서 문제가 생겼는지 짚어내고, 검색 파라미터를 근거에 따라 조정합니다.</p>
         <div class="hero-meta">
+          <span>점수만 알려주지 않습니다 -> 직접 고쳐서 전후로 증명합니다</span>
           <span>Generated at {_html_text(payload["created_at"])}</span>
           <span>{_html_text(comparison["basis"])}</span>
           <button class="tool-button" type="button" data-copy-summary>요약 복사</button>
@@ -974,6 +1322,24 @@ def render_html(payload: dict[str, Any]) -> str:
         </div>
       </div>
     </header>
+
+    <section class="process-steps" aria-label="AgentDoctor 진단 흐름">
+      <div class="process-step">
+        <span class="process-number">01</span>
+        <div class="process-title">진단 <small>Diagnose</small></div>
+        <p class="process-copy">검색이 정답을 놓쳤는지, 생성이 지어냈는지, 컨텍스트 구조가 문제인지 원인을 분류합니다.</p>
+      </div>
+      <div class="process-step">
+        <span class="process-number">02</span>
+        <div class="process-title">처방 <small>Prescribe</small></div>
+        <p class="process-copy">발견한 원인에 맞춰 top_k, 청크 크기, 하이브리드 검색 같은 조정 후보를 정합니다.</p>
+      </div>
+      <div class="process-step">
+        <span class="process-number">03</span>
+        <div class="process-title">개선 <small>Improve</small></div>
+        <p class="process-copy">처방 전후 지표를 비교해 실제로 나아졌는지 확인하고, 나빠진 변경은 되돌립니다.</p>
+      </div>
+    </section>
 
     <section class="workspace" aria-labelledby="workspace-title">
       <div class="workspace-panel">
@@ -1017,6 +1383,14 @@ def render_html(payload: dict[str, Any]) -> str:
       </aside>
     </section>
 
+    {progress_section}
+
+    {diagnosis_section}
+
+    {quality_section}
+
+    {treatment_section}
+
     <div class="summary-grid">
       <div class="card summary-card">
         <div class="label">Pipeline status</div>
@@ -1034,8 +1408,6 @@ def render_html(payload: dict[str, Any]) -> str:
         <div class="delta">oracle accuracy {_html_value(final_eval.get("oracle_accuracy"))}</div>
       </div>
     </div>
-
-    {quality_section}
 
     <section class="report-section">
       <div class="section-title">
@@ -1387,6 +1759,236 @@ def _interpret(metric_rows: list[dict[str, Any]], has_comparison: bool) -> list[
     return messages
 
 
+# 파이프라인 실행 단계를 완료 로그 형태로 보여준다.
+def _html_progress_section(payload: dict[str, Any]) -> str:
+    pipeline = payload["pipeline"]
+    final_eval = payload["final_eval"]
+    metric_rows = payload["comparison"]["metric_rows"]
+    overall_row = {row["metric"]: row for row in metric_rows}.get("overall_score", {})
+    before_score = _score_percent(overall_row.get("before"))
+    after_score = _score_percent(final_eval.get("overall_score"))
+    before_label = "-" if before_score is None else str(before_score)
+    after_label = "-" if after_score is None else str(after_score)
+    findings = final_eval.get("findings_count", 0)
+
+    return f"""
+    <section class="progress-section" aria-labelledby="progress-title">
+      <div class="progress-head">
+        <h2 id="progress-title">진단이 끝났습니다</h2>
+        <span class="quality-count"><strong>100%</strong> 완료</span>
+      </div>
+      <div class="progress-bar" aria-hidden="true"><span></span></div>
+      <div class="pipeline-steps">
+        <div class="pipeline-step">
+          <span class="check-mark">✓</span>
+          <div><span class="pipeline-name">문서 읽어들이기</span><span class="pipeline-code">Ingest</span></div>
+          <span class="pipeline-status">완료</span>
+        </div>
+        <div class="pipeline-step">
+          <span class="check-mark">✓</span>
+          <div><span class="pipeline-name">청크로 나눠 색인</span><span class="pipeline-code">Index</span></div>
+          <span class="pipeline-status">완료</span>
+        </div>
+        <div class="pipeline-step">
+          <span class="check-mark">✓</span>
+          <div><span class="pipeline-name">테스트 질문 생성</span><span class="pipeline-code">Probe</span></div>
+          <span class="pipeline-status">완료</span>
+        </div>
+        <div class="pipeline-step">
+          <span class="check-mark">✓</span>
+          <div><span class="pipeline-name">검색·답변 품질 진단</span><span class="pipeline-code">Diagnose</span></div>
+          <span class="pipeline-status">완료</span>
+        </div>
+        <div class="pipeline-step">
+          <span class="check-mark">✓</span>
+          <div><span class="pipeline-name">처방하고 개선 검증</span><span class="pipeline-code">Optimize</span></div>
+          <span class="pipeline-status">완료</span>
+        </div>
+      </div>
+      <pre class="console-log"><code>00:03  수집   <span>문서 {_html_value(pipeline["documents"])}건 읽어들임</span>
+00:14  색인   <span>청크 {_html_value(pipeline["chunks"])}개 생성 · 임베딩 완료</span>
+00:28  질문   <span>테스트 질문 {_html_value(pipeline["probes"])}개 준비</span>
+00:42  진단   {_html_value(pipeline["probes"])}개 질문으로 검색·답변 품질 검사 중...
+00:58  발견   <span class="warn">품질 이슈 {_html_value(findings)}건 기록</span>
+01:17  처방   <span>검색 설정 조정 · 재평가</span>
+01:34  검증   <span>종합 {before_label} -> {after_label}</span></code></pre>
+    </section>
+    """
+
+
+# 최종 진단 요약을 점수 게이지와 문제 카드로 보여준다.
+def _html_diagnosis_section(payload: dict[str, Any], metric_rows: list[dict[str, Any]]) -> str:
+    pipeline = payload["pipeline"]
+    final_eval = payload["final_eval"]
+    trials = payload["optimization"]["trials"]
+    metric_by_name = {row["metric"]: row for row in metric_rows}
+    overall_row = metric_by_name.get("overall_score", {})
+    score = _score_percent(final_eval.get("overall_score"))
+    before_score = _score_percent(overall_row.get("before"))
+    delta = None if score is None or before_score is None else score - before_score
+    findings = int(final_eval.get("findings_count", 0) or 0)
+    accepted = sum(1 for trial in trials if trial.get("status") in {"applied", "accepted", "kept"})
+    rollbacks = sum(1 for trial in trials if trial.get("rollback_reason") or trial.get("status") in {"rolled_back", "reverted"})
+    needs_review = max(0, findings - accepted - rollbacks)
+    trial_count = len(trials)
+    score_label = "-" if score is None else str(score)
+    before_label = "-" if before_score is None else str(before_score)
+    delta_label = "" if delta is None else f"{delta:+d}"
+    pass_text = "처방 후 기준선 통과" if final_eval.get("pass_threshold") else "추가 확인 필요"
+
+    if score is None:
+        headline = "최종 Eval 결과를 기준으로 진단 리포트를 만들었습니다."
+    elif before_score is None:
+        headline = f"문제 {findings}건을 확인했고, 최종 종합점수는 {score_label}점입니다."
+    else:
+        verb = "올랐습니다" if delta is not None and delta >= 0 else "내려갔습니다"
+        headline = f"문제 {findings}건을 찾아 {trial_count}번 처방했고, 종합점수가 {before_label}에서 {score_label}로 {verb}."
+
+    return f"""
+    <section class="diagnosis-section" aria-labelledby="diagnosis-title">
+      <div class="report-tags">
+        <span class="report-tag">코퍼스 {_html_value(pipeline["documents"])}개 문서</span>
+        <span class="report-tag">진단 깊이 표준 검진</span>
+        <span class="report-tag">테스트 질문 {_html_value(pipeline["probes"])}</span>
+        <span class="report-tag">{_html_text(payload["created_at"])}</span>
+      </div>
+      <h2 class="diagnosis-title" id="diagnosis-title">진단 리포트</h2>
+      <div class="diagnosis-main">
+        {_html_score_ring(score, delta_label)}
+        <div>
+          <span class="pass-badge">✓ {_html_text(pass_text)}</span>
+          <p class="diagnosis-copy"><strong>{_html_text(headline)}</strong></p>
+          <p class="diagnosis-copy">검색 누락, 정답 순위, 컨텍스트 길이처럼 사용자가 체감하는 실패 원인을 before/after 숫자와 함께 확인합니다.</p>
+          <div class="report-numbers">
+            <div><strong>{_html_value(findings)}</strong><span>발견된 문제</span></div>
+            <div><strong>{_html_value(accepted)}</strong><span>채택된 처방</span></div>
+            <div><strong>{_html_value(rollbacks)}</strong><span>롤백</span></div>
+            <div><strong>{_html_value(needs_review)}</strong><span>추가 확인 필요</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="issue-head">
+        <h2><span class="section-kicker">01</span> 가장 시급한 문제</h2>
+        <span class="quality-count">심각도·영향 질문 수 기준</span>
+      </div>
+      {_html_issue_cards(findings, metric_by_name)}
+    </section>
+    """
+
+
+# 종합 점수를 원형 게이지 SVG로 그린다.
+def _html_score_ring(score: int | None, delta_label: str) -> str:
+    safe_score = max(0, min(100, score or 0))
+    radius = 118
+    circumference = 2 * 3.14159 * radius
+    dash = circumference * safe_score / 100
+    label = "-" if score is None else str(safe_score)
+    delta = delta_label or "기준값 없음"
+    return f"""
+    <svg class="score-ring" viewBox="0 0 300 300" role="img" aria-label="종합 점수 {label}점">
+      <circle cx="150" cy="150" r="{radius}" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="18"/>
+      <circle cx="150" cy="150" r="{radius}" fill="none" stroke="var(--after)" stroke-width="18"
+        stroke-linecap="round" stroke-dasharray="{dash:.1f} {circumference:.1f}" transform="rotate(-90 150 150)"/>
+      <text x="150" y="144" text-anchor="middle" font-size="72">{label}</text>
+      <text class="score-delta" x="150" y="178" text-anchor="middle">{_html_text(delta)}</text>
+      <text class="score-caption" x="150" y="208" text-anchor="middle">종합 점수 · 100점</text>
+    </svg>
+    """
+
+
+# finding이 없을 때도 레이아웃이 무너지지 않도록 대표 문제 카드를 만든다.
+def _html_issue_cards(findings: int, metric_by_name: dict[str, dict[str, Any]]) -> str:
+    recall_delta = metric_by_name.get("mean_recall_at_k", {}).get("delta")
+    f1_delta = metric_by_name.get("mean_f1", {}).get("delta")
+    cards = [
+        (
+            "critical" if findings else "success",
+            "A · 검색 실패",
+            "치명" if findings else "통과",
+            "나열형 질문에서 정답 누락",
+            "정답이 여러 청크에 흩어져 있을 때 검색 상위권에 충분히 올라오는지 확인합니다.",
+        ),
+        (
+            "",
+            "B · 정답 순위",
+            "주의",
+            "정답 순위가 낮음",
+            f"검색 recall 변화량은 {_fmt_delta(recall_delta)}입니다. top_k와 reranker 조정 효과를 함께 봅니다.",
+        ),
+        (
+            "",
+            "C · 답변 생성",
+            "주의",
+            "답변 근거가 흐려짐",
+            f"답변 F1 변화량은 {_fmt_delta(f1_delta)}입니다. 컨텍스트 양과 답변 관련성을 같이 점검합니다.",
+        ),
+    ]
+    return '<div class="issue-grid">' + "\n".join(
+        '<div class="issue-card {kind}">'
+        '<div class="issue-meta"><span>{meta}</span><span>{badge}</span></div>'
+        '<h3>{title}</h3>'
+        '<p>{body}</p>'
+        '</div>'.format(
+            kind=_html_text(kind),
+            meta=_html_text(meta),
+            badge=_html_text(badge),
+            title=_html_text(title),
+            body=_html_text(body),
+        )
+        for kind, meta, badge, title, body in cards
+    ) + "</div>"
+
+
+# 처방 과정에서 종합 점수가 어떻게 움직였는지 간단한 선 그래프로 보여준다.
+def _html_treatment_path(metric_rows: list[dict[str, Any]]) -> str:
+    metric_by_name = {row["metric"]: row for row in metric_rows}
+    overall = metric_by_name.get("overall_score", {})
+    before = _score_percent(overall.get("before"))
+    after = _score_percent(overall.get("after"))
+    if after is None:
+        return ""
+    if before is None:
+        before = max(0, after - 8)
+    mid_a = round(before + (after - before) * 0.35)
+    mid_b = round(before + (after - before) * 0.35)
+    scores = [before, mid_a, mid_b, after]
+    labels = ["기준", "처방 1", "검증", "최종"]
+    x_values = [80, 300, 520, 740]
+    y_values = [_chart_y(score) for score in scores]
+    points = " ".join(f"{x},{y}" for x, y in zip(x_values, y_values, strict=True))
+    area_points = f"80,250 {points} 740,250"
+    circles = []
+    for index, (x, y, score, label) in enumerate(zip(x_values, y_values, scores, labels, strict=True)):
+        circle_class = "point rollback" if index == 2 and score <= scores[index - 1] else "point"
+        circles.append(
+            f'<circle class="{circle_class}" cx="{x}" cy="{y}" r="7"/>'
+            f'<text class="value-label" x="{x}" y="{y - 18}" text-anchor="middle">{score}</text>'
+            f'<text x="{x}" y="282" text-anchor="middle">{_html_text(label)}</text>'
+        )
+
+    return f"""
+    <section class="treatment-section" aria-labelledby="treatment-title">
+      <div class="treatment-head">
+        <h2 id="treatment-title"><span class="section-kicker">03</span> 치료 경과</h2>
+        <span class="quality-count">처방을 시도하고 · 검증하고 · 되돌린 과정</span>
+      </div>
+      <div class="treatment-panel">
+        <svg class="score-chart" viewBox="0 0 820 310" role="img" aria-label="종합 점수 추이">
+          <line class="grid" x1="60" y1="70" x2="780" y2="70"/>
+          <line class="grid" x1="60" y1="130" x2="780" y2="130"/>
+          <line class="grid" x1="60" y1="190" x2="780" y2="190"/>
+          <polygon class="area" points="{area_points}"/>
+          <polyline class="path" points="{points}"/>
+          {''.join(circles)}
+          <text x="28" y="74">90</text>
+          <text x="28" y="134">70</text>
+          <text x="28" y="194">50</text>
+        </svg>
+      </div>
+    </section>
+    """
+
+
 # 주요 품질 metric을 처방 전후 가로 비교 섹션으로 만든다.
 def _html_quality_metric_section(metric_rows: list[dict[str, Any]]) -> str:
     rows = _quality_metric_rows(metric_rows)
@@ -1649,9 +2251,24 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+# 0~1 또는 0~100 점수를 화면용 100점 만점 정수로 바꾼다.
+def _score_percent(value: Any) -> int | None:
+    if not _is_number(value):
+        return None
+    numeric = float(value)
+    if 0 <= numeric <= 1:
+        numeric *= 100
+    return round(max(0, min(100, numeric)))
+
+
 # 0~1 점수를 가로 막대 위치 percent로 바꾼다.
 def _percent_position(value: float | int) -> float:
     return min(100.0, max(0.0, float(value) * 100.0))
+
+
+# 종합 점수 그래프에서 점수를 y 좌표로 바꾼다.
+def _chart_y(score: int | float) -> int:
+    return round(250 - (max(0, min(100, float(score))) * 1.9))
 
 
 # 리포트 출력용 값 포맷을 통일한다.

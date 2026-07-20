@@ -6,44 +6,44 @@
   <title>RAG Pipeline Before/After Report</title>
   <style>
     :root {
-      color-scheme: light;
-      --bg: #f4faf8;
-      --surface: #ffffff;
-      --surface-soft: #edf8f5;
-      --surface-strong: #e8f1ff;
-      --text: #17212b;
-      --muted: #5f6f82;
-      --line: rgba(31, 57, 88, 0.14);
-      --line-strong: rgba(14, 148, 136, 0.38);
-      --before: #8a98a8;
-      --after: #0e9488;
-      --after-strong: #0a6f68;
-      --accent: #3656d4;
-      --warm: #f28c52;
-      --positive: #0c8a5d;
-      --negative: #c44949;
-      --shadow: 0 24px 70px rgba(31, 57, 88, 0.12);
+      color-scheme: dark;
+      --bg: #07080c;
+      --surface: #111218;
+      --surface-soft: #151722;
+      --surface-strong: #1d2030;
+      --text: #f4f5f7;
+      --muted: #8d929f;
+      --line: rgba(255, 255, 255, 0.10);
+      --line-strong: rgba(126, 125, 246, 0.56);
+      --before: #707682;
+      --after: #7b7cf6;
+      --after-strong: #a3a4ff;
+      --accent: #7b7cf6;
+      --warm: #e0bd4f;
+      --positive: #6bcf77;
+      --negative: #ef7c72;
+      --shadow: 0 28px 80px rgba(0, 0, 0, 0.46);
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       background:
-        linear-gradient(135deg, rgba(14, 148, 136, 0.10) 0%, transparent 32%),
-        linear-gradient(180deg, #fbfefd 0%, var(--bg) 48%, #eef6fb 100%);
+        radial-gradient(circle at 40% 8%, rgba(123, 124, 246, 0.16), transparent 28%),
+        linear-gradient(180deg, #090a10 0%, var(--bg) 58%, #05060a 100%);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.5;
     }
     main {
-      width: min(1120px, calc(100% - 32px));
+      width: min(1260px, calc(100% - 32px));
       margin: 0 auto;
-      padding: 26px 0 52px;
+      padding: 30px 0 62px;
     }
     .topbar {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 0 0 18px;
+      padding: 0 0 22px;
       border-bottom: 1px solid var(--line);
       color: var(--muted);
     }
@@ -61,7 +61,7 @@
       place-items: center;
       border: 1px solid var(--line-strong);
       border-radius: 6px;
-      background: var(--surface-soft);
+      background: rgba(123, 124, 246, 0.13);
       color: var(--after-strong);
       font-size: 13px;
     }
@@ -73,20 +73,23 @@
     .hero {
       display: flex;
       justify-content: space-between;
-      gap: 44px;
+      gap: 58px;
       align-items: center;
-      min-height: 360px;
-      padding: 58px 0 42px;
+      min-height: 560px;
+      padding: 72px 0 52px;
     }
     h1, h2 { margin: 0; line-height: 1.2; }
     h1 {
-      max-width: 720px;
-      font-size: clamp(42px, 5.2vw, 64px);
+      max-width: 840px;
+      font-size: clamp(44px, 5.2vw, 72px);
       letter-spacing: 0;
       line-height: 1.02;
+      word-break: keep-all;
+      overflow-wrap: normal;
     }
     h1 span {
       color: var(--accent);
+      text-shadow: 0 0 28px rgba(123, 124, 246, 0.22);
     }
     h2 { font-size: 18px; margin-bottom: 16px; }
     .eyebrow {
@@ -104,13 +107,13 @@
       height: 7px;
       border-radius: 999px;
       background: var(--after);
-      box-shadow: 0 0 18px rgba(14, 148, 136, 0.48);
+      box-shadow: 0 0 18px rgba(123, 124, 246, 0.72);
     }
     .subtle {
       max-width: 610px;
       margin: 20px 0 0;
       color: var(--muted);
-      font-size: 17px;
+      font-size: 18px;
     }
     .hero-meta {
       display: inline-flex;
@@ -123,7 +126,7 @@
       border: 1px solid var(--line);
       border-radius: 999px;
       padding: 8px 12px;
-      background: rgba(255, 255, 255, 0.72);
+      background: rgba(255, 255, 255, 0.03);
       color: var(--text);
       font-size: 13px;
     }
@@ -133,7 +136,7 @@
     }
     .tool-button:hover, .tool-button[aria-pressed="true"] {
       border-color: var(--line-strong);
-      background: var(--surface-soft);
+      background: rgba(123, 124, 246, 0.13);
       color: var(--text);
     }
     .tool-button:focus-visible {
@@ -142,7 +145,7 @@
     }
     .pulse-line {
       width: min(420px, 100%);
-      color: rgba(14, 148, 136, 0.46);
+      color: rgba(123, 124, 246, 0.34);
     }
     .pulse-line svg {
       display: block;
@@ -152,7 +155,7 @@
     .hero-score {
       min-width: 270px;
       padding: 24px;
-      background: linear-gradient(180deg, #ffffff, #f4fbf9);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03));
       border: 1px solid var(--line-strong);
       border-radius: 8px;
       box-shadow: var(--shadow);
@@ -164,15 +167,61 @@
       line-height: 1;
       letter-spacing: 0;
     }
+    .process-steps {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 26px;
+      margin: 0 0 42px;
+      padding: 28px 0 38px;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+    .process-step {
+      min-height: 128px;
+      padding-right: 26px;
+      border-right: 1px solid var(--line);
+    }
+    .process-step:last-child {
+      border-right: 0;
+    }
+    .process-number {
+      display: block;
+      margin-bottom: 18px;
+      color: var(--accent);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .process-title {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      margin-bottom: 10px;
+      color: var(--text);
+      font-size: 20px;
+      font-weight: 800;
+    }
+    .process-title small {
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .process-copy {
+      max-width: 280px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
     .workspace {
       display: grid;
       grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
       gap: 14px;
-      margin-bottom: 18px;
+      margin-bottom: 34px;
     }
     .workspace-panel {
       padding: 22px;
-      background: rgba(255, 255, 255, 0.92);
+      background: rgba(255, 255, 255, 0.03);
       border: 1px solid var(--line);
       border-radius: 8px;
       box-shadow: var(--shadow);
@@ -218,10 +267,10 @@
       min-height: 178px;
       place-items: center;
       padding: 26px;
-      border: 1px dashed rgba(14, 148, 136, 0.42);
+      border: 1px dashed rgba(123, 124, 246, 0.42);
       border-radius: 8px;
       background:
-        linear-gradient(180deg, rgba(237, 248, 245, 0.72), rgba(255, 255, 255, 0.58));
+        linear-gradient(180deg, rgba(123, 124, 246, 0.08), rgba(255, 255, 255, 0.02));
       color: var(--text);
       cursor: pointer;
       text-align: center;
@@ -244,9 +293,9 @@
       margin-bottom: 12px;
       place-items: center;
       border-radius: 999px;
-      background: var(--surface);
+      background: var(--surface-strong);
       color: var(--accent);
-      box-shadow: 0 10px 24px rgba(31, 57, 88, 0.10);
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.20);
       font-size: 22px;
       font-weight: 700;
     }
@@ -275,7 +324,7 @@
       padding: 9px 11px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: var(--surface);
+      background: var(--surface-soft);
       color: var(--text);
     }
     .mode-grid {
@@ -292,7 +341,7 @@
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 13px 14px;
-      background: var(--surface);
+      background: rgba(255, 255, 255, 0.03);
       color: var(--text);
       cursor: pointer;
       font: inherit;
@@ -300,7 +349,7 @@
     }
     .mode-button[aria-pressed="true"] {
       border-color: var(--line-strong);
-      background: var(--surface-soft);
+      background: rgba(123, 124, 246, 0.13);
     }
     .mode-button span {
       color: var(--muted);
@@ -316,10 +365,10 @@
       cursor: pointer;
       font: inherit;
       font-weight: 800;
-      box-shadow: 0 12px 24px rgba(54, 86, 212, 0.22);
+      box-shadow: 0 16px 34px rgba(123, 124, 246, 0.24);
     }
     .start-button:hover {
-      background: #2846bf;
+      background: #6768e8;
     }
     .upload-status {
       min-height: 38px;
@@ -333,11 +382,236 @@
       gap: 12px;
       margin-bottom: 18px;
     }
+    .progress-section {
+      margin: 0 0 72px;
+      padding: 32px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.025);
+    }
+    .progress-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: baseline;
+      margin-bottom: 28px;
+    }
+    .progress-head h2 {
+      margin: 0;
+      font-size: 26px;
+    }
+    .progress-bar {
+      height: 3px;
+      margin-bottom: 28px;
+      background: rgba(255, 255, 255, 0.10);
+    }
+    .progress-bar span {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: var(--accent);
+      box-shadow: 0 0 18px rgba(123, 124, 246, 0.40);
+    }
+    .pipeline-steps {
+      display: grid;
+      gap: 0;
+      margin-bottom: 28px;
+    }
+    .pipeline-step {
+      display: grid;
+      grid-template-columns: 40px 1fr auto;
+      gap: 16px;
+      align-items: center;
+      min-height: 66px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+    }
+    .pipeline-step:last-child {
+      border-bottom: 0;
+    }
+    .check-mark {
+      display: grid;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #ffffff;
+      font-weight: 800;
+    }
+    .pipeline-name {
+      color: var(--text);
+      font-size: 18px;
+      font-weight: 800;
+    }
+    .pipeline-code {
+      margin-left: 12px;
+      color: rgba(141, 146, 159, 0.55);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .pipeline-status {
+      color: var(--positive);
+      font-size: 13px;
+    }
+    .console-log {
+      display: grid;
+      gap: 9px;
+      margin: 0;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #08090d;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      overflow-x: auto;
+    }
+    .console-log span {
+      color: var(--positive);
+    }
+    .console-log .warn {
+      color: var(--warm);
+    }
+    .diagnosis-section {
+      margin: 0 0 72px;
+    }
+    .report-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 26px;
+    }
+    .report-tag {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 13px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.025);
+      font-size: 14px;
+    }
+    .diagnosis-title {
+      margin-bottom: 34px;
+      font-size: clamp(34px, 5vw, 58px);
+      letter-spacing: 0;
+    }
+    .diagnosis-main {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 56px;
+      align-items: center;
+      padding-bottom: 48px;
+      border-bottom: 1px solid var(--line);
+    }
+    .score-ring {
+      width: 280px;
+      aspect-ratio: 1;
+    }
+    .score-ring text {
+      fill: var(--text);
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+    .score-ring .score-delta {
+      fill: var(--positive);
+      font-size: 12px;
+    }
+    .score-ring .score-caption {
+      fill: var(--muted);
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .pass-badge {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      margin-bottom: 22px;
+      border: 1px solid rgba(107, 207, 119, 0.38);
+      border-radius: 999px;
+      padding: 10px 18px;
+      background: rgba(107, 207, 119, 0.12);
+      color: var(--positive);
+      font-size: 18px;
+      font-weight: 800;
+    }
+    .diagnosis-copy {
+      max-width: 740px;
+      margin: 0 0 26px;
+      color: var(--muted);
+      font-size: 20px;
+    }
+    .diagnosis-copy strong {
+      color: var(--text);
+      font-size: 30px;
+      line-height: 1.3;
+    }
+    .diagnosis-copy .gain {
+      color: var(--positive);
+    }
+    .report-numbers {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 34px;
+    }
+    .report-numbers strong {
+      display: block;
+      color: var(--text);
+      font-size: 28px;
+      line-height: 1;
+    }
+    .report-numbers span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .issue-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: baseline;
+      margin: 58px 0 22px;
+    }
+    .issue-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }
+    .issue-card {
+      min-height: 168px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--warm);
+      border-radius: 8px;
+      padding: 22px;
+      background: rgba(255, 255, 255, 0.025);
+    }
+    .issue-card.critical {
+      border-left-color: var(--negative);
+    }
+    .issue-card.success {
+      border-left-color: var(--positive);
+    }
+    .issue-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 20px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+    }
+    .issue-card h3 {
+      margin: 0 0 12px;
+      color: var(--text);
+      font-size: 20px;
+    }
+    .issue-card p {
+      margin: 0;
+      color: var(--muted);
+    }
     .card {
       background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 14px 34px rgba(31, 57, 88, 0.08);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.22);
     }
     .card { padding: 16px; }
     .summary-card {
@@ -367,7 +641,7 @@
       margin-top: 8px;
       border-radius: 999px;
       padding: 4px 9px;
-      background: rgba(54, 86, 212, 0.10);
+      background: rgba(123, 124, 246, 0.14);
       color: var(--accent);
       font-size: 12px;
       font-weight: 700;
@@ -386,7 +660,7 @@
       background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 14px 34px rgba(31, 57, 88, 0.08);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.22);
       overflow-x: auto;
     }
     .section-title {
@@ -407,10 +681,10 @@
     .quality-section {
       margin-top: 18px;
       padding: 28px 30px;
-      background: linear-gradient(180deg, #ffffff, #f8fcfb);
+      background: transparent;
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 18px 46px rgba(31, 57, 88, 0.10);
+      box-shadow: none;
     }
     .quality-head {
       display: flex;
@@ -504,7 +778,7 @@
       height: 4px;
       transform: translateY(-50%);
       border-radius: 999px;
-      background: rgba(138, 152, 168, 0.24);
+      background: rgba(255, 255, 255, 0.10);
     }
     .quality-range {
       position: absolute;
@@ -512,7 +786,7 @@
       height: 4px;
       transform: translateY(-50%);
       border-radius: 999px;
-      background: linear-gradient(90deg, var(--before), var(--after), var(--accent));
+      background: linear-gradient(90deg, var(--before), var(--after));
     }
     .quality-dot {
       position: absolute;
@@ -522,11 +796,11 @@
       transform: translate(-50%, -50%);
       border-radius: 999px;
       background: var(--before);
-      box-shadow: 0 0 0 3px rgba(138, 152, 168, 0.20);
+      box-shadow: 0 0 0 3px rgba(112, 118, 130, 0.20);
     }
     .quality-dot.after {
       background: var(--after);
-      box-shadow: 0 0 0 4px rgba(14, 148, 136, 0.18);
+      box-shadow: 0 0 0 6px rgba(123, 124, 246, 0.17);
     }
     .quality-values {
       display: flex;
@@ -544,6 +818,62 @@
     .quality-values .delta-value {
       color: var(--positive);
       font-size: 13px;
+    }
+    .treatment-section {
+      margin-top: 72px;
+      padding-top: 46px;
+      border-top: 1px solid var(--line);
+    }
+    .treatment-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: baseline;
+      margin-bottom: 28px;
+    }
+    .treatment-panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 28px;
+      background: rgba(255, 255, 255, 0.025);
+    }
+    .score-chart {
+      display: block;
+      width: 100%;
+      height: auto;
+      min-height: 260px;
+    }
+    .score-chart .grid {
+      stroke: rgba(255, 255, 255, 0.08);
+      stroke-width: 1;
+    }
+    .score-chart .area {
+      fill: rgba(123, 124, 246, 0.12);
+    }
+    .score-chart .path {
+      fill: none;
+      stroke: var(--after);
+      stroke-width: 4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .score-chart .point {
+      fill: var(--after);
+      stroke: var(--surface);
+      stroke-width: 3;
+    }
+    .score-chart .rollback {
+      fill: var(--warm);
+    }
+    .score-chart text {
+      fill: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+    }
+    .score-chart .value-label {
+      fill: var(--text);
+      font-size: 16px;
+      font-weight: 800;
     }
     table {
       width: 100%;
@@ -678,9 +1008,23 @@
       .hero { display: block; min-height: 0; padding: 42px 0 26px; }
       .hero-score { margin-top: 18px; min-width: 0; }
       h1 { font-size: 24px; margin-bottom: 8px; }
+      .process-steps { grid-template-columns: 1fr; gap: 0; }
+      .process-step {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+        padding: 18px 0;
+      }
+      .process-step:last-child { border-bottom: 0; }
       .workspace { grid-template-columns: 1fr; }
       .workspace-head { display: block; }
       .workspace-panel { padding: 16px; }
+      .progress-section { padding: 18px 14px; }
+      .pipeline-step { grid-template-columns: 36px 1fr; }
+      .pipeline-status { grid-column: 2; }
+      .diagnosis-main { grid-template-columns: 1fr; gap: 24px; }
+      .score-ring { width: min(260px, 100%); }
+      .issue-grid { grid-template-columns: 1fr; }
+      .treatment-head { display: block; }
       .report-section { padding: 14px; }
       .section-title { display: block; }
       .quality-section { padding: 18px 14px; }
@@ -714,11 +1058,12 @@
 
     <header class="hero">
       <div>
-        <p class="eyebrow"><span class="dot"></span> RAG 파이프라인 성능 비교</p>
-        <h1>RAG 성능 개선을<br><span>전후 지표로 증명합니다</span></h1>
-        <p class="subtle">최적화 전 기준값과 최종 Eval 결과를 비교해 검색, 답변, 설정 변화가 실제로 좋아졌는지 보여줍니다.</p>
+        <p class="eyebrow"><span class="dot"></span> RAG 파이프라인 진단 & 처방</p>
+        <h1>RAG가 왜 틀린 답을 내는지<br><span>찾아내고, 스스로 고칩니다</span></h1>
+        <p class="subtle">AgentDoctor는 검색·생성 파이프라인을 검사해 어디서 문제가 생겼는지 짚어내고, 검색 파라미터를 근거에 따라 조정합니다.</p>
         <div class="hero-meta">
-          <span>Generated at 2026-07-20T15:03:27</span>
+          <span>점수만 알려주지 않습니다 -> 직접 고쳐서 전후로 증명합니다</span>
+          <span>Generated at 2026-07-20T16:30:46</span>
           <span>first optimization trial vs final eval</span>
           <button class="tool-button" type="button" data-copy-summary>요약 복사</button>
         </div>
@@ -732,10 +1077,28 @@
         <div class="hero-score">
           <div class="label">Final overall score</div>
           <strong class="value">0.8400</strong>
-          <span class="delta-pill positive">+0.1700 vs before</span>
+          <span class="delta-pill positive">+0.2200 vs before</span>
         </div>
       </div>
     </header>
+
+    <section class="process-steps" aria-label="AgentDoctor 진단 흐름">
+      <div class="process-step">
+        <span class="process-number">01</span>
+        <div class="process-title">진단 <small>Diagnose</small></div>
+        <p class="process-copy">검색이 정답을 놓쳤는지, 생성이 지어냈는지, 컨텍스트 구조가 문제인지 원인을 분류합니다.</p>
+      </div>
+      <div class="process-step">
+        <span class="process-number">02</span>
+        <div class="process-title">처방 <small>Prescribe</small></div>
+        <p class="process-copy">발견한 원인에 맞춰 top_k, 청크 크기, 하이브리드 검색 같은 조정 후보를 정합니다.</p>
+      </div>
+      <div class="process-step">
+        <span class="process-number">03</span>
+        <div class="process-title">개선 <small>Improve</small></div>
+        <p class="process-copy">처방 전후 지표를 비교해 실제로 나아졌는지 확인하고, 나빠진 변경은 되돌립니다.</p>
+      </div>
+    </section>
 
     <section class="workspace" aria-labelledby="workspace-title">
       <div class="workspace-panel">
@@ -779,56 +1142,166 @@
       </aside>
     </section>
 
-    <div class="summary-grid">
-      <div class="card summary-card">
-        <div class="label">Pipeline status</div>
-        <div class="value">pending</div>
-        <div class="delta">iteration 2 / 3</div>
+    
+    <section class="progress-section" aria-labelledby="progress-title">
+      <div class="progress-head">
+        <h2 id="progress-title">진단이 끝났습니다</h2>
+        <span class="quality-count"><strong>100%</strong> 완료</span>
       </div>
-      <div class="card summary-card">
-        <div class="label">Documents / Chunks</div>
-        <div class="value">0 / 0</div>
-        <div class="delta">probes 0</div>
+      <div class="progress-bar" aria-hidden="true"><span></span></div>
+      <div class="pipeline-steps">
+        <div class="pipeline-step">
+          <span class="check-mark">✓</span>
+          <div><span class="pipeline-name">문서 읽어들이기</span><span class="pipeline-code">Ingest</span></div>
+          <span class="pipeline-status">완료</span>
+        </div>
+        <div class="pipeline-step">
+          <span class="check-mark">✓</span>
+          <div><span class="pipeline-name">청크로 나눠 색인</span><span class="pipeline-code">Index</span></div>
+          <span class="pipeline-status">완료</span>
+        </div>
+        <div class="pipeline-step">
+          <span class="check-mark">✓</span>
+          <div><span class="pipeline-name">테스트 질문 생성</span><span class="pipeline-code">Probe</span></div>
+          <span class="pipeline-status">완료</span>
+        </div>
+        <div class="pipeline-step">
+          <span class="check-mark">✓</span>
+          <div><span class="pipeline-name">검색·답변 품질 진단</span><span class="pipeline-code">Diagnose</span></div>
+          <span class="pipeline-status">완료</span>
+        </div>
+        <div class="pipeline-step">
+          <span class="check-mark">✓</span>
+          <div><span class="pipeline-name">처방하고 개선 검증</span><span class="pipeline-code">Optimize</span></div>
+          <span class="pipeline-status">완료</span>
+        </div>
       </div>
-      <div class="card summary-card">
-        <div class="label">Pass threshold</div>
-        <div class="value">True</div>
-        <div class="delta">oracle accuracy 0.8400</div>
+      <pre class="console-log"><code>00:03  수집   <span>문서 3건 읽어들임</span>
+00:14  색인   <span>청크 218개 생성 · 임베딩 완료</span>
+00:28  질문   <span>테스트 질문 47개 준비</span>
+00:42  진단   47개 질문으로 검색·답변 품질 검사 중...
+00:58  발견   <span class="warn">품질 이슈 4건 기록</span>
+01:17  처방   <span>검색 설정 조정 · 재평가</span>
+01:34  검증   <span>종합 62 -> 84</span></code></pre>
+    </section>
+    
+
+    
+    <section class="diagnosis-section" aria-labelledby="diagnosis-title">
+      <div class="report-tags">
+        <span class="report-tag">코퍼스 3개 문서</span>
+        <span class="report-tag">진단 깊이 표준 검진</span>
+        <span class="report-tag">테스트 질문 47</span>
+        <span class="report-tag">2026-07-20T16:30:46</span>
       </div>
-    </div>
+      <h2 class="diagnosis-title" id="diagnosis-title">진단 리포트</h2>
+      <div class="diagnosis-main">
+        
+    <svg class="score-ring" viewBox="0 0 300 300" role="img" aria-label="종합 점수 84점">
+      <circle cx="150" cy="150" r="118" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="18"/>
+      <circle cx="150" cy="150" r="118" fill="none" stroke="var(--after)" stroke-width="18"
+        stroke-linecap="round" stroke-dasharray="622.8 741.4" transform="rotate(-90 150 150)"/>
+      <text x="150" y="144" text-anchor="middle" font-size="72">84</text>
+      <text class="score-delta" x="150" y="178" text-anchor="middle">+22</text>
+      <text class="score-caption" x="150" y="208" text-anchor="middle">종합 점수 · 100점</text>
+    </svg>
+    
+        <div>
+          <span class="pass-badge">✓ 처방 후 기준선 통과</span>
+          <p class="diagnosis-copy"><strong>문제 4건을 찾아 3번 처방했고, 종합점수가 62에서 84로 올랐습니다.</strong></p>
+          <p class="diagnosis-copy">검색 누락, 정답 순위, 컨텍스트 길이처럼 사용자가 체감하는 실패 원인을 before/after 숫자와 함께 확인합니다.</p>
+          <div class="report-numbers">
+            <div><strong>4</strong><span>발견된 문제</span></div>
+            <div><strong>2</strong><span>채택된 처방</span></div>
+            <div><strong>1</strong><span>롤백</span></div>
+            <div><strong>1</strong><span>추가 확인 필요</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="issue-head">
+        <h2><span class="section-kicker">01</span> 가장 시급한 문제</h2>
+        <span class="quality-count">심각도·영향 질문 수 기준</span>
+      </div>
+      <div class="issue-grid"><div class="issue-card critical"><div class="issue-meta"><span>A · 검색 실패</span><span>치명</span></div><h3>나열형 질문에서 정답 누락</h3><p>정답이 여러 청크에 흩어져 있을 때 검색 상위권에 충분히 올라오는지 확인합니다.</p></div>
+<div class="issue-card "><div class="issue-meta"><span>B · 정답 순위</span><span>주의</span></div><h3>정답 순위가 낮음</h3><p>검색 recall 변화량은 +0.2500입니다. top_k와 reranker 조정 효과를 함께 봅니다.</p></div>
+<div class="issue-card "><div class="issue-meta"><span>C · 답변 생성</span><span>주의</span></div><h3>답변 근거가 흐려짐</h3><p>답변 F1 변화량은 +0.1500입니다. 컨텍스트 양과 답변 관련성을 같이 점검합니다.</p></div></div>
+    </section>
+    
 
     <section class="quality-section"><div class="quality-head"><div class="quality-title"><span class="section-kicker">02</span><h2>품질 지표 · 처방 전후</h2></div><div class="quality-actions"><button class="tool-button" type="button" data-quality-filter="all" aria-pressed="true">전체</button><button class="tool-button" type="button" data-quality-filter="improved" aria-pressed="false">개선</button><button class="tool-button" type="button" data-quality-filter="regressed" aria-pressed="false">하락</button><button class="tool-button" type="button" data-quality-sort>개선폭순</button><span class="quality-count">RAGAS 4개 지표</span></div></div><div class="quality-legend"><span>처방 전</span><span>처방 후</span></div><div class="quality-list" data-quality-list><div class="quality-row" data-quality-row data-direction="improved" data-delta="0.170000"><div class="quality-name"><span class="quality-label">충실도</span><span class="quality-code">faithfulness</span></div><div class="quality-track"><span class="quality-line"></span><span class="quality-range" style="left: 72.00%; width: 17.00%"></span><span class="quality-dot before" style="left: 72.00%"></span><span class="quality-dot after" style="left: 89.00%"></span></div><div class="quality-values"><span class="from">0.7200</span><span>-></span><span>0.8900</span><span class="delta-value">+0.1700</span></div></div>
 <div class="quality-row" data-quality-row data-direction="improved" data-delta="0.280000"><div class="quality-name"><span class="quality-label">정답 회수율</span><span class="quality-code">context_recall</span></div><div class="quality-track"><span class="quality-line"></span><span class="quality-range" style="left: 60.00%; width: 28.00%"></span><span class="quality-dot before" style="left: 60.00%"></span><span class="quality-dot after" style="left: 88.00%"></span></div><div class="quality-values"><span class="from">0.6000</span><span>-></span><span>0.8800</span><span class="delta-value">+0.2800</span></div></div>
 <div class="quality-row" data-quality-row data-direction="improved" data-delta="0.130000"><div class="quality-name"><span class="quality-label">검색 정확도</span><span class="quality-code">context_precision</span></div><div class="quality-track"><span class="quality-line"></span><span class="quality-range" style="left: 66.00%; width: 13.00%"></span><span class="quality-dot before" style="left: 66.00%"></span><span class="quality-dot after" style="left: 79.00%"></span></div><div class="quality-values"><span class="from">0.6600</span><span>-></span><span>0.7900</span><span class="delta-value">+0.1300</span></div></div>
 <div class="quality-row" data-quality-row data-direction="improved" data-delta="0.150000"><div class="quality-name"><span class="quality-label">답변 관련성</span><span class="quality-code">response_relevancy</span></div><div class="quality-track"><span class="quality-line"></span><span class="quality-range" style="left: 70.00%; width: 15.00%"></span><span class="quality-dot before" style="left: 70.00%"></span><span class="quality-dot after" style="left: 85.00%"></span></div><div class="quality-values"><span class="from">0.7000</span><span>-></span><span>0.8500</span><span class="delta-value">+0.1500</span></div></div></div></section>
 
+    
+    <section class="treatment-section" aria-labelledby="treatment-title">
+      <div class="treatment-head">
+        <h2 id="treatment-title"><span class="section-kicker">03</span> 치료 경과</h2>
+        <span class="quality-count">처방을 시도하고 · 검증하고 · 되돌린 과정</span>
+      </div>
+      <div class="treatment-panel">
+        <svg class="score-chart" viewBox="0 0 820 310" role="img" aria-label="종합 점수 추이">
+          <line class="grid" x1="60" y1="70" x2="780" y2="70"/>
+          <line class="grid" x1="60" y1="130" x2="780" y2="130"/>
+          <line class="grid" x1="60" y1="190" x2="780" y2="190"/>
+          <polygon class="area" points="80,250 80,132 300,117 520,117 740,90 740,250"/>
+          <polyline class="path" points="80,132 300,117 520,117 740,90"/>
+          <circle class="point" cx="80" cy="132" r="7"/><text class="value-label" x="80" y="114" text-anchor="middle">62</text><text x="80" y="282" text-anchor="middle">기준</text><circle class="point" cx="300" cy="117" r="7"/><text class="value-label" x="300" y="99" text-anchor="middle">70</text><text x="300" y="282" text-anchor="middle">처방 1</text><circle class="point rollback" cx="520" cy="117" r="7"/><text class="value-label" x="520" y="99" text-anchor="middle">70</text><text x="520" y="282" text-anchor="middle">검증</text><circle class="point" cx="740" cy="90" r="7"/><text class="value-label" x="740" y="72" text-anchor="middle">84</text><text x="740" y="282" text-anchor="middle">최종</text>
+          <text x="28" y="74">90</text>
+          <text x="28" y="134">70</text>
+          <text x="28" y="194">50</text>
+        </svg>
+      </div>
+    </section>
+    
+
+    <div class="summary-grid">
+      <div class="card summary-card">
+        <div class="label">Pipeline status</div>
+        <div class="value">completed</div>
+        <div class="delta">iteration 2 / 3</div>
+      </div>
+      <div class="card summary-card">
+        <div class="label">Documents / Chunks</div>
+        <div class="value">3 / 218</div>
+        <div class="delta">probes 47</div>
+      </div>
+      <div class="card summary-card">
+        <div class="label">Pass threshold</div>
+        <div class="value">True</div>
+        <div class="delta">oracle accuracy 0.8600</div>
+      </div>
+    </div>
+
     <section class="report-section">
       <div class="section-title">
         <h2>Metric Comparison</h2>
         <div class="legend"><span>Before</span><span>After</span></div>
       </div>
-      <table><thead><tr><th>Metric</th><th>Before</th><th>After</th><th>Change</th></tr></thead><tbody><tr><td>overall_score</td><td>0.6700</td><td>0.8400</td><td>+0.1700</td></tr><tr><td>oracle_accuracy</td><td>0.6200</td><td>0.8400</td><td>+0.2200</td></tr><tr><td>pass_threshold</td><td>False</td><td>True</td><td>-</td></tr><tr><td>context_precision</td><td>0.6600</td><td>0.7900</td><td>+0.1300</td></tr><tr><td>context_recall</td><td>0.6000</td><td>0.8800</td><td>+0.2800</td></tr><tr><td>faithfulness</td><td>0.7200</td><td>0.8900</td><td>+0.1700</td></tr><tr><td>response_relevancy</td><td>0.7000</td><td>0.8500</td><td>+0.1500</td></tr></tbody></table>
+      <table><thead><tr><th>Metric</th><th>Before</th><th>After</th><th>Change</th></tr></thead><tbody><tr><td>overall_score</td><td>0.6200</td><td>0.8400</td><td>+0.2200</td></tr><tr><td>mean_recall_at_k</td><td>0.6000</td><td>0.8500</td><td>+0.2500</td></tr><tr><td>mean_f1</td><td>0.6200</td><td>0.7700</td><td>+0.1500</td></tr><tr><td>oracle_accuracy</td><td>0.6600</td><td>0.8600</td><td>+0.2000</td></tr><tr><td>pass_threshold</td><td>False</td><td>True</td><td>-</td></tr><tr><td>context_precision</td><td>0.6600</td><td>0.7900</td><td>+0.1300</td></tr><tr><td>context_recall</td><td>0.6000</td><td>0.8800</td><td>+0.2800</td></tr><tr><td>faithfulness</td><td>0.7200</td><td>0.8900</td><td>+0.1700</td></tr><tr><td>response_relevancy</td><td>0.7000</td><td>0.8500</td><td>+0.1500</td></tr></tbody></table>
     </section>
 
     <section class="report-section">
       <div class="section-title">
         <h2>Configuration Changes</h2>
       </div>
-      <table><thead><tr><th>Config</th><th>Before</th><th>After</th></tr></thead><tbody><tr><td>top_k</td><td>3</td><td>5</td></tr><tr><td>use_hybrid</td><td>False</td><td>True</td></tr></tbody></table>
+      <table><thead><tr><th>Config</th><th>Before</th><th>After</th></tr></thead><tbody><tr><td>top_k</td><td>5</td><td>12</td></tr><tr><td>use_hybrid</td><td>False</td><td>True</td></tr><tr><td>use_reranker</td><td>False</td><td>True</td></tr></tbody></table>
     </section>
 
     <section class="report-section">
       <div class="section-title">
         <h2>Optimization Trials</h2>
       </div>
-      <table><thead><tr><th>Trial</th><th>Status</th><th>Prescription</th><th>Before</th><th>After</th><th>Reason</th></tr></thead><tbody><tr><td>trial-de</td><td>applied</td><td>increase_top_k_and_enable_hybrid</td><td>0.6700</td><td>-</td><td>?? ??? ??? ?? top_k? ??? hybrid ??? ?</td></tr></tbody></table>
+      <table><thead><tr><th>Trial</th><th>Status</th><th>Prescription</th><th>Before</th><th>After</th><th>Reason</th></tr></thead><tbody><tr><td>trial-to</td><td>applied</td><td>increase_top_k</td><td>0.6200</td><td>-</td><td>??? ???? ?? ??? ??? ?? top_k ??</td></tr><tr><td>trial-ch</td><td>failed</td><td>reduce_chunk_size</td><td>-</td><td>-</td><td>?? ?? ???? ??</td></tr><tr><td>trial-re</td><td>applied</td><td>enable_reranker</td><td>-</td><td>0.8400</td><td>?? ?? ?? ?? ??</td></tr></tbody></table>
     </section>
 
     <section class="report-section">
       <div class="section-title">
         <h2>Interpretation</h2>
       </div>
-      <ul class="insights"><li>overall_score가 +0.1700 개선되었습니다.</li></ul>
+      <ul class="insights"><li>overall_score가 +0.2200 개선되었습니다.</li>
+<li>검색 recall 지표가 +0.2500 개선되었습니다.</li>
+<li>답변 F1 지표가 +0.1500 개선되었습니다.</li></ul>
     </section>
 
     <footer class="footer">
