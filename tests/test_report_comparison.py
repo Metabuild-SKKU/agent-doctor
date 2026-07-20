@@ -93,6 +93,8 @@ class ReportComparisonTest(unittest.TestCase):
                 html = html_file.read()
             self.assertIn("RAG Pipeline Before/After Report", html)
             self.assertIn("품질 지표", html)
+            self.assertIn("data-quality-filter", html)
+            self.assertIn("요약 복사", html)
             self.assertIn("Metric Comparison", html)
             with open(artifacts["json"], encoding="utf-8") as json_file:
                 payload = json.load(json_file)
@@ -113,6 +115,7 @@ class ReportComparisonTest(unittest.TestCase):
         self.assertIn("RAG Pipeline Before/After Report", html)
         self.assertIn("Final overall score", html)
         self.assertIn("품질 지표", html)
+        self.assertIn("data-quality-sort", html)
 
 
 if __name__ == "__main__":

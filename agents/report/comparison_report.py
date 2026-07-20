@@ -192,6 +192,7 @@ def render_html(payload: dict[str, Any]) -> str:
     overall_row = metric_by_name.get("overall_score", {})
     overall_delta = overall_row.get("delta")
     overall_delta_class = _html_delta_class(overall_delta)
+    summary_text = _report_summary_text(metric_rows, final_eval)
 
     quality_section = _html_quality_metric_section(metric_rows)
     metric_table = _html_table(
@@ -350,16 +351,30 @@ def render_html(payload: dict[str, Any]) -> str:
     .hero-meta {{
       display: inline-flex;
       flex-wrap: wrap;
+      align-items: center;
       gap: 10px;
       margin-top: 26px;
     }}
-    .hero-meta span {{
+    .hero-meta span, .tool-button {{
       border: 1px solid var(--line);
       border-radius: 999px;
       padding: 8px 12px;
       background: rgba(255, 255, 255, 0.03);
       color: #dce0ef;
       font-size: 13px;
+    }}
+    .tool-button {{
+      cursor: pointer;
+      font-family: inherit;
+    }}
+    .tool-button:hover, .tool-button[aria-pressed="true"] {{
+      border-color: var(--line-strong);
+      background: rgba(129, 124, 248, 0.18);
+      color: var(--text);
+    }}
+    .tool-button:focus-visible {{
+      outline: 2px solid var(--after);
+      outline-offset: 2px;
     }}
     .pulse-line {{
       width: min(420px, 100%);
@@ -477,6 +492,12 @@ def render_html(payload: dict[str, Any]) -> str:
       align-items: center;
       margin-bottom: 26px;
     }}
+    .quality-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }}
     .quality-title {{
       display: flex;
       gap: 12px;
@@ -522,6 +543,9 @@ def render_html(payload: dict[str, Any]) -> str:
     }}
     .quality-row:last-child {{
       border-bottom: 1px solid var(--line);
+    }}
+    .quality-row[hidden] {{
+      display: none;
     }}
     .quality-name {{
       display: flex;
@@ -709,6 +733,17 @@ def render_html(payload: dict[str, Any]) -> str:
       color: var(--muted);
       font-size: 13px;
     }}
+    .sr-only {{
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }}
     @media (max-width: 720px) {{
       main {{ width: min(100% - 20px, 1120px); padding-top: 20px; }}
       .topbar {{ align-items: flex-start; gap: 16px; }}
@@ -734,7 +769,7 @@ def render_html(payload: dict[str, Any]) -> str:
   </style>
 </head>
 <body>
-  <main>
+  <main data-report data-summary="{_html_text(summary_text)}">
     <nav class="topbar">
       <div class="brand">
         <span class="brand-icon">~</span>
@@ -755,6 +790,7 @@ def render_html(payload: dict[str, Any]) -> str:
         <div class="hero-meta">
           <span>Generated at {_html_text(payload["created_at"])}</span>
           <span>{_html_text(comparison["basis"])}</span>
+          <button class="tool-button" type="button" data-copy-summary>요약 복사</button>
         </div>
       </div>
       <div>
@@ -825,6 +861,50 @@ def render_html(payload: dict[str, Any]) -> str:
       <span>Ingest -> Index -> RAG -> Eval -> Optimize</span>
     </footer>
   </main>
+  <script>
+    (() => {{
+      const report = document.querySelector("[data-report]");
+      const rows = Array.from(document.querySelectorAll("[data-quality-row]"));
+      const filterButtons = Array.from(document.querySelectorAll("[data-quality-filter]"));
+      const sortButton = document.querySelector("[data-quality-sort]");
+      const copyButton = document.querySelector("[data-copy-summary]");
+      const list = document.querySelector("[data-quality-list]");
+
+      function setFilter(filter) {{
+        rows.forEach((row) => {{
+          row.hidden = filter !== "all" && row.dataset.direction !== filter;
+        }});
+        filterButtons.forEach((button) => {{
+          button.setAttribute("aria-pressed", String(button.dataset.qualityFilter === filter));
+        }});
+      }}
+
+      filterButtons.forEach((button) => {{
+        button.addEventListener("click", () => setFilter(button.dataset.qualityFilter));
+      }});
+
+      if (sortButton && list) {{
+        sortButton.addEventListener("click", () => {{
+          const sorted = [...rows].sort((a, b) => Number(b.dataset.delta) - Number(a.dataset.delta));
+          sorted.forEach((row) => list.appendChild(row));
+          sortButton.textContent = "개선폭순 적용";
+        }});
+      }}
+
+      if (copyButton && report) {{
+        copyButton.addEventListener("click", async () => {{
+          try {{
+            await navigator.clipboard.writeText(report.dataset.summary || "");
+            copyButton.textContent = "복사됨";
+            setTimeout(() => {{ copyButton.textContent = "요약 복사"; }}, 1400);
+          }} catch (error) {{
+            copyButton.textContent = "복사 실패";
+            setTimeout(() => {{ copyButton.textContent = "요약 복사"; }}, 1400);
+          }}
+        }});
+      }}
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -1027,10 +1107,16 @@ def _html_quality_metric_section(metric_rows: list[dict[str, Any]]) -> str:
         '<span class="section-kicker">02</span>'
         "<h2>품질 지표 · 처방 전후</h2>"
         "</div>"
+        '<div class="quality-actions">'
+        '<button class="tool-button" type="button" data-quality-filter="all" aria-pressed="true">전체</button>'
+        '<button class="tool-button" type="button" data-quality-filter="improved" aria-pressed="false">개선</button>'
+        '<button class="tool-button" type="button" data-quality-filter="regressed" aria-pressed="false">하락</button>'
+        '<button class="tool-button" type="button" data-quality-sort>개선폭순</button>'
         f'<span class="quality-count">RAGAS {len(rows)}개 지표</span>'
         "</div>"
+        "</div>"
         '<div class="quality-legend"><span>처방 전</span><span>처방 후</span></div>'
-        f'<div class="quality-list">{items}</div>'
+        f'<div class="quality-list" data-quality-list>{items}</div>'
         "</section>"
     )
 
@@ -1081,8 +1167,9 @@ def _html_quality_metric_row(row: dict[str, Any]) -> str:
     after_pos = _percent_position(after)
     delta = row["delta"]
     delta_text = _fmt_delta(delta)
+    direction = _metric_direction(delta)
     return (
-        '<div class="quality-row">'
+        f'<div class="quality-row" data-quality-row data-direction="{direction}" data-delta="{_delta_sort_value(delta):.6f}">'
         '<div class="quality-name">'
         f'<span class="quality-label">{_html_text(row["label"])}</span>'
         f'<span class="quality-code">{_html_text(row["metric"])}</span>'
@@ -1185,6 +1272,41 @@ def _html_delta_class(value: Any) -> str:
     if value < 0:
         return "negative"
     return ""
+
+
+# metric 변화 방향을 필터용 값으로 바꾼다.
+def _metric_direction(value: Any) -> str:
+    if not _is_number(value):
+        return "flat"
+    if value > 0:
+        return "improved"
+    if value < 0:
+        return "regressed"
+    return "flat"
+
+
+# 개선폭 정렬에 쓸 숫자값을 만든다.
+def _delta_sort_value(value: Any) -> float:
+    if not _is_number(value):
+        return 0.0
+    return float(value)
+
+
+# 상단 요약 복사 버튼에 들어갈 문장을 만든다.
+def _report_summary_text(metric_rows: list[dict[str, Any]], final_eval: dict[str, Any]) -> str:
+    numeric_rows = [
+        row for row in metric_rows
+        if _is_number(row.get("delta")) and _is_number(row.get("after"))
+    ]
+    best = max(numeric_rows, key=lambda row: row["delta"], default=None)
+    score = _fmt(final_eval.get("overall_score"))
+    pass_threshold = final_eval.get("pass_threshold")
+    if best is None:
+        return f"RAG 최종 overall_score는 {score}이고 pass_threshold는 {pass_threshold}입니다."
+    return (
+        f"RAG 최종 overall_score는 {score}이고 pass_threshold는 {pass_threshold}입니다. "
+        f"가장 크게 개선된 지표는 {best['metric']}({_fmt_delta(best['delta'])})입니다."
+    )
 
 
 # HTML에 넣을 일반 텍스트를 안전하게 escape한다.
