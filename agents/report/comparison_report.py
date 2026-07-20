@@ -7,6 +7,7 @@ pipeline run can leave one report artifact.
 from __future__ import annotations
 
 import dataclasses
+import html as html_lib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -31,8 +32,10 @@ def save_pipeline_report(
     base = f"rag_pipeline_report_{stamp}"
     markdown_path = out_dir / f"{base}.md"
     json_path = out_dir / f"{base}.json"
+    html_path = out_dir / f"{base}.html"
 
     markdown_path.write_text(render_markdown(payload), encoding="utf-8")
+    html_path.write_text(render_html(payload), encoding="utf-8")
     json_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
@@ -40,6 +43,7 @@ def save_pipeline_report(
     return {
         "markdown": str(markdown_path),
         "json": str(json_path),
+        "html": str(html_path),
         "comparison_available": payload["comparison"]["available"],
     }
 
@@ -170,6 +174,253 @@ def render_markdown(payload: dict[str, Any]) -> str:
     lines.extend(f"- {item}" for item in payload["interpretation"])
     lines.append("")
     return "\n".join(lines)
+
+
+def render_html(payload: dict[str, Any]) -> str:
+    """Render the comparison payload as a standalone browser report."""
+    pipeline = payload["pipeline"]
+    comparison = payload["comparison"]
+    final_eval = payload["final_eval"]
+    metric_rows = comparison["metric_rows"]
+    config_rows = comparison["config_rows"]
+    trials = payload["optimization"]["trials"]
+
+    metric_cards = _html_metric_cards(metric_rows)
+    metric_table = _html_table(
+        ["Metric", "Before", "After", "Change"],
+        [
+            [
+                row["metric"],
+                _fmt(row["before"]),
+                _fmt(row["after"]),
+                _fmt_delta(row["delta"]),
+            ]
+            for row in metric_rows
+        ],
+    )
+    config_table = _html_table(
+        ["Config", "Before", "After"],
+        [[row["key"], _fmt(row["before"]), _fmt(row["after"])] for row in config_rows],
+    )
+    trial_table = _html_table(
+        ["Trial", "Status", "Prescription", "Before", "After", "Reason"],
+        [
+            [
+                trial["trial_id"],
+                trial["status"],
+                trial.get("selected_prescription_id") or "-",
+                _fmt(trial.get("before_score")),
+                _fmt(trial.get("after_score")),
+                trial.get("rollback_reason") or trial.get("reason") or "-",
+            ]
+            for trial in trials
+        ],
+    )
+    interpretation = "\n".join(
+        f"<li>{_html_text(item)}</li>" for item in payload["interpretation"]
+    )
+
+    if not metric_rows:
+        metric_table = '<p class="empty">No comparable metrics were recorded.</p>'
+    if not config_rows:
+        config_table = '<p class="empty">No changed configuration values were recorded.</p>'
+    if not trials:
+        trial_table = '<p class="empty">No optimization trials were recorded.</p>'
+
+    return f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG Pipeline Before/After Report</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f6f7fb;
+      --surface: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --line: #d9dee8;
+      --before: #64748b;
+      --after: #2563eb;
+      --positive: #15803d;
+      --negative: #b91c1c;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }}
+    main {{
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0 48px;
+    }}
+    header {{
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: flex-end;
+      margin-bottom: 24px;
+    }}
+    h1, h2 {{ margin: 0; line-height: 1.2; }}
+    h1 {{ font-size: 30px; }}
+    h2 {{ font-size: 18px; margin-bottom: 14px; }}
+    .subtle {{ color: var(--muted); }}
+    .grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }}
+    .card, section {{
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }}
+    .card {{ padding: 14px 16px; }}
+    .label {{
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 4px;
+    }}
+    .value {{
+      font-size: 24px;
+      font-weight: 600;
+    }}
+    .delta {{
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .delta.positive {{ color: var(--positive); }}
+    .delta.negative {{ color: var(--negative); }}
+    section {{
+      padding: 18px;
+      margin-top: 16px;
+      overflow-x: auto;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 640px;
+    }}
+    th, td {{
+      border-bottom: 1px solid var(--line);
+      padding: 10px 8px;
+      text-align: left;
+      vertical-align: top;
+    }}
+    th {{
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+    }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .metric-name {{ font-weight: 600; }}
+    .bar-wrap {{
+      min-width: 220px;
+    }}
+    .bar {{
+      display: grid;
+      gap: 5px;
+    }}
+    .bar-line {{
+      display: grid;
+      grid-template-columns: 52px 1fr 70px;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
+      color: var(--muted);
+    }}
+    .track {{
+      height: 8px;
+      border-radius: 999px;
+      background: #eef2f7;
+      overflow: hidden;
+    }}
+    .fill {{
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+    }}
+    .fill.before {{ background: var(--before); }}
+    .fill.after {{ background: var(--after); }}
+    .pill {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 8px;
+      background: #eef2ff;
+      color: #3730a3;
+      font-size: 12px;
+      font-weight: 600;
+    }}
+    .empty {{ color: var(--muted); margin: 0; }}
+    ul {{ margin: 0; padding-left: 20px; }}
+    @media (max-width: 720px) {{
+      main {{ width: min(100% - 20px, 1120px); padding-top: 20px; }}
+      header {{ display: block; }}
+      h1 {{ font-size: 24px; margin-bottom: 8px; }}
+      section {{ padding: 14px; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="subtle">Generated at {_html_text(payload["created_at"])}</p>
+        <h1>RAG Pipeline Before/After Report</h1>
+      </div>
+      <span class="pill">{_html_text(comparison["basis"])}</span>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <div class="label">Pipeline status</div>
+        <div class="value">{_html_text(pipeline["status"])}</div>
+        <div class="delta">iteration {_html_value(pipeline["iteration"])} / {_html_value(pipeline["max_iterations"])}</div>
+      </div>
+      <div class="card">
+        <div class="label">Documents / Chunks</div>
+        <div class="value">{_html_value(pipeline["documents"])} / {_html_value(pipeline["chunks"])}</div>
+        <div class="delta">probes {_html_value(pipeline["probes"])}</div>
+      </div>
+      <div class="card">
+        <div class="label">Final overall score</div>
+        <div class="value">{_html_value(final_eval.get("overall_score"))}</div>
+        <div class="delta">pass threshold {_html_value(final_eval.get("pass_threshold"))}</div>
+      </div>
+    </div>
+
+    {metric_cards}
+
+    <section>
+      <h2>Metric Comparison</h2>
+      {metric_table}
+    </section>
+
+    <section>
+      <h2>Configuration Changes</h2>
+      {config_table}
+    </section>
+
+    <section>
+      <h2>Optimization Trials</h2>
+      {trial_table}
+    </section>
+
+    <section>
+      <h2>Interpretation</h2>
+      <ul>{interpretation}</ul>
+    </section>
+  </main>
+</body>
+</html>
+"""
 
 
 def _baseline_trial(history: list[Any]) -> Any | None:
@@ -333,6 +584,90 @@ def _interpret(metric_rows: list[dict[str, Any]], has_comparison: bool) -> list[
     return messages
 
 
+def _html_metric_cards(metric_rows: list[dict[str, Any]]) -> str:
+    if not metric_rows:
+        return ""
+
+    preferred = {"overall_score", "mean_recall_at_k", "mean_f1", "oracle_accuracy"}
+    selected = [row for row in metric_rows if row["metric"] in preferred][:4]
+    if not selected:
+        selected = metric_rows[:4]
+
+    cards = []
+    for row in selected:
+        delta = row["delta"]
+        delta_class = _html_delta_class(delta)
+        bars = _html_metric_bars(row["before"], row["after"])
+        cards.append(
+            '<div class="card">'
+            f'<div class="label">{_html_text(row["metric"])}</div>'
+            f'<div class="value">{_html_value(row["after"])}</div>'
+            f'<div class="delta {delta_class}">change {_html_text(_fmt_delta(delta))}</div>'
+            f"{bars}"
+            "</div>"
+        )
+    return '<div class="grid">' + "\n".join(cards) + "</div>"
+
+
+def _html_metric_bars(before: Any, after: Any) -> str:
+    if not _is_number(before) or not _is_number(after):
+        return ""
+
+    maximum = max(abs(before), abs(after), 1)
+    before_width = min(100, max(0, abs(before) / maximum * 100))
+    after_width = min(100, max(0, abs(after) / maximum * 100))
+    return (
+        '<div class="bar">'
+        '<div class="bar-line">'
+        '<span>Before</span>'
+        '<span class="track">'
+        f'<span class="fill before" style="width: {before_width:.1f}%"></span>'
+        '</span>'
+        f'<span>{_html_value(before)}</span>'
+        '</div>'
+        '<div class="bar-line">'
+        '<span>After</span>'
+        '<span class="track">'
+        f'<span class="fill after" style="width: {after_width:.1f}%"></span>'
+        '</span>'
+        f'<span>{_html_value(after)}</span>'
+        '</div>'
+        '</div>'
+    )
+
+
+def _html_table(headers: list[str], rows: list[list[Any]]) -> str:
+    header_html = "".join(f"<th>{_html_text(header)}</th>" for header in headers)
+    body_rows = []
+    for row in rows:
+        cells = "".join(f"<td>{_html_text(cell)}</td>" for cell in row)
+        body_rows.append(f"<tr>{cells}</tr>")
+    return (
+        "<table>"
+        f"<thead><tr>{header_html}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table>"
+    )
+
+
+def _html_delta_class(value: Any) -> str:
+    if not _is_number(value):
+        return ""
+    if value > 0:
+        return "positive"
+    if value < 0:
+        return "negative"
+    return ""
+
+
+def _html_text(value: Any) -> str:
+    return html_lib.escape(str(value))
+
+
+def _html_value(value: Any) -> str:
+    return html_lib.escape(_fmt(value))
+
+
 def _markdown_table(headers: list[str], rows: list[list[Any]]) -> list[str]:
     lines = [
         "| " + " | ".join(headers) + " |",
@@ -349,6 +684,10 @@ def _delta(before: Any, after: Any) -> float | int | None:
     if isinstance(before, (int, float)) and isinstance(after, (int, float)):
         return after - before
     return None
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _fmt(value: Any) -> str:

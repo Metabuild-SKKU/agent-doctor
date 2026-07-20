@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from core.schema import DiagnosticReport, Finding
 from core.state import AgentDoctorState
 from agents.optimize.schemas import OptimizationHistoryItem
-from agents.report import build_comparison_payload, save_pipeline_report
+from agents.report import build_comparison_payload, render_html, save_pipeline_report
 
 
 def make_report(score: float, recall: float, f1: float) -> DiagnosticReport:
@@ -85,13 +85,32 @@ class ReportComparisonTest(unittest.TestCase):
 
             self.assertTrue(os.path.exists(artifacts["markdown"]))
             self.assertTrue(os.path.exists(artifacts["json"]))
+            self.assertTrue(os.path.exists(artifacts["html"]))
             with open(artifacts["markdown"], encoding="utf-8") as markdown_file:
                 markdown = markdown_file.read()
             self.assertIn("RAG Pipeline Before/After Report", markdown)
+            with open(artifacts["html"], encoding="utf-8") as html_file:
+                html = html_file.read()
+            self.assertIn("RAG Pipeline Before/After Report", html)
+            self.assertIn("Metric Comparison", html)
             with open(artifacts["json"], encoding="utf-8") as json_file:
                 payload = json.load(json_file)
             self.assertEqual(payload["final_eval"]["overall_score"], 0.75)
             self.assertFalse(payload["comparison"]["available"])
+
+    def test_renders_html_report_from_payload(self):
+        state = AgentDoctorState(
+            report=make_report(0.82, 0.78, 0.7),
+            index_config={"top_k": 5, "use_hybrid": True},
+            iteration=1,
+        )
+        payload = build_comparison_payload(state)
+
+        html = render_html(payload)
+
+        self.assertIn("<!doctype html>", html)
+        self.assertIn("RAG Pipeline Before/After Report", html)
+        self.assertIn("Final overall score", html)
 
 
 if __name__ == "__main__":
