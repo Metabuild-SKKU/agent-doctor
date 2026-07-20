@@ -31,7 +31,7 @@ from agents.eval.types import (
     EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled,
     resolve_probe_source, PROBE_SOURCE_MADE,
 )
-from agents.eval.probe_gen import generate_probes
+from agents.eval.probe_gen import generate_probes, uses_user_log
 from agents.eval.probe_store import save_probes, load_probes
 from agents.index.qdrant_store import keyword_search
 from agents.rag.generator import generate_answer
@@ -88,7 +88,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
-        # user_questions 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
+        # user_log 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
+        # 판정은 generate_probes 와 같은 술어(uses_user_log)로 한다 — state.user_questions
+        # 유무만 보면 EVAL_PROBE_SOURCE=auto 일 때 실제로는 LLM 생성으로 가는데도
+        # 캐시를 건너뛰어, 문서가 그대로여도 매 실행 골든 테스트셋을 다시 만든다.
         # LLM 생성(llm_generated) 경로만 영속화 대상 — 코퍼스 버전이 그대로면 이전에
         # 만든 골든 테스트셋을 재사용해 매 Optimize 반복마다 LLM 재호출을 피한다.
         # made: 코퍼스 버전과 무관하게 이미 만들어 둔 eval_probes.json 을 그대로 재사용
@@ -101,7 +104,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 print("[Eval] STEP1: made 소스지만 저장된 Probe 없음 → 자동 생성 후 저장")
                 probes = generate_probes(state)
                 save_probes(probes, version)
-        elif state.user_questions:
+        elif uses_user_log(state):
             probes = generate_probes(state)
         else:
             probes = load_probes(version)
@@ -202,9 +205,13 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
 
 def _pipeline_version(state: AgentDoctorState) -> str:
     """진단 신호 캐시 무효화 키. index_config(Optimize가 바꿈)+코퍼스가 바뀌면 값이 달라진다.
-    (재실행/코퍼스 의존 신호는 이 버전 내에서만 재사용 안전.)"""
+    (재실행/코퍼스 의존 신호는 이 버전 내에서만 재사용 안전.)
+
+    청크 id 와 함께 본문 hash 도 넣는다 — doc_id 는 출처로 고정돼 있어서(Ingest 의
+    _stable_doc_id) 같은 파일을 고쳐도 id 는 그대로다. hash 를 빼면 본문이 바뀌었는데도
+    버전이 같아져, 옛 gold_chunk_ids 를 가리키는 stale probe 를 재사용하게 된다."""
     key = json.dumps(state.index_config, sort_keys=True, default=str)
-    key += "|chunks=" + ",".join(sorted(c.chunk_id for c in state.chunks))
+    key += "|chunks=" + ",".join(sorted(f"{c.chunk_id}:{c.hash}" for c in state.chunks))
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
