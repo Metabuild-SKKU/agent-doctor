@@ -126,7 +126,13 @@ def _judge_pending_trial(
     after_config = dict(state.index_config)
 
     if not verdict.keep:
-        state.index_config = dict(pending.before_config)  # config 되돌리기(롤백)
+        restored = dict(pending.before_config)  # config 되돌리기(롤백)
+        # 임베딩 모델을 바꿨던 처방을 되돌릴 때는 컬렉션 차원도 원래대로
+        # 재생성해야 한다. before_config의 플래그는 적용 전 스냅샷(False)이라
+        # 그대로 복원하면 영구 Qdrant에서 dimension mismatch로 죽는다.
+        if restored.get("embedding_model") != after_config.get("embedding_model"):
+            restored["recreate_collection_on_dimension_mismatch"] = True
+        state.index_config = restored
         label = pending.failure_labels[0] if pending.failure_labels else ""
         if label and pending.selected_prescription_id:
             state.blacklist.add((label, pending.selected_prescription_id))
