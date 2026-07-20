@@ -24,6 +24,7 @@ CANONICAL_INDEX_CONFIG_KEYS: dict[str, str] = {
     "chunker.chunk_overlap": "chunk_overlap",
     "embedding.model": "embedding_model",
     "embedding_model": "embedding_model",
+    "embedding.recreate_on_mismatch": "recreate_collection_on_dimension_mismatch",
 }
 
 
@@ -46,6 +47,10 @@ CONFIG_READ_PATHS: dict[str, tuple[str, ...]] = {
     "chunker.chunk_overlap": ("chunker.chunk_overlap", "chunk_overlap"),
     "chunker.strategy": ("chunker.strategy", "chunking_strategy"),
     "embedding.model": ("embedding.model", "embedding_model"),
+    "embedding.recreate_on_mismatch": (
+        "embedding.recreate_on_mismatch",
+        "recreate_collection_on_dimension_mismatch",
+    ),
 }
 
 

@@ -729,6 +729,11 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
                 config.get("recreate_collection_on_dimension_mismatch", False)
             ),
         )
+        # one-shot: 재생성 플래그는 소비 즉시 끈다. 켠 채로 두면 이후 모든
+        # 재색인과 retriever(resolve_retrieval_settings)까지 차원 가드가
+        # 풀린 채 남아, mismatch 시 에러 대신 컬렉션이 조용히 삭제된다.
+        if state.index_config.get("recreate_collection_on_dimension_mismatch"):
+            state.index_config["recreate_collection_on_dimension_mismatch"] = False
         tools.delete_document_chunks(client, list(seen_doc_ids))
         tools.upsert_chunks(client, all_chunks)
 

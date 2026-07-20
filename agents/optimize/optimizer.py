@@ -111,6 +111,12 @@ REINDEX_PATHS: set[str] = {
 }
 
 
+# 임베딩 모델 교체는 벡터 차원이 바뀔 수 있어, Qdrant 컬렉션을 안전하게 재생성하도록
+# 이 부수 키를 함께 실어 보내야 하는 경로. planner의 search_space는 단일 축(embedding.model)만
+# 다루므로, 최종 ConfigPatch를 만드는 이 시점에만 추가한다(_run_rules 참고).
+_RECREATE_ON_MISMATCH_PATHS: set[str] = {"embedding.model"}
+
+
 # 공개 진입점 ---------------------------------------------------------------
 def run(
     request: OptimizationRequest,
@@ -369,8 +375,11 @@ def _run_rules(
         path in REINDEX_PATHS
         or (candidate and candidate.patch and candidate.patch.reindex_required)
     )
+    changes: dict[str, Any] = {path: value}
+    if path in _RECREATE_ON_MISMATCH_PATHS:
+        changes["embedding.recreate_on_mismatch"] = True
     patch = ConfigPatch(
-        changes={path: value},
+        changes=changes,
         reindex_required=reindex_required,
         description=description or f"{path} 값을 {value!r}(으)로 변경",
         metadata={"prescription_id": prescription_id} if prescription_id else {},
