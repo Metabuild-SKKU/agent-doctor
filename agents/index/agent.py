@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import unicodedata
 from dataclasses import dataclass, replace
@@ -15,14 +14,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
     DEFAULT_EMBEDDING_MODEL,
-    build_client,
     build_sparse_vector,
     count_tokens,
-    delete_document_chunks,
     embed,
-    ensure_collection,
-    upsert_chunks,
 )
+from agents.rag.retriever import get_retriever
 from core.schema import Chunk, Document
 from core.state import AgentDoctorState
 
@@ -46,10 +42,7 @@ class _SectionDraft:
 @dataclass(frozen=True)
 class IndexTools:
     # 실험/테스트 때 저장소, 임베딩, 그래프 구현만 바꿔 끼우기 위한 얇은 묶음.
-    build_client: Callable[..., Any]
-    ensure_collection: Callable[..., Any]
-    delete_document_chunks: Callable[..., Any]
-    upsert_chunks: Callable[..., Any]
+    get_retriever: Callable[..., Any]
     embed: Callable[..., list[float]]
     count_tokens: Callable[..., int]
     build_sparse_vector: Callable[..., dict]
@@ -354,10 +347,7 @@ def _configured_chunk_strategy(config: dict) -> str:
 
 def _default_tools() -> IndexTools:
     return IndexTools(
-        build_client=build_client,
-        ensure_collection=ensure_collection,
-        delete_document_chunks=delete_document_chunks,
-        upsert_chunks=upsert_chunks,
+        get_retriever=get_retriever,
         embed=embed,
         count_tokens=count_tokens,
         build_sparse_vector=build_sparse_vector,
@@ -718,19 +708,7 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
             )
 
         vector_dim = len(next(chunk.embedding for chunk in all_chunks if chunk.embedding))
-        client = tools.build_client(
-            url=os.getenv("QDRANT_URL", ":memory:"),
-            api_key=os.getenv("QDRANT_API_KEY"),
-        )
-        tools.ensure_collection(
-            client,
-            vector_dim=vector_dim,
-            recreate_on_mismatch=bool(
-                config.get("recreate_collection_on_dimension_mismatch", False)
-            ),
-        )
-        tools.delete_document_chunks(client, list(seen_doc_ids))
-        tools.upsert_chunks(client, all_chunks)
+        tools.get_retriever(all_chunks, config, delete_doc_ids=list(seen_doc_ids))
 
         state.chunks = all_chunks
         if config.get("graph_enabled", True):

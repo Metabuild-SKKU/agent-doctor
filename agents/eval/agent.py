@@ -35,7 +35,7 @@ from agents.eval.probe_gen import generate_probes
 from agents.eval.probe_store import save_probes, load_probes
 from agents.index.qdrant_store import keyword_search
 from agents.rag.generator import generate_answer
-from agents.rag.retriever import Retriever, build_retriever
+from agents.rag.retriever import Retriever, get_retriever
 from agents.eval.metrics_ragas import evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge
 from agents.eval.diagnose import diagnose, set_context as set_diag_context
 from agents.eval.report import build_report
@@ -119,7 +119,9 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
         # 검색 인덱스 준비: 공통 RAG retriever가 Qdrant/keyword fallback을 오케스트레이션한다.
         # Eval은 검색 구현을 직접 들고 있지 않고, RAG 모듈의 동일한 검색 규칙을 재사용한다.
-        retriever = build_retriever(state.chunks, state.index_config)
+        # get_retriever(=캐시판): Index가 방금 적재한 같은 청크 집합이면 그 결과를 그대로
+        # 재사용한다 — 예전엔 여기서 컬렉션 준비와 upsert를 통째로 한 번 더 했다.
+        retriever = get_retriever(state.chunks, state.index_config)
         chunk_text = {c.chunk_id: c.text for c in state.chunks}
         top_k = int(state.index_config.get("top_k", DEFAULT_TOP_K))
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from agents.index.qdrant_store import (
     DEFAULT_RERANKER_MODEL,
     VECTOR_DIM,
     build_client,
+    delete_document_chunks,
     embed,
     ensure_collection,
     hybrid_search,
@@ -324,23 +326,21 @@ class Retriever:
             "results": results,
         }
 
-# eval의 retrieval_temp.py 대체하는 부분
-def build_retriever(
-    chunks: list[Chunk | dict],
-    config: dict | None = None,
-    client: QdrantClient | None = None,
-) -> Retriever:
-    """Build a retriever from indexed chunks.
+def _populate(
+    raw_chunks: list[dict],
+    scope_id: str,
+    settings: RetrievalSettings,
+    client: QdrantClient | None,
+    delete_doc_ids: list[str] | None,
+) -> tuple[list[dict], QdrantClient | None]:
+    """청크를 Qdrant 에 적재하고 (스코프가 찍힌 청크, 클라이언트) 를 돌려준다.
 
-    If chunks contain embeddings, they are upserted into Qdrant. If embeddings
-    are missing and no client is provided, the returned retriever still works
-    via keyword_search().
+    임베딩이 없거나 적재에 실패하면 client=None 으로 떨어지고, 호출부는
+    keyword_search() 폴백으로 계속 동작한다. 이 함수가 Qdrant 쓰기의 유일한 지점이다.
     """
-    settings = resolve_retrieval_settings(chunks, config)
-    raw_chunks = [_chunk_to_dict(chunk) for chunk in chunks]
     embedded = [_chunk_from_dict(chunk) for chunk in raw_chunks if chunk.get("embedding")]
     if embedded:
-        raw_chunks = _with_scope(raw_chunks, _scope_id(raw_chunks))
+        raw_chunks = _with_scope(raw_chunks, scope_id)
         embedded = [_chunk_from_dict(chunk) for chunk in raw_chunks if chunk.get("embedding")]
 
     if embedded:
@@ -355,11 +355,106 @@ def build_retriever(
                 vector_dim=vector_dim,
                 recreate_on_mismatch=settings.recreate_collection_on_dimension_mismatch,
             )
+            if delete_doc_ids:
+                delete_document_chunks(client, list(delete_doc_ids))
             upsert_chunks(client, embedded)
         except Exception as exc:
             print(f"[Retriever] Qdrant setup failed, using keyword fallback: {exc}")
             client = None
+    return raw_chunks, client
+
+
+def build_retriever(
+    chunks: list[Chunk | dict],
+    config: dict | None = None,
+    client: QdrantClient | None = None,
+    delete_doc_ids: list[str] | None = None,
+) -> Retriever:
+    """Build a retriever from indexed chunks (항상 새로 적재한다).
+
+    If chunks contain embeddings, they are upserted into Qdrant. If embeddings
+    are missing and no client is provided, the returned retriever still works
+    via keyword_search().
+
+    같은 프로세스에서 같은 청크를 여러 번 검색한다면 get_retriever() 를 쓸 것 —
+    이 함수는 호출할 때마다 컬렉션 준비와 upsert 를 다시 한다.
+    """
+    settings = resolve_retrieval_settings(chunks, config)
+    raw_chunks = [_chunk_to_dict(chunk) for chunk in chunks]
+    raw_chunks, client = _populate(
+        raw_chunks, _scope_id(raw_chunks), settings, client, delete_doc_ids
+    )
     return Retriever(raw_chunks, settings, client=client)
+
+
+# ── 적재 캐시 ────────────────────────────────────────────────────
+# Index → Eval → (Optimize → Index → Eval)* 로 도는 동안 같은 청크 집합을 매번
+# 다시 upsert 하던 문제를 없앤다. 
+
+_cache_lock = threading.Lock()
+_cached_key: tuple | None = None
+_cached_payload: tuple[list[dict], QdrantClient | None] | None = None
+
+
+def _population_key(
+    raw_chunks: list[dict], scope_id: str, settings: RetrievalSettings
+) -> tuple:
+    """적재 결과를 좌우하는 값만 키에 넣는다.
+
+    청크 집합(scope_id)과 저장소 좌표만 보고, top_k 처럼 검색 시점에만 쓰는
+    설정은 넣지 않는다. Index 와 Eval 이 서로 다른 config dict(전자는 기본값이
+    병합된 전체 config, 후자는 state.index_config)를 넘겨도 같은 키로 모이게 하려는 것.
+    """
+    return (
+        scope_id,
+        _first_embedding_dim(raw_chunks) or settings.embedding_dimension,
+        settings.qdrant_url,
+        settings.qdrant_api_key,
+        settings.recreate_collection_on_dimension_mismatch,
+    )
+
+
+def get_retriever(
+    chunks: list[Chunk | dict],
+    config: dict | None = None,
+    client: QdrantClient | None = None,
+    delete_doc_ids: list[str] | None = None,
+) -> Retriever:
+    """build_retriever 의 캐시 버전 — 같은 청크 집합이면 Qdrant 적재를 건너뛴다.
+
+    Index·Eval·Serve 가 모두 이것을 호출하면 파이프라인 1회 실행에서 컬렉션 준비와
+    upsert 는 정확히 한 번만 일어난다. 청크나 저장소 좌표가 바뀌면(재색인 등)
+    키가 달라져 자동으로 다시 적재한다.
+
+    주의: 캐시가 맞으면 delete_doc_ids 도 건너뛴다. 청크 집합이 같다는 것은
+    지우고 다시 넣어도 결과가 같다는 뜻이라 안전하다.
+    """
+    global _cached_key, _cached_payload
+
+    settings = resolve_retrieval_settings(chunks, config)
+    raw_chunks = [_chunk_to_dict(chunk) for chunk in chunks]
+    scope_id = _scope_id(raw_chunks)
+    key = _population_key(raw_chunks, scope_id, settings)
+
+    with _cache_lock:
+        if _cached_key == key and _cached_payload is not None:
+            raw_chunks, cached_client = _cached_payload
+        else:
+            raw_chunks, cached_client = _populate(
+                raw_chunks, scope_id, settings, client, delete_doc_ids
+            )
+            _cached_key = key
+            _cached_payload = (raw_chunks, cached_client)
+
+    return Retriever(raw_chunks, settings, client=cached_client)
+
+
+def reset_retriever_cache() -> None:
+    """적재 캐시를 비운다(테스트·장기 실행 프로세스에서 인덱스를 강제로 다시 만들 때)."""
+    global _cached_key, _cached_payload
+    with _cache_lock:
+        _cached_key = None
+        _cached_payload = None
 
 # serve 쪽에서 chunk.json 읽을 때 helper
 def load_chunks(path: str | Path) -> list[dict]:
