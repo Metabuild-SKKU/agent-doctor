@@ -244,29 +244,30 @@ def render_html(payload: dict[str, Any]) -> str:
   <title>RAG Pipeline Before/After Report</title>
   <style>
     :root {{
-      color-scheme: dark;
-      --bg: #07080d;
-      --surface: #101116;
-      --surface-soft: #151722;
-      --surface-strong: #1b1d2b;
-      --text: #f5f7ff;
-      --muted: #9aa3b7;
-      --line: rgba(148, 163, 184, 0.18);
-      --line-strong: rgba(129, 124, 248, 0.55);
-      --before: #64748b;
-      --after: #817cf8;
-      --after-strong: #a5a1ff;
-      --accent: #817cf8;
-      --positive: #63e6a5;
-      --negative: #ff8a8a;
-      --shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+      color-scheme: light;
+      --bg: #f4faf8;
+      --surface: #ffffff;
+      --surface-soft: #edf8f5;
+      --surface-strong: #e8f1ff;
+      --text: #17212b;
+      --muted: #5f6f82;
+      --line: rgba(31, 57, 88, 0.14);
+      --line-strong: rgba(14, 148, 136, 0.38);
+      --before: #8a98a8;
+      --after: #0e9488;
+      --after-strong: #0a6f68;
+      --accent: #3656d4;
+      --warm: #f28c52;
+      --positive: #0c8a5d;
+      --negative: #c44949;
+      --shadow: 0 24px 70px rgba(31, 57, 88, 0.12);
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
       background:
-        radial-gradient(circle at 42% 12%, rgba(129, 124, 248, 0.18), transparent 28rem),
-        linear-gradient(180deg, #090a10 0%, var(--bg) 46%, #05060a 100%);
+        linear-gradient(135deg, rgba(14, 148, 136, 0.10) 0%, transparent 32%),
+        linear-gradient(180deg, #fbfefd 0%, var(--bg) 48%, #eef6fb 100%);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.5;
@@ -296,8 +297,9 @@ def render_html(payload: dict[str, Any]) -> str:
       width: 24px;
       height: 24px;
       place-items: center;
-      border: 1px solid var(--accent);
+      border: 1px solid var(--line-strong);
       border-radius: 6px;
+      background: var(--surface-soft);
       color: var(--after-strong);
       font-size: 13px;
     }}
@@ -311,8 +313,8 @@ def render_html(payload: dict[str, Any]) -> str:
       justify-content: space-between;
       gap: 44px;
       align-items: center;
-      min-height: 410px;
-      padding: 72px 0 54px;
+      min-height: 360px;
+      padding: 58px 0 42px;
     }}
     h1, h2 {{ margin: 0; line-height: 1.2; }}
     h1 {{
@@ -322,7 +324,7 @@ def render_html(payload: dict[str, Any]) -> str:
       line-height: 1.02;
     }}
     h1 span {{
-      color: var(--after);
+      color: var(--accent);
     }}
     h2 {{ font-size: 18px; margin-bottom: 16px; }}
     .eyebrow {{
@@ -340,7 +342,7 @@ def render_html(payload: dict[str, Any]) -> str:
       height: 7px;
       border-radius: 999px;
       background: var(--after);
-      box-shadow: 0 0 18px var(--after);
+      box-shadow: 0 0 18px rgba(14, 148, 136, 0.48);
     }}
     .subtle {{
       max-width: 610px;
@@ -359,8 +361,8 @@ def render_html(payload: dict[str, Any]) -> str:
       border: 1px solid var(--line);
       border-radius: 999px;
       padding: 8px 12px;
-      background: rgba(255, 255, 255, 0.03);
-      color: #dce0ef;
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--text);
       font-size: 13px;
     }}
     .tool-button {{
@@ -369,7 +371,7 @@ def render_html(payload: dict[str, Any]) -> str:
     }}
     .tool-button:hover, .tool-button[aria-pressed="true"] {{
       border-color: var(--line-strong);
-      background: rgba(129, 124, 248, 0.18);
+      background: var(--surface-soft);
       color: var(--text);
     }}
     .tool-button:focus-visible {{
@@ -378,7 +380,7 @@ def render_html(payload: dict[str, Any]) -> str:
     }}
     .pulse-line {{
       width: min(420px, 100%);
-      color: rgba(129, 124, 248, 0.56);
+      color: rgba(14, 148, 136, 0.46);
     }}
     .pulse-line svg {{
       display: block;
@@ -388,7 +390,7 @@ def render_html(payload: dict[str, Any]) -> str:
     .hero-score {{
       min-width: 270px;
       padding: 24px;
-      background: linear-gradient(180deg, rgba(129, 124, 248, 0.16), rgba(255, 255, 255, 0.04));
+      background: linear-gradient(180deg, #ffffff, #f4fbf9);
       border: 1px solid var(--line-strong);
       border-radius: 8px;
       box-shadow: var(--shadow);
@@ -410,7 +412,7 @@ def render_html(payload: dict[str, Any]) -> str:
       background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.22);
+      box-shadow: 0 14px 34px rgba(31, 57, 88, 0.08);
     }}
     .card {{ padding: 16px; }}
     .summary-card {{
@@ -440,17 +442,17 @@ def render_html(payload: dict[str, Any]) -> str:
       margin-top: 8px;
       border-radius: 999px;
       padding: 4px 9px;
-      background: rgba(129, 124, 248, 0.16);
+      background: rgba(54, 86, 212, 0.10);
       color: var(--accent);
       font-size: 12px;
       font-weight: 700;
     }}
     .delta-pill.positive {{
-      background: rgba(99, 230, 165, 0.12);
+      background: rgba(12, 138, 93, 0.10);
       color: var(--positive);
     }}
     .delta-pill.negative {{
-      background: rgba(255, 138, 138, 0.12);
+      background: rgba(196, 73, 73, 0.10);
       color: var(--negative);
     }}
     .report-section {{
@@ -459,7 +461,7 @@ def render_html(payload: dict[str, Any]) -> str:
       background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2);
+      box-shadow: 0 14px 34px rgba(31, 57, 88, 0.08);
       overflow-x: auto;
     }}
     .section-title {{
@@ -480,10 +482,10 @@ def render_html(payload: dict[str, Any]) -> str:
     .quality-section {{
       margin-top: 18px;
       padding: 28px 30px;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.018));
+      background: linear-gradient(180deg, #ffffff, #f8fcfb);
       border: 1px solid var(--line);
       border-radius: 8px;
-      box-shadow: 0 16px 42px rgba(0, 0, 0, 0.22);
+      box-shadow: 0 18px 46px rgba(31, 57, 88, 0.10);
     }}
     .quality-head {{
       display: flex;
@@ -577,7 +579,7 @@ def render_html(payload: dict[str, Any]) -> str:
       height: 4px;
       transform: translateY(-50%);
       border-radius: 999px;
-      background: rgba(148, 163, 184, 0.20);
+      background: rgba(138, 152, 168, 0.24);
     }}
     .quality-range {{
       position: absolute;
@@ -585,7 +587,7 @@ def render_html(payload: dict[str, Any]) -> str:
       height: 4px;
       transform: translateY(-50%);
       border-radius: 999px;
-      background: linear-gradient(90deg, var(--before), var(--after));
+      background: linear-gradient(90deg, var(--before), var(--after), var(--accent));
     }}
     .quality-dot {{
       position: absolute;
@@ -595,11 +597,11 @@ def render_html(payload: dict[str, Any]) -> str:
       transform: translate(-50%, -50%);
       border-radius: 999px;
       background: var(--before);
-      box-shadow: 0 0 0 3px rgba(100, 116, 139, 0.16);
+      box-shadow: 0 0 0 3px rgba(138, 152, 168, 0.20);
     }}
     .quality-dot.after {{
       background: var(--after);
-      box-shadow: 0 0 0 4px rgba(129, 124, 248, 0.20);
+      box-shadow: 0 0 0 4px rgba(14, 148, 136, 0.18);
     }}
     .quality-values {{
       display: flex;
@@ -635,7 +637,7 @@ def render_html(payload: dict[str, Any]) -> str:
       font-weight: 600;
       text-transform: uppercase;
     }}
-    tbody tr:hover {{ background: rgba(129, 124, 248, 0.06); }}
+    tbody tr:hover {{ background: rgba(14, 148, 136, 0.06); }}
     tr:last-child td {{ border-bottom: 0; }}
     .metric-card {{
       display: grid;
@@ -673,7 +675,7 @@ def render_html(payload: dict[str, Any]) -> str:
     .track {{
       height: 9px;
       border-radius: 999px;
-      background: rgba(148, 163, 184, 0.16);
+      background: rgba(138, 152, 168, 0.18);
       overflow: hidden;
     }}
     .fill {{
@@ -704,7 +706,7 @@ def render_html(payload: dict[str, Any]) -> str:
       align-items: center;
       border-radius: 999px;
       padding: 5px 10px;
-      background: rgba(129, 124, 248, 0.14);
+      background: rgba(14, 148, 136, 0.10);
       color: var(--after-strong);
       font-size: 12px;
       font-weight: 600;
