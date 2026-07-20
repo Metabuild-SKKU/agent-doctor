@@ -160,6 +160,25 @@ def _enumeration_cache(record: EvalRecord) -> bool:
 
 # ── tier2 · 추가 검색 쿼리 (자원: top-N 재검색 / BM25 / 코퍼스 조회) — set_context 로 주입 ──
 
+def _wide_hits(record: EvalRecord):
+    """top-N(wide_n) 재검색 결과(순위 내림차순 정렬)를 probe 당 1회만 계산·공유.
+
+    같은 질문의 wide 재검색은 gold_in_wider_candidates(존재 여부)와 gold_ranks(순위)가
+    함께 필요로 한다. 검색 1회를 memoize 로 공유해 tier2 비용을 중복 지불하지 않는다.
+    True 결과가 아니라 원본 hits(list[dict{"chunk_id",...}])를 그대로 캐시한다.
+    None=자원·모드 미충족.
+    """
+    if _active_mode < Mode.STANDARD or _ctx.retrieve_fn is None:
+        return None
+
+    def compute():
+        return _ctx.retrieve_fn(
+            _ctx.client, _ctx.chunks, record.probe.question, _ctx.wide_n
+        )
+
+    return _cache(record, "wide_hits", compute)
+
+
 def _gold_in_wider_candidates(record: EvalRecord):
     """
     top-N 재검색에서, top-k 가 놓친 gold 가 넓은 후보엔 있나 확인.
@@ -173,11 +192,37 @@ def _gold_in_wider_candidates(record: EvalRecord):
         missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids) # 차집합 - 놓친 골드
         if not missed:
             return None
-        hits = _ctx.retrieve_fn(_ctx.client, _ctx.chunks, record.probe.question, _ctx.wide_n) # 넓은 n으로 검색
+        hits = _wide_hits(record) # 넓은 n으로 검색(memoize 공유)
         wide_ids = {h.get("chunk_id") for h in hits}
         return bool(missed & wide_ids) # 교집합 - 하나라도 찾았으면 True.
 
     return _cache(record, "gold_in_wider_candidates", compute)
+
+
+def _gold_ranks(record: EvalRecord):
+    """probe 의 각 gold 청크가 wide_n 재검색에서 몇 위인지(1-based) 매핑.
+
+    planner 가 top_k 근거값을 계산할 원시 순위 측정치다(집계·후보화는 planner 소관).
+    "gold 가 5개니 top_k=5" 같은 개수 추정과 달리, "가장 늦게 나오는 gold 가 20위면
+    top_k 는 최소 20" 이라는 실측을 준다(multi-hop/나열형에서 개수 ≪ 순위).
+
+    반환: {gold_id: rank}  rank 는 1-based, wide_n 밖이면 None(=top_k 로 도달 불가).
+          gold 없음 → None / 모드·자원 미충족 → None.
+    """
+    if _active_mode < Mode.STANDARD or _ctx.retrieve_fn is None:
+        return None
+
+    def compute():
+        golds = record.probe.gold_chunk_ids
+        if not golds:
+            return None
+        hits = _wide_hits(record)
+        if hits is None:
+            return None
+        order = {h.get("chunk_id"): i + 1 for i, h in enumerate(hits)}  # 1-based 순위
+        return {g: order.get(g) for g in golds}  # wide_n 밖이면 None
+
+    return _cache(record, "gold_ranks", compute)
 
 
 def _bm25_hits_gold(record: EvalRecord):

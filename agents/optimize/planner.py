@@ -371,27 +371,59 @@ def _knee_candidates(required: list[int]) -> list[int]:
     return values[start:start + _MAX_SWEEP_CANDIDATES]
 
 
-def _ground_enumeration_top_k(
+def _probe_required_top_k(finding: Finding) -> int | None:
+    """probe 하나가 gold 를 다 담으려면 필요한 최소 top_k.
+
+    우선순위:
+      1. gold 순위(Finding.metadata["gold_ranks"], Eval tier2 실측): 가장 늦게 나오는
+         gold 의 순위 = 필요 top_k. 개수와 달리 흩어짐(multi-hop/나열형)을 반영한다.
+         예) gold 가 3·13·20위면 필요 top_k 는 20(개수 3이 아니라).
+         wide_n 밖 gold(순위 None)는 top_k 로 도달 불가라 제외 — 남은 gold 기준의
+         '이 probe 에서 top_k 가 기여 가능한 최대치'를 쓴다.
+      2. gold 개수(len(affected_chunks)): 순위 미측정(FAST 모드 등) 시 폴백.
+         "top_k 가 gold 개수보다 작으면 구조적으로 다 못 가져온다"는 하한 근사.
+    둘 다 없으면 None(→ 방향 키워드 폴백).
+    """
+    ranks = finding.metadata.get("gold_ranks")
+    if isinstance(ranks, dict):
+        present = [r for r in ranks.values() if isinstance(r, int)]
+        if present:
+            return max(present)
+    if finding.affected_chunks:
+        return len(finding.affected_chunks)
+    return None
+
+
+def _ground_top_k_from_gold(
     findings: list[Finding], baseline_config: dict
 ) -> list[int] | None:
-    """나열형 누락(retrieval_incomplete_enumeration) → top_k 후보.
+    """gold 를 다 담으려면 필요한 top_k 후보 — 검색 실패 라벨 공용.
 
-    근거: probe 마다 정답이 흩어져 있는 gold 청크 개수(= len(affected_chunks)).
-    top_k 가 그 개수보다 작으면 구조적으로 다 가져올 수 없다 — 이건 추측이
-    아니라 Eval 이 실측한 값이다(diagnose._finding 이 gold_chunk_ids 를 실어준다).
+    top_k 를 키우면 고쳐지는 라벨들(나열형 누락 / missing_gold)은 근거가 같다:
+    "가장 늦게 나오는 gold 의 순위 = 필요 top_k". 그래서 계산을 한 함수로
+    공유한다. probe 마다 필요 top_k(순위 실측 우선, 없으면 개수 근사)를 뽑아
+    무릎 분석에 넣는다. Eval 이 실측한 값이므로 방향 키워드 추측(×2)이 아니다.
+    (low_rank 는 제외 — 정석 처방이 리랭커라 top_k 근거값이 안 쓰인다. 아래
+    _GROUNDED_VALUES 등록부 참고.)
     """
-    counts = [len(f.affected_chunks) for f in findings if f.affected_chunks]
-    if not counts:
+    required = [
+        r for r in (_probe_required_top_k(f) for f in findings) if r is not None
+    ]
+    if not required:
         return None  # 측정값 없음 → 방향 키워드 폴백
-    return _knee_candidates(counts)
+    return _knee_candidates(required)
 
 
 # 라벨 → 근거값 계산 함수. 여기 없는 라벨은 방향 키워드(추측)로 폴백한다.
 # 계산 공식(집계·이상치 처리)은 planner 소유다. Eval 은 원시 측정치만 준다.
-# TODO: gold_rank 가 Finding.metadata 로 들어오면 retrieval_low_rank /
-#   retrieval_missing_gold 의 top_k 근거값도 여기 추가한다(PARAM_TUNING_PROPOSAL.md §8).
+# top_k 를 키워야 gold 를 담는 두 라벨은 gold 순위(diagnose 가 metadata 로 실어줌)로
+# 필요 top_k 를 계산한다 — 근거가 같아 한 함수를 공유한다.
+# retrieval_low_rank 는 제외: gold 가 후보엔 있고 순위만 낮은 문제라 정석 처방이
+#   리랭커(rules.py enable_reranker)다. top_k 증가는 노이즈(too_long/lost_in_middle)를
+#   키우는 열등한 차선책이라 rules.py 도 top_k 를 처방하지 않는다.
 _GROUNDED_VALUES: dict[str, dict[str, Any]] = {
-    "retrieval_incomplete_enumeration": {"top_k": _ground_enumeration_top_k},
+    "retrieval_incomplete_enumeration": {"top_k": _ground_top_k_from_gold},
+    "retrieval_missing_gold": {"top_k": _ground_top_k_from_gold},
 }
 
 

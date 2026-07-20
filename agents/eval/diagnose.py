@@ -37,7 +37,7 @@ from agents.eval.signals import (
     set_mode, set_context, _compute_metrics, _no_diagnosis,
     _retrieval_failed, _generation_failed, _context_applicable,
     _is_multi_hop, _enumeration_cache,
-    _gold_in_wider_candidates, _bm25_hits_gold, _gold_in_corpus,
+    _gold_in_wider_candidates, _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
     _faith, _faith_oracle, _rel, _rel_oracle, _both_high,
     _context_shorten_helps, _gold_front_helps, _noise_removal_helps,
     _bridge_decompose_recovers,
@@ -367,6 +367,18 @@ def _severity_of(label: str) -> str:
     return "warning"
 
 
+# gold 순위(top-N 재검색)가 top_k 근거값 계산에 쓰이는 라벨.
+# 이 라벨의 Finding 에만 gold_ranks 를 실어 planner(_GROUNDED_VALUES)가 개수 대신
+# 순위로 top_k 를 산정하게 한다. tier2(STANDARD+) 에서만 순위가 나오고, 그 아래
+# 모드에선 gold_ranks 가 안 실려 planner 가 개수 근사로 폴백한다.
+# retrieval_low_rank 는 제외: 정석 처방이 리랭커라 top_k 근거값을 planner 가 쓰지
+#   않는다(planner._GROUNDED_VALUES 참고). 순위를 실어봤자 안 쓰이는 무효 데이터다.
+_RANK_LABELS = {
+    "retrieval_incomplete_enumeration",
+    "retrieval_missing_gold",
+}
+
+
 def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool) -> Finding:
     """라벨 함수 공통 Finding 생성기.
 
@@ -378,6 +390,13 @@ def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool) -> Fin
     probe = record.probe
     group = _group_of(label, ftype)
     prefix = "" if confirmed else "[예비] "
+    metadata: dict = {"group": group}
+    if label in _RANK_LABELS:
+        # planner 가 top_k 근거값을 계산할 원시 순위(집계는 planner 소관).
+        # None(모드·자원 미충족)이면 싣지 않아 planner 가 개수 폴백을 쓰게 둔다.
+        ranks = _gold_ranks(record)
+        if ranks:
+            metadata["gold_ranks"] = ranks
     return Finding(
         finding_id=f"{probe.probe_id}:{label}",
         type=ftype,
@@ -387,7 +406,7 @@ def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool) -> Fin
         confirmed=confirmed,
         affected_chunks=list(probe.gold_chunk_ids),
         affected_probes=[probe.probe_id],
-        metadata={"group": group},
+        metadata=metadata,
     )
 
 

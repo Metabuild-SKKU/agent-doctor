@@ -22,8 +22,15 @@ from agents.optimize import planner
 from agents.optimize.planner import _knee, _knee_candidates
 
 
-def make_finding(probe_id, label, gold_n=0, confirmed=True, candidates=None):
-    """probe 1개에서 나온 Finding 하나. gold_n = 그 probe 가 필요로 하는 gold 청크 수."""
+def make_finding(probe_id, label, gold_n=0, confirmed=True, candidates=None,
+                 gold_ranks=None):
+    """probe 1개에서 나온 Finding 하나. gold_n = 그 probe 가 필요로 하는 gold 청크 수.
+    gold_ranks = {gold_id: 순위} (Eval tier2 실측). 있으면 개수보다 우선한다."""
+    metadata = {}
+    if candidates:
+        metadata["parameter_candidates"] = candidates
+    if gold_ranks is not None:
+        metadata["gold_ranks"] = gold_ranks
     return Finding(
         finding_id=f"{probe_id}:{label}",
         type="retrieval_failure",
@@ -33,7 +40,7 @@ def make_finding(probe_id, label, gold_n=0, confirmed=True, candidates=None):
         confirmed=confirmed,
         affected_chunks=[f"c{i}" for i in range(gold_n)],
         affected_probes=[probe_id],
-        metadata={"parameter_candidates": candidates} if candidates else {},
+        metadata=metadata,
     )
 
 
@@ -117,6 +124,48 @@ class GroundedValueTest(unittest.TestCase):
         # 후보가 여러 개 → internal 이 방문에 걸쳐 sweep 하고 실측으로 승자를 고른다.
         self.assertEqual(request.optimizer, "internal")
         self.assertEqual(request.max_trials, 3)
+
+    def test_gold_rank_beats_count_for_top_k(self):
+        # gold 3개지만 가장 늦은 놈이 20위 → top_k 는 개수(3)가 아니라 순위(20) 기준.
+        # multi-hop/나열형에서 개수 ≪ 순위인 경우를 실측으로 반영한다.
+        findings = [
+            make_finding("p1", "retrieval_incomplete_enumeration", gold_n=3,
+                         gold_ranks={"g_a": 2, "g_b": 9, "g_c": 20}),
+        ]
+        request, _decision = planner.plan(make_state(findings, top_k=5))
+
+        self.assertEqual(request.search_space, {"retriever.top_k": [20]})
+
+    def test_missing_gold_also_grounds_top_k_from_rank(self):
+        # missing_gold 도 top_k 처방(increase_top_k)이 있어 순위 근거가 먹힌다.
+        findings = [
+            make_finding("p1", "retrieval_missing_gold", gold_n=2,
+                         gold_ranks={"g_a": 7, "g_b": 14}),
+        ]
+        request, _decision = planner.plan(make_state(findings, top_k=5))
+
+        self.assertEqual(request.search_space, {"retriever.top_k": [14]})
+
+    def test_low_rank_does_not_ground_top_k(self):
+        # low_rank 처방은 리랭커(use_reranker)뿐 — top_k 를 처방하지 않으므로
+        # 순위가 있어도 top_k search_space 가 생기지 않는다(옵션 1).
+        findings = [
+            make_finding("p1", "retrieval_low_rank",
+                         gold_ranks={"g_a": 15}),
+        ]
+        request, _decision = planner.plan(make_state(findings, top_k=5))
+
+        self.assertNotIn("retriever.top_k", request.search_space)
+
+    def test_gold_beyond_wide_n_is_excluded_from_top_k(self):
+        # wide 밖 gold(None)는 top_k 로 도달 불가라 제외 — 도달 가능한 최대 순위(11)만 쓴다.
+        findings = [
+            make_finding("p1", "retrieval_incomplete_enumeration", gold_n=3,
+                         gold_ranks={"g_a": 4, "g_b": 11, "g_far": None}),
+        ]
+        request, _decision = planner.plan(make_state(findings, top_k=5))
+
+        self.assertEqual(request.search_space, {"retriever.top_k": [11]})
 
     def test_falls_back_to_direction_keyword_without_evidence(self):
         # gold 개수가 없으면(affected_chunks 비어있음) 계산 불가 → ×2 폴백
