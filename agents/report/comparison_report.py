@@ -1,8 +1,8 @@
-"""Build a before/after performance report for the RAG pipeline.
+"""RAG 파이프라인 성능 비교 리포트를 만든다.
 
-The report compares the first optimization baseline with the final Eval result.
-If no optimization was attempted, it still writes a final Eval summary so every
-pipeline run can leave one report artifact.
+1. 첫 최적화 기준값과 최종 Eval 결과를 before/after로 비교한다.
+2. 최적화 작업이 수행되지 않았으면 최종 Eval 요약만 작성한다.
+3. 파이프라인 실행마다 Markdown/JSON/HTML 리포트 파일을 남긴다.
 """
 from __future__ import annotations
 
