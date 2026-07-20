@@ -81,6 +81,8 @@ class ChunkPrescreenerTest(unittest.TestCase):
         metrics = result.metadata["candidate_metrics"]
         overlap_100 = next(item for item in metrics if item["value"] == 100)
         self.assertEqual(overlap_100["full_span_containment"], 1.0)
+        self.assertEqual(overlap_100["boundary_recovery_rate"], 1.0)
+        self.assertEqual(overlap_100["unrecovered_cut_rate"], 0.0)
 
     def test_missing_gold_spans_skips_automatic_precheck(self):
         request = self.make_request(

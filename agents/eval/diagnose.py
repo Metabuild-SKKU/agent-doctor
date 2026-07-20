@@ -40,7 +40,7 @@ from agents.eval.signals import (
     _gold_in_wider_candidates, _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
     _faith, _faith_oracle, _rel, _rel_oracle, _both_high,
     _context_shorten_helps, _gold_front_helps, _noise_removal_helps,
-    _bridge_decompose_recovers,
+    _bridge_decompose_recovers, _gold_span_boundary_analysis,
 )
 
 
@@ -97,6 +97,28 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
         return _finding(record, "retrieval_missing_gold", "retrieval_failure", confirmed=False)
     if in_corpus is False:
         return None
+
+
+def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
+    """정답 근거가 현재 청크 경계에 나뉘어 한 청크에 온전히 없음을 판정한다.
+
+    gold span과 현재 청크의 원문 좌표만 비교하므로 FAST 모드에서도 확정할 수
+    있다. 검색이 실제로 실패한 경우에만 원인 후보로 채택한다.
+    """
+
+    if not _retrieval_failed(record):
+        return None
+    analysis = _gold_span_boundary_analysis(record)
+    if not isinstance(analysis, dict) or analysis.get("boundary_split_count", 0) <= 0:
+        return None
+    finding = _finding(
+        record,
+        "chunking_context_mismatch",
+        "retrieval_failure",
+        confirmed=True,
+    )
+    finding.metadata["boundary_analysis"] = dict(analysis)
+    return finding
 
 
 def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]:
@@ -297,7 +319,8 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 _RETRIEVAL_CAUSE = (
-    retrieval_incomplete_enumeration, retrieval_missing_bridge_dependency,
+    chunking_context_mismatch, retrieval_incomplete_enumeration,
+    retrieval_missing_bridge_dependency,
     retrieval_low_rank, retrieval_lexical_mismatch, retrieval_semantic_mismatch, retrieval_missing_gold,
 )
 _GENERATION_CAUSE = (
@@ -348,6 +371,8 @@ def _group_of(label: str, ftype: str) -> str:
     """label·ftype 에서 그룹(A/B/C/D)을 파생 — 처방 순서 정렬용."""
     if ftype == "gap":
         return "D"
+    if label == "chunking_context_mismatch":
+        return "A"
     if label.startswith("retrieval_"):
         return "A"
     if label.startswith("generation_"):

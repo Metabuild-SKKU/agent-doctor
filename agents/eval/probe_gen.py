@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import random
 import re
+from dataclasses import dataclass
+from typing import Any, Iterable
 
 from core.schema import Chunk, Document, Probe
 from core.state import AgentDoctorState
@@ -52,6 +54,15 @@ from agents.eval.types import (
 DEFAULT_TESTSET_SIZE = 5
 
 
+@dataclass
+class _SynthesizedProbe:
+    """질문 합성 결과와 원문 좌표 계산에 사용할 exact evidence 묶음."""
+
+    question: str
+    ground_truth: str
+    evidence: list[dict[str, Any]]
+
+
 def generate_probes(state: AgentDoctorState) -> list[Probe]:
     """
     state 를 보고 Probe 리스트를 생성한다.
@@ -68,26 +79,41 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
     if state.user_questions:
         probes = _from_user_questions(state.user_questions)
         print(f"[Eval] STEP1: user_log Probe {len(probes)}개 생성")
-        return probes
+        return _finalize_probes(probes, state)
 
     graph = knowledge_graph.build_graph(state.chunks)
     budget = _allocate_budget(DEFAULT_TESTSET_SIZE)
+    chunks_by_id = {chunk.chunk_id: chunk for chunk in state.chunks}
+    documents_by_id = {document.doc_id: document for document in state.documents}
 
-    ragas_probes = _generate_ragas_probes(graph, budget["ragas"])
+    ragas_probes = _generate_ragas_probes(
+        graph,
+        budget["ragas"],
+        chunks_by_id,
+        documents_by_id,
+    )
     if not ragas_probes:
-        probes = _from_chunks(state.chunks, DEFAULT_TESTSET_SIZE)
+        probes = _from_chunks(
+            state.chunks,
+            DEFAULT_TESTSET_SIZE,
+            documents_by_id,
+        )
         print(f"[Eval] STEP1: llm_generated(폴백) Probe {len(probes)}개 생성")
-        return probes
+        return _finalize_probes(probes, state)
 
-    datamorgana_probes = _generate_datamorgana_probes(graph, budget["datamorgana"])
+    datamorgana_probes = _generate_datamorgana_probes(
+        graph,
+        budget["datamorgana"],
+        chunks_by_id,
+        documents_by_id,
+    )
     no_answer_probes = _generate_no_answer_probes(state.chunks, graph, budget["no_answer"])
 
     probes = ragas_probes + datamorgana_probes + no_answer_probes
-    probes = _resync_gold_chunk_ids(probes, state.chunks, state.documents)
     print(f"[Eval] STEP1: llm_generated Probe {len(probes)}개 생성 "
           f"(ragas={len(ragas_probes)}, datamorgana={len(datamorgana_probes)}, "
           f"no_answer={len(no_answer_probes)})")
-    return probes
+    return _finalize_probes(probes, state)
 
 
 # ── user_log: 실사용 질문 기반 ────────────────────────────────────
@@ -117,10 +143,18 @@ def _from_user_questions(questions: list[str]) -> list[Probe]:
 
 # ── llm_generated: 청크 기반 (Single-Hop Specific) ────────────────
 
-_SENT_SPLIT = re.compile(r"(?<=[.!?。？！\n])\s+")
+# 문장 종결부호 뒤의 공백 또는 줄바꿈만 경계로 본다. 토큰 내부의 점에는
+# 공백이 없으므로 URL·이메일·버전·날짜·소수점을 중간에서 자르지 않는다.
+_SENT_SPLIT = re.compile(r"(?<=[.!?。？！])[ \t]+|\r?\n+")
+_HEURISTIC_EVIDENCE_MIN_CHARS = 20
+_HEURISTIC_EVIDENCE_MAX_CHARS = 240
 
 
-def _from_chunks(chunks: list[Chunk], size: int) -> list[Probe]:
+def _from_chunks(
+    chunks: list[Chunk],
+    size: int,
+    documents_by_id: dict[str, Document] | None = None,
+) -> list[Probe]:
     """
     청크마다 Single-Hop Specific Probe 를 만든다.
     각 청크에 대해 LLM 생성을 시도하고, 실패/미설정 시 휴리스틱 추출로 대체한다.
@@ -129,8 +163,16 @@ def _from_chunks(chunks: list[Chunk], size: int) -> list[Probe]:
     # 너무 짧은 청크는 스킵, 앞에서부터 size 개 사용
     usable = [c for c in chunks if c.text and len(c.text.strip()) >= 20]
     for i, chunk in enumerate(usable[:size]):
-        question, ground_truth = _llm_generate_single_hop(chunk.text) or _heuristic_single_hop(chunk.text)
-        probes.append(Probe(
+        generated = _llm_generate_single_hop(chunk.text)
+        heuristic_quote: str | None = None
+        if generated is None:
+            question, ground_truth = _heuristic_single_hop(chunk.text)
+            heuristic_quote = ground_truth
+            gen_method = "heuristic_evidence"
+        else:
+            question, ground_truth = generated
+            gen_method = "llm_single_hop"
+        probe = Probe(
             probe_id=f"probe_gen_{i:03d}",
             question=question,
             source="llm_generated",
@@ -139,14 +181,85 @@ def _from_chunks(chunks: list[Chunk], size: int) -> list[Probe]:
             ground_truth=ground_truth,
             gold_chunk_ids=[chunk.chunk_id],
             qtype=None,                 # 단일홉
-        ))
+            metadata={"gen_method": gen_method},
+        )
+        document = (documents_by_id or {}).get(chunk.doc_id)
+        spans = []
+        exact_span_count = 0
+        fallback_span_count = 0
+        if document is not None:
+            span = None
+            if heuristic_quote:
+                span = _locate_evidence_in_chunk(
+                    heuristic_quote,
+                    chunk,
+                    document,
+                    chunks,
+                )
+            if span is None:
+                span = _chunk_fallback_span(chunk, document, chunks)
+            if span is not None:
+                spans.append(span)
+                if span.get("_grounding_quality") == "exact":
+                    exact_span_count = 1
+                else:
+                    fallback_span_count = 1
+        _set_probe_gold_spans(
+            probe,
+            spans,
+            expected_sources=1,
+            located_sources=len(spans),
+            exact_span_count=exact_span_count,
+            fallback_span_count=fallback_span_count,
+        )
+        probes.append(probe)
     return probes
 
 
 def _heuristic_single_hop(text: str) -> tuple[str, str]:
-    """LLM 미사용/실패 시 폴백: 청크 앞부분을 질문 주제로, 청크 전문을 정답으로 그대로 사용."""
-    topic = _topic_of(text)
-    return f"{topic}에 대해 설명해줘.", text.strip()
+    """LLM 미사용/실패 시 원문의 대표 근거 구간으로 질문과 정답을 만든다."""
+    evidence = _heuristic_evidence_of(text)
+    topic = _topic_of(evidence or text)
+    return f"{topic}에 대해 설명해줘.", evidence
+
+
+def _heuristic_evidence_of(text: str) -> str:
+    """
+    원문에서 좌표를 정확히 계산할 수 있는 대표 문장 또는 짧은 연속 구간을 고른다.
+
+    제목처럼 짧은 첫 줄보다 일정 길이 이상의 첫 문장을 우선한다. 문장 경계가
+    없거나 한 문장이 지나치게 길면 앞부분을 제한하되, 가능한 경우 단어 중간을
+    자르지 않는다. 반환값은 항상 입력 원문에 그대로 포함된 부분 문자열이다.
+    """
+    source = (text or "").strip()
+    if not source:
+        return ""
+
+    candidates: list[str] = []
+    for segment in _SENT_SPLIT.split(source):
+        candidate = segment.strip().lstrip("#•-*> \t")
+        if candidate:
+            candidates.append(candidate)
+
+    if not candidates:
+        candidates = [source]
+
+    evidence = next(
+        (
+            candidate
+            for candidate in candidates
+            if len(candidate) >= _HEURISTIC_EVIDENCE_MIN_CHARS
+        ),
+        max(candidates, key=len),
+    )
+    if len(evidence) <= _HEURISTIC_EVIDENCE_MAX_CHARS:
+        return evidence
+
+    bounded = evidence[:_HEURISTIC_EVIDENCE_MAX_CHARS].rstrip()
+    word_break = max(bounded.rfind(" "), bounded.rfind("\t"))
+    if word_break >= _HEURISTIC_EVIDENCE_MAX_CHARS // 2:
+        bounded = bounded[:word_break].rstrip()
+    return bounded
 
 
 def _llm_generate_single_hop(chunk_text: str) -> tuple[str, str] | None:
@@ -191,9 +304,10 @@ def _topic_of(text: str) -> str:
 # RAGAS 스타일 재구현(STEP1)에서 gold_char_span/gold_spans 로 정답 위치를
 # 원문(Document.content) 절대 좌표로 저장해두면, Optimize→Index 재청킹 후에도
 # (chunk_size/overlap이 달라져도) probe.gold_chunk_ids 를 다시 맞출 수 있다.
-# generate_probes() 가 마지막 단계에서 _resync_gold_chunk_ids 를 호출한다
-# (gold_spans 가 없는 probe는 그대로 통과 — _generate_ragas_probes 가 만드는
-# probe는 아직 gold_spans 를 채우지 않으므로 현재는 사실상 no-op).
+# generate_probes() 가 마지막 단계에서 _resync_gold_chunk_ids 를 호출한다.
+# 답이 있는 자동 생성 Probe는 exact evidence를 우선한다. LLM 합성 실패 시에도
+# 휴리스틱이 고른 짧은 원문 구간을 evidence로 쓰며, 좌표화까지 실패한 source만
+# 청크 전체 좌표로 폴백한다.
 #
 # 전제: Chunk.text 는 Document.content 의 앞에서부터 순서대로 나온 부분 문자열이다
 # (agents/index/agent.py::_chunk_text 가 고정 크기로 슬라이스하는 방식과, 향후
@@ -239,13 +353,288 @@ def _build_doc_position_index(doc: Document, chunks: list[Chunk]) -> list[tuple[
     index: list[tuple[str, int, int]] = []
     cursor = 0
     for c in doc_chunks:
-        span = _locate_span(doc.content, c.text, cursor)
+        declared = _declared_chunk_span(c)
+        span = None
+        if declared is not None and _valid_document_span(
+            doc,
+            declared[0],
+            declared[1],
+            c.text,
+        ):
+            span = declared
+        if span is None:
+            span = _locate_span(doc.content, c.text, cursor)
         if span is None:
             continue
         start, end = span
         index.append((c.chunk_id, start, end))
-        cursor = start
+        # overlap 청크도 허용하면서 동일 텍스트의 다음 등장을 찾을 수 있게 한 칸 전진한다.
+        cursor = start + 1
     return index
+
+
+def _declared_chunk_span(chunk: Chunk) -> tuple[int, int] | None:
+    """Chunk 필드나 legacy metadata에서 선언된 원문 좌표를 읽는다."""
+
+    raw = chunk.char_span
+    if raw is None and chunk.metadata:
+        raw = chunk.metadata.get("char_span")
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        return None
+    start, end = raw
+    if (
+        isinstance(start, bool)
+        or isinstance(end, bool)
+        or not isinstance(start, int)
+        or not isinstance(end, int)
+        or start < 0
+        or end <= start
+    ):
+        return None
+    return start, end
+
+
+def _valid_document_span(
+    document: Document,
+    start: int,
+    end: int,
+    expected_text: str | None = None,
+) -> bool:
+    """좌표 범위와 선택적 원문 일치 조건을 검증한다."""
+
+    if start < 0 or end <= start or end > len(document.content):
+        return False
+    return expected_text is None or document.content[start:end] == expected_text
+
+
+def _chunk_fallback_span(
+    chunk: Chunk,
+    document: Document,
+    chunks: Iterable[Chunk] | None = None,
+) -> dict[str, Any] | None:
+    """exact evidence가 없을 때 source chunk 전체의 원문 좌표를 구한다."""
+
+    declared = _declared_chunk_span(chunk)
+    if declared is not None:
+        start, end = declared
+        if _valid_document_span(document, start, end, chunk.text):
+            return {
+                "doc_id": chunk.doc_id,
+                "start": start,
+                "end": end,
+                "_grounding_quality": "chunk_fallback",
+            }
+
+    if chunks is not None:
+        position_index = _build_doc_position_index(document, list(chunks))
+        for chunk_id, start, end in position_index:
+            if chunk_id == chunk.chunk_id:
+                return {
+                    "doc_id": chunk.doc_id,
+                    "start": start,
+                    "end": end,
+                    "_grounding_quality": "chunk_fallback",
+                }
+
+    located = _locate_span(document.content, chunk.text, declared[0] if declared else 0)
+    if located is None:
+        return None
+    start, end = located
+    if not _valid_document_span(document, start, end, chunk.text):
+        return None
+    return {
+        "doc_id": chunk.doc_id,
+        "start": start,
+        "end": end,
+        "_grounding_quality": "chunk_fallback",
+    }
+
+
+def _locate_evidence_in_chunk(
+    quote: str,
+    chunk: Chunk,
+    document: Document,
+    chunks: Iterable[Chunk] | None = None,
+) -> dict[str, Any] | None:
+    """선택된 source chunk 안에서 exact quote를 찾아 원문 절대좌표로 바꾼다."""
+
+    if not quote:
+        return None
+    chunk_span = _chunk_fallback_span(chunk, document, chunks)
+    if chunk_span is None:
+        return None
+
+    local_start = chunk.text.find(quote)
+    if local_start >= 0:
+        start = chunk_span["start"] + local_start
+        end = start + len(quote)
+        if _valid_document_span(document, start, end, quote):
+            return {
+                "doc_id": chunk.doc_id,
+                "start": start,
+                "end": end,
+                "_grounding_quality": "exact",
+            }
+
+    start = document.content.find(
+        quote,
+        chunk_span["start"],
+        chunk_span["end"],
+    )
+    if start == -1:
+        return None
+    end = start + len(quote)
+    if not _valid_document_span(document, start, end, quote):
+        return None
+    return {
+        "doc_id": chunk.doc_id,
+        "start": start,
+        "end": end,
+        "_grounding_quality": "exact",
+    }
+
+
+def _parse_evidence(raw_evidence: Any) -> list[dict[str, Any]]:
+    """LLM evidence를 안전한 source_index/quote 목록으로 정규화한다."""
+
+    if not isinstance(raw_evidence, (list, tuple)):
+        return []
+    parsed: list[dict[str, Any]] = []
+    for raw in raw_evidence:
+        if not isinstance(raw, dict):
+            continue
+        source_index = raw.get("source_index")
+        quote = raw.get("quote")
+        if (
+            isinstance(source_index, bool)
+            or not isinstance(source_index, int)
+            or source_index < 0
+            or not isinstance(quote, str)
+            or not quote.strip()
+        ):
+            continue
+        parsed.append({"source_index": source_index, "quote": quote.strip()})
+    return parsed
+
+
+def _gold_spans_from_evidence(
+    synthesized: _SynthesizedProbe,
+    nodes: list[KGNode],
+    chunks_by_id: dict[str, Chunk],
+    documents_by_id: dict[str, Document],
+) -> tuple[list[dict[str, Any]], int, int, int]:
+    """합성 evidence를 source별로 grounding하고 누락 source는 chunk로 폴백한다."""
+
+    exact_by_source: dict[int, list[dict[str, Any]]] = {}
+    for item in synthesized.evidence:
+        source_index = item["source_index"]
+        if source_index >= len(nodes):
+            continue
+        node = nodes[source_index]
+        chunk = chunks_by_id.get(node.chunk_id)
+        document = documents_by_id.get(node.doc_id)
+        if chunk is None or document is None or chunk.doc_id != node.doc_id:
+            continue
+        span = _locate_evidence_in_chunk(
+            item["quote"],
+            chunk,
+            document,
+            list(chunks_by_id.values()),
+        )
+        if span is not None:
+            exact_by_source.setdefault(source_index, []).append(span)
+
+    spans: list[dict[str, Any]] = []
+    exact_span_count = 0
+    fallback_span_count = 0
+    located_sources = 0
+    for source_index, node in enumerate(nodes):
+        exact_spans = exact_by_source.get(source_index, [])
+        if exact_spans:
+            spans.extend(exact_spans)
+            exact_span_count += len(exact_spans)
+            located_sources += 1
+            continue
+        chunk = chunks_by_id.get(node.chunk_id)
+        document = documents_by_id.get(node.doc_id)
+        if chunk is None or document is None or chunk.doc_id != node.doc_id:
+            continue
+        fallback = _chunk_fallback_span(
+            chunk,
+            document,
+            list(chunks_by_id.values()),
+        )
+        if fallback is not None:
+            spans.append(fallback)
+            fallback_span_count += 1
+            located_sources += 1
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = set()
+    for span in spans:
+        key = (span["doc_id"], span["start"], span["end"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(span)
+    return deduped, located_sources, exact_span_count, fallback_span_count
+
+
+def _set_probe_gold_spans(
+    probe: Probe,
+    spans: list[dict[str, Any]],
+    *,
+    expected_sources: int,
+    located_sources: int,
+    exact_span_count: int,
+    fallback_span_count: int,
+) -> Probe:
+    """Probe에 좌표와 품질 요약을 기록하고 단일 근거 호환 필드를 맞춘다."""
+
+    span_qualities = [
+        span.get("_grounding_quality", "unknown")
+        for span in spans
+    ]
+    clean_spans = [
+        {
+            "doc_id": span["doc_id"],
+            "start": span["start"],
+            "end": span["end"],
+        }
+        for span in spans
+    ]
+    probe.gold_spans = clean_spans
+    if len(clean_spans) == 1:
+        span = clean_spans[0]
+        probe.gold_doc_id = span["doc_id"]
+        probe.gold_char_span = (span["start"], span["end"])
+    else:
+        probe.gold_doc_id = None
+        probe.gold_char_span = None
+
+    if not clean_spans:
+        status = "failed"
+    elif fallback_span_count == 0 and located_sources == expected_sources:
+        status = "exact"
+    elif exact_span_count == 0 and located_sources == expected_sources:
+        status = "chunk_fallback"
+    else:
+        status = "partial"
+    probe.metadata["span_grounding"] = {
+        "status": status,
+        "expected_sources": expected_sources,
+        "located_sources": located_sources,
+        "exact_span_count": exact_span_count,
+        "fallback_span_count": fallback_span_count,
+        "span_qualities": span_qualities,
+    }
+    return probe
+
+
+def _finalize_probes(probes: list[Probe], state: AgentDoctorState) -> list[Probe]:
+    """모든 생성 경로에서 현재 청킹 기준 gold chunk 캐시를 마지막에 동기화한다."""
+
+    return _resync_gold_chunk_ids(probes, state.chunks, state.documents)
 
 
 def _resync_gold_chunk_ids(
@@ -282,8 +671,8 @@ def _resync_gold_chunk_ids(
             for chunk_id, c_start, c_end in _position_index(doc_id):
                 if c_start < s_end and c_end > s_start:  # 구간 겹침
                     matched.append(chunk_id)
-        if matched:
-            probe.gold_chunk_ids = list(dict.fromkeys(matched))  # 순서 유지 dedupe
+        # 매번 현재 청킹 결과로 교체한다. 매칭이 없을 때도 이전 청크 ID를 남기지 않는다.
+        probe.gold_chunk_ids = list(dict.fromkeys(matched))  # 순서 유지 dedupe
     return probes
 
 
@@ -352,12 +741,15 @@ def _round_robin(items: list[str], n: int) -> list[str]:
     return [items[i % len(items)] for i in range(n)]
 
 
-def _generate_ragas_probes(graph: knowledge_graph.KGraph, n: int) -> list[Probe]:
+def _generate_ragas_probes(
+    graph: knowledge_graph.KGraph,
+    n: int,
+    chunks_by_id: dict[str, Chunk],
+    documents_by_id: dict[str, Document],
+) -> list[Probe]:
     """
-    그래프 하나로 RAGAS 스타일 Probe n개를 생성한다(청크/문서 리스트를 별도로
-    받지 않음 - KGNode가 chunk_id/doc_id/text를 이미 담고 있어 그래프만으로
-    충분하다는 판단. 계획 문서의 _generate_ragas_probes(graph, docs, n) 시그
-    니처에서 docs를 뺀 의도적 편차).
+    그래프에서 RAGAS 스타일 Probe n개를 만들고 source chunk/document를 이용해
+    정답 evidence를 원문 절대좌표로 grounding한다.
     """
     usable = [node for node in graph.nodes.values() if node.text and len(node.text.strip()) >= 20]
     pairs = knowledge_graph.connected_pairs(graph, n=2)
@@ -392,7 +784,14 @@ def _generate_ragas_probes(graph: knowledge_graph.KGraph, n: int) -> list[Probe]
             nodes = [graph.nodes[cid] for cid in pair_ids if cid in graph.nodes] if pair_ids else []
         if len(nodes) < (1 if quadrant.startswith("single") else 2):
             continue
-        probe = _make_ragas_probe(nodes, quadrant, subtype, len(probes))
+        probe = _make_ragas_probe(
+            nodes,
+            quadrant,
+            subtype,
+            len(probes),
+            chunks_by_id,
+            documents_by_id,
+        )
         if probe is not None:
             probes.append(probe)
     return probes
@@ -405,7 +804,12 @@ def _generate_ragas_probes(graph: knowledge_graph.KGraph, n: int) -> list[Probe]
 # 묻는" 조합(비격식·긴 길이·breadth 확장)을 강제해 좀 더 거친 질문을 만드는
 # 최소 버전으로 축소했다(설계 문서도 "시간 남으면 구체화" 항목으로 분류).
 
-def _generate_datamorgana_probes(graph: knowledge_graph.KGraph, n: int) -> list[Probe]:
+def _generate_datamorgana_probes(
+    graph: knowledge_graph.KGraph,
+    n: int,
+    chunks_by_id: dict[str, Chunk],
+    documents_by_id: dict[str, Document],
+) -> list[Probe]:
     """단일홉 노드에서 거친 스타일(conversational/long/breadth)로 질문을 합성한다."""
     if n <= 0:
         return []
@@ -416,25 +820,38 @@ def _generate_datamorgana_probes(graph: knowledge_graph.KGraph, n: int) -> list[
             break
         node = random.choice(usable)
         result = _llm_synthesize_query(
-            node.text, "single_specific", None,
+            [node], "single_specific", None,
             persona=random.choice(PERSONAS), style="conversational",
             length="long", evol_dir="breadth",
         )
         if result is None:
             result = _heuristic_synthesize_query([node])
-        question, ground_truth = result
-        if not question or not ground_truth:
+        if not result.question or not result.ground_truth:
             continue
-        probes.append(Probe(
+        probe = Probe(
             probe_id=f"probe_datamorgana_{i:03d}",
-            question=question,
+            question=result.question,
             source="llm_generated",
             expected_difficulty="medium",
             answer_exists=True,
-            ground_truth=ground_truth,
+            ground_truth=result.ground_truth,
             gold_chunk_ids=[node.chunk_id],
             qtype=None,
             metadata={"gen_method": "datamorgana_lite", "style": "conversational"},
+        )
+        spans, located_sources, exact_count, fallback_count = _gold_spans_from_evidence(
+            result,
+            [node],
+            chunks_by_id,
+            documents_by_id,
+        )
+        probes.append(_set_probe_gold_spans(
+            probe,
+            spans,
+            expected_sources=1,
+            located_sources=located_sources,
+            exact_span_count=exact_count,
+            fallback_span_count=fallback_count,
         ))
     return probes
 
@@ -542,7 +959,12 @@ def _false_premise_question(chunk_text: str) -> str | None:
 
 
 def _make_ragas_probe(
-    nodes: list[KGNode], quadrant: str, subtype: str | None, index: int
+    nodes: list[KGNode],
+    quadrant: str,
+    subtype: str | None,
+    index: int,
+    chunks_by_id: dict[str, Chunk],
+    documents_by_id: dict[str, Document],
 ) -> Probe | None:
     """노드(들)로 시나리오를 샘플링하고 질문을 합성해 Probe 하나를 만든다."""
     persona = random.choice(PERSONAS)
@@ -550,23 +972,21 @@ def _make_ragas_probe(
     length = random.choice(QUERY_LENGTHS)
     evol_dir = random.choice(EVOL_DIRECTIONS)
     is_multi = quadrant.startswith("multi")
-    context = "\n\n".join(node.text for node in nodes)
 
-    result = _llm_synthesize_query(context, quadrant, subtype, persona, style, length, evol_dir)
+    result = _llm_synthesize_query(nodes, quadrant, subtype, persona, style, length, evol_dir)
     if result is None:
         result = _heuristic_synthesize_query(nodes)
-    question, ground_truth = result
-    if not question or not ground_truth:
+    if not result.question or not result.ground_truth:
         return None
 
     gen_method = f"ragas_{quadrant}_{subtype}" if is_multi else f"ragas_{quadrant}"
-    return Probe(
+    probe = Probe(
         probe_id=f"probe_{quadrant}_{index:03d}",
-        question=question,
+        question=result.question,
         source="llm_generated",
         expected_difficulty="medium",
         answer_exists=True,
-        ground_truth=ground_truth,
+        ground_truth=result.ground_truth,
         gold_chunk_ids=[node.chunk_id for node in nodes],
         qtype=subtype if is_multi else None,
         metadata={
@@ -577,30 +997,67 @@ def _make_ragas_probe(
             "evol_direction": evol_dir,
         },
     )
+    spans, located_sources, exact_count, fallback_count = _gold_spans_from_evidence(
+        result,
+        nodes,
+        chunks_by_id,
+        documents_by_id,
+    )
+    return _set_probe_gold_spans(
+        probe,
+        spans,
+        expected_sources=len(nodes),
+        located_sources=located_sources,
+        exact_span_count=exact_count,
+        fallback_span_count=fallback_count,
+    )
 
 
-def _heuristic_synthesize_query(nodes: list[KGNode]) -> tuple[str, str]:
-    """LLM 미사용/실패 시 폴백. 단일홉은 기존 단일홉 폴백과 동일한 방식,
-    멀티홉은 두 청크의 주제를 이어붙인 나열형 질문으로 대체한다(정교하지
-    않음 - [구현 포인트]로 남김, LLM 경로가 정상 동작하면 쓰이지 않음)."""
+def _heuristic_synthesize_query(nodes: list[KGNode]) -> _SynthesizedProbe:
+    """LLM 미사용/실패 시 각 source의 대표 근거 구간으로 Probe를 합성한다."""
+    evidence_quotes = [_heuristic_evidence_of(node.text) for node in nodes]
     if len(nodes) == 1:
-        topic = _topic_of(nodes[0].text)
-        return f"{topic}에 대해 설명해줘.", nodes[0].text.strip()
-    topics = [_topic_of(n.text) for n in nodes]
+        evidence = evidence_quotes[0]
+        topic = _topic_of(evidence or nodes[0].text)
+        return _SynthesizedProbe(
+            question=f"{topic}에 대해 설명해줘.",
+            ground_truth=evidence,
+            evidence=[{"source_index": 0, "quote": evidence}],
+        )
+    topics = [
+        _topic_of(evidence or node.text)
+        for node, evidence in zip(nodes, evidence_quotes)
+    ]
     question = " 그리고 ".join(topics) + "의 관계를 설명해줘."
-    ground_truth = "\n".join(n.text.strip() for n in nodes)
-    return question, ground_truth
+    ground_truth = "\n".join(evidence_quotes)
+    return _SynthesizedProbe(
+        question=question,
+        ground_truth=ground_truth,
+        evidence=[
+            {"source_index": index, "quote": quote}
+            for index, quote in enumerate(evidence_quotes)
+        ],
+    )
+
+
+def _format_sources_for_llm(nodes: list[KGNode]) -> str:
+    """멀티홉 evidence가 출처를 가리킬 수 있도록 source 번호를 붙인다."""
+
+    return "\n\n".join(
+        f"[SOURCE {index}]\n{node.text}"
+        for index, node in enumerate(nodes)
+    )
 
 
 def _llm_synthesize_query(
-    context: str,
+    nodes: list[KGNode],
     quadrant: str,
     subtype: str | None,
     persona: str,
     style: str,
     length: str,
     evol_dir: str,
-) -> tuple[str, str] | None:
+) -> _SynthesizedProbe | None:
     """
     RAGAS 시나리오(quadrant/subtype/persona/style/length/evol_direction)를
     LLM(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택) 호출 1번으로 합성한다. 기존
@@ -616,16 +1073,25 @@ def _llm_synthesize_query(
                     f"{instruction} "
                     f"질문자의 페르소나는 '{persona}', 어투는 '{style}', 길이는 '{length}' 이며 "
                     f"'{evol_dir}' 방향으로 질문의 난이도·범위를 조정해라. "
-                    "질문과 정답 모두 컨텍스트 문장을 그대로 베끼지 말고 자기 말로 다시 구성하되, "
-                    "정답은 컨텍스트에 있는 사실에서 벗어나면 안 된다. "
-                    "반드시 {\"question\": str, \"ground_truth\": str} 형태의 JSON으로만 답하라."),
-            user=f"[컨텍스트]\n{context}",
+                     "질문과 정답은 컨텍스트 문장을 그대로 베끼지 말고 자기 말로 다시 구성하되, "
+                     "정답은 컨텍스트에 있는 사실에서 벗어나면 안 된다. "
+                     "evidence에는 정답에 실제 사용한 각 SOURCE의 짧고 연속된 원문을 "
+                     "한 글자도 바꾸지 말고 복사하라. 단일홉은 최소 1개, 멀티홉은 사용한 "
+                     "각 SOURCE마다 최소 1개를 반환하라. source_index는 표시된 SOURCE 번호다. "
+                     "반드시 {\"question\": str, \"ground_truth\": str, "
+                     "\"evidence\": [{\"source_index\": int, \"quote\": str}]} "
+                     "형태의 JSON으로만 답하라."),
+            user=f"[컨텍스트]\n{_format_sources_for_llm(nodes)}",
         )
         question = (data.get("question") or "").strip()
         ground_truth = (data.get("ground_truth") or "").strip()
         if not question or not ground_truth:
             return None
-        return question, ground_truth
+        return _SynthesizedProbe(
+            question=question,
+            ground_truth=ground_truth,
+            evidence=_parse_evidence(data.get("evidence")),
+        )
     except Exception as e:
         print(f"[Eval] STEP1: RAGAS Probe 합성 실패({e}) -> 휴리스틱 폴백")
         return None

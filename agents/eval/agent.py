@@ -2,7 +2,7 @@
 agents/eval/agent.py
 Eval Agent — RAG 파이프라인 품질 진단
 
-읽기: state.chunks, state.user_questions, state.index_config, state.iteration
+읽기: state.documents, state.chunks, state.user_questions, state.index_config, state.iteration
 쓰기: state.probes, state.report, state.status, state.error, state.current_agent
 
 설계 문서(Evaluate Module)의 STEP 1~5 를 순서대로 실행한다:
@@ -29,7 +29,7 @@ from core.schema import Probe
 from core.state import AgentDoctorState
 
 from agents.eval.types import EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled
-from agents.eval.probe_gen import generate_probes
+from agents.eval.probe_gen import generate_probes, _resync_gold_chunk_ids
 from agents.eval.probe_store import save_probes, load_probes, corpus_version
 # ⚠️ 임시: Index Agent가 검색 리트리버를 제공하기 전까지만 retrieval_temp 사용.
 #     Index 검색이 준비되면 retrieval_temp 를 삭제하고 여기 import 를 교체할 것.
@@ -79,9 +79,9 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.diagnosis_cache = {}
         state.diagnosis_cache_version = version
 
-    # Probe(골든 테스트셋) 캐시는 코퍼스에만 의존한다(top_k 등 index_config 무관).
-    # top_k 만 바꾼 Optimize 재실행에서 probe 를 불필요하게 재생성하지 않도록 분리.
-    probe_version = corpus_version(state.chunks)
+    # Probe 캐시는 원문 문서에 의존한다. top_k뿐 아니라 chunk_size가 바뀌어도 같은
+    # 질문/gold_spans를 유지하고, 불러온 뒤 현재 청크 기준 gold_chunk_ids만 재동기화한다.
+    probe_version = corpus_version(state.chunks, state.documents)
 
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
@@ -96,6 +96,11 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 probes = generate_probes(state)
                 save_probes(probes, probe_version)
             else:
+                probes = _resync_gold_chunk_ids(
+                    probes,
+                    state.chunks,
+                    state.documents,
+                )
                 print(f"[Eval] STEP1: 저장된 Probe {len(probes)}개 재사용(버전 일치)")
         if not probes:
             print("[Eval] 경고: Probe 0개 생성 → 평가 불가, 통과 처리")

@@ -60,6 +60,7 @@ def run(
     candidates = [baseline_value, *values[: request.max_trials]]
     trials: list[InternalTrialResult] = []
     ranked: list[tuple[tuple[float, ...], Any, dict[str, Any], bool]] = []
+    baseline_contained_indices: set[int] | None = None
 
     try:
         for index, value in enumerate(candidates):
@@ -76,6 +77,21 @@ def run(
                 chunk_overlap=chunk_overlap,
                 strategy=strategy,
                 previewer=preview,
+            )
+            contained_indices = set(metrics.pop("_contained_span_indices"))
+            if is_baseline:
+                baseline_contained_indices = set(contained_indices)
+            all_indices = set(range(int(metrics["total_span_count"])))
+            baseline_missing_indices = all_indices - (baseline_contained_indices or set())
+            recovered = len(contained_indices & baseline_missing_indices)
+            baseline_missing = len(baseline_missing_indices)
+            metrics["boundary_recovery_rate"] = (
+                recovered / baseline_missing if baseline_missing else 1.0
+            )
+            metrics["unrecovered_cut_rate"] = (
+                max(0, baseline_missing - recovered) / baseline_missing
+                if baseline_missing
+                else 0.0
             )
             key = _ranking_key(
                 path=path,
@@ -254,7 +270,8 @@ def _measure_candidate(
     contained = 0
     span_fit = 0
     wastes: list[int] = []
-    for span in gold_spans:
+    contained_indices: list[int] = []
+    for span_index, span in enumerate(gold_spans):
         span_length = span["end"] - span["start"]
         if span_length <= chunk_size:
             span_fit += 1
@@ -265,6 +282,7 @@ def _measure_candidate(
         ]
         if containing:
             contained += 1
+            contained_indices.append(span_index)
             smallest = min(end - start for start, end in containing)
             wastes.append(max(0, smallest - span_length))
 
@@ -278,6 +296,9 @@ def _measure_candidate(
     chunk_count = sum(len(spans) for spans in previews.values())
     containment = contained / total_spans
     return {
+        "_contained_span_indices": contained_indices,
+        "contained_span_count": contained,
+        "total_span_count": total_spans,
         "full_span_containment": containment,
         "boundary_cut_rate": 1.0 - containment,
         "span_fit_rate": span_fit / total_spans,

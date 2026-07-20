@@ -3,9 +3,8 @@ tests/test_probe_store.py
 Probe 캐시 버전 키 검증 — 4단계(버전 키 분리).
 
 corpus_version 은 Probe(골든 테스트셋) 캐시 무효화 키다. 핵심 계약:
-  - 코퍼스(청크 id + 텍스트)에만 의존 → top_k 등 index_config 는 영향 없음.
-  - chunk_id 는 위치 기반이라 재청킹 후 목록이 우연히 같아질 수 있으므로,
-    텍스트까지 해싱해 내용 변화가 반드시 버전을 바꾸게 한다(stale probe 방지).
+  - 원문 문서가 있으면 문서에 의존하고 청킹 설정에는 의존하지 않는다.
+  - 원문 문서가 없는 legacy 호출은 청크 id + 텍스트를 사용한다.
 
 probe_store 는 qdrant 의존이 없어 agent.py 없이 단독 테스트가 가능하다.
 """
@@ -15,7 +14,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core.schema import Chunk, Probe
+from core.schema import Chunk, Document, Probe
 from agents.eval.probe_store import corpus_version, save_probes, load_probes
 
 
@@ -53,6 +52,26 @@ class CorpusVersionTest(unittest.TestCase):
         a = _chunks(("d1_chunk_000", "ab"), ("d1_chunk_001", "c"))
         b = _chunks(("d1_chunk_000", "a"), ("d1_chunk_001", "bc"))
         self.assertNotEqual(corpus_version(a), corpus_version(b))
+
+    def test_same_documents_keep_version_across_rechunking(self):
+        document = Document("d1", "memory", "txt", "가나다라마바사")
+        before = _chunks(("d1_chunk_000", "가나다라"), ("d1_chunk_001", "마바사"))
+        after = _chunks(("d1_chunk_000", "가나"), ("d1_chunk_001", "다라마바사"))
+
+        self.assertEqual(
+            corpus_version(before, [document]),
+            corpus_version(after, [document]),
+        )
+
+    def test_document_content_change_invalidates_version(self):
+        chunks = _chunks(("d1_chunk_000", "가나다"))
+        before = Document("d1", "memory", "txt", "가나다")
+        after = Document("d1", "memory", "txt", "가나다 변경")
+
+        self.assertNotEqual(
+            corpus_version(chunks, [before]),
+            corpus_version(chunks, [after]),
+        )
 
 
 class SaveLoadTest(unittest.TestCase):

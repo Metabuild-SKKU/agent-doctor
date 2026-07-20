@@ -302,6 +302,206 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertEqual(context["documents"][0].doc_id, "d1")
         self.assertEqual(context["gold_spans"][0]["start"], 100)
 
+    @staticmethod
+    def _chunk_blacklist():
+        """too_long_context의 앞선 두 처방을 건너뛰고 chunk 처방을 선택한다."""
+
+        return {
+            ("too_long_context", "decrease_top_k"),
+            ("too_long_context", "context_compression"),
+        }
+
+    def test_chunk_size_candidates_are_grounded_in_affected_gold_spans(self):
+        finding = make_finding("p1", "too_long_context")
+        state = AgentDoctorState(
+            report=_report(finding),
+            documents=[Document("d1", "memory", "txt", "가" * 3000)],
+            probes=[
+                Probe(
+                    probe_id="p1",
+                    question="질문 1",
+                    source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[
+                        {"doc_id": "d1", "start": 0, "end": 100},
+                        {"doc_id": "d1", "start": 200, "end": 500},
+                        {"doc_id": "d1", "start": 600, "end": 1000},
+                    ],
+                ),
+                Probe(
+                    probe_id="p2",
+                    question="관련 없는 질문",
+                    source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[
+                        {"doc_id": "d1", "start": 1200, "end": 2400},
+                    ],
+                ),
+            ],
+            index_config={
+                "top_k": 5,
+                "chunk_size": 800,
+                "chunk_overlap": 50,
+                "chunk_candidate_policy": {
+                    "target_quantile": 0.85,
+                    "margin_ratio": 0.20,
+                    "rounding_step": 50,
+                    "path_fractions": [0.33, 0.66, 1.0],
+                    "candidate_count": 3,
+                    "min_span_count": 3,
+                },
+            },
+        )
+
+        request, _decision = planner.plan(state, blacklist=self._chunk_blacklist())
+
+        self.assertEqual(
+            request.search_space,
+            {"chunker.chunk_size": [700, 600, 500]},
+        )
+        self.assertEqual(request.optimizer, "internal")
+        grounding = request.metadata["candidate_grounding"]
+        self.assertEqual(grounding["status"], "grounded")
+        self.assertEqual(grounding["p85"], 400)
+        self.assertEqual(grounding["span_count"], 3)
+        context = request.metadata["chunk_precheck_context"]
+        self.assertEqual(len(context["gold_spans"]), 3)
+
+    def test_exact_spans_win_over_chunk_fallback_spans(self):
+        finding = make_finding("p1", "too_long_context")
+        finding.affected_probes = ["p1", "p2"]
+        state = AgentDoctorState(
+            report=_report(finding),
+            documents=[Document("d1", "memory", "txt", "가" * 3000)],
+            probes=[
+                Probe(
+                    probe_id="p1",
+                    question="정확한 질문",
+                    source="llm_generated",
+                    answer_exists=True,
+                    gold_spans=[
+                        {"doc_id": "d1", "start": 0, "end": 100},
+                        {"doc_id": "d1", "start": 200, "end": 400},
+                        {"doc_id": "d1", "start": 500, "end": 800},
+                    ],
+                    metadata={"span_grounding": {"status": "exact"}},
+                ),
+                Probe(
+                    probe_id="p2",
+                    question="폴백 질문",
+                    source="llm_generated",
+                    answer_exists=True,
+                    gold_spans=[
+                        {"doc_id": "d1", "start": 1000, "end": 2000},
+                    ],
+                    metadata={"span_grounding": {"status": "chunk_fallback"}},
+                ),
+            ],
+            index_config={
+                "top_k": 5,
+                "chunk_size": 800,
+                "chunk_overlap": 50,
+                "chunk_candidate_policy": {
+                    "target_quantile": 0.85,
+                    "margin_ratio": 0.20,
+                    "rounding_step": 50,
+                    "path_fractions": [0.33, 0.66, 1.0],
+                    "candidate_count": 3,
+                    "min_span_count": 3,
+                },
+            },
+        )
+
+        request, _decision = planner.plan(state, blacklist=self._chunk_blacklist())
+
+        self.assertEqual(
+            request.search_space,
+            {"chunker.chunk_size": [650, 550, 400]},
+        )
+        self.assertEqual(request.metadata["candidate_grounding"]["p85"], 300)
+        self.assertEqual(request.metadata["candidate_grounding"]["span_count"], 3)
+        self.assertEqual(
+            len(request.metadata["chunk_precheck_context"]["gold_spans"]),
+            3,
+        )
+
+    def test_too_few_spans_fall_back_to_single_rule_value(self):
+        finding = make_finding("p1", "too_long_context")
+        state = AgentDoctorState(
+            report=_report(finding),
+            documents=[Document("d1", "memory", "txt", "가" * 1000)],
+            probes=[
+                Probe(
+                    probe_id="p1",
+                    question="질문",
+                    source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[
+                        {"doc_id": "d1", "start": 0, "end": 100},
+                        {"doc_id": "d1", "start": 200, "end": 400},
+                    ],
+                )
+            ],
+            index_config={
+                "top_k": 5,
+                "chunk_size": 800,
+                "chunk_overlap": 50,
+                "chunk_candidate_policy": {
+                    "target_quantile": 0.85,
+                    "margin_ratio": 0.20,
+                    "rounding_step": 50,
+                    "path_fractions": [0.33, 0.66, 1.0],
+                    "candidate_count": 3,
+                    "min_span_count": 3,
+                },
+            },
+        )
+
+        request, _decision = planner.plan(state, blacklist=self._chunk_blacklist())
+
+        self.assertEqual(request.search_space, {"chunker.chunk_size": [400]})
+        self.assertEqual(request.optimizer, "rules")
+        self.assertEqual(
+            request.metadata["candidate_grounding"],
+            {
+                "status": "insufficient_spans",
+                "source": "gold_spans",
+                "span_count": 2,
+                "min_span_count": 3,
+            },
+        )
+
+    def test_invalid_chunk_policy_falls_back_to_single_rule_value(self):
+        finding = make_finding("p1", "too_long_context")
+        state = AgentDoctorState(
+            report=_report(finding),
+            documents=[Document("d1", "memory", "txt", "가" * 1000)],
+            probes=[
+                Probe(
+                    probe_id="p1",
+                    question="질문",
+                    source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[{"doc_id": "d1", "start": 0, "end": 300}],
+                )
+            ],
+            index_config={
+                "top_k": 5,
+                "chunk_size": 800,
+                "chunk_overlap": 50,
+                "chunk_candidate_policy": {"target_quantile": 2.0},
+            },
+        )
+
+        request, _decision = planner.plan(state, blacklist=self._chunk_blacklist())
+
+        self.assertEqual(request.search_space, {"chunker.chunk_size": [400]})
+        self.assertEqual(request.optimizer, "rules")
+        self.assertEqual(
+            request.metadata["candidate_grounding"]["status"],
+            "invalid_policy",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

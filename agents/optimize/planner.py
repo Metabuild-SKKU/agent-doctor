@@ -36,13 +36,14 @@ Optimize 모듈의 "결정" 계층.
 """
 from __future__ import annotations
 
+import math
 import uuid
 from typing import Any
 
 from core.state import AgentDoctorState
 from core.schema import Finding
 from agents.optimize import rules
-from agents.optimize.config_mapper import canonicalize_path
+from agents.optimize.config_mapper import canonicalize_path, get_current_value
 from agents.optimize.schemas import (
     ConfigPatch,
     OptimizationRequest,
@@ -138,9 +139,7 @@ def plan(
         )
 
     label, findings, rule, _score_val = picked
-    candidates = _build_candidates(
-        label, findings, rule, blacklist, state.index_config
-    )
+    candidates = _build_candidates(label, findings, rule, blacklist, state)
     request = _build_request(label, findings, rule, candidates, ranked, state)
     decision.request_id = request.request_id
     return request, decision
@@ -395,8 +394,8 @@ def _probe_required_top_k(finding: Finding) -> int | None:
 
 
 def _ground_top_k_from_gold(
-    findings: list[Finding], baseline_config: dict
-) -> list[int] | None:
+    findings: list[Finding], state: AgentDoctorState, _direction: Any
+) -> tuple[list[int] | None, dict[str, Any] | None]:
     """gold 를 다 담으려면 필요한 top_k 후보 — 검색 실패 라벨 공용.
 
     top_k 를 키우면 고쳐지는 라벨들(나열형 누락 / missing_gold)은 근거가 같다:
@@ -410,8 +409,454 @@ def _ground_top_k_from_gold(
         r for r in (_probe_required_top_k(f) for f in findings) if r is not None
     ]
     if not required:
-        return None  # 측정값 없음 → 방향 키워드 폴백
-    return _knee_candidates(required)
+        return None, None  # 측정값 없음 → 방향 키워드 폴백
+    return _knee_candidates(required), None
+
+
+def _valid_gold_spans(
+    state: AgentDoctorState,
+    findings: list[Finding],
+) -> list[dict[str, Any]]:
+    """유효한 exact span을 우선하고, 없을 때만 fallback span을 반환한다."""
+
+    affected_probe_ids = {
+        probe_id
+        for finding in findings
+        for probe_id in finding.affected_probes
+        if isinstance(probe_id, str)
+    }
+    document_lengths = {
+        document.doc_id: len(document.content) for document in state.documents
+    }
+    exact_spans: list[dict[str, Any]] = []
+    fallback_spans: list[dict[str, Any]] = []
+    exact_seen: set[tuple[str, int, int]] = set()
+    fallback_seen: set[tuple[str, int, int]] = set()
+
+    for probe in state.probes:
+        if affected_probe_ids and probe.probe_id not in affected_probe_ids:
+            continue
+        if not affected_probe_ids and not probe.answer_exists:
+            continue
+        grounding = probe.metadata.get("span_grounding", {})
+        if not isinstance(grounding, dict):
+            grounding = {}
+        raw_qualities = grounding.get("span_qualities")
+        qualities = raw_qualities if isinstance(raw_qualities, list) else []
+        status = grounding.get("status")
+
+        for index, span in enumerate(probe.gold_spans):
+            if not isinstance(span, dict):
+                continue
+            doc_id = span.get("doc_id")
+            start = span.get("start")
+            end = span.get("end")
+            if (
+                not isinstance(doc_id, str)
+                or doc_id not in document_lengths
+                or isinstance(start, bool)
+                or isinstance(end, bool)
+                or not isinstance(start, int)
+                or not isinstance(end, int)
+                or start < 0
+                or end <= start
+                or end > document_lengths[doc_id]
+            ):
+                continue
+            identity = (doc_id, start, end)
+            quality = qualities[index] if index < len(qualities) else None
+            if quality not in {"exact", "chunk_fallback"}:
+                if status == "chunk_fallback" or status == "partial":
+                    quality = "chunk_fallback"
+                else:
+                    # 사람이 넣은 taxonomy/gold span과 새 exact Probe는 기본적으로 신뢰한다.
+                    quality = "exact"
+            target = exact_spans if quality == "exact" else fallback_spans
+            seen = exact_seen if quality == "exact" else fallback_seen
+            if identity in seen:
+                continue
+            seen.add(identity)
+            target.append({"doc_id": doc_id, "start": start, "end": end})
+    return exact_spans or fallback_spans
+
+
+def _percentile_nearest_rank(values: list[int], quantile: float) -> int:
+    """외부 통계 의존성 없이 nearest-rank 백분위 값을 계산한다."""
+
+    ordered = sorted(values)
+    index = max(0, math.ceil(quantile * len(ordered)) - 1)
+    return ordered[index]
+
+
+def _chunk_candidate_policy(
+    state: AgentDoctorState,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """상태에서 chunk 후보 정책을 읽고 계산에 안전한지 검증한다."""
+
+    policy = state.index_config.get("chunk_candidate_policy")
+    if not isinstance(policy, dict):
+        return None, "chunk_candidate_policy가 dict가 아님"
+
+    target_quantile = policy.get("target_quantile")
+    margin_ratio = policy.get("margin_ratio")
+    rounding_step = policy.get("rounding_step")
+    path_fractions = policy.get("path_fractions")
+    candidate_count = policy.get("candidate_count")
+    min_span_count = policy.get("min_span_count")
+    valid = (
+        isinstance(target_quantile, (int, float))
+        and not isinstance(target_quantile, bool)
+        and 0 < target_quantile <= 1
+        and isinstance(margin_ratio, (int, float))
+        and not isinstance(margin_ratio, bool)
+        and margin_ratio >= 0
+        and isinstance(rounding_step, int)
+        and not isinstance(rounding_step, bool)
+        and rounding_step > 0
+        and isinstance(path_fractions, list)
+        and path_fractions
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and 0 < value <= 1
+            for value in path_fractions
+        )
+        and isinstance(candidate_count, int)
+        and not isinstance(candidate_count, bool)
+        and candidate_count > 1
+        and isinstance(min_span_count, int)
+        and not isinstance(min_span_count, bool)
+        and min_span_count > 0
+    )
+    if not valid:
+        return None, "chunk_candidate_policy 값이 유효하지 않음"
+    return {
+        "target_quantile": float(target_quantile),
+        "margin_ratio": float(margin_ratio),
+        "rounding_step": rounding_step,
+        "path_fractions": [float(value) for value in path_fractions],
+        "candidate_count": candidate_count,
+        "min_span_count": min_span_count,
+    }, None
+
+
+def _chunk_overlap_candidate_policy(
+    state: AgentDoctorState,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """상태에서 chunk_overlap 후보 정책을 읽고 안전 범위를 검증한다."""
+
+    policy = state.index_config.get("chunk_overlap_candidate_policy")
+    if not isinstance(policy, dict):
+        return None, "chunk_overlap_candidate_policy가 dict가 아님"
+
+    target_quantiles = policy.get("target_quantiles")
+    rounding_step = policy.get("rounding_step")
+    candidate_count = policy.get("candidate_count")
+    min_crossing_span_count = policy.get("min_crossing_span_count")
+    max_ratio = policy.get("max_ratio")
+    max_overlap = policy.get("max_overlap")
+    valid = (
+        isinstance(target_quantiles, list)
+        and target_quantiles
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and 0 < value <= 1
+            for value in target_quantiles
+        )
+        and isinstance(rounding_step, int)
+        and not isinstance(rounding_step, bool)
+        and rounding_step > 0
+        and isinstance(candidate_count, int)
+        and not isinstance(candidate_count, bool)
+        and candidate_count > 0
+        and isinstance(min_crossing_span_count, int)
+        and not isinstance(min_crossing_span_count, bool)
+        and min_crossing_span_count > 0
+        and isinstance(max_ratio, (int, float))
+        and not isinstance(max_ratio, bool)
+        and 0 < max_ratio <= 0.40
+        and isinstance(max_overlap, int)
+        and not isinstance(max_overlap, bool)
+        and 0 < max_overlap <= 300
+    )
+    if not valid:
+        return None, "chunk_overlap_candidate_policy 값이 유효하지 않음"
+    return {
+        "target_quantiles": [float(value) for value in target_quantiles],
+        "rounding_step": rounding_step,
+        "candidate_count": candidate_count,
+        "min_crossing_span_count": min_crossing_span_count,
+        "max_ratio": float(max_ratio),
+        "max_overlap": max_overlap,
+    }, None
+
+
+def _round_to_step(value: float, step: int) -> int:
+    """후보를 사람이 읽기 쉬운 단위로 반올림한다."""
+
+    return max(step, int(round(value / step) * step))
+
+
+def _ground_chunk_size_candidates(
+    findings: list[Finding],
+    state: AgentDoctorState,
+    direction: Any,
+) -> tuple[list[int] | None, dict[str, Any]]:
+    """gold span 길이 P85와 현재값 사이에서 chunk_size 후보를 만든다."""
+
+    spans = _valid_gold_spans(state, findings)
+    if not spans:
+        return None, {"status": "missing_gold_spans"}
+
+    policy, error = _chunk_candidate_policy(state)
+    if policy is None:
+        return None, {"status": "invalid_policy", "reason": error}
+
+    current = get_current_value(state.index_config, "chunker.chunk_size")
+    if isinstance(current, bool) or not isinstance(current, (int, float)) or current <= 0:
+        return None, {"status": "invalid_current_value"}
+    if direction not in {"increase", "decrease"}:
+        return None, {"status": "unsupported_direction", "direction": direction}
+
+    lengths = [span["end"] - span["start"] for span in spans]
+    if len(lengths) < policy["min_span_count"]:
+        return None, {
+            "status": "insufficient_spans",
+            "source": "gold_spans",
+            "span_count": len(lengths),
+            "min_span_count": policy["min_span_count"],
+        }
+    p50 = _percentile_nearest_rank(lengths, 0.50)
+    p85 = _percentile_nearest_rank(lengths, 0.85)
+    p95 = _percentile_nearest_rank(lengths, 0.95)
+    target_span = _percentile_nearest_rank(lengths, policy["target_quantile"])
+    raw_target = target_span * (1 + policy["margin_ratio"])
+    step = policy["rounding_step"]
+    target = max(step, int(math.ceil(raw_target / step) * step))
+    current_int = int(round(current))
+
+    metadata: dict[str, Any] = {
+        "status": "grounded",
+        "source": "gold_spans",
+        "span_count": len(lengths),
+        "min": min(lengths),
+        "p50": p50,
+        "p85": p85,
+        "p95": p95,
+        "max": max(lengths),
+        "target_quantile": policy["target_quantile"],
+        "margin_ratio": policy["margin_ratio"],
+        "current_chunk_size": current_int,
+        "target_chunk_size": target,
+        "direction": direction,
+    }
+    if (direction == "decrease" and target >= current_int) or (
+        direction == "increase" and target <= current_int
+    ):
+        metadata["status"] = "direction_conflict"
+        return None, metadata
+
+    candidates: list[int] = []
+    for fraction in policy["path_fractions"]:
+        value = current_int + ((target - current_int) * fraction)
+        rounded = _round_to_step(value, step)
+        if direction == "decrease" and not target <= rounded < current_int:
+            continue
+        if direction == "increase" and not current_int < rounded <= target:
+            continue
+        if rounded not in candidates:
+            candidates.append(rounded)
+        if len(candidates) >= policy["candidate_count"]:
+            break
+
+    if len(candidates) < 2:
+        metadata["status"] = "insufficient_candidates"
+        return None, metadata
+    metadata["generated_candidates"] = list(candidates)
+    return candidates, metadata
+
+
+def _chunk_positions_by_doc(
+    state: AgentDoctorState,
+) -> tuple[dict[str, list[tuple[int, int]]], int]:
+    """현재 청크의 원문 좌표를 문서별로 정렬한다."""
+
+    positions_by_doc: dict[str, list[tuple[int, int]]] = {}
+    missing_position_count = 0
+    for chunk in state.chunks:
+        raw = chunk.char_span
+        if raw is None and isinstance(chunk.metadata, dict):
+            raw = chunk.metadata.get("char_span")
+        if (
+            not isinstance(raw, (list, tuple))
+            or len(raw) != 2
+            or isinstance(raw[0], bool)
+            or isinstance(raw[1], bool)
+            or not isinstance(raw[0], int)
+            or not isinstance(raw[1], int)
+            or raw[0] < 0
+            or raw[1] <= raw[0]
+        ):
+            missing_position_count += 1
+            continue
+        positions_by_doc.setdefault(chunk.doc_id, []).append((raw[0], raw[1]))
+    for positions in positions_by_doc.values():
+        positions.sort()
+    return positions_by_doc, missing_position_count
+
+
+def _ground_chunk_overlap_candidates(
+    findings: list[Finding],
+    state: AgentDoctorState,
+    direction: Any,
+) -> tuple[list[int] | None, dict[str, Any]]:
+    """경계에 걸린 gold span에서 필요한 총 chunk_overlap 후보를 계산한다.
+
+    경계 ``b``를 기준으로 왼쪽 청크에 들어간 정답 길이 ``b - start``가
+    다음 청크 시작점을 정답 시작점까지 당겨야 하는 최소 overlap이다. 정답의
+    오른쪽 길이와 전체 길이도 함께 검사해 chunk_size 고정 상태에서 회복 가능한
+    단일 경계 사례만 백분위 계산에 넣는다. 실제 회복 여부는 prescreener가 현재
+    청커를 dry-run해 다시 검증한다.
+    """
+
+    spans = _valid_gold_spans(state, findings)
+    if not spans:
+        return None, {"status": "missing_gold_spans"}
+    if direction != "increase":
+        return None, {"status": "unsupported_direction", "direction": direction}
+
+    policy, error = _chunk_overlap_candidate_policy(state)
+    if policy is None:
+        return None, {"status": "invalid_policy", "reason": error}
+
+    current = get_current_value(state.index_config, "chunker.chunk_overlap")
+    chunk_size = get_current_value(state.index_config, "chunker.chunk_size")
+    if (
+        isinstance(current, bool)
+        or not isinstance(current, (int, float))
+        or current < 0
+        or isinstance(chunk_size, bool)
+        or not isinstance(chunk_size, (int, float))
+        or chunk_size <= 0
+    ):
+        return None, {"status": "invalid_current_value"}
+    current_int = int(round(current))
+    chunk_size_int = int(round(chunk_size))
+    max_allowed = min(
+        policy["max_overlap"],
+        int(math.floor(chunk_size_int * policy["max_ratio"])),
+        chunk_size_int - 1,
+    )
+    if max_allowed <= current_int:
+        return None, {
+            "status": "at_safe_limit",
+            "current_chunk_overlap": current_int,
+            "max_allowed_overlap": max_allowed,
+        }
+
+    positions_by_doc, missing_position_count = _chunk_positions_by_doc(state)
+    required: list[int] = []
+    right_needs: list[int] = []
+    contained_count = 0
+    irregular_count = 0
+    span_too_long_count = 0
+    limit_exceeded_count = 0
+    geometry_conflict_count = 0
+
+    for span in spans:
+        start, end = span["start"], span["end"]
+        positions = positions_by_doc.get(span["doc_id"], [])
+        if any(c_start <= start and c_end >= end for c_start, c_end in positions):
+            contained_count += 1
+            continue
+        if end - start > chunk_size_int:
+            span_too_long_count += 1
+            continue
+
+        # 시작을 덮는 왼쪽 청크와 끝을 덮는 바로 다음 청크의 경계를 찾는다.
+        pairs: list[tuple[int, int]] = []
+        for index in range(len(positions) - 1):
+            left_start, boundary = positions[index]
+            right_start, right_end = positions[index + 1]
+            if (
+                left_start <= start < boundary < end
+                and start < right_start < end <= right_end
+            ):
+                pairs.append((boundary - start, end - boundary))
+        if not pairs:
+            irregular_count += 1
+            continue
+
+        # 같은 span에 후보 경계가 여러 개면 가장 작은 안전 overlap을 택하고,
+        # 실제 청커 사전검증이 그 선택이 맞는지 확인한다.
+        left_need, right_need = min(pairs, key=lambda pair: pair[0])
+        if left_need <= current_int:
+            geometry_conflict_count += 1
+            continue
+        if left_need > max_allowed:
+            limit_exceeded_count += 1
+            continue
+        required.append(left_need)
+        right_needs.append(right_need)
+
+    metadata: dict[str, Any] = {
+        "status": "grounded",
+        "source": "gold_span_boundary_geometry",
+        "span_count": len(spans),
+        "recoverable_crossing_count": len(required),
+        "contained_count": contained_count,
+        "irregular_or_multi_boundary_count": irregular_count,
+        "span_too_long_count": span_too_long_count,
+        "limit_exceeded_count": limit_exceeded_count,
+        "geometry_conflict_count": geometry_conflict_count,
+        "missing_chunk_position_count": missing_position_count,
+        "current_chunk_overlap": current_int,
+        "chunk_size": chunk_size_int,
+        "max_allowed_overlap": max_allowed,
+        "target_quantiles": list(policy["target_quantiles"]),
+    }
+    if len(required) < policy["min_crossing_span_count"]:
+        metadata["status"] = (
+            "no_recoverable_crossings" if not required else "insufficient_crossings"
+        )
+        metadata["min_crossing_span_count"] = policy["min_crossing_span_count"]
+        return None, metadata
+
+    p50 = _percentile_nearest_rank(required, 0.50)
+    p85 = _percentile_nearest_rank(required, 0.85)
+    p95 = _percentile_nearest_rank(required, 0.95)
+    metadata.update({
+        "min_required_overlap": min(required),
+        "p50": p50,
+        "p85": p85,
+        "p95": p95,
+        "max_required_overlap": max(required),
+        "max_right_need": max(right_needs),
+    })
+
+    step = policy["rounding_step"]
+    candidates: list[int] = []
+    for quantile in policy["target_quantiles"]:
+        raw_target = _percentile_nearest_rank(required, quantile)
+        rounded = int(math.ceil(raw_target / step) * step)
+        rounded = min(rounded, max_allowed)
+        if current_int < rounded <= max_allowed and rounded not in candidates:
+            candidates.append(rounded)
+
+    # 표본이 적어 백분위들이 같은 값이면 바로 위 값을 함께 dry-run한다.
+    # P95보다 조금 큰 값의 중복비용까지 비교해야 가장 작은 회복값을 고를 수 있다.
+    anchor = max(candidates, default=current_int)
+    while len(candidates) < policy["candidate_count"] and anchor + step <= max_allowed:
+        anchor += step
+        if anchor not in candidates:
+            candidates.append(anchor)
+    candidates = sorted(set(candidates))[: policy["candidate_count"]]
+    if not candidates:
+        metadata["status"] = "insufficient_candidates"
+        return None, metadata
+    metadata["generated_candidates"] = list(candidates)
+    return candidates, metadata
 
 
 # 라벨 → 근거값 계산 함수. 여기 없는 라벨은 방향 키워드(추측)로 폴백한다.
@@ -423,21 +868,36 @@ def _ground_top_k_from_gold(
 #   키우는 열등한 차선책이라 rules.py 도 top_k 를 처방하지 않는다.
 _GROUNDED_VALUES: dict[str, dict[str, Any]] = {
     "retrieval_incomplete_enumeration": {"top_k": _ground_top_k_from_gold},
-    "retrieval_missing_gold": {"top_k": _ground_top_k_from_gold},
+    "retrieval_missing_gold": {
+        "top_k": _ground_top_k_from_gold,
+        "chunk_overlap": _ground_chunk_overlap_candidates,
+    },
+    "chunking_context_mismatch": {
+        "chunk_overlap": _ground_chunk_overlap_candidates,
+    },
+    "too_long_context": {"chunk_size": _ground_chunk_size_candidates},
 }
 
 
 def _grounded_search_space(
-    label: str, findings: list[Finding], baseline_config: dict
-) -> dict[str, list]:
+    label: str,
+    findings: list[Finding],
+    state: AgentDoctorState,
+    changes: dict,
+) -> tuple[dict[str, list], dict[str, Any] | None]:
     """이 라벨에서 측정값으로 계산 가능한 {config키: [후보값]} 을 만든다.
     계산할 근거가 없는 키는 담지 않는다(호출부가 방향 키워드로 폴백)."""
     space: dict[str, list] = {}
+    grounding_metadata: dict[str, Any] | None = None
     for key, compute in _GROUNDED_VALUES.get(label, {}).items():
-        values = compute(findings, baseline_config)
+        if key not in changes:
+            continue
+        values, metadata = compute(findings, state, changes.get(key))
         if values:
             space[key] = values
-    return space
+        if metadata is not None:
+            grounding_metadata = metadata
+    return space, grounding_metadata
 
 
 # ── 6. 처방 후보 생성 (rules.py → PrescriptionCandidate) ──────────
@@ -498,9 +958,8 @@ def _supplied_candidates(findings: list[Finding]) -> dict[str, list]:
 def _finding_search_space(
     findings: list[Finding],
     changes: dict,
-    baseline_config: dict,
-    grounded: dict[str, list],
-) -> dict[str, list]:
+    state: AgentDoctorState,
+) -> tuple[dict[str, list], dict[str, Any] | None]:
     """이 처방이 바꿀 키들의 최종 후보값을 정한다.
 
     우선순위:
@@ -511,15 +970,28 @@ def _finding_search_space(
     1이 2보다 앞서는 이유는 Eval 이 planner 보다 많은 원시 신호를 갖고 있어,
     후보 산출을 Eval 쪽으로 옮기더라도 planner 를 고치지 않게 하기 위해서다.
     """
-    fallback = _build_search_space(changes, baseline_config)
+    fallback = _build_search_space(changes, state.index_config)
     supplied = _supplied_candidates(findings)
+    grounded, grounding_metadata = _grounded_search_space(
+        findings[0].label if findings else "", findings, state, changes
+    )
 
     resolved: dict[str, list] = {}
     for raw_path, fallback_values in fallback.items():
         path = canonicalize_path(raw_path)
-        values = supplied.get(path) or grounded.get(raw_path) or grounded.get(path)
+        supplied_values = supplied.get(path)
+        values = supplied_values or grounded.get(raw_path) or grounded.get(path)
         resolved[path] = list(values) if values else list(fallback_values)
-    return resolved
+        if supplied_values and path in {
+            "chunker.chunk_size",
+            "chunker.chunk_overlap",
+        }:
+            grounding_metadata = {
+                "status": "explicit_candidates",
+                "source": "finding.metadata.parameter_candidates",
+                "generated_candidates": list(supplied_values),
+            }
+    return resolved, grounding_metadata
 
 
 def _build_candidates(
@@ -527,7 +999,7 @@ def _build_candidates(
     findings: list[Finding],
     rule: dict,
     blacklist: set[tuple[str, str]],
-    baseline_config: dict,
+    state: AgentDoctorState,
 ) -> list[PrescriptionCandidate]:
     """
     rules.py 의 raw dict 처방들을 PrescriptionCandidate 객체로 변환한다.
@@ -536,11 +1008,12 @@ def _build_candidates(
     """
     candidates: list[PrescriptionCandidate] = []
     target_metrics = list(rule.get("target_metrics", []))
-    # 진단 측정값에서 계산한 목표값(있으면 방향 키워드 추측보다 우선).
-    grounded = _grounded_search_space(label, findings, baseline_config)
     reason = findings[0].description if findings else ""
     for pres in _available_prescriptions(rule, label, blacklist):
         changes = dict(pres.get("patch", {}))
+        search_space, grounding_metadata = _finding_search_space(
+            findings, changes, state
+        )
         patch = ConfigPatch(
             changes=changes,
             reindex_required=bool(pres.get("reindex")),
@@ -556,9 +1029,7 @@ def _build_candidates(
                 patch=patch,
                 # optimizer 가 소비할 구체 후보값.
                 # 우선순위: Finding.metadata 후보 > 근거값 계산 > 방향 키워드 추측.
-                search_space=_finding_search_space(
-                    findings, changes, baseline_config, grounded
-                ),
+                search_space=search_space,
                 cost=float(_derive_cost(pres)),
                 priority=0.0,          # 후보 개별 우선순위는 MVP 미사용
                 target_metrics=list(target_metrics),  # rules.py 라벨의 target_metrics
@@ -566,6 +1037,11 @@ def _build_candidates(
                 # → optimizer 가 순서대로 순차 시도(fallback).
                 applies_when=dict(pres.get("applies_when", {})),
                 reason=reason,
+                metadata=(
+                    {"candidate_grounding": grounding_metadata}
+                    if grounding_metadata is not None
+                    else {}
+                ),
             )
         )
     return candidates
@@ -599,11 +1075,15 @@ def _build_request(
         "baseline_metrics": _report_metrics(state),
         "trial_results": [],
     }
+    if candidates and "candidate_grounding" in candidates[0].metadata:
+        metadata["candidate_grounding"] = dict(
+            candidates[0].metadata["candidate_grounding"]
+        )
     if use_internal and _space_path(selected_space) in {
         "chunker.chunk_size",
         "chunker.chunk_overlap",
     }:
-        metadata["chunk_precheck_context"] = _chunk_precheck_context(state)
+        metadata["chunk_precheck_context"] = _chunk_precheck_context(state, findings)
     return OptimizationRequest(
         request_id=str(uuid.uuid4()),
         iteration=state.iteration,
@@ -647,15 +1127,13 @@ def _report_metrics(state: AgentDoctorState) -> dict[str, Any]:
     return metrics
 
 
-def _chunk_precheck_context(state: AgentDoctorState) -> dict[str, Any]:
+def _chunk_precheck_context(
+    state: AgentDoctorState,
+    findings: list[Finding],
+) -> dict[str, Any]:
     """Chunk 사전검증에 필요한 원문과 이미 준비된 gold span만 전달한다."""
 
-    gold_spans = [
-        dict(span)
-        for probe in state.probes
-        for span in probe.gold_spans
-        if isinstance(span, dict)
-    ]
+    gold_spans = _valid_gold_spans(state, findings)
     affected_doc_ids = {
         span.get("doc_id")
         for span in gold_spans

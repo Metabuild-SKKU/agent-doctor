@@ -9,6 +9,20 @@
 "미구현"으로 서술하지만, 그 뒤 이 4개 파일이 모두 구현·테스트·통합됐다.
 최신 상태는 이 절만 보면 된다(1~7절은 그 이전 하위 부품 진행상황 기록으로만 참고).
 
+### 2026-07-20 chunk_overlap 근거화 완료
+
+- Eval이 exact `gold_spans`와 현재 `Chunk.char_span`을 비교해, 한 청크에는 완전히
+  포함되지 않지만 인접 청크들의 합집합에는 포함되는 검색 실패를
+  `chunking_context_mismatch`로 확정한다. 이 판정에는 LLM이 필요 없다.
+- Planner가 경계별 필요 총 overlap(`boundary - gold_span.start`)을 계산하고
+  P50/P85/P95를 25자 단위로 올림해 후보를 만든다.
+- 후보는 `300`, `chunk_size × 0.4`, `chunk_size - 1` 중 가장 작은 안전 상한을
+  넘지 않는다. 긴 span·여러 경계·불규칙 좌표는 통계에서 분리해 metadata에 집계한다.
+- 기존 chunk prescreener가 실제 청커를 dry-run해 정답 전체 포함률과 경계 회복률을
+  비교하고, 동률이면 중복량이 가장 작은 overlap을 선택한다.
+- `chunking_context_mismatch`는 `ready`로 승격했으며 처방 순서는
+  `increase_chunk_overlap → increase_chunk_size → switch_chunking_strategy`다.
+
 - **완료**: `agent.py`(Phase 1 순방향 실행 + Phase 2 방문 간 판정·롤백), `history.py`
   (하한선 검사, judge, pending→확정 2단계 이력), `reporter.py`(decision/verdict 기반
   사용자 리포트 생성), `graph.py` 라우팅(`route_after_optimize`, 예산 소진 시 마지막
@@ -493,3 +507,20 @@ python -m pytest tests/test_optimize_agent.py tests/test_optimizer.py tests/test
 나머지는 기존 하위 모듈 테스트). 여전히 실제 LangGraph `eval → optimize → index → eval`
 왕복 전체를 도는 end-to-end 테스트는 없다 — Ingest/Index의 외부 의존성(Notion, qdrant)
 때문에 이 환경에서 실행이 어렵다.
+
+### 7-2. 2026-07-20 업데이트
+
+Eval의 RAGAS/DataMorgana Probe가 exact evidence quote를 원문 절대좌표 `gold_spans`로
+grounding하고, Planner가 affected Probe의 span 길이 P85와 state의
+`chunk_candidate_policy`를 이용해 `chunk_size` 복수 후보를 만든다. 명시적인
+`Finding.metadata["parameter_candidates"]`가 있으면 계속 가장 먼저 사용한다.
+
+`tests/test_probe_gen.py`와 `tests/test_chunk_grounding_integration.py`를 추가해 반복 문장,
+멀티홉 source별 폴백, legacy char span, 재청킹 후 gold chunk 재동기화와
+Eval → Planner → chunk prescreener 흐름을 검증한다.
+
+후속 검토에서 Probe 캐시를 원문 문서 버전 기준으로 바꿔 재청킹 전후에 동일한 Probe를
+유지하도록 보강했다. span별 exact/fallback 품질을 기록해 exact가 있으면 후보 통계에
+exact만 사용하고, `min_span_count` 미만이면 `insufficient_spans`로 단일값 폴백한다.
+legacy 반복 문장도 전체 청크 순서와 cursor로 선택된 위치를 찾는다. UTF-8 모드 자동
+테스트는 169개 통과, optional 테스트 1개 스킵이다.
