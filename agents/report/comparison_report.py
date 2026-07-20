@@ -19,6 +19,7 @@ from core.state import AgentDoctorState
 DEFAULT_OUTPUT_DIR = Path("output") / "reports"
 
 
+# 파이프라인 리포트를 파일로 저장하고 생성 경로를 반환한다.
 def save_pipeline_report(
     state: AgentDoctorState,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
@@ -48,6 +49,7 @@ def save_pipeline_report(
     }
 
 
+# state에서 before/after 비교용 데이터를 만든다.
 def build_comparison_payload(state: AgentDoctorState) -> dict[str, Any]:
     """Create a JSON-ready before/after report payload from pipeline state."""
     final_report = state.report
@@ -90,6 +92,7 @@ def build_comparison_payload(state: AgentDoctorState) -> dict[str, Any]:
     }
 
 
+# payload를 Markdown 리포트 문자열로 바꾼다.
 def render_markdown(payload: dict[str, Any]) -> str:
     """Render the comparison payload as a human-readable markdown report."""
     pipeline = payload["pipeline"]
@@ -176,6 +179,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# payload를 브라우저용 HTML 리포트 문자열로 바꾼다.
 def render_html(payload: dict[str, Any]) -> str:
     """Render the comparison payload as a standalone browser report."""
     pipeline = payload["pipeline"]
@@ -568,6 +572,7 @@ def render_html(payload: dict[str, Any]) -> str:
 """
 
 
+# 최적화 이력 중 기준이 되는 첫 trial을 찾는다.
 def _baseline_trial(history: list[Any]) -> Any | None:
     for item in history:
         if getattr(item, "before_config", None):
@@ -575,6 +580,7 @@ def _baseline_trial(history: list[Any]) -> Any | None:
     return None
 
 
+# 최적화 전 설정과 metric 스냅샷을 만든다.
 def _before_snapshot(trial: Any | None) -> dict[str, Any]:
     if trial is None:
         return {"config": {}, "metrics": {}}
@@ -591,6 +597,7 @@ def _before_snapshot(trial: Any | None) -> dict[str, Any]:
     }
 
 
+# 최종 평가 기준의 설정과 metric 스냅샷을 만든다.
 def _after_snapshot(state: AgentDoctorState, trial: Any | None) -> dict[str, Any]:
     metrics = _metrics_from_report(state.report)
     if not metrics and trial is not None and getattr(trial, "after_metrics", None):
@@ -610,6 +617,7 @@ def _after_snapshot(state: AgentDoctorState, trial: Any | None) -> dict[str, Any
     }
 
 
+# DiagnosticReport에서 비교할 metric만 꺼낸다.
 def _metrics_from_report(report: DiagnosticReport | None) -> dict[str, Any]:
     if report is None:
         return {}
@@ -620,6 +628,7 @@ def _metrics_from_report(report: DiagnosticReport | None) -> dict[str, Any]:
     return {key: value for key, value in metrics.items() if value is not None}
 
 
+# before/after metric을 비교 행으로 묶는다.
 def _metric_rows(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
     keys = sorted(set(before) | set(after), key=_metric_sort_key)
     rows = []
@@ -635,6 +644,7 @@ def _metric_rows(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str
     return rows
 
 
+# 중요한 metric이 먼저 보이도록 정렬 순서를 정한다.
 def _metric_sort_key(name: str) -> tuple[int, str]:
     priority = {
         "overall_score": 0,
@@ -646,6 +656,7 @@ def _metric_sort_key(name: str) -> tuple[int, str]:
     return priority.get(name, 100), name
 
 
+# 변경된 설정값만 비교 행으로 묶는다.
 def _config_rows(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for key in sorted(set(before) | set(after)):
@@ -657,6 +668,7 @@ def _config_rows(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str
     return rows
 
 
+# 최적화 trial 하나를 리포트용 요약 dict로 만든다.
 def _trial_summary(item: Any) -> dict[str, Any]:
     metadata = getattr(item, "metadata", {}) or {}
     return {
@@ -676,6 +688,7 @@ def _trial_summary(item: Any) -> dict[str, Any]:
     }
 
 
+# Eval 리포트를 저장 가능한 dict로 줄인다.
 def _report_snapshot(report: DiagnosticReport | None) -> dict[str, Any]:
     if report is None:
         return {}
@@ -691,6 +704,7 @@ def _report_snapshot(report: DiagnosticReport | None) -> dict[str, Any]:
     }
 
 
+# dataclass 객체를 JSON에 넣을 수 있는 값으로 바꾼다.
 def _safe_dataclass(value: Any) -> Any:
     if value is None:
         return None
@@ -699,6 +713,7 @@ def _safe_dataclass(value: Any) -> Any:
     return value
 
 
+# metric 변화량을 사람이 읽을 해석 문장으로 만든다.
 def _interpret(metric_rows: list[dict[str, Any]], has_comparison: bool) -> list[str]:
     if not has_comparison:
         return ["최적화 시도 이력이 없어 최종 Eval 결과만 요약했습니다."]
@@ -729,6 +744,7 @@ def _interpret(metric_rows: list[dict[str, Any]], has_comparison: bool) -> list[
     return messages
 
 
+# HTML 상단에 보여줄 주요 metric 카드를 만든다.
 def _html_metric_cards(metric_rows: list[dict[str, Any]]) -> str:
     if not metric_rows:
         return ""
@@ -758,6 +774,7 @@ def _html_metric_cards(metric_rows: list[dict[str, Any]]) -> str:
     return '<div class="metric-grid">' + "\n".join(cards) + "</div>"
 
 
+# 숫자 metric의 before/after 막대 그래프를 만든다.
 def _html_metric_bars(before: Any, after: Any) -> str:
     if not _is_number(before) or not _is_number(after):
         return ""
@@ -785,6 +802,7 @@ def _html_metric_bars(before: Any, after: Any) -> str:
     )
 
 
+# HTML 표 문자열을 만든다.
 def _html_table(headers: list[str], rows: list[list[Any]]) -> str:
     header_html = "".join(f"<th>{_html_text(header)}</th>" for header in headers)
     body_rows = []
@@ -799,6 +817,7 @@ def _html_table(headers: list[str], rows: list[list[Any]]) -> str:
     )
 
 
+# delta 값에 따라 색상 class를 정한다.
 def _html_delta_class(value: Any) -> str:
     if not _is_number(value):
         return ""
@@ -809,14 +828,17 @@ def _html_delta_class(value: Any) -> str:
     return ""
 
 
+# HTML에 넣을 일반 텍스트를 안전하게 escape한다.
 def _html_text(value: Any) -> str:
     return html_lib.escape(str(value))
 
 
+# HTML에 넣을 표시값을 포맷 후 escape한다.
 def _html_value(value: Any) -> str:
     return html_lib.escape(_fmt(value))
 
 
+# Markdown 표 문자열을 만든다.
 def _markdown_table(headers: list[str], rows: list[list[Any]]) -> list[str]:
     lines = [
         "| " + " | ".join(headers) + " |",
@@ -827,6 +849,7 @@ def _markdown_table(headers: list[str], rows: list[list[Any]]) -> list[str]:
     return lines
 
 
+# 숫자 before/after 차이를 계산한다.
 def _delta(before: Any, after: Any) -> float | int | None:
     if isinstance(before, bool) or isinstance(after, bool):
         return None
@@ -835,10 +858,12 @@ def _delta(before: Any, after: Any) -> float | int | None:
     return None
 
 
+# bool을 제외한 숫자인지 확인한다.
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+# 리포트 출력용 값 포맷을 통일한다.
 def _fmt(value: Any) -> str:
     if value is None:
         return "-"
@@ -849,6 +874,7 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
+# delta 출력 형식을 통일한다.
 def _fmt_delta(value: Any) -> str:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return "-"
@@ -856,5 +882,6 @@ def _fmt_delta(value: Any) -> str:
     return f"{sign}{value:.4f}"
 
 
+# 긴 ID를 짧게 줄인다.
 def _short(value: str) -> str:
     return value[:8] if value else ""
