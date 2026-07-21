@@ -150,10 +150,14 @@ def _context_applicable(record: EvalRecord) -> bool:
 
 
 def _no_diagnosis(record: EvalRecord) -> bool:
-    """진단 불필요(= 예전 Branch.SUCCESS/NO_ANSWER_OK): 정답셋 없음 / 올바른 무응답 / 성공."""
+    """진단 불필요(= 예전 Branch.SUCCESS/NO_ANSWER_OK): 올바른 무응답 / 정답셋 없음 / 성공.
+
+    무응답 기대(answer_exists=False) probe 는 정답셋(ground_truth)이 없더라도 먼저 판정한다 —
+    올바르게 회피하면 통과, 답을 지어내면 진단 대상(B그룹 생성실패)이다. 이 순서를 뒤집으면
+    'ground_truth 없음 → 무조건 통과'에 걸려 무응답 지어냄이 조용히 통과 처리된다."""
+    if record.probe.answer_exists is False:
+        return is_abstention(record.generated_answer)
     if not record.probe.ground_truth:
-        return True
-    if record.probe.answer_exists is False and is_abstention(record.generated_answer):
         return True
     return _recall_ok(record) and _f1_ok(record)
 
