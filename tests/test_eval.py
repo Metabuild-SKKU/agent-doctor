@@ -35,6 +35,33 @@ assert is_abstention("제공된 정보로는 알 수 없습니다") is True
 assert is_abstention("제공된 컨텍스트에 따르면 재택근무는 주 2일입니다") is False  # 근거 인용은 기권 아님(오탐 회귀)
 print("규칙 지표 단위 확인 통과 [OK]")
 
+# ── 1b) 무응답 probe 회귀: 지어내면 실패로 집계 (게이트 순서) ──────
+# _no_diagnosis 가 'ground_truth 없음'을 무응답 판정보다 먼저 보면, 무응답 기대 probe 에
+# 모델이 답을 지어내도 통과 처리되어 신뢰도가 부풀려진다. (의존성 0·결정적 — API 불필요)
+from core.schema import Probe
+from agents.eval.types import EvalRecord
+from agents.eval.diagnose import diagnose, set_context as _set_diag_ctx
+from agents.eval.scoring import reliability_score
+
+_set_diag_ctx()  # 진단 자원 미주입(순수 규칙 경로)
+
+def _na_record(answer: str) -> EvalRecord:
+    p = Probe(probe_id="na", question="아직 공개 안 된 내규는?", source="llm_generated",
+              answer_exists=False, ground_truth=None, gold_chunk_ids=[])
+    r = EvalRecord(probe=p, signals={})
+    r.retrieved_chunk_ids, r.retrieved_context = [], []
+    r.generated_answer = answer
+    r.findings = diagnose(r, 1)  # FAST
+    return r
+
+_hall = _na_record("확실히 존재하며 값은 42입니다.")
+assert _hall.findings, "무응답인데 지어낸 답이 진단되지 않음(게이트 순서 회귀)"
+assert reliability_score([_hall]) == 0.0
+_ok = _na_record("제공된 정보로는 알 수 없습니다.")
+assert not _ok.findings
+assert reliability_score([_ok]) == 1.0
+print("무응답 회귀 테스트 통과 [OK]")
+
 # ── 2) Mock Chunks (Index 결과 시뮬레이션) ───────────────────────
 raw = [
     ("doc_001_chunk_000", "재택근무는 주 2일까지 가능하며 팀장 승인 후 사용합니다."),

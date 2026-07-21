@@ -7,7 +7,8 @@ STEP4: 원인 판정 (Finding 생성)
      맞으면 Finding, 아니면 None 을 돌려준다. 각 라벨은 자기 싼 전제(recall/f1/oracle)로
      self-scope 하므로, 안 맞는 슬롯은 자연히 빈다.
   2. diagnose() 가 모든 원인 슬롯을 시도: 슬롯당 _pick 으로 '한 원인' 채택(확정 우선),
-     corpus_gap 은 additive. 판별 신호·지표 계산은 전부 signals 모듈에서 lazy·memoize.
+     corpus_gap 은 additive. 판별 신호는 전부 signals 모듈에서 lazy·memoize.
+     지표(_compute_metrics)와 RAGAS(_compute_ragas)는 판정 전에 항상 측정한다.
 
 Finding에 label을 담고 다음단계로 진행된다.
 
@@ -34,7 +35,7 @@ from agents.eval.types import (
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
 )
 from agents.eval.signals import (
-    set_mode, set_context, _compute_metrics, _no_diagnosis,
+    set_mode, set_context, _compute_metrics, _compute_ragas, _no_diagnosis,
     _retrieval_failed, _generation_failed, _context_applicable,
     _is_multi_hop, _enumeration_cache,
     _gold_in_wider_candidates, _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
@@ -530,13 +531,16 @@ _SEV_ORDER = {"critical": 0, "warning": 1, "info": 2}
 
 def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
     """
-    metric을 계산하고, diagnosis가 필요없는 경우 return한다 (기존 성공 브랜치)
-    이후 모든 라벨에 대해 검사한다.
-    라벨은 각
+    지표(STEP3-1)와 RAGAS(STEP3-2)를 먼저 전부 측정하고, diagnosis가 필요없는 경우 return한다
+    (기존 성공 브랜치). 이후 모든 라벨에 대해 검사한다.
+
+    측정은 스킵하지 않는다 — 성공 probe 도 RAGAS 점수를 갖고 리포트 평균에 들어간다.
+    (RAGAS 는 DEEP 이상에서만 실행되므로 그 미만 모드의 비용은 그대로다.)
     """
     set_mode(mode if mode is not None else resolve_mode())
 
     _compute_metrics(record)      # 지표(recall/f1/oracle_f1) 계산 → record 반영
+    _compute_ragas(record)        # RAGAS(실제·오라클 트랙) 계산 → record 반영 (DEEP 이상)
 
     if _no_diagnosis(record):     # 정답셋 없음 / 올바른 무응답 / 성공
         return []

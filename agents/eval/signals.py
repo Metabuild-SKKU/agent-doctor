@@ -90,7 +90,7 @@ def _cache(record: EvalRecord, name: str, compute):
     return cache[name]
 
 
-# ── STEP3-1 규칙 지표 (diagnose 진입 시 계산·저장) ────────────────
+# ── STEP3 지표 (diagnose 진입 시 계산·저장 — 판정 전, 스킵 없음) ───
 
 def _compute_metrics(record: EvalRecord) -> None:
     """규칙 지표(recall/f1/oracle_f1)를 record 에 계산·저장. (agent STEP3-1 이관, diagnose 진입 시 1회.)
@@ -108,6 +108,21 @@ def _compute_metrics(record: EvalRecord) -> None:
     )
     record.f1_score = token_f1(record.generated_answer, gt) if gt else 0.0
     record.oracle_f1 = token_f1(record.oracle_answer, gt) if (gt and record.oracle_answer) else 0.0
+
+
+def _compute_ragas(record: EvalRecord) -> None:
+    """RAGAS 점수(실제·오라클 트랙)를 record 에 계산·저장. (STEP3-2, diagnose 진입 시 1회.)
+
+    _compute_metrics 와 같은 자리에서 항상 돌린다 — 진단이 필요 없는 probe(성공·정답셋 없음·
+    올바른 무응답)도 faithfulness/response_relevancy 를 갖게 된다. 예전엔 라벨 함수가 필요할 때만
+    lazy 로 불러서, report 의 RAGAS 평균이 '진단이 돌아간 실패 probe'만의 평균이었다.
+
+    비용 게이트는 DEEP 유지 — 그 미만 모드에선 LLM 을 한 번도 부르지 않는다.
+    이후 _faith/_rel 등의 lazy 호출은 *_done 플래그에 걸려 재호출되지 않는다."""
+    if _active_mode < Mode.DEEP:
+        return
+    _ensure_ragas(record, "real")
+    _ensure_ragas(record, "oracle")
 
 
 # ── 전제 신호 (브랜치 대체 — 각 슬롯이 언제 적용되는지) ───────────
@@ -149,10 +164,14 @@ def _context_applicable(record: EvalRecord) -> bool:
 
 
 def _no_diagnosis(record: EvalRecord) -> bool:
-    """진단 불필요(= 예전 Branch.SUCCESS/NO_ANSWER_OK): 정답셋 없음 / 올바른 무응답 / 성공."""
+    """진단 불필요(= 예전 Branch.SUCCESS/NO_ANSWER_OK): 올바른 무응답 / 정답셋 없음 / 성공.
+
+    무응답 기대(answer_exists=False) probe 는 정답셋(ground_truth)이 없더라도 먼저 판정한다 —
+    올바르게 회피하면 통과, 답을 지어내면 진단 대상(B그룹 생성실패)이다. 이 순서를 뒤집으면
+    'ground_truth 없음 → 무조건 통과'에 걸려 무응답 지어냄이 조용히 통과 처리된다."""
+    if record.probe.answer_exists is False:
+        return is_abstention(record.generated_answer)
     if not record.probe.ground_truth:
-        return True
-    if record.probe.answer_exists is False and is_abstention(record.generated_answer):
         return True
     return _recall_ok(record) and _f1_ok(record)
 
@@ -511,9 +530,10 @@ def _gold_in_corpus(record: EvalRecord):
 # 생성 원인(hallucination/hop_binding/partial)은 항상 오라클, bad_gold만 각 트랙 사용.
 
 def _ensure_ragas(record: EvalRecord, track: str):
-    """트랙 RAGAS 점수를 record 에 lazy 계산·저장(트랙별 1회만). agent 가 미리 안 돌리고
-    diagnose 가 필요할 때 _ctx.ragas_fn 으로 계산 → '진단 계산은 전부 diagnose 안'.
-    빈 결과({})여도 *_done 플래그로 '시도함'을 기록해 같은 트랙 재-LLM호출(수 번의 LLM콜)을 막는다."""
+    """트랙 RAGAS 점수를 record 에 계산·저장(트랙별 1회만). 실제로는 diagnose 진입 시
+    _compute_ragas 가 두 트랙을 먼저 채우고, 아래 신호들의 호출은 그 결과를 재사용한다.
+    빈 결과({})여도 *_done 플래그로 '시도함'을 기록해 같은 트랙 재-LLM호출(수 번의 LLM콜)을 막는다.
+    (oracle 답이 없으면 _ctx.ragas_fn 이 {} 를 돌려준다.)"""
     if _ctx.ragas_fn is None:
         return
     if track == "oracle":
