@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from core.state import AgentDoctorState
-from agents.optimize import planner, optimizer, config_mapper, history, reporter
+from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate
 from agents.optimize.schemas import (
     OptimizationHistoryItem,
     OptimizationRequest,
@@ -314,7 +314,7 @@ def _report_metrics(state: AgentDoctorState) -> dict:
     metrics = dict(state.report.ragas_scores)
     if state.report.overall_score is not None:
         metrics["overall_score"] = state.report.overall_score
-    metrics["pass_threshold"] = state.report.pass_threshold
+    metrics["pass_threshold"] = gate.passes_report(state.report)
     return metrics
 
 

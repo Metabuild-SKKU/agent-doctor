@@ -21,6 +21,7 @@ from agents.index.agent import run as index_run
 from agents.eval.agent import run as eval_run
 from agents.optimize.agent import run as optimize_run
 from agents.optimize import history   # 판정 대기(pending) 처방 조회용
+from agents.optimize import gate      # serve/optimize 게이트 정책(점수 + 검색 바닥선)
 from agents.serve.agent import run as serve_run
 
 try:
@@ -37,7 +38,7 @@ def route_after_eval(state: AgentDoctorState) -> str:
       반복 예산 소진 + 대기 없음       → Serve
       품질 미달(예산 남음)            → Optimize
     """
-    if state.report and state.report.pass_threshold:
+    if gate.passes_report(state.report):
         print(f"[Orchestrator] 품질 통과 ({state.report.overall_score}점) → Serve")
         return "serve"
 

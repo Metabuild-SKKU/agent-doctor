@@ -43,6 +43,7 @@ from typing import Any
 from core.state import AgentDoctorState
 from core.schema import Finding
 from agents.optimize import rules
+from agents.optimize import gate
 from agents.optimize.config_mapper import canonicalize_path, get_current_value
 from agents.optimize.schemas import (
     ConfigPatch,
@@ -193,7 +194,7 @@ def _decide_mode(
     manual_labels = [f.label for f in manual if f.label]
 
     report = state.report
-    if report is not None and report.pass_threshold:
+    if gate.passes_report(report):
         return OptimizeDecision(
             mode="use_current",
             status="already_optimal",
@@ -1134,7 +1135,7 @@ def _report_metrics(state: AgentDoctorState) -> dict[str, Any]:
     metrics: dict[str, Any] = dict(state.report.ragas_scores)
     if state.report.overall_score is not None:
         metrics["overall_score"] = state.report.overall_score
-    metrics["pass_threshold"] = state.report.pass_threshold
+    metrics["pass_threshold"] = gate.passes_report(state.report)
     return metrics
 
 

@@ -62,7 +62,11 @@ print(f"문서:   {len(state.documents)}개")
 print(f"청크:   {len(state.chunks)}개")
 print(f"프로브: {len(state.probes)}개")
 if state.report:
-    print(f"overall={state.report.overall_score}  pass={state.report.pass_threshold}")
+    from agents.optimize import gate
+    # score_pass = Eval 점수 판정, gate = serve/optimize 운영 게이트(점수 + 검색 바닥선)
+    print(f"overall={state.report.overall_score}  "
+          f"score_pass={state.report.pass_threshold}  "
+          f"gate_pass={gate.passes_report(state.report)}")
     print(f"findings_summary: {state.report.findings_summary}")
 print(f"index_config: {state.index_config}")
 print("\n전체 파이프라인 로컬 스모크 완료 [OK]")

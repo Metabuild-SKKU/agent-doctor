@@ -5,7 +5,9 @@ STEP5: 진단 리포트 생성
 설계 문서 'STEP 5: 진단 리포트' 구현.
 모든 Probe 판정 결과(EvalRecord)를 집계해 DiagnosticReport 를 만든다.
     - overall_score : RAGAS 가중 평균(있으면) / 없으면 규칙 지표 폴백
-    - pass_threshold: overall_score >= PASS_SCORE_THRESHOLD
+    - pass_threshold: overall_score >= PASS_SCORE_THRESHOLD (Eval 의 점수 판정, 관측용)
+                      주의: serve/optimize 운영 게이트는 agents/optimize/gate.py 가 소유한다
+                      (점수 + 검색 바닥선 등 정책). 이 필드는 그 정책의 점수 부분만 담는다.
     - ragas_scores  : RAGAS 평균 + 규칙 지표 평균 + 결과 분포(관측용)
     - findings      : 전 record 의 Finding 합침(확정 우선 정렬)
     - findings_summary: 확정/예비·라벨 집계(+진단 모드). Optimize 가 확정건 우선 처리하도록 요약
