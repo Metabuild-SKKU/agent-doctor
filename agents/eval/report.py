@@ -188,7 +188,8 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     print(f"[Eval] STEP5: 리포트 생성 - probe {n}개, 실패 {fail}개, "
           f"overall={report.overall_score}, pass={report.pass_threshold} (모드 {fs.get('mode')})")
     if report.findings:
-        # 타입 분포도 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
+        # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
+        # (타입=처방 그룹 4종, 라벨=세분화 진단명. 타입만 보면 gap 처럼 뭉뚱그려져 원인이 안 보인다.)
         by_type: dict[str, float] = {}
         for r in records:
             k = len(r.findings)
@@ -196,8 +197,14 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
                 continue
             for f in r.findings:
                 by_type[f.type] = round(by_type.get(f.type, 0.0) + 1.0 / k, 3)
+        # 라벨분포는 findings_summary 가 이미 같은 가중치로 집계한 값을 병합 재사용
+        by_label: dict[str, float] = {}
+        for src in (fs.get("confirmed_labels", {}), fs.get("preliminary_labels", {})):
+            for label, w in src.items():
+                by_label[label] = round(by_label.get(label, 0.0) + w, 3)
         print(f"[Eval]        Finding {len(report.findings)}개 "
               f"(확정 {fs.get('confirmed', 0)} / 예비 {fs.get('preliminary', 0)}), "
               f"가중 타입분포 {by_type}")
+        print(f"[Eval]        가중 라벨분포 {dict(sorted(by_label.items(), key=lambda kv: -kv[1]))}")
         if fs.get("preliminary"):
             print(f"[Eval]        예비 {fs['preliminary']}개는 더 깊은 모드(EVAL_MODE=deep/full)에서 확정 가능")
