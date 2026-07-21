@@ -118,6 +118,16 @@ PROBE_SOURCE_MADE = "made"
 PROBE_SOURCE_TAXONOMY = "taxonomy"
 
 
+def resolve_llm_concurrency() -> int:
+    """LLM 호출 동시 실행 수. 환경변수 EVAL_LLM_CONCURRENCY(기본 4, 최소 1).
+    1 이면 완전 순차(병렬화 이전 동작). Gemini 무료 티어처럼 분당 한도(RPM)가
+    낮은 provider 는 2~3 권장 — 429 재시도 로그가 잦으면 낮출 것."""
+    try:
+        return max(1, int(os.getenv("EVAL_LLM_CONCURRENCY", "4")))
+    except (TypeError, ValueError):
+        return 4
+
+
 def resolve_probe_source() -> str:
     """Probe 소스 스위치. EVAL_PROBE_SOURCE(auto|user_log|made|taxonomy), 미지정/오타면 "" (자동 판별)."""
     raw = os.getenv("EVAL_PROBE_SOURCE", "").strip().lower()

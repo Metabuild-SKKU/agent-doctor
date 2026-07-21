@@ -6,25 +6,59 @@ STEP1: Probe(골든 테스트셋) 영속화
 (Optimize 루프)마다 다시 생성할 필요가 없다 — 같은 코퍼스 버전이면 이전에 만든
 Probe 를 그대로 재사용(골든 테스트셋)한다.
 
-버전 키: agent.py::_pipeline_version 과 동일하게 "index_config + 코퍼스(청크 id 목록)"
-해시를 쓴다. Probe 생성은 index_config 에 의존하지 않지만(청크 텍스트만 씀), 같은
-해시를 재사용하면 별도 무효화 로직을 두 벌 관리하지 않아도 된다 — index_config 만
-바뀐 경우 불필요하게 재생성되는 손해보다, 캐시 무효화 로직이 어긋나 stale probe 를
-쓰는 위험을 피하는 쪽을 택했다.
+버전 키: corpus_version — 원문 문서(doc_id + content) 해시. Probe의 질문과
+gold_spans는 원문에 의존하므로 chunk_size/overlap이 바뀌어도 같은 Probe를 재사용하고,
+현재 청킹에 맞춰 gold_chunk_ids만 다시 계산한다. 원문 문서가 없는 legacy 호출만
+청크 id + 텍스트 해시를 사용한다. index_config(top_k 등)는 버전 키에서 제외한다.
+(진단 신호 캐시는 top_k 에 의존하므로 여전히 agent.py::_pipeline_version 을 쓴다.)
 
 파일 하나(JSON)에 {version, probes:[...]} 형태로 저장한다. probes 는 Probe 의
 필드를 그대로 dict 화한 것 — dataclass 이므로 asdict/생성자 재조립만으로 충분하다.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import asdict
 from pathlib import Path
 
-from core.schema import Probe
+from core.schema import Chunk, Document, Probe
 
 DEFAULT_STORE_PATH = "eval_probes.json"
+# gold_spans 생성 계약이 바뀌면 이전 Probe 캐시를 재사용하지 않는다.
+PROBE_SCHEMA_VERSION = "gold-spans-v2"
+
+
+def corpus_version(
+    chunks: list[Chunk],
+    documents: list[Document] | None = None,
+) -> str:
+    """Probe 캐시 무효화 키 — 원문 문서가 있으면 청킹 결과와 분리한다.
+
+    Probe 질문과 원문 gold_spans는 원문 문서에 의존하므로 documents가 있으면
+    doc_id+content를 해싱한다. 이 경우 chunk_size/overlap 변경은 버전을 바꾸지 않아
+    같은 Probe를 재사용하고 현재 청크에 gold_chunk_ids만 다시 맞출 수 있다.
+    documents가 없는 legacy 호출은 기존처럼 청크 id+텍스트를 해싱한다."""
+    h = hashlib.sha1()
+    h.update(PROBE_SCHEMA_VERSION.encode("utf-8"))
+    h.update(b"\x00")
+    if documents:
+        h.update(b"documents\x00")
+        for document in sorted(documents, key=lambda item: item.doc_id):
+            h.update(document.doc_id.encode("utf-8"))
+            h.update(b"\x00")
+            h.update((document.content or "").encode("utf-8"))
+            h.update(b"\x00")
+        return h.hexdigest()[:12]
+
+    h.update(b"chunks\x00")
+    for c in sorted(chunks, key=lambda c: c.chunk_id):
+        h.update(c.chunk_id.encode("utf-8"))
+        h.update(b"\x00")
+        h.update((c.text or "").encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()[:12]
 
 
 def save_probes(probes: list[Probe], version: str, path: str = DEFAULT_STORE_PATH) -> None:

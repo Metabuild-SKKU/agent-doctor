@@ -2,19 +2,20 @@
 agents/eval/agent.py
 Eval Agent — RAG 파이프라인 품질 진단
 
-읽기: state.chunks, state.user_questions, state.index_config, state.iteration
-쓰기: state.probes, state.report, state.iteration, state.status, state.error, state.current_agent
+읽기: state.documents, state.chunks, state.user_questions, state.index_config, state.iteration
+쓰기: state.probes, state.report, state.status, state.error, state.current_agent
 
 설계 문서(Evaluate Module)의 STEP 1~5 를 순서대로 실행한다:
     STEP1  Probe 생성            → probe_gen.generate_probes
     STEP2  각 Probe로 검색·생성   → retrieval.retrieve / generate_answer
     STEP3-1 규칙 지표            → diagnose 내부 _compute_metrics (recall_at_k / token_f1)
-    STEP3-2 LLM(RAGAS) 진단      → diagnose 내부 signals RAGAS 신호 (옵션, 기본 꺼짐)
+    STEP3-2 LLM(RAGAS) 진단      → diagnose 내부 _compute_ragas (DEEP 이상에서 전 probe 측정)
     STEP4  원인 판정(Finding)     → diagnose.diagnose
     STEP5  DiagnosticReport 생성  → report.build_report
 
 그 뒤 graph.route_after_eval() 이 report.pass_threshold 로 Serve/Optimize 를 정한다.
-반복 카운터(state.iteration)는 이 에이전트가 증가시킨다(측정 시점 = 반복 경계).
+반복 카운터(state.iteration)는 Optimize가 새 라벨 study를 시작할 때만 증가시킨다.
+Eval은 같은 라벨의 후보별 측정에서 카운터를 바꾸지 않는다.
 
 계약(AGENTS.md): run() 은 반드시 state 를 반환한다. 오류는 예외를 던지지 말고
 state.status="error" / state.error 에 기록하고 state 를 반환한다.
@@ -25,14 +26,17 @@ import hashlib
 import json
 
 from core.schema import Probe
+from core.llm_usage import print_summary
+from core.parallel import parallel_map
 from core.state import AgentDoctorState
 
 from agents.eval.types import (
     EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled,
-    resolve_probe_source, PROBE_SOURCE_MADE, PROBE_SOURCE_TAXONOMY,
+    resolve_llm_concurrency, resolve_probe_source,
+    PROBE_SOURCE_MADE, PROBE_SOURCE_TAXONOMY,
 )
-from agents.eval.probe_gen import generate_probes, uses_user_log
-from agents.eval.probe_store import save_probes, load_probes
+from agents.eval.probe_gen import generate_probes, uses_user_log, _resync_gold_chunk_ids
+from agents.eval.probe_store import save_probes, load_probes, corpus_version
 from agents.index.qdrant_store import keyword_search
 from agents.rag.generator import generate_answer
 from agents.rag.retriever import Retriever, get_retriever
@@ -46,7 +50,7 @@ def _retrieve_with_rag(retriever: Retriever, chunks, question: str, top_k: int) 
 
 
 def _ragas_track(record: EvalRecord, track: str) -> dict:
-    """diagnose 가 lazy 로 부르는 RAGAS 트랙 계산기(set_context 로 주입).
+    """diagnose 가 트랙별 1회 부르는 RAGAS 계산기(set_context 로 주입).
     비활성(EVAL_ENABLE_LLM)·키없음·실패 → {} 폴백. (DEEP 게이트는 diagnose 신호가 담당.)"""
     if not llm_eval_enabled():
         return {}
@@ -73,18 +77,21 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         print(f"[Eval] 오류: {state.error}")
         return state
 
-    # 반복 카운터 증가 (route_after_eval 의 종료 조건)
-    state.iteration += 1
-
     # 진단 모드(비용 tier 상한): EVAL_MODE 환경변수. STEP3-2/STEP4/리포트가 이 값으로 게이팅된다.
     mode = resolve_mode()
     print(f"[Eval] 진단 모드 = {mode} (1=fast·2=standard·3=deep·4=full)")
 
     # 진단 신호 캐시: 파이프라인 버전(index_config+코퍼스)이 바뀌면 무효화 → stale 재사용 방지.
+    # 진단 신호(예: gold_in_wider_candidates)는 top_k 로 검색한 결과에 의존하므로,
+    # 이 캐시는 index_config 를 포함하는 _pipeline_version 을 그대로 쓴다.
     version = _pipeline_version(state)
     if state.diagnosis_cache_version != version:
         state.diagnosis_cache = {}
         state.diagnosis_cache_version = version
+
+    # Probe 캐시는 원문 문서에 의존한다. top_k뿐 아니라 chunk_size가 바뀌어도 같은
+    # 질문/gold_spans를 유지하고, 불러온 뒤 현재 청크 기준 gold_chunk_ids만 재동기화한다.
+    probe_version = corpus_version(state.chunks, state.documents)
 
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
@@ -98,26 +105,36 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # (파일 없음/비었으면 자동 생성으로 폴백해 저장). user_questions 보다 우선한다.
         probe_source = resolve_probe_source()
         if probe_source == PROBE_SOURCE_MADE:
-            probes = load_probes(version, ignore_version=True)
+            probes = load_probes(probe_version, ignore_version=True)
             if probes:
+                probes = _resync_gold_chunk_ids(
+                    probes,
+                    state.chunks,
+                    state.documents,
+                )
                 print(f"[Eval] STEP1: made 소스 — 저장된 Probe {len(probes)}개 재사용")
             else:
                 print("[Eval] STEP1: made 소스지만 저장된 Probe 없음 → 자동 생성 후 저장")
                 probes = generate_probes(state)
-                save_probes(probes, version)
+                save_probes(probes, probe_version)
         elif probe_source == PROBE_SOURCE_TAXONOMY:
-            # taxonomy 는 version 키(index_config+청크)에 없는 입력(QA 파일·KORQUAD_MAX_DOCS/
-            # QA_LIMIT)에 좌우되므로 캐시를 타면 auto/다른 QA 의 Probe 를 재사용해 오염된다.
+            # taxonomy 는 probe_version 키(corpus_version=청크+문서)에 없는 입력(QA 파일·
+            # KORQUAD_MAX_DOCS/QA_LIMIT)에 좌우되므로 캐시를 타면 auto/다른 QA 의 Probe 를 재사용해 오염된다.
             # 파일 로드+resync 는 LLM 없이 저비용이라 매번 새로 만든다(캐시 우회).
             probes = generate_probes(state)
         elif uses_user_log(state):
             probes = generate_probes(state)
         else:
-            probes = load_probes(version)
+            probes = load_probes(probe_version)
             if probes is None:
                 probes = generate_probes(state)
-                save_probes(probes, version)
+                save_probes(probes, probe_version)
             else:
+                probes = _resync_gold_chunk_ids(
+                    probes,
+                    state.chunks,
+                    state.documents,
+                )
                 print(f"[Eval] STEP1: 저장된 Probe {len(probes)}개 재사용(버전 일치)")
         if not probes:
             print("[Eval] 경고: Probe 0개 생성 → 평가 불가, 통과 처리")
@@ -142,13 +159,38 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
         #   진단 중 계산한 비싼 신호가 state 에 누적되어 재진단 시 재사용된다.
+        #   LLM 호출(답변 생성)만 병렬화하고 검색·진단은 순차 유지 — Qdrant/임베딩/
+        #   signals 전역이 병렬 구간에 들어가지 않게 하는 설계(계획 B안).
         print(f"\n[Eval] STEP2-4: probe별 평가 ({len(probes)}개)\n")
+
+        # Phase A(순차): 검색 + record 준비, 답변 생성 태스크 수집
         records = []
-        for i, p in enumerate(probes, 1):
-            rec = _evaluate_probe(p, retriever, state.chunks, chunk_text, top_k, mode,
+        gen_tasks: list[tuple[EvalRecord, str, list[str]]] = []
+        for p in probes:
+            rec = _prepare_record(p, retriever, chunk_text, top_k,
                                   state.diagnosis_cache.setdefault(p.probe_id, {}))
-            _log_probe(i, len(probes), rec)
             records.append(rec)
+            gen_tasks.append((rec, "real", rec.retrieved_context))
+            if rec.oracle_context:  # gold context 가 있을 때만 Oracle 트랙 (기존 동일)
+                gen_tasks.append((rec, "oracle", rec.oracle_context))
+
+        # Phase B(병렬): LLM 답변 생성만 동시 실행 (EVAL_LLM_CONCURRENCY, 1이면 순차)
+        concurrency = resolve_llm_concurrency()
+        if concurrency > 1 and len(gen_tasks) > 1:
+            print(f"[Eval] STEP2: 답변 생성 {len(gen_tasks)}건 병렬 실행 (동시성 {concurrency})")
+        answers = parallel_map(lambda t: generate_answer(t[0].probe.question, t[2]),
+                               gen_tasks, concurrency)
+        for (rec, track, _ctx), answer in zip(gen_tasks, answers):
+            if track == "real":
+                rec.generated_answer = answer
+            else:
+                rec.oracle_answer = answer
+
+        # Phase C(순차): 지표·진단·로그 — diagnose 는 signals 전역·진단 캐시·tier2
+        # 재검색을 쓰므로 병렬 구간 밖에서 실행한다.
+        for i, rec in enumerate(records, 1):
+            rec.findings = diagnose(rec, mode)
+            _log_probe(i, len(records), rec)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
         state.probes = probes
@@ -160,6 +202,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.error = f"평가 실패: {e}"
         print(f"[Eval] 오류: {e}")
 
+    print_summary(tag="Eval")
     return state
 
 
@@ -224,16 +267,16 @@ def _pipeline_version(state: AgentDoctorState) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
-def _evaluate_probe(
+def _prepare_record(
     probe: Probe,
     retriever: Retriever,
-    chunks: list,
     chunk_text: dict[str, str],
     top_k: int,
-    mode: int,
     sig_cache: dict,
 ) -> EvalRecord:
-    """한 Probe 에 대해 검색·생성·지표·판정을 수행하고 EvalRecord 반환.
+    """[STEP2 Phase A·순차] 검색을 수행하고 답변 생성 직전까지의 EvalRecord 를 준비한다.
+    답변 생성(LLM)은 run() 의 Phase B 에서 병렬로, 지표·진단(STEP3~4, diagnose)은
+    Phase C 에서 순차로 이어진다 — record 는 raw I/O(검색·생성 결과)만 담는다.
     sig_cache 는 state.diagnosis_cache[probe_id] 뷰 — 진단 신호 memoize 가 여기(=state)에 누적된다."""
     rec = EvalRecord(probe=probe, signals=sig_cache)
 
@@ -243,17 +286,8 @@ def _evaluate_probe(
     rec.retrieved_context = [h.get("text", "") for h in hits]
     rec.retrieved_chunk_ids = [h.get("chunk_id", "") for h in hits]
 
-    # STEP2: 답변 생성 (실제 트랙)
-    rec.generated_answer = generate_answer(probe.question, rec.retrieved_context)
-
-    # STEP2: Oracle 답변 (gold context 가 있을 때만)
+    # Oracle 트랙 컨텍스트 (gold context 가 있을 때만 — 답변은 Phase B 에서 생성)
     gold_ctx = [chunk_text[cid] for cid in probe.gold_chunk_ids if cid in chunk_text]
     if gold_ctx:
         rec.oracle_context = gold_ctx
-        rec.oracle_answer = generate_answer(probe.question, gold_ctx)
-
-    # STEP3-1(지표)·STEP3-2(RAGAS)·STEP4(진단)는 전부 diagnose 안에서 계산·판정한다.
-    # 구조를 계산 -> diagnose에서 diagnose -> 모든 계산으로 변경함.
-    #   agent 는 STEP2(파이프라인 실행)까지만 — record 는 raw I/O(검색·생성 결과)만 담는다.
-    rec.findings = diagnose(rec, mode)
     return rec

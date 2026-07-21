@@ -280,7 +280,7 @@ agents/eval/
 ├── types.py           # EvalRecord(내부 중간결과) · Mode(tier) · 상수
 ├── signals.py         # 판별 신호 레이어 — 옛 브랜치 판정을 대체하는 전제 함수 + tier1~4 판별 신호(memoize)
 ├── probe_gen.py       # STEP1  Probe 생성(user_log/RAGAS 4분면/DataMorgana-lite/무응답)
-├── probe_store.py     # STEP1  eval_probes.json 영속화(코퍼스 버전 불변 시 재사용)
+├── probe_store.py     # STEP1  eval_probes.json 영속화(원문 문서 버전 불변 시 재사용)
 ├── knowledge_graph.py # STEP1  청크 간 관계 그래프(RAGAS 멀티홉 후보 탐색용, 휴리스틱 전용)
 ├── llm_provider.py    # LLM 호출 추상화(OpenAI/Gemini/GitHub Models) — probe_gen/metrics_ragas 공용
 ├── metrics.py         # STEP3-1 규칙 지표(Recall@k/token F1/Oracle F1) 순수 함수
@@ -297,7 +297,8 @@ agents/eval/
 1. **Probe 자동생성** (`probe_gen.py`, `knowledge_graph.py`, `probe_store.py`) — ✅ 배선 완료.
    `generate_probes()`가 `_allocate_budget()` 비율(75% RAGAS 4분면 / 20% DataMorgana-lite /
    5% 무응답)대로 실제로 섞어 생성하고, `probe_store.py`가 `eval_probes.json`으로 캐시해
-   코퍼스가 안 바뀌면 재사용한다(매 Optimize 반복마다 LLM 재호출 방지). 세부:
+   원문 문서가 안 바뀌면 재사용한다. 재청킹 후에도 같은 질문과 `gold_spans`를 유지하고
+   현재 청크 기준 `gold_chunk_ids`만 다시 맞춘다(매 Optimize 반복마다 LLM 재호출 방지). 세부:
    - `knowledge_graph.py` — 청크 간 관계 그래프(키워드 Jaccard + 임베딩 코사인, LLM 미사용)와
      `connected_pairs()`로 멀티홉 후보 탐색.
    - `_generate_ragas_probes`(`probe_gen.py`) — 그래프 기반 단일홉(구체/추상) + 멀티홉
@@ -309,9 +310,9 @@ agents/eval/
      `ground_truth=None` probe를 만들어 `_no_diagnosis`/`is_abstention` 게이팅이 "정답 없음을
      올바르게 기권"과 "무응답인데 답을 지어내는 생성 실패"를 구분해 진단할 수 있게 함.
    - `_build_doc_position_index`/`_locate_span`/`_resync_gold_chunk_ids` — `gold_spans`(원문
-     절대 좌표) 기준으로 재청킹 후에도 `gold_chunk_ids`를 다시 맞추는 유틸. `_generate_ragas_probes`가
-     만드는 probe는 아직 `gold_spans`를 채우지 않아 현재는 사실상 no-op(외부 taxonomy 소스가
-     `gold_spans`를 채울 때 실효).
+     절대 좌표) 기준으로 재청킹 후에도 `gold_chunk_ids`를 다시 맞추는 유틸. RAGAS와
+     DataMorgana 생성기는 LLM의 exact evidence quote를 source chunk 안에서 찾아 좌표를
+     채우며, evidence가 없으면 source chunk 좌표로 폴백한다.
    - 남은 일: `state.user_questions` 없이 taxonomy(사람 작성) 소스 자체를 만드는 부분은 미착수.
 2. **LLM Provider** (`llm_provider.py`) — ✅ 구현됨. OpenAI 토큰 승인 전 무료 대체용 브릿지.
    `EVAL_LLM_PROVIDER=openai|gemini|github` 로 전환, `probe_gen.py`/`retrieval_temp.py`/
@@ -326,7 +327,10 @@ agents/eval/
    엔지니어링·컨텍스트 랭킹 등 고도화는 rag 모듈 쪽 과제.
 5. **Reranker** — Bi-Encoder 후 Cross-Encoder 재정렬(2차 개선). Index 검색이 담당하게 될 영역.
    README 작성 시점 기준 우선순위 낮음.
-6. **STEP4 라벨 세트 확장** (`diagnose.py`) — Notion 설계 문서엔 현재 16개(A/B/C/D)보다 많은
+6. **STEP4 라벨 세트 확장** (`diagnose.py`) — `chunking_context_mismatch`는 구현됨.
+   exact `gold_spans`가 현재 청크들의 합집합에는 포함되지만 한 청크에는 온전히 포함되지
+   않는 검색 실패를 FAST 모드에서 확정한다(LLM·추가 검색 불필요). 그 밖에 Notion 설계
+   문서엔 현재 라벨보다 많은
    후보 라벨이 있다(`chunking_*`, `reranker_*`, `generation_contradiction/misinterpretation/
    abstention_failure/parametric_overreliance/numerical_error` 등). `generation_contradiction`은
    `metrics_ragas.py::evaluate_aspect_critics`가 이미 `record.aspect["contradiction"]`을 계산해둬서

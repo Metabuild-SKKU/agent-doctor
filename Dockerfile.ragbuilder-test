@@ -1,0 +1,25 @@
+# AgentDoctor RAGBuilder adapter 전용 테스트 이미지
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+# 앱 전체 의존성과 분리해 adapter 검증에 필요한 RAGBuilder 버전만 고정한다.
+COPY requirements.ragbuilder-test.txt ./
+RUN python -m pip install --upgrade pip \
+    && python -m pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu \
+    && python -m pip install -r requirements.ragbuilder-test.txt
+
+# adapter가 직접 import하는 optimize 모듈과 해당 테스트만 이미지에 포함한다.
+COPY agents/__init__.py ./agents/__init__.py
+COPY agents/optimize ./agents/optimize
+COPY tests/test_ragbuilder_adapter.py ./tests/test_ragbuilder_adapter.py
+
+# 빌드 단계에서 패키지 설치와 공개 진입점 import를 먼저 검증한다.
+RUN python -c "import importlib.metadata as m; from ragbuilder import RAGBuilder; assert m.version('ragbuilder') == '0.1.6'"
+
+CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_ragbuilder_adapter.py", "-v"]
