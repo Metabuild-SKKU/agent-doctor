@@ -98,11 +98,18 @@ def _summarize_stage_event(stage: str, snapshot: AgentDoctorState) -> tuple[str,
     return (stage, "진행 중", "")
 
 
+# index.html 이 노출하는 depth 선택지(fast/standard/full) → EVAL_MODE 매핑.
+# "full"은 UI 상 가장 깊은 진단이므로 EVAL_MODE=deep 이상에서만 켜지는 RAGAS까지 실행한다.
+_DEPTH_TO_EVAL_MODE = {"fast": "fast", "standard": "standard", "full": "deep"}
+
+
 def _run_pipeline_background(run_id: str, file_path: Path, depth: str) -> None:
     from core.run_logger import setup_run_logging
     setup_run_logging(prefix="web_run")  # Windows 콘솔 인코딩 문제로 print 가 예외를 던지지 않도록 보호
 
-    os.environ["EVAL_MODE"] = "standard"
+    eval_mode = _DEPTH_TO_EVAL_MODE.get(depth, "standard")
+    os.environ["EVAL_MODE"] = eval_mode
+    os.environ["EVAL_ENABLE_LLM"] = "1" if eval_mode in ("deep", "full") else "0"
 
     run_registry.update(run_id, status="running")
     graph = build_graph()

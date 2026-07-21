@@ -7,9 +7,17 @@ I/O 없는 순수 함수 모음. report.html 의 렌더 함수(mHtml/rxCard/dxLi
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
 from core.state import AgentDoctorState
+
+_EVAL_MODE_LABELS = {
+    "fast": "빠른 검진",
+    "standard": "표준 검진",
+    "deep": "정밀 검진",
+    "full": "정밀 검진",
+}
 
 _METRIC_LABELS = {
     "faithfulness": ("충실도", "답이 근거 문서에 충실한 정도. 낮으면 지어낼 위험이 있습니다."),
@@ -36,14 +44,14 @@ def build_report_view(state: AgentDoctorState) -> dict[str, Any]:
     return {
         "meta": {
             "corpus": _corpus_label(state),
-            "depth": state.index_config.get("_eval_mode_label", "표준 검진"),
+            "depth": _EVAL_MODE_LABELS.get(os.getenv("EVAL_MODE", "").strip().lower(), "표준 검진"),
             "question_count": len(state.probes),
             "created_at": report.created_at.isoformat() if report else "",
         },
         "score": {
-            "before": round(overall_before, 1),
-            "after": round(overall_after, 1),
-            "delta": round(overall_after - overall_before, 1),
+            "before": _to_100(overall_before),
+            "after": _to_100(overall_after),
+            "delta": round(_to_100(overall_after) - _to_100(overall_before), 1),
             "pass_threshold": bool(report and report.pass_threshold),
             "findings_count": len(findings),
             "kept": kept,
@@ -73,6 +81,11 @@ def _corpus_label(state: AgentDoctorState) -> str:
         if title:
             return title
     return state.source_url or "업로드된 문서"
+
+
+def _to_100(score_0_to_1: float) -> float:
+    """Eval overall_score(0~1 스케일)를 리포트 표시용 100점 만점으로 변환한다."""
+    return round(score_0_to_1 * 100, 1)
 
 
 def _first_score(history: list, fallback: float) -> float:
@@ -128,18 +141,18 @@ def _build_metrics(report, history: list) -> list[dict[str, Any]]:
 
 
 def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
-    points = [{"label": "기준선", "score": round(baseline_score, 1), "kept": True}]
+    points = [{"label": "기준선", "score": _to_100(baseline_score), "kept": True}]
     for idx, item in enumerate(history, start=1):
         before = item.metadata.get("before_score", baseline_score)
         after = item.metadata.get("after_score", before)
         kept = item.status == "applied" and not item.metadata.get("pending")
         point = {
             "label": f"Rx{idx} · {item.selected_prescription_id or ''}",
-            "score": round(after if kept else before, 1),
+            "score": _to_100(after if kept else before),
             "kept": kept,
         }
         if not kept:
-            point["roll"] = round(after, 1)
+            point["roll"] = _to_100(after)
         points.append(point)
     return points
 
@@ -174,8 +187,8 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             "target": ", ".join(item.failure_labels),
             "reason": ["처방 근거", item.reason or ""],
             "score": [
-                str(round(before_score, 1)),
-                str(round(after_score, 1)),
+                str(_to_100(before_score)),
+                str(_to_100(after_score)),
                 direction,
             ],
             "verdict": (

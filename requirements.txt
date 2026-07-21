@@ -17,6 +17,7 @@ hwp5                   # HWP parsing
 mcp[cli]               # MCP server (incl. FastMCP)
 fastapi
 uvicorn
+python-multipart        # FastAPI UploadFile parsing (web_api.py PDF upload)
 openai
 
 # Index Agent
