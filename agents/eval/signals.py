@@ -19,7 +19,12 @@ from agents.eval.types import (
     Mode, EvalRecord, DEFAULT_TOP_K, F1_PASS_THRESHOLD,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
 )
-from agents.eval.metrics import recall_at_k, token_f1, is_abstention   # STEP3-1 지표(diagnose 이관)
+from agents.eval.metrics import (
+    recall_at_k,
+    span_recall_at_k,
+    token_f1,
+    is_abstention,
+)
 
 
 # ── 진단 모드 (현재 실행의 tier 상한) — diagnose() 가 set_mode 로 설정 ──
@@ -91,7 +96,16 @@ def _compute_metrics(record: EvalRecord) -> None:
     """규칙 지표(recall/f1/oracle_f1)를 record 에 계산·저장. (agent STEP3-1 이관, diagnose 진입 시 1회.)
     전제 헬퍼·report 가 record.recall_at_k / f1_score / oracle_f1 로 읽는다."""
     gt = record.probe.ground_truth
-    record.recall_at_k = recall_at_k(record.probe.gold_chunk_ids, record.retrieved_chunk_ids)
+    span_recall = span_recall_at_k(
+        record.probe.gold_spans,
+        record.retrieved_chunk_ids,
+        _ctx.chunks,
+    )
+    record.recall_at_k = (
+        span_recall
+        if span_recall is not None
+        else recall_at_k(record.probe.gold_chunk_ids, record.retrieved_chunk_ids)
+    )
     record.f1_score = token_f1(record.generated_answer, gt) if gt else 0.0
     record.oracle_f1 = token_f1(record.oracle_answer, gt) if (gt and record.oracle_answer) else 0.0
 
@@ -263,6 +277,117 @@ def _gold_span_boundary_analysis(record: EvalRecord):
         }
 
     return _cache(record, "gold_span_boundary_analysis", compute)
+
+
+def _merged_span_text(span: dict, chunks: list) -> str | None:
+    """검색된 청크 조각을 원문 좌표 순서로 이어 gold span 텍스트를 복원한다."""
+
+    start, end = span["start"], span["end"]
+    pieces: list[tuple[int, int, str]] = []
+    for chunk in chunks:
+        if getattr(chunk, "doc_id", None) != span["doc_id"]:
+            continue
+        position = _chunk_char_span(chunk)
+        text = getattr(chunk, "text", None)
+        if position is None or not isinstance(text, str):
+            continue
+        chunk_start, chunk_end = position
+        if len(text) != chunk_end - chunk_start:
+            # 좌표와 텍스트 길이가 다르면 안전하게 재구성할 수 없다.
+            continue
+        piece_start = max(start, chunk_start)
+        piece_end = min(end, chunk_end)
+        if piece_start < piece_end:
+            pieces.append((
+                piece_start,
+                piece_end,
+                text[piece_start - chunk_start:piece_end - chunk_start],
+            ))
+
+    cursor = start
+    merged: list[str] = []
+    while cursor < end:
+        eligible = [piece for piece in pieces if piece[0] <= cursor < piece[1]]
+        if not eligible:
+            return None
+        piece_start, piece_end, text = max(eligible, key=lambda piece: piece[1])
+        offset = cursor - piece_start
+        take = piece_end - cursor
+        merged.append(text[offset:offset + take])
+        cursor = piece_end
+    return "".join(merged)
+
+
+def _boundary_merged_context(record: EvalRecord) -> list[str] | None:
+    """검색 context에서 분할 gold 조각만 하나의 연속 문맥으로 교체한다."""
+
+    retrieved_by_id = {
+        chunk.chunk_id: chunk
+        for chunk in _ctx.chunks
+        if chunk.chunk_id in set(record.retrieved_chunk_ids)
+    }
+    retrieved_chunks = list(retrieved_by_id.values())
+    merged_texts: list[str] = []
+    affected_ids: set[str] = set()
+    for span in _exact_probe_gold_spans(record):
+        positions = [
+            (_chunk_char_span(chunk), chunk)
+            for chunk in retrieved_chunks
+            if chunk.doc_id == span["doc_id"]
+        ]
+        if any(
+            position is not None
+            and position[0] <= span["start"]
+            and position[1] >= span["end"]
+            for position, _chunk in positions
+        ):
+            continue
+        merged = _merged_span_text(span, retrieved_chunks)
+        if not merged:
+            return None
+        merged_texts.append(merged)
+        for position, chunk in positions:
+            if (
+                position is not None
+                and position[0] < span["end"]
+                and position[1] > span["start"]
+            ):
+                affected_ids.add(chunk.chunk_id)
+    if not merged_texts or not affected_ids:
+        return None
+
+    affected_indices = [
+        index
+        for index, chunk_id in enumerate(record.retrieved_chunk_ids)
+        if chunk_id in affected_ids
+    ]
+    if not affected_indices:
+        return None
+    first = min(affected_indices)
+    contexts: list[str] = []
+    for index, (chunk_id, context) in enumerate(
+        zip(record.retrieved_chunk_ids, record.retrieved_context)
+    ):
+        if index == first:
+            contexts.extend(merged_texts)
+        if chunk_id not in affected_ids:
+            contexts.append(context)
+    return contexts
+
+
+def _boundary_merge_helps(record: EvalRecord):
+    """[tier4] 분할된 gold 조각만 이어 붙이면 실제 답변 품질이 회복되는지 확인한다."""
+
+    if _active_mode < Mode.FULL or _ctx.generate_fn is None:
+        return None
+
+    def compute():
+        contexts = _boundary_merged_context(record)
+        if not contexts:
+            return None
+        return _ablation_helps(record, contexts)
+
+    return _cache(record, "boundary_merge_helps", compute)
 
 
 # ── tier1 · 순수 규칙 (자원: 이미 계산된 지표/probe 메타 — 추가 조회 없음) ──

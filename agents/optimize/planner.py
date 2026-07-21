@@ -980,8 +980,19 @@ def _finding_search_space(
     for raw_path, fallback_values in fallback.items():
         path = canonicalize_path(raw_path)
         supplied_values = supplied.get(path)
-        values = supplied_values or grounded.get(raw_path) or grounded.get(path)
-        resolved[path] = list(values) if values else list(fallback_values)
+        grounded_values = grounded.get(raw_path) or grounded.get(path)
+        values = supplied_values or grounded_values
+        label = findings[0].label if findings else ""
+        blocks_symbolic_fallback = (
+            label == "chunking_context_mismatch"
+            and path == "chunker.chunk_overlap"
+            and isinstance(grounding_metadata, dict)
+            and grounding_metadata.get("status") != "grounded"
+        )
+        if values:
+            resolved[path] = list(values)
+        elif not blocks_symbolic_fallback:
+            resolved[path] = list(fallback_values)
         if supplied_values and path in {
             "chunker.chunk_size",
             "chunker.chunk_overlap",

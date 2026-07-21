@@ -41,6 +41,7 @@ from agents.eval.signals import (
     _faith, _faith_oracle, _rel, _rel_oracle, _both_high,
     _context_shorten_helps, _gold_front_helps, _noise_removal_helps,
     _bridge_decompose_recovers, _gold_span_boundary_analysis,
+    _boundary_merge_helps,
 )
 
 
@@ -102,20 +103,26 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
 def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     """정답 근거가 현재 청크 경계에 나뉘어 한 청크에 온전히 없음을 판정한다.
 
-    gold span과 현재 청크의 원문 좌표만 비교하므로 FAST 모드에서도 확정할 수
-    있다. 검색이 실제로 실패한 경우에만 원인 후보로 채택한다.
+    gold span과 현재 청크의 원문 좌표만 비교해 경계 분할 후보를 찾는다.
+    검색이 실패했다면 FAST에서도 확정하고, 검색은 성공했지만 답변이 실패했다면
+    FULL 모드에서 분할 조각 병합 재생성으로 실제 원인인지 확인한다.
     """
 
-    if not _retrieval_failed(record):
-        return None
     analysis = _gold_span_boundary_analysis(record)
     if not isinstance(analysis, dict) or analysis.get("boundary_split_count", 0) <= 0:
         return None
+    confirmed = False
+    if _retrieval_failed(record):
+        confirmed = True
+    elif _context_applicable(record):
+        helps = _boundary_merge_helps(record)
+        if helps is False:
+            return None
+        confirmed = helps is True
+    else:
+        return None
     finding = _finding(
-        record,
-        "chunking_context_mismatch",
-        "retrieval_failure",
-        confirmed=True,
+        record, "chunking_context_mismatch", "retrieval_failure", confirmed
     )
     finding.metadata["boundary_analysis"] = dict(analysis)
     return finding

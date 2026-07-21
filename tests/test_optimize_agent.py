@@ -9,6 +9,7 @@ Eval 이 report 를 갱신하는 것을 손으로 흉내 내 검증한다.
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -36,7 +37,7 @@ import graph
 from core.schema import DiagnosticReport, Finding
 from core.state import AgentDoctorState
 from agents.optimize import agent, history
-from agents.optimize.schemas import OptimizationHistoryItem
+from agents.optimize.schemas import OptimizationHistoryItem, OptimizationResult
 
 
 def make_report(overall, pass_threshold=False, label="too_long_context"):
@@ -77,6 +78,39 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertEqual(state.status, "manual_required")
         self.assertEqual(state.iteration, 0)  # 수동 경로는 iteration 미소비
         self.assertEqual(state.index_config, before)
+
+    def test_prescreener_baseline_selection_tries_the_next_prescription(self):
+        state = make_state(label="chunking_context_mismatch", chunk_size=400)
+        state.report.findings[0].metadata["parameter_candidates"] = {
+            "chunker.chunk_overlap": [50, 75]
+        }
+        real_optimizer_run = agent.optimizer.run
+        calls = []
+
+        def select_baseline_once(request):
+            calls.append(request)
+            if len(calls) == 1:
+                return OptimizationResult(
+                    request_id=request.request_id,
+                    status="skipped",
+                    optimizer="internal",
+                    selected_candidate=request.candidates[0],
+                    metadata={"error_code": "baseline_selected"},
+                )
+            return real_optimizer_run(request)
+
+        with patch("agents.optimize.agent.optimizer.run", side_effect=select_baseline_once):
+            result_state = agent.run(state)
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn(
+            ("chunking_context_mismatch", "increase_chunk_overlap"),
+            result_state.blacklist,
+        )
+        self.assertEqual(result_state.index_config["chunk_overlap"], 50)
+        self.assertEqual(result_state.index_config["chunk_size"], 800)
+        self.assertEqual(result_state.status, "applied")
+        self.assertEqual(result_state.iteration, 1)
 
     def test_always_returns_state_even_without_report(self):
         result = agent.run(AgentDoctorState(report=None, index_config={}, iteration=0))

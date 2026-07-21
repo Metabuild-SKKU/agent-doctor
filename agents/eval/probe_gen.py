@@ -642,7 +642,9 @@ def _resync_gold_chunk_ids(
 ) -> list[Probe]:
     """
     probe.gold_spans(원문 절대 좌표, 재청킹해도 불변)를 기준으로 현재 chunks 와
-    구간이 겹치는 청크 id를 다시 찾아 probe.gold_chunk_ids 를 갱신한다(in-place + 반환).
+    대응하는 최소 청크 id를 다시 찾아 probe.gold_chunk_ids 를 갱신한다(in-place + 반환).
+    span 전체를 포함하는 청크가 있으면 문맥 낭비가 가장 작은 하나를 고르고,
+    없으면 span을 빈틈없이 덮는 최소 분할 청크 조합을 고른다.
     gold_spans 가 없는 probe는 건드리지 않는다(기존 legacy 경로 그대로 유지).
 
     [설계 편차] 최초 계획엔 "state.chunks만 있으면 되고 state.documents는 필요 없다"고
@@ -659,6 +661,50 @@ def _resync_gold_chunk_ids(
             position_cache[doc_id] = _build_doc_position_index(doc, chunks) if doc else []
         return position_cache[doc_id]
 
+    def _minimal_gold_ids(
+        positions: list[tuple[str, int, int]],
+        span_start: int,
+        span_end: int,
+    ) -> list[str]:
+        """span을 대표하는 단일 포함 청크 또는 최소 연속 커버를 반환한다."""
+
+        containing = [
+            item
+            for item in positions
+            if item[1] <= span_start and item[2] >= span_end
+        ]
+        if containing:
+            best = min(
+                containing,
+                key=lambda item: (item[2] - item[1], item[1], item[0]),
+            )
+            return [best[0]]
+
+        intersections = sorted(
+            (
+                chunk_id,
+                max(span_start, chunk_start),
+                min(span_end, chunk_end),
+            )
+            for chunk_id, chunk_start, chunk_end in positions
+            if chunk_start < span_end and chunk_end > span_start
+        )
+        selected: list[str] = []
+        cursor = span_start
+        while cursor < span_end:
+            eligible = [
+                item
+                for item in intersections
+                if item[1] <= cursor < item[2]
+            ]
+            if not eligible:
+                # 좌표 사이에 빈틈이 있으면 정보 손실을 피하려고 모든 교차 청크를 유지한다.
+                return [item[0] for item in intersections]
+            best = max(eligible, key=lambda item: (item[2], -item[1]))
+            selected.append(best[0])
+            cursor = best[2]
+        return selected
+
     for probe in probes:
         if not probe.gold_spans:
             continue
@@ -666,11 +712,19 @@ def _resync_gold_chunk_ids(
         for span in probe.gold_spans:
             doc_id = span.get("doc_id")
             s_start, s_end = span.get("start"), span.get("end")
-            if doc_id is None or s_start is None or s_end is None:
+            if (
+                not isinstance(doc_id, str)
+                or isinstance(s_start, bool)
+                or isinstance(s_end, bool)
+                or not isinstance(s_start, int)
+                or not isinstance(s_end, int)
+                or s_start < 0
+                or s_end <= s_start
+            ):
                 continue
-            for chunk_id, c_start, c_end in _position_index(doc_id):
-                if c_start < s_end and c_end > s_start:  # 구간 겹침
-                    matched.append(chunk_id)
+            matched.extend(
+                _minimal_gold_ids(_position_index(doc_id), s_start, s_end)
+            )
         # 매번 현재 청킹 결과로 교체한다. 매칭이 없을 때도 이전 청크 ID를 남기지 않는다.
         probe.gold_chunk_ids = list(dict.fromkeys(matched))  # 순서 유지 dedupe
     return probes

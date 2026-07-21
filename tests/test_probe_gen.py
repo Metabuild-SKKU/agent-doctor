@@ -349,6 +349,44 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
 
         self.assertEqual(probe.gold_chunk_ids, ["new_1"])
 
+    def test_resync_prefers_one_chunk_that_fully_contains_the_span(self):
+        content = "가" * 1000
+        document = Document("d1", "memory", "txt", content)
+        probe = Probe(
+            probe_id="p1",
+            question="질문",
+            source="taxonomy",
+            gold_chunk_ids=["old_0", "old_1"],
+            gold_spans=[{"doc_id": "d1", "start": 325, "end": 450}],
+        )
+        chunks = [
+            Chunk("c0", "d1", content[0:400], char_span=(0, 400)),
+            Chunk("c1", "d1", content[275:675], char_span=(275, 675)),
+        ]
+
+        _resync_gold_chunk_ids([probe], chunks, [document])
+
+        self.assertEqual(probe.gold_chunk_ids, ["c1"])
+
+    def test_resync_uses_minimum_continuous_cover_when_no_chunk_contains_span(self):
+        content = "가" * 1000
+        document = Document("d1", "memory", "txt", content)
+        probe = Probe(
+            probe_id="p1",
+            question="질문",
+            source="taxonomy",
+            gold_spans=[{"doc_id": "d1", "start": 350, "end": 450}],
+        )
+        chunks = [
+            Chunk("c0", "d1", content[0:400], char_span=(0, 400)),
+            Chunk("redundant", "d1", content[300:380], char_span=(300, 380)),
+            Chunk("c1", "d1", content[400:800], char_span=(400, 800)),
+        ]
+
+        _resync_gold_chunk_ids([probe], chunks, [document])
+
+        self.assertEqual(probe.gold_chunk_ids, ["c0", "c1"])
+
     def test_resync_clears_stale_ids_when_no_current_chunk_matches(self):
         document = Document("d1", "memory", "txt", "짧은 문서")
         probe = Probe(

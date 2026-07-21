@@ -2,7 +2,7 @@ import unittest
 
 from agents.eval import diagnose, signals
 from agents.eval.types import EvalRecord, Mode
-from agents.optimize import planner
+from agents.optimize import optimizer, planner
 from agents.optimize.adapters.chunk_prescreener import run as run_prescreener
 from core.schema import Chunk, DiagnosticReport, Document, Finding, Probe
 from core.state import AgentDoctorState
@@ -98,6 +98,71 @@ class ChunkBoundaryDiagnosisTest(unittest.TestCase):
             finding.label == "chunking_context_mismatch" for finding in findings
         ))
 
+    def test_recall_success_but_split_context_is_preliminary_in_fast_mode(self):
+        chunks = _fixed_chunks("d1", 1000, 400, 0)
+        signals.set_context(chunks=chunks)
+        probe = Probe(
+            probe_id="p1",
+            question="정답은?",
+            source="taxonomy",
+            answer_exists=True,
+            ground_truth="정답",
+            gold_chunk_ids=[chunks[0].chunk_id, chunks[1].chunk_id],
+            gold_spans=[{"doc_id": "d1", "start": 350, "end": 450}],
+            metadata={"span_grounding": {"status": "exact"}},
+        )
+        record = EvalRecord(
+            probe=probe,
+            retrieved_chunk_ids=[chunks[0].chunk_id, chunks[1].chunk_id],
+            retrieved_context=[chunks[0].text, chunks[1].text],
+            generated_answer="오답",
+            oracle_answer="정답",
+        )
+
+        findings = diagnose.diagnose(record, Mode.FAST)
+        finding = next(
+            item for item in findings if item.label == "chunking_context_mismatch"
+        )
+
+        self.assertEqual(record.recall_at_k, 1.0)
+        self.assertFalse(finding.confirmed)
+
+    def test_boundary_merge_ablation_confirms_recall_success_case(self):
+        chunks = [
+            Chunk("c0", "d1", "가" * 400, char_span=(0, 400)),
+            Chunk("c1", "d1", "나" * 400, char_span=(400, 800)),
+        ]
+        merged_evidence = "가" * 50 + "나" * 50
+
+        def generate(_question, contexts):
+            return "정답" if merged_evidence in contexts else "오답"
+
+        signals.set_context(chunks=chunks, generate_fn=generate)
+        probe = Probe(
+            probe_id="p1",
+            question="정답은?",
+            source="taxonomy",
+            answer_exists=True,
+            ground_truth="정답",
+            gold_chunk_ids=["c0", "c1"],
+            gold_spans=[{"doc_id": "d1", "start": 350, "end": 450}],
+            metadata={"span_grounding": {"status": "exact"}},
+        )
+        record = EvalRecord(
+            probe=probe,
+            retrieved_chunk_ids=["c0", "c1"],
+            retrieved_context=[chunks[0].text, chunks[1].text],
+            generated_answer="오답",
+            oracle_answer="정답",
+        )
+
+        findings = diagnose.diagnose(record, Mode.FULL)
+        finding = next(
+            item for item in findings if item.label == "chunking_context_mismatch"
+        )
+
+        self.assertTrue(finding.confirmed)
+
 
 class ChunkOverlapGroundingTest(unittest.TestCase):
     def _state(self) -> AgentDoctorState:
@@ -175,6 +240,55 @@ class ChunkOverlapGroundingTest(unittest.TestCase):
         )
         self.assertEqual(selected["boundary_recovery_rate"], 1.0)
         self.assertEqual(selected["unrecovered_cut_rate"], 0.0)
+
+    def test_unrecoverable_overlap_moves_to_chunk_size_candidate(self):
+        document = Document("d1", "memory", "txt", "가" * 1600)
+        chunks = _fixed_chunks("d1", len(document.content), 400, 50)
+        probe = Probe(
+            probe_id="p1",
+            question="질문",
+            source="taxonomy",
+            answer_exists=True,
+            gold_spans=[{"doc_id": "d1", "start": 100, "end": 900}],
+            metadata={"span_grounding": {"status": "exact"}},
+        )
+        finding = Finding(
+            finding_id="p1:chunking_context_mismatch",
+            type="retrieval_failure",
+            severity="warning",
+            description="안전한 overlap 범위로 복구할 수 없는 긴 정답",
+            label="chunking_context_mismatch",
+            affected_probes=["p1"],
+        )
+        state = AgentDoctorState(
+            documents=[document],
+            chunks=chunks,
+            probes=[probe],
+            report=DiagnosticReport(
+                report_id="r1",
+                findings=[finding],
+                overall_score=0.5,
+                pass_threshold=False,
+            ),
+            index_config={
+                "chunk_size": 400,
+                "chunk_overlap": 50,
+                "chunk_strategy": "fixed",
+                "top_k": 5,
+                "chunk_overlap_candidate_policy": _overlap_policy(),
+            },
+        )
+
+        request, decision = planner.plan(state)
+        result = optimizer.run(request)
+
+        self.assertEqual(decision.mode, "apply_optimize")
+        self.assertEqual(
+            request.metadata["candidate_grounding"]["status"],
+            "no_recoverable_crossings",
+        )
+        self.assertEqual(result.selected_candidate.id, "increase_chunk_size")
+        self.assertEqual(result.config_patch.changes, {"chunker.chunk_size": 800})
 
 
 if __name__ == "__main__":

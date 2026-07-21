@@ -55,27 +55,45 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         judged_item, verdict = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
 
-        # (2) 새 처방 선택. iteration 예산은 후보 수가 아니라 새 라벨 시작을 막는다.
-        request, decision = planner.plan(state, blacklist=state.blacklist)
-        if decision.mode != "apply_optimize" or request is None:
-            state.status = "rolled_back" if rolled_back else decision.status
-            # 롤백이 있었으면 그게 headline, 아니면 흐름 결정(수동/유지)을 보고.
-            state.optimization_report = (
-                reporter.build_trial_report(judged_item, verdict)
-                if rolled_back
-                else reporter.build_report(decision, request)
+        # (2) 새 처방 선택. 저비용 사전검증에서 baseline이 이기면 현재 처방을
+        # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
+        while True:
+            request, decision = planner.plan(state, blacklist=state.blacklist)
+            if decision.mode != "apply_optimize" or request is None:
+                state.status = "rolled_back" if rolled_back else decision.status
+                # 롤백이 있었으면 그게 headline, 아니면 흐름 결정(수동/유지)을 보고.
+                state.optimization_report = (
+                    reporter.build_trial_report(judged_item, verdict)
+                    if rolled_back
+                    else reporter.build_report(decision, request)
+                )
+                return state
+
+            previous_label = history.last_failure_label(state.optimization_history)
+            starts_new_label = (
+                previous_label is None or previous_label != request.failure_label
             )
-            return state
+            if starts_new_label and state.iteration >= state.max_iterations:
+                state.status = "rolled_back" if rolled_back else "verified"
+                if judged_item is not None:
+                    state.optimization_report = reporter.build_trial_report(
+                        judged_item, verdict
+                    )
+                return state
 
-        previous_label = history.last_failure_label(state.optimization_history)
-        starts_new_label = previous_label is None or previous_label != request.failure_label
-        if starts_new_label and state.iteration >= state.max_iterations:
-            state.status = "rolled_back" if rolled_back else "verified"
-            if judged_item is not None:
-                state.optimization_report = reporter.build_trial_report(judged_item, verdict)
-            return state
+            result = optimizer.run(request)
+            if result.metadata.get("error_code") != "baseline_selected":
+                break
 
-        result = optimizer.run(request)
+            prescription_id = (
+                result.selected_candidate.id if result.selected_candidate else None
+            )
+            rejection = (request.failure_label, prescription_id)
+            if not prescription_id or rejection in state.blacklist:
+                state.status = "skipped"
+                return state
+            state.blacklist.add(rejection)
+
         if result.status != "proposed" or result.config_patch is None:
             # optimizer 가 적용 가능한 patch 를 못 만듦(skipped/failed)
             state.status = "rolled_back" if rolled_back else result.status
