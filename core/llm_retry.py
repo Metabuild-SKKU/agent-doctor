@@ -39,7 +39,7 @@ def is_rate_limit(exc: Exception) -> bool:
         return True
     msg = str(exc).lower()
     markers = ("429", "too many requests", "rate limit", "ratelimit",
-               "resource_exhausted", "resourceexhausted", "quota", "exceeded")
+               "resource_exhausted", "resourceexhausted", "quota")
     return any(m in msg for m in markers)
 
 
