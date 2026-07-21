@@ -21,7 +21,7 @@ state.documents
 | 항목 | 기본값 | 변경 방법 |
 |---|---|---|
 | 청킹 | 교체 가능한 4개 전략 | `chunk_strategy`, `chunk_size`, `chunk_overlap` |
-| 크기 | 600자, overlap 80자 | `state.index_config` |
+| 크기 | 512자, overlap 50자 | `state.index_config` |
 | 임베딩 | `BAAI/bge-m3` (1024차원) | `embedding_model`, `embedding_dimension` |
 | Vector DB | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY` |
 | 검색 | Dense, top-k 5 | `top_k` |

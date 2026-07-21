@@ -28,15 +28,22 @@ import json
 from core.schema import Probe
 from core.state import AgentDoctorState
 
-from agents.eval.types import EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled
-from agents.eval.probe_gen import generate_probes, _resync_gold_chunk_ids
+from agents.eval.types import (
+    EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled,
+    resolve_probe_source, PROBE_SOURCE_MADE,
+)
+from agents.eval.probe_gen import generate_probes, uses_user_log, _resync_gold_chunk_ids
 from agents.eval.probe_store import save_probes, load_probes, corpus_version
-# ⚠️ 임시: Index Agent가 검색 리트리버를 제공하기 전까지만 retrieval_temp 사용.
-#     Index 검색이 준비되면 retrieval_temp 를 삭제하고 여기 import 를 교체할 것.
-from agents.eval.retrieval_temp import build_eval_index, retrieve, generate_answer, _keyword_search
+from agents.index.qdrant_store import keyword_search
+from agents.rag.generator import generate_answer
+from agents.rag.retriever import Retriever, get_retriever
 from agents.eval.metrics_ragas import evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge
 from agents.eval.diagnose import diagnose, set_context as set_diag_context
 from agents.eval.report import build_report
+
+
+def _retrieve_with_rag(retriever: Retriever, chunks, question: str, top_k: int) -> list[dict]:
+    return retriever.search(question, top_k=top_k)
 
 
 def _ragas_track(record: EvalRecord, track: str) -> dict:
@@ -59,7 +66,7 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
-    print(f"[Eval] 시작 - 청크 {len(state.chunks)}개, 라벨 반복 {state.iteration}/{state.max_iterations}")
+    print(f"[Eval] 청크 {len(state.chunks)}개, 반복 {state.iteration + 1}/{state.max_iterations}")
 
     if not state.chunks:
         state.status = "error"
@@ -85,10 +92,28 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
-        # user_questions 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
+        # user_log 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
+        # 판정은 generate_probes 와 같은 술어(uses_user_log)로 한다 — state.user_questions
+        # 유무만 보면 EVAL_PROBE_SOURCE=auto 일 때 실제로는 LLM 생성으로 가는데도
+        # 캐시를 건너뛰어, 문서가 그대로여도 매 실행 골든 테스트셋을 다시 만든다.
         # LLM 생성(llm_generated) 경로만 영속화 대상 — 코퍼스 버전이 그대로면 이전에
         # 만든 골든 테스트셋을 재사용해 매 Optimize 반복마다 LLM 재호출을 피한다.
-        if state.user_questions:
+        # made: 코퍼스 버전과 무관하게 이미 만들어 둔 eval_probes.json 을 그대로 재사용
+        # (파일 없음/비었으면 자동 생성으로 폴백해 저장). user_questions 보다 우선한다.
+        if resolve_probe_source() == PROBE_SOURCE_MADE:
+            probes = load_probes(probe_version, ignore_version=True)
+            if probes:
+                probes = _resync_gold_chunk_ids(
+                    probes,
+                    state.chunks,
+                    state.documents,
+                )
+                print(f"[Eval] STEP1: made 소스 — 저장된 Probe {len(probes)}개 재사용")
+            else:
+                print("[Eval] STEP1: made 소스지만 저장된 Probe 없음 → 자동 생성 후 저장")
+                probes = generate_probes(state)
+                save_probes(probes, probe_version)
+        elif uses_user_log(state):
             probes = generate_probes(state)
         else:
             probes = load_probes(probe_version)
@@ -109,27 +134,29 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             state.status = "evaluated"
             return state
 
-        # 검색 인덱스 준비(임시): Index 리트리버 미개발 → retrieval_temp 로 state.chunks 재적재
-        # [TODO 비효율] eval 실행마다 전체 청크를 재인덱싱(재임베딩 upsert). Optimize 루프 시 반복 비용.
-        #   → Index Agent 가 검색 리트리버를 제공하면 retrieval_temp 와 함께 제거하고 인덱스를 재사용.
-        client = build_eval_index(state.chunks)
-        # client = build_eval_index(state.chunks)
+        # 검색 인덱스 준비: 공통 RAG retriever가 Qdrant/keyword fallback을 오케스트레이션한다.
+        # Eval은 검색 구현을 직접 들고 있지 않고, RAG 모듈의 동일한 검색 규칙을 재사용한다.
+        # get_retriever(=캐시판): Index가 방금 적재한 같은 청크 집합이면 그 결과를 그대로
+        # 재사용한다 — 예전엔 여기서 컬렉션 준비와 upsert를 통째로 한 번 더 했다.
+        retriever = get_retriever(state.chunks, state.index_config)
         chunk_text = {c.chunk_id: c.text for c in state.chunks}
         top_k = int(state.index_config.get("top_k", DEFAULT_TOP_K))
 
         # tier2/tier4 판별 훅(재검색·코퍼스·재생성)이 쓸 자원 주입
-        set_diag_context(client=client, chunks=state.chunks,
-                         retrieve_fn=retrieve, keyword_fn=_keyword_search,
+        set_diag_context(client=retriever, chunks=state.chunks,
+                         retrieve_fn=_retrieve_with_rag, keyword_fn=keyword_search,
                          generate_fn=generate_answer, ragas_fn=_ragas_track)
 
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
         #   진단 중 계산한 비싼 신호가 state 에 누적되어 재진단 시 재사용된다.
-        records = [
-            _evaluate_probe(p, client, state.chunks, chunk_text, top_k, mode,
-                            state.diagnosis_cache.setdefault(p.probe_id, {}))
-            for p in probes
-        ]
+        print(f"\n[Eval] STEP2-4: probe별 평가 ({len(probes)}개)\n")
+        records = []
+        for i, p in enumerate(probes, 1):
+            rec = _evaluate_probe(p, retriever, state.chunks, chunk_text, top_k, mode,
+                                  state.diagnosis_cache.setdefault(p.probe_id, {}))
+            _log_probe(i, len(probes), rec)
+            records.append(rec)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
         state.probes = probes
@@ -146,17 +173,68 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 # ── probe 1개 평가 (STEP2 → STEP3 → STEP4) ───────────────────────
 
+def _clip(text: str, n: int = 50) -> str:
+    """로그용 한 줄 축약(줄바꿈 제거 + n자 컷)."""
+    t = " ".join((text or "").split())
+    return t if len(t) <= n else t[:n] + "…"
+
+
+def _fmt_metric(v, applicable: bool = True) -> str:
+    """지표 포맷: 미측정/미해당(-1·None·비적용)이면 '-'."""
+    if not applicable or v is None or (isinstance(v, (int, float)) and v < 0):
+        return "-"
+    return f"{v:.2f}" if isinstance(v, (int, float)) else str(v)
+
+
+def _short_cid(cid: str) -> str:
+    """로그용 청크 id 축약: '<doc-uuid>_chunk_016' → 'chunk_016', 그 외는 원본."""
+    i = cid.rfind("_chunk_")
+    return cid[i + 1:] if i != -1 else cid
+
+
+def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
+    """probe 1개 평가 결과를 블록 형태로 출력(STEP2~4 진행 가시성용).
+    질문(Q)·정답(A)·생성 답변(R)·검색/gold·지표·판정 라벨을 한 블록으로 남기고 빈 줄로 구분한다."""
+    p = rec.probe
+    meta = "·".join(filter(None, [p.source, p.qtype or "single"]))
+    recall = _fmt_metric(rec.recall_at_k)
+    f1 = _fmt_metric(rec.f1_score, bool(p.ground_truth))
+    oracle = _fmt_metric(rec.oracle_f1, rec.oracle_answer is not None)
+    retrieved = ", ".join(_short_cid(c) for c in rec.retrieved_chunk_ids)
+    gold = ", ".join(_short_cid(c) for c in p.gold_chunk_ids)
+
+    print(f"[{idx}/{total}] {p.probe_id}  ({meta})")
+    print(f"Q: {_clip(p.question, 80)}")
+    print(f"A: {_clip(p.ground_truth, 80) if p.ground_truth else '-'}")
+    print(f"R: {_clip(rec.generated_answer, 80) if rec.generated_answer else '-'}")
+    print(f"검색: [{retrieved}]")
+    print(f"골드: [{gold}]")
+    print(f"메트릭 결과: recall@k={recall}  f1={f1}  oracle_f1={oracle}")
+    print(f"-Findings({len(rec.findings)})-")
+    if rec.findings:
+        for i, f in enumerate(rec.findings, 1):
+            mark = "" if f.confirmed else "(예비)"
+            print(f"[{i}] {f.label}{mark}: {f.metadata.get('reason') or '-'}")
+    else:
+        print("없음(정상)")
+    print()  # 블록 구분 빈 줄
+
+
 def _pipeline_version(state: AgentDoctorState) -> str:
     """진단 신호 캐시 무효화 키. index_config(Optimize가 바꿈)+코퍼스가 바뀌면 값이 달라진다.
-    (재실행/코퍼스 의존 신호는 이 버전 내에서만 재사용 안전.)"""
+    (재실행/코퍼스 의존 신호는 이 버전 내에서만 재사용 안전.)
+
+    청크 id 와 함께 본문 hash 도 넣는다 — doc_id 는 출처로 고정돼 있어서(Ingest 의
+    _stable_doc_id) 같은 파일을 고쳐도 id 는 그대로다. hash 를 빼면 본문이 바뀌었는데도
+    버전이 같아져, 옛 gold_chunk_ids 를 가리키는 stale probe 를 재사용하게 된다."""
     key = json.dumps(state.index_config, sort_keys=True, default=str)
-    key += "|chunks=" + ",".join(sorted(c.chunk_id for c in state.chunks))
+    key += "|chunks=" + ",".join(sorted(f"{c.chunk_id}:{c.hash}" for c in state.chunks))
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
 def _evaluate_probe(
     probe: Probe,
-    client,
+    retriever: Retriever,
     chunks: list,
     chunk_text: dict[str, str],
     top_k: int,
@@ -167,8 +245,8 @@ def _evaluate_probe(
     sig_cache 는 state.diagnosis_cache[probe_id] 뷰 — 진단 신호 memoize 가 여기(=state)에 누적된다."""
     rec = EvalRecord(probe=probe, signals=sig_cache)
 
-    # STEP2: 검색(임시): Index 리트리버 미개발 → retrieval_temp.retrieve 사용
-    hits = retrieve(client, chunks, probe.question, top_k)
+    # STEP2: 공통 RAG retriever로 검색
+    hits = retriever.search(probe.question, top_k=top_k)
     rec.retrieved = hits
     rec.retrieved_context = [h.get("text", "") for h in hits]
     rec.retrieved_chunk_ids = [h.get("chunk_id", "") for h in hits]

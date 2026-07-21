@@ -18,7 +18,7 @@ Probe 소스별 신뢰도 (설계 §3):
 Premise 반씩)을 _allocate_budget 비율대로 섞어 생성한다(질문 모두 LLM으로 생성 —
 청크 내용을 그대로 베끼지 않도록 질문·정답을 LLM이 새로 구성. 실제 호출은
 agents/eval/llm_provider.py 가 담당(OpenAI 기본, EVAL_LLM_PROVIDER=gemini 로
-대체 가능) — retrieval_temp.py 와 동일한 폴백 규칙: 키 없거나 호출 실패 시
+대체 가능) — 공용 RAG generator와 동일한 폴백 규칙: 키 없거나 호출 실패 시
 휴리스틱 추출로 대체). testset_size(n) < 8 이면 5%/20%가 0~1개로 반올림돼 통계적
 의미가 없으므로 _allocate_budget 이 전부 RAGAS 로 몰아준다(무응답/DataMorgana 없음).
 gold_spans 가 채워진 probe(taxonomy 등 외부 소스)는 _resync_gold_chunk_ids 로
@@ -48,10 +48,13 @@ from agents.eval.types import (
     QUERY_STYLES,
     RAGAS_MIX_RATIO,
     RAGAS_QUADRANT_WEIGHTS,
+    PROBE_SOURCE_AUTO,
+    PROBE_SOURCE_USER_LOG,
+    resolve_probe_source,
 )
 
 # 자동 생성 기본 개수 (설계: testset_size=5~10 으로 시작해 비용 확인 후 확대)
-DEFAULT_TESTSET_SIZE = 5
+DEFAULT_TESTSET_SIZE = 10
 
 
 @dataclass
@@ -68,15 +71,18 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
     state 를 보고 Probe 리스트를 생성한다.
 
     우선순위 (설계 §3, 소스 신뢰도 user_log > taxonomy > llm_generated):
-        1) state.user_questions 있으면 → user_log Probe
-        2) 없으면 → _allocate_budget 비율(RAGAS/DataMorgana/무응답)대로
+        1) user_log 경로(uses_user_log) → user_log Probe (GT 없음)
+        2) 아니면 → _allocate_budget 비율(RAGAS/DataMorgana/무응답)대로
            지식그래프 기반 4분면 + DataMorgana-lite + 무응답 Probe를 섞어 생성.
            RAGAS 몫이 그래프 부족으로 비면(단일 폴백만 있는 경우) → 단일홉
            폴백(_from_chunks)으로 전체를 대체(비중 섞기보다 최소 동작 보장 우선).
 
+    user_log/auto 선택은 uses_user_log 이 EVAL_PROBE_SOURCE(auto|user_log) 스위치와
+    state.user_questions 유무로 결정한다. 자동 생성 경로만 GT·gold 를 채운다.
+
     읽기: state.user_questions, state.chunks, state.documents
     """
-    if state.user_questions:
+    if uses_user_log(state):
         probes = _from_user_questions(state.user_questions)
         print(f"[Eval] STEP1: user_log Probe {len(probes)}개 생성")
         return _finalize_probes(probes, state)
@@ -114,6 +120,24 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
           f"(ragas={len(ragas_probes)}, datamorgana={len(datamorgana_probes)}, "
           f"no_answer={len(no_answer_probes)})")
     return _finalize_probes(probes, state)
+
+
+# ── probe 소스 선택 (EVAL_PROBE_SOURCE 스위치) ────────────────────
+
+def uses_user_log(state: AgentDoctorState) -> bool:
+    """user_log 경로를 쓸지 결정.
+    EVAL_PROBE_SOURCE(auto|user_log)가 지정되면 그걸 강제하고, 미지정이면 기존 자동
+    판별(user_questions 유무)을 따른다. auto 는 질문이 있어도 무시하고 자동 생성으로 가며,
+    user_log 는 강제하되 질문이 없으면 자동 생성으로 폴백한다(빈 probe 방지).
+
+    agent.py STEP1 도 이 술어로 캐시 여부를 정한다 — state.user_questions 유무만 보면
+    auto 일 때 실제로는 LLM 생성으로 가는데도 캐시를 건너뛴다."""
+    source = resolve_probe_source()
+    if source == PROBE_SOURCE_AUTO:
+        return False
+    if source == PROBE_SOURCE_USER_LOG:
+        return bool(state.user_questions)
+    return bool(state.user_questions)   # 미지정 → 기존 동작
 
 
 # ── user_log: 실사용 질문 기반 ────────────────────────────────────

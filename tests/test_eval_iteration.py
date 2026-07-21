@@ -24,16 +24,18 @@ class EvalIterationContractTest(unittest.TestCase):
         self.assertEqual(result.status, "evaluated")
 
     @patch("agents.eval.agent.build_report")
+    @patch("agents.eval.agent._log_probe")
     @patch("agents.eval.agent._evaluate_probe", return_value=object())
-    @patch("agents.eval.agent.build_eval_index", return_value=object())
+    @patch("agents.eval.agent.get_retriever", return_value=object())
     @patch("agents.eval.agent.generate_probes")
     @patch("agents.eval.agent.load_probes")
     def test_cached_probe_is_resynced_after_rechunking(
         self,
         load_probes,
         generate_probes,
-        _build_index,
+        _get_retriever,
         _evaluate,
+        _log_probe,
         build_report,
     ):
         content = "가" * 100 + "정답" + "나" * 100

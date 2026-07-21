@@ -56,7 +56,10 @@ def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
     예비: 없음
     """
     if _gold_in_wider_candidates(record) is True:
-        return _finding(record, "retrieval_low_rank", "retrieval_failure", confirmed=True)
+        return _finding(
+            record, "retrieval_low_rank", "retrieval_failure", confirmed=True,
+            reason=f"gold_in_wider_candidates=True, recall@k={_v(record.recall_at_k)}",
+        )
     return None
 
 
@@ -67,7 +70,10 @@ def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
     예비: 없음
     """
     if _bm25_hits_gold(record) is True:
-        return _finding(record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True)
+        return _finding(
+            record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True,
+            reason=f"bm25_hits_gold=True, recall@k={_v(record.recall_at_k)}",
+        )
     return None
 
 
@@ -77,8 +83,13 @@ def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     확정: BM25 도 gold 를 못 잡음 + gold 는 코퍼스에 존재(tier2).
     예비: 없음
     """
-    if _bm25_hits_gold(record) is False and _gold_in_corpus(record) is not False:
-        return _finding(record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=True)
+    in_corpus = _gold_in_corpus(record)
+    if _bm25_hits_gold(record) is False and in_corpus is not False:
+        return _finding(
+            record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=True,
+            reason=f"bm25_hits_gold=False, gold_in_corpus={_v(in_corpus)}, "
+                   f"recall@k={_v(record.recall_at_k)}",
+        )
     return None
 
 
@@ -93,9 +104,15 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
 
     in_corpus = _gold_in_corpus(record)
     if in_corpus is True:
-        return _finding(record, "retrieval_missing_gold", "retrieval_failure", confirmed=True)
+        return _finding(
+            record, "retrieval_missing_gold", "retrieval_failure", confirmed=True,
+            reason=f"gold_in_corpus=True, recall@k={_v(record.recall_at_k)}",
+        )
     if in_corpus is None:
-        return _finding(record, "retrieval_missing_gold", "retrieval_failure", confirmed=False)
+        return _finding(
+            record, "retrieval_missing_gold", "retrieval_failure", confirmed=False,
+            reason=f"gold_in_corpus=-, recall@k={_v(record.recall_at_k)}",
+        )
     if in_corpus is False:
         return None
 
@@ -139,9 +156,17 @@ def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]
 
     recovers = _bridge_decompose_recovers(record)
     if recovers is True:
-        return _finding(record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=True)
+        return _finding(
+            record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=True,
+            reason=f"bridge_decompose_recovers=True, qtype={record.probe.qtype}, "
+                   f"recall@k={_v(record.recall_at_k)}",
+        )
     if recovers is None:
-        return _finding(record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False)
+        return _finding(
+            record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False,
+            reason=f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}, "
+                   f"bridge_decompose_recovers=-",
+        )
     if recovers is False:
         return None
 
@@ -154,7 +179,11 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
     if not _retrieval_failed(record):
         return None
     if _enumeration_cache(record):
-        return _finding(record, "retrieval_incomplete_enumeration", "retrieval_failure", confirmed=True)
+        return _finding(
+            record, "retrieval_incomplete_enumeration", "retrieval_failure", confirmed=True,
+            reason=f"gold={len(record.probe.gold_chunk_ids)}, top_k={len(record.retrieved_chunk_ids)}, "
+                   f"recall@k={_v(record.recall_at_k)}",
+        )
     return None
 
 
@@ -171,7 +200,11 @@ def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
         return None
     faith = _faith_oracle(record)
     if _is_multi_hop(record) and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN:
-        return _finding(record, "generation_hop_binding_error", "generation_failure", confirmed=True)
+        return _finding(
+            record, "generation_hop_binding_error", "generation_failure", confirmed=True,
+            reason=f"faithfulness={_v(faith)}>={RAGAS_FAITHFULNESS_MIN}, qtype={record.probe.qtype}, "
+                   f"oracle_f1={_v(record.oracle_f1)}",
+        )
     return None
 
 
@@ -184,7 +217,10 @@ def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
         return None
     faith = _faith_oracle(record)
     if faith is not None and faith < RAGAS_FAITHFULNESS_MIN:
-        return _finding(record, "generation_hallucination", "generation_failure", confirmed=True)
+        return _finding(
+            record, "generation_hallucination", "generation_failure", confirmed=True,
+            reason=f"faithfulness={_v(faith)}<{RAGAS_FAITHFULNESS_MIN}, oracle_f1={_v(record.oracle_f1)}",
+        )
     return None
 
 
@@ -197,7 +233,11 @@ def generation_partial_answer(record: EvalRecord) -> Optional[Finding]:
         return None
     rel = _rel_oracle(record)
     if rel is not None and rel < RAGAS_RESPONSE_RELEVANCY_MIN:
-        return _finding(record, "generation_partial_answer", "generation_failure", confirmed=True)
+        return _finding(
+            record, "generation_partial_answer", "generation_failure", confirmed=True,
+            reason=f"response_relevancy={_v(rel)}<{RAGAS_RESPONSE_RELEVANCY_MIN}, "
+                   f"oracle_f1={_v(record.oracle_f1)}",
+        )
     return None
 
 
@@ -205,7 +245,11 @@ def generation_failure(record: EvalRecord) -> Optional[Finding]:
     """생성 실패 예비 롤업. 생성이 실패(oracle 실패/무응답 위반)했는데 위 세분화 라벨이
     확정 못 했을 때(RAGAS 미실행 등) 예비로 낸다. 생성 슬롯의 마지막 후보."""
     if _generation_failed(record):
-        return _finding(record, "generation_failure", "generation_failure", confirmed=False)
+        return _finding(
+            record, "generation_failure", "generation_failure", confirmed=False,
+            reason=f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, "
+                   f"faithfulness={_v(_faith_oracle(record))}, relevancy={_v(_rel_oracle(record))}",
+        )
     return None
 
 
@@ -232,7 +276,10 @@ def too_long_context(record: EvalRecord) -> Optional[Finding]:
     if not _context_applicable(record):
         return None
     if _context_shorten_helps(record) is True:
-        return _finding(record, "too_long_context", "retrieval_failure", confirmed=True)
+        return _finding(
+            record, "too_long_context", "retrieval_failure", confirmed=True,
+            reason=f"context_shorten_helps=True, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
+        )
     return None
 
 
@@ -245,7 +292,10 @@ def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
     if not _context_applicable(record):
         return None
     if _gold_front_helps(record) is True:
-        return _finding(record, "lost_in_the_middle", "retrieval_failure", confirmed=True)
+        return _finding(
+            record, "lost_in_the_middle", "retrieval_failure", confirmed=True,
+            reason=f"gold_front_helps=True, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
+        )
     return None
 
 
@@ -259,9 +309,15 @@ def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
         return None
     helps = _noise_removal_helps(record)
     if helps is True:
-        return _finding(record, "context_noise_interference", "retrieval_failure", confirmed=True)
+        return _finding(
+            record, "context_noise_interference", "retrieval_failure", confirmed=True,
+            reason=f"noise_removal_helps=True, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
+        )
     if helps is None:
-        return _finding(record, "context_noise_interference", "retrieval_failure", confirmed=False)
+        return _finding(
+            record, "context_noise_interference", "retrieval_failure", confirmed=False,
+            reason=f"noise_removal_helps=-, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
+        )
     return None
 
 
@@ -276,8 +332,12 @@ def bad_gold_answer(record: EvalRecord) -> Optional[Finding]:
     """
     if not _context_applicable(record):
         return None
-    if _both_high(_faith(record), _rel(record)):
-        return _finding(record, "bad_gold_answer", "gap", confirmed=True)
+    faith, rel = _faith(record), _rel(record)
+    if _both_high(faith, rel):
+        return _finding(
+            record, "bad_gold_answer", "gap", confirmed=True,
+            reason=f"faithfulness={_v(faith)}, response_relevancy={_v(rel)}, f1={_v(record.f1_score)}",
+        )
     return None
 
 
@@ -288,8 +348,13 @@ def bad_gold_answer_oracle(record: EvalRecord) -> Optional[Finding]:
     """
     if not _generation_failed(record):
         return None
-    if _both_high(_faith_oracle(record), _rel_oracle(record)):
-        return _finding(record, "bad_gold_answer", "gap", confirmed=True)
+    faith, rel = _faith_oracle(record), _rel_oracle(record)
+    if _both_high(faith, rel):
+        return _finding(
+            record, "bad_gold_answer", "gap", confirmed=True,
+            reason=f"faithfulness(oracle)={_v(faith)}, response_relevancy(oracle)={_v(rel)}, "
+                   f"oracle_f1={_v(record.oracle_f1)}",
+        )
     return None
 
 
@@ -302,7 +367,10 @@ def corpus_gap(record: EvalRecord) -> Optional[Finding]:
     if not _retrieval_failed(record):
         return None
     if _gold_in_corpus(record) is False and not _is_multi_hop(record):
-        return _finding(record, "corpus_gap", "gap", confirmed=True)
+        return _finding(
+            record, "corpus_gap", "gap", confirmed=True,
+            reason=f"gold_in_corpus=False, qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
+        )
     return None
 
 
@@ -314,7 +382,10 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
     if not _retrieval_failed(record):
         return None
     if _gold_in_corpus(record) is False and _is_multi_hop(record):
-        return _finding(record, "corpus_gap_partial_hop", "gap", confirmed=True)
+        return _finding(
+            record, "corpus_gap_partial_hop", "gap", confirmed=True,
+            reason=f"gold_in_corpus=False, qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
+        )
     return None
 
 
@@ -411,18 +482,27 @@ _RANK_LABELS = {
 }
 
 
-def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool) -> Finding:
+def _v(x) -> str:
+    """reason 문자열용 값 포맷(float 은 소수 2자리, None 은 '-')."""
+    if x is None:
+        return "-"
+    return f"{x:.2f}" if isinstance(x, float) else str(x)
+
+
+def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool, reason: str = "") -> Finding:
     """라벨 함수 공통 Finding 생성기.
 
     confirmed 는 라벨 함수가 명시한다 — '확정 신호가 실제로 발동했는지'.
       True  = 확정 신호(그 자원)가 발동해 확정.
       False = 예비 신호로 의심만(확정 자원 미실행) → 상위 모드에서 확정.
     (mode>=tier 자동판정 아님 — 자원 미실행/미측정이면 예비.)
+
+    reason 은 이 라벨을 고르게 한 판별 신호의 실제 값 한 줄(로그·리포트용). 예: "faithfulness=0.31<0.6, oracle_f1=0.24"
     """
     probe = record.probe
     group = _group_of(label, ftype)
     prefix = "" if confirmed else "[예비] "
-    metadata: dict = {"group": group}
+    metadata: dict = {"group": group, "reason": reason}
     if label in _RANK_LABELS:
         # planner 가 top_k 근거값을 계산할 원시 순위(집계는 planner 소관).
         # None(모드·자원 미충족)이면 싣지 않아 planner 가 개수 폴백을 쓰게 둔다.

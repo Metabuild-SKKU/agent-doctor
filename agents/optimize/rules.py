@@ -37,6 +37,14 @@ from __future__ import annotations
 #   전부 이 필드가 생겨야 실행 가능 → schema/state 합의가 선행돼야 함.
 #   # TODO(state-스키마-확장): generation_config: dict 필드 추가 필요
 
+# swap_embedding_model이 바꿔 끼울 실제 임베딩 모델명.
+# TODO(embedding-후보-합의): 품질 기준으로 검증된 실제 업그레이드 후보가 아직 정해지지
+#   않았다. 지금은 sentence-transformers로 바로 로드 가능한 다른 차원(384차원)의 모델을
+#   임시로 지정해, "차원이 바뀌는 임베딩 모델 교체 → recreate_collection_on_dimension_mismatch로
+#   Qdrant 컬렉션 재생성" 경로가 실제로 동작하는지 검증하는 용도다. 기본 모델(bge-m3, 1024차원)
+#   보다 검색 품질이 낫다는 근거는 없으므로, 실제 품질 개선용 후보가 정해지면 교체해야 한다.
+_EMBEDDING_MODEL_UPGRADE_CANDIDATE = "sentence-transformers/all-MiniLM-L6-v2"
+
 
 LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
@@ -100,13 +108,17 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
             {
                 # 임베딩 모델 바꾸기 case 3 2에 해당
                 "id": "swap_embedding_model",
-                "patch": {"embedding_model": "upgrade"},
+                "patch": {"embedding_model": _EMBEDDING_MODEL_UPGRADE_CANDIDATE},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
                 "applies_when": {"topic_cluster": ["spread", "concentrated"]},
-                # WARN: VECTOR_DIM 변경 시 Qdrant 컬렉션 재생성 필요 (qdrant_store.py)
-                
-                # TODO: Case2(도메인약함)는 범용 upgrade가 아니라 도메인특화/파인튜닝 모델이 
+                # 차원이 바뀌는 임베딩 모델 교체이므로, optimizer._run_rules가 이 patch를
+                # search_space에서 골라 최종 ConfigPatch를 만들 때
+                # recreate_collection_on_dimension_mismatch=True를 자동으로 함께 실어 보낸다
+                # (agents/optimize/optimizer.py 참고 — 여기서 직접 넣지 않는 이유는
+                # planner의 단일 축 search_space 계산을 깨지 않기 위함).
+
+                # TODO: Case2(도메인약함)는 범용 upgrade가 아니라 도메인특화/파인튜닝 모델이
                 # 이상적 → adapter 단계에서 세분화. MVP는 upgrade로 통합.
             },
             {

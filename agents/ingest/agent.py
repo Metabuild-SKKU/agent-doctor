@@ -24,6 +24,18 @@ from core.schema import Document
 from core.state import AgentDoctorState
 
 
+def _stable_doc_id(*parts: str) -> str:
+    """같은 출처면 실행이 달라도 같은 doc_id 를 준다.
+
+    uuid4 를 쓰면 매 실행마다 doc_id 가 새로 나오고, Index 가 만드는
+    chunk_id(=f"{doc_id}_chunk_NNN")까지 전부 달라진다. 그러면 청크 id 목록으로
+    캐시 키를 잡는 쪽(Eval 의 probe 저장소·진단 신호 캐시)이 매번 무효화돼서,
+    문서가 그대로인데도 LLM 으로 골든 테스트셋을 다시 만들게 된다.
+
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "|".join(parts)))
+
+
 # ── Notion ────────────────────────────────────────────────────────
 
 def _ingest_notion(source_url: str) -> list[Document]:
@@ -53,7 +65,7 @@ def _ingest_notion(source_url: str) -> list[Document]:
     content = _notion_blocks_to_text(client, page_id)
 
     return [Document(
-        doc_id=str(uuid.uuid4()),
+        doc_id=_stable_doc_id("notion", page_id),
         source=source_url,
         format="notion",
         content=content,
@@ -136,12 +148,59 @@ def _ingest_file(source_url: str) -> list[Document]:
         raise ValueError(f"지원 안 하는 형식: {suffix}  (지원: .txt .md .pdf)")
 
     return [Document(
-        doc_id=str(uuid.uuid4()),
+        doc_id=_stable_doc_id("file", str(path.resolve())),
         source=str(path.resolve()),
         format=fmt,
         content=content,
         metadata={"filename": path.name},
     )]
+
+
+# ── JSON Corpus ───────────────────────────────────────────────────
+
+def _ingest_json_corpus(source_url: str) -> list[Document]:
+    """
+    직무체험 — 전처리된 corpus.json 로드
+
+    기대 형식:
+        [{"id": "doc_0", "text": "...", "source": "고용동향.pdf"}, ...]
+    """
+    import json
+
+    path = Path(source_url)
+    if not path.exists():
+        raise FileNotFoundError(f"파일 없음: {source_url}")
+
+    with path.open(encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError("corpus.json은 리스트 형식이어야 합니다: [{id, text, source}, ...]")
+
+    docs = []
+    seen_ids: set[str] = set()
+    for i, item in enumerate(data):
+        content = item.get("text")
+        if not content:
+            raise ValueError(f"item[{i}] (id={item.get('id', '?')})에 'text' 필드가 없습니다")
+
+        # id 가 없는 항목도 실행마다 흔들리지 않게 파일 경로+순번으로 고정한다.
+        doc_id = item.get("id") or _stable_doc_id("json_corpus", str(path.resolve()), str(i))
+        if doc_id in seen_ids:
+            raise ValueError(f"item[{i}]의 doc_id '{doc_id}'가 앞선 항목과 중복됩니다")
+        seen_ids.add(doc_id)
+
+        src = item.get("source", str(path.resolve()))
+        fmt = Path(src).suffix.lstrip(".").lower() or "txt"
+
+        docs.append(Document(
+            doc_id  = doc_id,
+            source  = src,
+            format  = fmt,
+            content = content,
+            metadata= {"source_file": item.get("source", path.name)},
+        ))
+
+    return docs
 
 
 # ── Google Drive (TODO) ───────────────────────────────────────────
@@ -157,9 +216,10 @@ def _ingest_gdrive(source_url: str) -> list[Document]:
 # ── 라우팅 테이블 ─────────────────────────────────────────────────
 
 _INGESTERS = {
-    "notion": _ingest_notion,
-    "file":   _ingest_file,
-    "gdrive": _ingest_gdrive,
+    "notion":      _ingest_notion,
+    "file":        _ingest_file,
+    "json_corpus": _ingest_json_corpus,
+    "gdrive":      _ingest_gdrive,
 }
 
 
