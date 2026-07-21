@@ -19,8 +19,8 @@ print("Pipeline 테스트: Ingest → Index → Serve")
 print("=" * 50)
 
 state = AgentDoctorState()
-state.source_url = NOTION_URL
-state.source_type = "notion"
+state.source_url  = "data/pdf_corpus.json"
+state.source_type = "json_corpus"
 
 # 1단계: Ingest
 print("\n[1/3] Ingest Agent 실행 중...")

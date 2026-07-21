@@ -20,13 +20,13 @@
 
 ---
 
-## 현재 구현 (테스트용 / 로컬)
-
-Index Agent 미완성 상태에서 테스트하기 위한 임시 구현.
+## 현재 구현 (로컬)
 
 ```
-state.chunks → chunks.json (로컬 파일)
-mcp_server.py → chunks.json 읽어서 키워드 검색
+state.chunks → chunks.json 저장 (임베딩 포함)
+agent.py → api.py 백그라운드 기동 (FastAPI: /health /documents /search /answer)
+             /search: Qdrant 벡터 검색   /answer: agents/rag 기반 RAG 답변 생성
+mcp_server.py → 검색을 직접 하지 않고 api.py에 HTTP로 위임
 claude_desktop_config.json → 자동 등록
 Claude Desktop 재시작 → 연결 완료
 ```
@@ -75,12 +75,14 @@ Claude Desktop이 mcp_server.py를 직접 프로세스로 실행.
 {
   "mcpServers": {
     "agent-doctor": {
-      "command": "python",
-      "args": ["mcp_server.py", "--chunks-file", "chunks.json"]
+      "command": "<python 실행 경로>",
+      "args": ["<repo>/agents/serve/mcp_server.py"]
     }
   }
 }
 ```
+
+(등록은 `agent.py`가 자동으로 해준다. mcp_server가 필요 시 api.py를 직접 띄우고 검색은 HTTP로 위임.)
 
 ### 향후 — URL (클라우드 배포 시)
 클라우드 MCP 서버 URL을 이용자가 한 번만 등록.
@@ -102,23 +104,10 @@ Claude Desktop이 mcp_server.py를 직접 프로세스로 실행.
 
 ## 향후 확장 계획
 
-### 1단계 — Qdrant 연동 (Index Agent 완성 후)
+> ~~1단계 — Qdrant 연동~~ ✅ 완료: `api.py`가 Qdrant 벡터 검색(`/search`)과
+> RAG 답변 생성(`/answer`, `agents/rag`)을 제공하고 mcp_server가 이를 위임 호출한다.
 
-`mcp_server.py`의 `_search()` 함수 교체:
-
-```python
-# 현재 (키워드 매칭)
-score = sum(1 for word in query.split() if word in text)
-
-# 교체 (Qdrant 벡터 검색)
-results = qdrant_client.search(
-    collection_name="agent_doctor",
-    query_vector=embed(query),
-    limit=top_k
-)
-```
-
-### 2단계 — 클라우드 배포
+### 1단계 — 클라우드 배포
 
 ```
 Railway / Render / AWS
@@ -127,7 +116,7 @@ Railway / Render / AWS
     → URL 방식으로 연결
 ```
 
-### 3단계 — 웹 챗봇 (선택)
+### 2단계 — 웹 챗봇 (선택)
 
 MCP 없이도 쓸 수 있게 웹페이지 챗봇 추가.
 Claude Desktop 없는 이용자도 사용 가능.
@@ -158,8 +147,9 @@ Notion 수집 → 인덱싱 → Serve까지 전체 실행. 완료 후 Claude Des
 
 ```
 agents/serve/
-├── agent.py       # run() — 청크 저장 + Claude Desktop 설정 자동 등록
-├── mcp_server.py  # FastMCP 서버 (search_docs, list_documents 툴)
+├── agent.py       # run() — 청크 저장 + api.py 기동 + Claude Desktop 설정 자동 등록
+├── api.py         # FastAPI 서버 (/health /documents /search /answer)
+├── mcp_server.py  # FastMCP 서버 (search_docs, ask_docs, list_documents 툴) — api.py에 위임
 └── README.md      # 이 파일
 ```
 
@@ -169,5 +159,6 @@ agents/serve/
 
 | 툴 | 설명 |
 |----|------|
-| `search_docs(query)` | 문서에서 관련 청크 검색 (top 3 반환) |
+| `search_docs(query)` | 문서에서 관련 청크 검색 (벡터 검색, top 3 반환) |
+| `ask_docs(question)` | 검색 + RAG 답변 생성 (`/answer` 호출, 출처 포함) |
 | `list_documents()` | 인덱싱된 문서 목록 조회 |

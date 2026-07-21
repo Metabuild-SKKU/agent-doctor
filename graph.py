@@ -13,7 +13,6 @@ Agent Doctor v2 메인 LangGraph 그래프
 """
 
 from __future__ import annotations
-
 from langgraph.graph import StateGraph, END
 
 from core.state import AgentDoctorState
@@ -25,6 +24,11 @@ from agents.optimize import history   # 판정 대기(pending) 처방 조회용
 from agents.optimize import gate      # serve/optimize 게이트 정책(점수 + 검색 바닥선)
 from agents.serve.agent import run as serve_run
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 def route_after_eval(state: AgentDoctorState) -> str:
     """
@@ -106,6 +110,9 @@ def run_pipeline(
         source_type:    "notion" | "gdrive" | "file" | "slack"
         user_questions: 테스트 질문 (없으면 자동 생성)
     """
+    from core.run_logger import setup_run_logging
+    setup_run_logging(prefix="pipeline")  # 이후 모든 print 를 콘솔+로그파일에 동시 출력
+
     graph = build_graph()
 
     initial_state = AgentDoctorState(
@@ -121,6 +128,10 @@ def run_pipeline(
     print("=" * 60)
 
     final_state = graph.invoke(initial_state)
+    # LangGraph 는 dataclass state 를 dict 로 반환한다 → 속성 접근 위해 dataclass 로 복원
+    # (노드 안에서는 AgentDoctorState 객체지만 invoke() 최종 반환은 dict).
+    if isinstance(final_state, dict):
+        final_state = AgentDoctorState(**final_state)
 
     print("=" * 60)
     print("완료")
@@ -134,8 +145,19 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
-    run_pipeline(
-        source_url="https://notion.so/example-page",
-        source_type="notion",
-        user_questions=["휴가 정책이 어떻게 돼?", "신입사원 온보딩 기간은?"],
-    )
+    import os
+
+    # 소스는 env 로 받는다(run_local_pipeline.py 와 동일 계약: SOURCE_TYPE / SOURCE_URL).
+    #   SOURCE_TYPE=korquad SOURCE_URL=data/corpus.jsonl python graph.py   # 기본
+    #   SOURCE_TYPE=notion  SOURCE_URL=https://notion.so/... python graph.py
+    source_type = os.getenv("SOURCE_TYPE", "korquad").strip().lower()
+    defaults = {
+        "korquad": "data/corpus.jsonl",
+        "file": "sample_docs/hr_policy.md",
+        "notion": "https://notion.so/example-page",
+    }
+    source_url = os.getenv("SOURCE_URL", defaults.get(source_type, ""))
+    if source_type == "korquad":
+        os.environ.setdefault("EVAL_PROBE_SOURCE", "taxonomy")  # qa 를 taxonomy 로
+
+    run_pipeline(source_url, source_type=source_type)

@@ -1,11 +1,10 @@
 # Index 단계에서 만지는 상태:
-# - read: state.documents, state.index_config
-# - write: state.chunks, state.index_artifacts, state.status, state.error
+# - read: state.documents, state.index_config, state.reindex_required
+# - write: state.chunks, state.index_artifacts, state.reindex_required, state.status, state.error
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import unicodedata
 from dataclasses import dataclass, replace
@@ -15,14 +14,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
     DEFAULT_EMBEDDING_MODEL,
-    build_client,
     build_sparse_vector,
     count_tokens,
-    delete_document_chunks,
     embed,
-    ensure_collection,
-    upsert_chunks,
 )
+from agents.rag.retriever import get_retriever
 from core.schema import Chunk, Document
 from core.state import AgentDoctorState
 
@@ -46,10 +42,7 @@ class _SectionDraft:
 @dataclass(frozen=True)
 class IndexTools:
     # 실험/테스트 때 저장소, 임베딩, 그래프 구현만 바꿔 끼우기 위한 얇은 묶음.
-    build_client: Callable[..., Any]
-    ensure_collection: Callable[..., Any]
-    delete_document_chunks: Callable[..., Any]
-    upsert_chunks: Callable[..., Any]
+    get_retriever: Callable[..., Any]
     embed: Callable[..., list[float]]
     count_tokens: Callable[..., int]
     build_sparse_vector: Callable[..., dict]
@@ -354,10 +347,7 @@ def _configured_chunk_strategy(config: dict) -> str:
 
 def _default_tools() -> IndexTools:
     return IndexTools(
-        build_client=build_client,
-        ensure_collection=ensure_collection,
-        delete_document_chunks=delete_document_chunks,
-        upsert_chunks=upsert_chunks,
+        get_retriever=get_retriever,
         embed=embed,
         count_tokens=count_tokens,
         build_sparse_vector=build_sparse_vector,
@@ -513,6 +503,133 @@ def _previous_chunks_by_document(chunks: list[Chunk]) -> dict[tuple[str, str], l
     return grouped
 
 
+@dataclass(frozen=True)
+class _DocResult:
+    chunks: list[Chunk]        # 이 문서에서 새로 만든/재사용한 청크
+    new_hashes: set[str]       # 성공 시에만 seen_chunks에 커밋할 청크 해시
+    document_hash: str
+    reused: int                # 재사용 임베딩 개수 (신규는 0)
+
+
+# 문서 하나를 청크 리스트로 변환한다. 공유 상태(seen_*)는 읽기만 하고,
+# 새로 본 청크 해시는 반환값으로 돌려줘서 호출자가 성공 시에만 커밋한다 —
+# 처리 도중 실패한 문서의 흔적이 dedup 집합에 남으면 다른 문서의 동일 청크가
+# 중복으로 오인되어 조용히 누락되기 때문.
+def _process_document(
+    document: Document,
+    *,
+    config: dict,
+    tools: IndexTools,
+    chunk_strategy: str,
+    signature: str,
+    previous: dict[tuple[str, str], list[Chunk]],
+    seen_chunks: set[str],
+    seen_doc_ids: dict[str, str],
+    seen_documents: set[str],
+) -> _DocResult:
+    _validate_document(document)
+    normalized = _normalize_text(document.content)
+    document_hash = _sha256(normalized)
+    previous_hash = seen_doc_ids.get(document.doc_id)
+    if previous_hash and previous_hash != document_hash:
+        raise ValueError(
+            f"같은 doc_id에 서로 다른 본문이 들어왔습니다: {document.doc_id}"
+        )
+    if config.get("deduplicate", True) and document_hash in seen_documents:
+        print(f"[Index] 중복 문서 제외: {document.doc_id}")
+        return _DocResult([], set(), document_hash, 0)
+
+    new_hashes: set[str] = set()
+
+    def _is_duplicate(chunk_hash: str) -> bool:
+        return config.get("deduplicate", True) and (
+            chunk_hash in seen_chunks or chunk_hash in new_hashes
+        )
+
+    reusable = previous.get((document_hash, signature), [])
+    if reusable:
+        document_chunks: list[Chunk] = []
+        for chunk in reusable:
+            chunk_hash = _sha256(chunk.text)
+            if _is_duplicate(chunk_hash):
+                continue
+            new_hashes.add(chunk_hash)
+            document_chunks.append(
+                _refresh_reused_chunk(
+                    chunk,
+                    document,
+                    config,
+                    chunk_index=len(document_chunks),
+                    document_hash=document_hash,
+                    chunk_hash=chunk_hash,
+                    chunk_strategy=chunk_strategy,
+                    signature=signature,
+                )
+            )
+        print(f"[Index] 기존 임베딩 재사용: {document.doc_id} ({len(document_chunks)}개)")
+        return _DocResult(document_chunks, new_hashes, document_hash, len(document_chunks))
+
+    drafts = _chunk_document(
+        document,
+        chunk_size=config["chunk_size"],
+        chunk_overlap=config["chunk_overlap"],
+        strategy=chunk_strategy,
+    )
+    title = document.metadata.get("title", document.doc_id)
+    print(
+        f"[Index] └ '{title}' → {len(drafts)}개 청크 후보 "
+        f"(strategy={chunk_strategy})"
+    )
+
+    document_chunks: list[Chunk] = []
+    for draft in drafts:
+        chunk_hash = _sha256(draft.text)
+        if _is_duplicate(chunk_hash):
+            continue
+        new_hashes.add(chunk_hash)
+
+        vector = tools.embed(
+            draft.text,
+            model_name=config["embedding_model"],
+            vector_dim=config.get("embedding_dimension"),
+        )
+        chunk_index = len(document_chunks)
+        char_span = (draft.start, draft.end)
+        metadata = _chunk_metadata(
+            document,
+            config,
+            chunk_index=chunk_index,
+            document_hash=document_hash,
+            chunk_hash=chunk_hash,
+            char_span=char_span,
+            chunk_strategy=chunk_strategy,
+            signature=signature,
+            embedding_dimension=len(vector),
+        )
+        chunk = Chunk(
+            chunk_id=f"{document.doc_id}_chunk_{chunk_index:03d}",
+            doc_id=document.doc_id,
+            text=draft.text,
+            section=draft.section,
+            char_span=char_span,
+            token_count=tools.count_tokens(
+                draft.text,
+                model_name=config["embedding_model"],
+            ),
+            parent_id=_parent_id(document, draft.section),
+            hash=chunk_hash[:16],
+            embedding=vector,
+            sparse_vector=(
+                tools.build_sparse_vector(draft.text)
+                if config.get("use_hybrid", False)
+                else None
+            ),
+            metadata=metadata,
+        )
+        document_chunks.append(chunk)
+    return _DocResult(document_chunks, new_hashes, document_hash, 0)
+
+
 # Eval/Optimize가 config를 바꿔 다시 호출하는 흐름을 전제로 둔 Index 본체.
 def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctorState:
     tools = tools or _default_tools()
@@ -523,6 +640,19 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
     if not state.documents:
         state.status = "error"
         state.error = "문서가 없습니다. Ingest Agent 완료 여부를 확인하세요."
+        return state
+
+    # top_k처럼 검색 시점에만 쓰는 설정은 기존 청크와 벡터를 그대로 사용할 수 있다.
+    # 그래프의 Index→Eval 흐름은 유지하되 실제 재청킹·재임베딩·upsert는 생략한다.
+    if not state.reindex_required and state.chunks:
+        state.reindex_required = True
+        state.status = "indexed"
+        state.index_artifacts = {
+            **state.index_artifacts,
+            "reindex_skipped": True,
+            "skip_reason": "검색 시점 설정만 변경됨",
+        }
+        print("[Index] 검색 시점 설정만 변경됨 — 기존 인덱스 재사용")
         return state
 
     config = {
@@ -544,123 +674,62 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
         all_chunks: list[Chunk] = []
         reused_count = 0
 
+        failed_documents: list[dict] = []
+
         for document in state.documents:
-            _validate_document(document)
-            normalized = _normalize_text(document.content)
-            document_hash = _sha256(normalized)
-            previous_hash = seen_doc_ids.get(document.doc_id)
-            if previous_hash and previous_hash != document_hash:
-                raise ValueError(
-                    f"같은 doc_id에 서로 다른 본문이 들어왔습니다: {document.doc_id}"
-                )
-            seen_doc_ids[document.doc_id] = document_hash
-            if config.get("deduplicate", True) and document_hash in seen_documents:
-                print(f"[Index] 중복 문서 제외: {document.doc_id}")
-                continue
-            seen_documents.add(document_hash)
-
-            reusable = previous.get((document_hash, signature), [])
-            if reusable:
-                document_chunks: list[Chunk] = []
-                for chunk in reusable:
-                    chunk_hash = _sha256(chunk.text)
-                    if config.get("deduplicate", True) and chunk_hash in seen_chunks:
-                        continue
-                    seen_chunks.add(chunk_hash)
-                    document_chunks.append(
-                        _refresh_reused_chunk(
-                            chunk,
-                            document,
-                            config,
-                            chunk_index=len(document_chunks),
-                            document_hash=document_hash,
-                            chunk_hash=chunk_hash,
-                            chunk_strategy=chunk_strategy,
-                            signature=signature,
-                        )
-                    )
-                all_chunks.extend(document_chunks)
-                reused_count += len(document_chunks)
-                print(f"[Index] 기존 임베딩 재사용: {document.doc_id} ({len(document_chunks)}개)")
-                continue
-
-            drafts = _chunk_document(
-                document,
-                chunk_size=config["chunk_size"],
-                chunk_overlap=config["chunk_overlap"],
-                strategy=chunk_strategy,
-            )
-            title = document.metadata.get("title", document.doc_id)
-            print(
-                f"[Index] └ '{title}' → {len(drafts)}개 청크 후보 "
-                f"(strategy={chunk_strategy})"
-            )
-
-            document_chunks: list[Chunk] = []
-            for draft in drafts:
-                chunk_hash = _sha256(draft.text)
-                if config.get("deduplicate", True) and chunk_hash in seen_chunks:
-                    continue
-                seen_chunks.add(chunk_hash)
-
-                vector = tools.embed(
-                    draft.text,
-                    model_name=config["embedding_model"],
-                    vector_dim=config.get("embedding_dimension"),
-                )
-                chunk_index = len(document_chunks)
-                char_span = (draft.start, draft.end)
-                metadata = _chunk_metadata(
+            try:
+                res = _process_document(
                     document,
-                    config,
-                    chunk_index=chunk_index,
-                    document_hash=document_hash,
-                    chunk_hash=chunk_hash,
-                    char_span=char_span,
+                    config=config,
+                    tools=tools,
                     chunk_strategy=chunk_strategy,
                     signature=signature,
-                    embedding_dimension=len(vector),
+                    previous=previous,
+                    seen_chunks=seen_chunks,
+                    seen_doc_ids=seen_doc_ids,
+                    seen_documents=seen_documents,
                 )
-                chunk = Chunk(
-                    chunk_id=f"{document.doc_id}_chunk_{chunk_index:03d}",
-                    doc_id=document.doc_id,
-                    text=draft.text,
-                    section=draft.section,
-                    char_span=char_span,
-                    token_count=tools.count_tokens(
-                        draft.text,
-                        model_name=config["embedding_model"],
-                    ),
-                    parent_id=_parent_id(document, draft.section),
-                    hash=chunk_hash[:16],
-                    embedding=vector,
-                    sparse_vector=(
-                        tools.build_sparse_vector(draft.text)
-                        if config.get("use_hybrid", False)
-                        else None
-                    ),
-                    metadata=metadata,
-                )
-                document_chunks.append(chunk)
-            all_chunks.extend(document_chunks)
+            except Exception as exc:
+                doc_id = str(getattr(document, "doc_id", "<unknown>"))
+                failed_documents.append({"doc_id": doc_id, "error": str(exc)})
+                print(f"[Index] 문서 처리 실패(건너뜀): {doc_id} — {exc}")
+                continue
+
+            # 성공한 문서만 공유 상태에 반영한다. 실패 문서의 doc_id가 seen_doc_ids에
+            # 남으면 아래 delete_document_chunks가 기존 벡터를 지우는데 새 청크는
+            # upsert되지 않아 벡터 스토어에서 그 문서가 통째로 사라진다.
+            seen_chunks |= res.new_hashes
+            seen_doc_ids[document.doc_id] = res.document_hash
+            seen_documents.add(res.document_hash)
+            all_chunks.extend(res.chunks)
+            reused_count += res.reused
 
         if not all_chunks:
-            raise ValueError("검증과 중복 제거 후 저장할 청크가 없습니다.")
+            failure_summary = (
+                f" (문서 {len(failed_documents)}개 처리 실패, "
+                f"첫 오류: {failed_documents[0]['error']})"
+                if failed_documents
+                else ""
+            )
+            raise ValueError(f"검증과 중복 제거 후 저장할 청크가 없습니다.{failure_summary}")
+
+        if failed_documents:
+            print(
+                f"[Index] 경고: 문서 {len(failed_documents)}개 처리 실패 — "
+                f"나머지 {len(seen_doc_ids)}개는 정상 인덱싱 "
+                f"(상세: index_artifacts['failed_documents'])"
+            )
 
         vector_dim = len(next(chunk.embedding for chunk in all_chunks if chunk.embedding))
-        client = tools.build_client(
-            url=os.getenv("QDRANT_URL", ":memory:"),
-            api_key=os.getenv("QDRANT_API_KEY"),
-        )
-        tools.ensure_collection(
-            client,
-            vector_dim=vector_dim,
-            recreate_on_mismatch=bool(
-                config.get("recreate_collection_on_dimension_mismatch", False)
-            ),
-        )
-        tools.delete_document_chunks(client, list(seen_doc_ids))
-        tools.upsert_chunks(client, all_chunks)
+        # 컬렉션 준비·증분 삭제·upsert를 공통 retriever에 위임한다. 뒤이어 도는
+        # Eval/Serve가 같은 청크로 get_retriever를 부르면 이 적재 결과를 그대로 쓴다.
+        # 재생성 플래그는 config를 통해 ensure_collection까지 전달된다.
+        tools.get_retriever(all_chunks, config, delete_doc_ids=list(seen_doc_ids))
+        # one-shot: 재생성 플래그는 소비 즉시 끈다. 켠 채로 두면 이후 모든
+        # 재색인과 retriever(resolve_retrieval_settings)까지 차원 가드가
+        # 풀린 채 남아, mismatch 시 에러 대신 컬렉션이 조용히 삭제된다.
+        if state.index_config.get("recreate_collection_on_dimension_mismatch"):
+            state.index_config["recreate_collection_on_dimension_mismatch"] = False
 
         state.chunks = all_chunks
         if config.get("graph_enabled", True):
@@ -675,6 +744,7 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
                 "chunk_strategy": chunk_strategy,
                 "embedding_model": config["embedding_model"],
                 "embedding_dimension": vector_dim,
+                "failed_documents": failed_documents,
             }
         )
         state.status = "indexed"

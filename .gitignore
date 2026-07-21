@@ -16,13 +16,19 @@ venv/
 .venv/
 env/
 
-# 데이터 (용량 큼)
-data/
+# 데이터 (용량 큼) — 디렉터리 대신 내용물을 무시해야 README 예외가 먹는다
+data/*
+!data/README.md
 *.json
 !sample_data/*.json
 
+# 비밀 정보 — *.json 규칙이 바뀌어도 절대 커밋 금지
+agents/ingest/tokens.json
+eval_probes.json
+
 # 결과물
 results/
+output/
 
 # IDE
 .vscode/

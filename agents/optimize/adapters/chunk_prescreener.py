@@ -124,6 +124,16 @@ def run(
                 )
             )
             ranked.append((key, value, metrics, is_baseline))
+    except ImportError as exc:
+        return _result(
+            request,
+            status="skipped",
+            error=f"chunk preview 의존성을 불러올 수 없습니다: {exc}",
+            path=path,
+            search_space={path: list(values)},
+            trials=trials,
+            metadata={"error_code": "chunk_precheck_unavailable"},
+        )
     except Exception as exc:
         return _result(
             request,

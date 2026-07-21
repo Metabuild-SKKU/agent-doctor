@@ -124,6 +124,32 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
             ["exact", "chunk_fallback"],
         )
 
+    def test_duplicate_grounding_counts_follow_deduplicated_spans(self):
+        content = "중복 근거 문장입니다."
+        document = Document("d1", "memory", "txt", content)
+        chunk = Chunk("c1", "d1", content, char_span=(0, len(content)))
+        nodes = [
+            KGNode("c1", "d1", content),
+            KGNode("c1", "d1", content),
+        ]
+        synthesized = _SynthesizedProbe(
+            question="중복 근거는?",
+            ground_truth=content,
+            # 첫 source는 exact, 두 번째 source는 같은 좌표의 chunk fallback이 된다.
+            # dedup 전 count를 쓰면 exact+fallback으로 잘못 집계된다.
+            evidence=[{"source_index": 0, "quote": content}],
+        )
+
+        spans, located, exact, fallback = _gold_spans_from_evidence(
+            synthesized,
+            nodes,
+            {"c1": chunk},
+            {"d1": document},
+        )
+
+        self.assertEqual(len(spans), 1)
+        self.assertEqual((located, exact, fallback), (2, 1, 0))
+
     @patch("agents.eval.probe_gen._llm_synthesize_query")
     def test_ragas_probe_sets_gold_fields_and_grounding_metadata(self, synthesize):
         content = "정책 신청은 전날 오후 여섯 시까지 제출해야 합니다."

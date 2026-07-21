@@ -1,14 +1,21 @@
 """
 run_local_pipeline.py
-전체 파이프라인 로컬 스모크 — 외부 API/크리덴셜 없이 로컬 파일로 Ingest→Index→Eval→Optimize 실행.
+전체 파이프라인 로컬 스모크 — Ingest→Index→Eval→Optimize 실행.
 
-  python run_local_pipeline.py
-  EVAL_MODE=full python run_local_pipeline.py     # 진단 깊이 조절
+소스는 env 로 고른다(state.source_type/source_url 로 들어감):
+  python run_local_pipeline.py                                   # 기본: korquad (data/corpus.jsonl)
+  SOURCE_TYPE=file SOURCE_URL=sample_docs/hr_policy.md python run_local_pipeline.py
 
-Serve(Ctrl+C 로 멈춰야 하는 API 서버)는 스킵한다. 서버까지 띄우려면 graph.py 의 run_pipeline 사용:
-  from graph import run_pipeline
-  run_pipeline("sample_docs/hr_policy.md", source_type="file",
-               user_questions=["재택근무 며칠까지 가능해?"])
+korquad 설정(둘 다 있어야 함 — corpus 는 Ingest, qa 는 Eval):
+  Ingest : SOURCE_TYPE=korquad, SOURCE_URL=data/corpus.jsonl (원문 복원)
+  Eval   : EVAL_PROBE_SOURCE=taxonomy → EVAL_TAXONOMY_QA(기본 data/qa_pairs.jsonl) 로드.
+           gold 좌표용 corpus 는 state.source_url(=위 SOURCE_URL)을 그대로 재사용(단일화)
+  규모   : KORQUAD_MAX_DOCS(문서 수)·KORQUAD_QA_LIMIT(질문 수) — 기본 소규모 스모크
+           (전체를 쓰려면 두 값을 0/미설정. 아래는 setdefault 라 shell·.env 로 덮인다)
+
+  EVAL_MODE=deep EVAL_ENABLE_LLM=1 python run_local_pipeline.py  # 생성·RAGAS 채점(API 비용)
+
+Serve(API 서버)는 스킵한다. 서버까지 띄우려면 graph.py 의 run_pipeline 사용.
 """
 import os
 import sys
@@ -21,20 +28,34 @@ try:
 except ImportError:
     pass
 
+from core.run_logger import setup_run_logging
+setup_run_logging(prefix="local_pipeline")  # 이후 모든 print 를 콘솔+로그파일에 동시 출력
+
 from core.state import AgentDoctorState
 from agents.ingest.agent import run as ingest_run
 from agents.index.agent import run as index_run
 from agents.eval.agent import run as eval_run
 from agents.optimize.agent import run as optimize_run
 
+SOURCE_TYPE = os.getenv("SOURCE_TYPE", "korquad").strip().lower()
+
 state = AgentDoctorState()
-state.source_url = "sample_docs/hr_policy.md"
-state.source_type = "file"
-state.user_questions = [
-    "재택근무 며칠까지 가능해?",
-    "연차는 며칠이야?",
-    "성과급은 언제 나와?",
-]
+state.source_type = SOURCE_TYPE
+if SOURCE_TYPE == "korquad":
+    state.source_url = os.getenv("SOURCE_URL", "data/corpus.jsonl")
+    # korquad 는 qa 도 taxonomy 로 함께 세팅(shell/.env 로 덮게 setdefault).
+    os.environ.setdefault("EVAL_PROBE_SOURCE", "taxonomy")
+    os.environ.setdefault("KORQUAD_MAX_DOCS", "20")          # 스모크 규모(전체는 0/미설정)
+    os.environ.setdefault("KORQUAD_QA_LIMIT", "50")
+elif SOURCE_TYPE == "file":
+    state.source_url = os.getenv("SOURCE_URL", "sample_docs/hr_policy.md")
+    state.user_questions = [
+        "재택근무 며칠까지 가능해?",
+        "연차는 며칠이야?",
+        "성과급은 언제 나와?",
+    ]
+else:
+    state.source_url = os.getenv("SOURCE_URL", "")
 
 STEPS = [
     ("Ingest", ingest_run),

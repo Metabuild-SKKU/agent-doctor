@@ -40,6 +40,20 @@ class SpanRecallAtKTest(unittest.TestCase):
 
         self.assertIsNone(recall)
 
+    def test_retrieved_legacy_chunk_in_mixed_document_uses_fallback(self):
+        chunks = [
+            Chunk("legacy", "d1", "정답", char_span=None),
+            Chunk("positioned", "d1", "다른 내용", char_span=(10, 20)),
+        ]
+
+        recall = span_recall_at_k(
+            [{"doc_id": "d1", "start": 0, "end": 2}],
+            ["legacy"],
+            chunks,
+        )
+
+        self.assertIsNone(recall)
+
 
 if __name__ == "__main__":
     unittest.main()
