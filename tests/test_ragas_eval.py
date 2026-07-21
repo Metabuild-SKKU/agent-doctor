@@ -1,11 +1,12 @@
 # tests/test_ragas_eval.py
-# ragas_eval 을 **실제 OpenAI API** 로 검증. (모듈 코드 변경 없이 함수 직접 호출)
+# ragas_eval 을 **실제 LLM API** 로 검증. (모듈 코드 변경 없이 함수 직접 호출)
 #
 # 실행:
-#   1) .env 에 OPENAI_API_KEY 설정 (또는 환경변수)
+#   1) .env 에 EVAL_LLM_PROVIDER 와 그 provider 의 키 설정
+#      (openai→OPENAI_API_KEY / gemini→GEMINI_API_KEY / github→GITHUB_TOKEN)
 #   2) python tests/test_ragas_eval.py
 #      - LLM 입출력을 보고 싶으면:  EVAL_DEBUG=1 python tests/test_ragas_eval.py
-#   ※ 실제 API 호출이라 소액 비용 발생(~$0.01~0.05). 키 없으면 자동 스킵.
+#   ※ 실제 API 호출이라 provider 에 따라 소액 비용 발생. 키 없으면 자동 스킵.
 #
 # 검증 전략: LLM은 temperature=0 이어도 완벽 결정적이진 않으므로, 절대값 대신
 #           "정답을 아는 케이스의 상대 관계"(할루시네이션<정확, 모른다=0, 관련청크 앞>뒤)를 확인.
@@ -21,12 +22,19 @@ try:
 except ImportError:
     pass
 
-_key = os.getenv("OPENAI_API_KEY", "").strip()
-if not _key or "..." in _key or len(_key) < 20:
+from agents.eval.llm_provider import _provider, has_key
+
+# 활성 provider(EVAL_LLM_PROVIDER) 기준으로 키를 확인한다 — OpenAI 키만 보면
+# gemini/github provider 로 돌릴 때도 무조건 스킵됐다.
+_PROVIDER = _provider()
+_KEY_ENV = {"gemini": "GEMINI_API_KEY", "github": "GITHUB_TOKEN"}.get(_PROVIDER, "OPENAI_API_KEY")
+_key = os.getenv(_KEY_ENV, "").strip()
+if not has_key() or "..." in _key or len(_key) < 20:
     # 비었거나 .env.example 의 placeholder("sk-...") 면 실제 API 불가 → 스킵
-    print("실제 OPENAI_API_KEY 없음(비었거나 placeholder) → 스킵")
-    print("  .env 의 OPENAI_API_KEY 를 진짜 키로 바꾸고 다시 실행하세요.")
+    print(f"실제 {_KEY_ENV} 없음(비었거나 placeholder) → 스킵  [provider={_PROVIDER}]")
+    print(f"  .env 의 {_KEY_ENV} 를 진짜 키로 바꾸고 다시 실행하세요.")
     sys.exit(0)
+print(f"provider = {_PROVIDER}")
 
 os.environ["EVAL_ENABLE_LLM"] = "1"   # RAGAS 진단 활성화
 
