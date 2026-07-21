@@ -11,6 +11,7 @@ try:
 except ImportError:
     pass
 
+from core.llm_usage import print_summary
 from core.schema import Chunk
 from core.state import AgentDoctorState
 from agents.index.qdrant_store import embed
@@ -110,3 +111,4 @@ assert confirmed_flags == sorted(confirmed_flags, reverse=True), "확정 우선 
 # 진단 모드는 EVAL_MODE(.env/환경변수)로 정해진다 — 하드코딩 대신 resolve_mode 로 대조.
 assert fs["mode"] == resolve_mode(), "findings_summary.mode 가 EVAL_MODE 와 일치해야 함"
 print("\n전체 파이프라인 스모크 테스트 통과 [OK]")
+print_summary(tag="Test")  # run() 내부 + 위 재현 섹션까지 포함한 스크립트 전체 합계

@@ -14,6 +14,8 @@ import json
 import os
 import time
 
+from core.llm_usage import log_usage
+
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 
 
@@ -29,6 +31,13 @@ def has_key() -> bool:
     if provider == "github":
         return bool(os.getenv("GITHUB_TOKEN"))
     return bool(os.getenv("OPENAI_API_KEY"))
+
+
+# ── 토큰 사용량·비용 로깅 (core/llm_usage.py 공용 구현) ──────────
+# LLM_LOG_USAGE=0 (또는 EVAL_LOG_USAGE=0) 으로 끄기. 단가표도 core 쪽에 있다.
+
+def _log_usage(model: str, prompt_tokens, output_tokens) -> None:
+    log_usage(model, prompt_tokens, output_tokens, tag="Eval")
 
 
 # ── rate limit(429) 재시도 ────────────────────────────────────────
@@ -164,6 +173,8 @@ def _openai_generate(system: str, user: str, model: str, json_mode: bool = False
         ],
         **kwargs,
     )
+    if resp.usage:
+        _log_usage(model, resp.usage.prompt_tokens, resp.usage.completion_tokens)
     return resp.choices[0].message.content or ""
 
 
@@ -171,6 +182,8 @@ def _openai_embed(texts: list[str], model: str) -> list[list[float]]:
     from openai import OpenAI
     client = OpenAI()
     resp = client.embeddings.create(model=model, input=texts)
+    if resp.usage:
+        _log_usage(model, resp.usage.prompt_tokens, 0)
     return [d.embedding for d in resp.data]
 
 
@@ -191,6 +204,8 @@ def _github_generate(system: str, user: str, model: str, json_mode: bool = False
         ],
         **kwargs,
     )
+    if resp.usage:
+        _log_usage(model, resp.usage.prompt_tokens, resp.usage.completion_tokens)
     return resp.choices[0].message.content or ""
 
 
@@ -205,6 +220,9 @@ def _gemini_generate(system: str, user: str, model: str, json_mode: bool = False
     if json_mode:
         config["response_mime_type"] = "application/json"
     resp = client.models.generate_content(model=model, contents=user, config=config)
+    usage = getattr(resp, "usage_metadata", None)
+    if usage:
+        _log_usage(model, usage.prompt_token_count, usage.candidates_token_count)
     return resp.text or ""
 
 

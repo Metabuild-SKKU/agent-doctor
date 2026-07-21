@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from agents.rag.retriever import Retriever
+from core.llm_usage import log_usage
 
 # 답변, context, citation, 검색 상세 정보 보관
 @dataclass
@@ -300,14 +301,17 @@ def _openai_generate(
         return None
 
     client = OpenAI()
+    selected_model = model or os.getenv("RAG_OPENAI_MODEL", "gpt-4o")
     response = client.chat.completions.create(
-        model=model or os.getenv("RAG_OPENAI_MODEL", "gpt-4o"),
+        model=selected_model,
         temperature=0,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
     )
+    if response.usage:
+        log_usage(selected_model, response.usage.prompt_tokens, response.usage.completion_tokens, tag="RAG")
     content = response.choices[0].message.content
     return content.strip() if content else None
 
@@ -331,14 +335,17 @@ def _github_generate(
         return None
 
     client = OpenAI(base_url=GITHUB_MODELS_BASE_URL, api_key=api_key)
+    selected_model = model or os.getenv("RAG_GITHUB_MODEL", "openai/gpt-4o")
     response = client.chat.completions.create(
-        model=model or os.getenv("RAG_GITHUB_MODEL", "openai/gpt-4o"),
+        model=selected_model,
         temperature=0,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
     )
+    if response.usage:
+        log_usage(selected_model, response.usage.prompt_tokens, response.usage.completion_tokens, tag="RAG")
     content = response.choices[0].message.content
     return content.strip() if content else None
 
@@ -364,4 +371,7 @@ def _gemini_generate(
         contents=user,
         config={"temperature": 0, "system_instruction": system},
     )
+    usage = getattr(resp, "usage_metadata", None)
+    if usage:
+        log_usage(selected_model, usage.prompt_token_count, usage.candidates_token_count, tag="RAG")
     return (resp.text or "").strip() or None

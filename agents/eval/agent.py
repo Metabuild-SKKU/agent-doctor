@@ -25,6 +25,7 @@ import hashlib
 import json
 
 from core.schema import Probe
+from core.llm_usage import print_summary
 from core.state import AgentDoctorState
 
 from agents.eval.types import (
@@ -149,6 +150,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.error = f"평가 실패: {e}"
         print(f"[Eval] 오류: {e}")
 
+    print_summary(tag="Eval")
     return state
 
 
