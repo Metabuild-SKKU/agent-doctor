@@ -130,6 +130,23 @@ def taxonomy_qa_path() -> str:
     return os.getenv("EVAL_TAXONOMY_QA", "data/qa_pairs.jsonl")
 
 
+def _pos_int_env(name: str) -> Optional[int]:
+    """양의 정수 환경변수 → int, 0/비정수/미설정 → None(=제한 없음)."""
+    raw = os.getenv(name, "").strip()
+    return int(raw) if raw.isdigit() and int(raw) > 0 else None
+
+
+def korquad_max_docs() -> Optional[int]:
+    """KORQUAD_MAX_DOCS — 앞 N개 문서만(None=전체). Ingest·Eval 이 같은 값을 봐야 corpus/qa
+    문서 집합이 정합하므로 파싱을 여기 한 곳으로 모은다(양쪽 복붙 방지)."""
+    return _pos_int_env("KORQUAD_MAX_DOCS")
+
+
+def korquad_qa_limit() -> Optional[int]:
+    """KORQUAD_QA_LIMIT — qa 개수 상한(None=전체). Eval 전용."""
+    return _pos_int_env("KORQUAD_QA_LIMIT")
+
+
 def llm_eval_enabled() -> bool:
     """STEP3-2 RAGAS(LLM-as-Judge) 진단 활성화 여부. 기본 꺼짐(EVAL_ENABLE_LLM=1/true/yes/on).
     실제 실행은 signals 의 RAGAS 신호(_faith 등)가 `EVAL_MODE≥deep` 게이트와 AND 로 정한다."""

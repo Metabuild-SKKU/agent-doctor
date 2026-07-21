@@ -29,7 +29,7 @@ from core.state import AgentDoctorState
 
 from agents.eval.types import (
     EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled,
-    resolve_probe_source, PROBE_SOURCE_MADE,
+    resolve_probe_source, PROBE_SOURCE_MADE, PROBE_SOURCE_TAXONOMY,
 )
 from agents.eval.probe_gen import generate_probes, uses_user_log
 from agents.eval.probe_store import save_probes, load_probes
@@ -96,7 +96,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # 만든 골든 테스트셋을 재사용해 매 Optimize 반복마다 LLM 재호출을 피한다.
         # made: 코퍼스 버전과 무관하게 이미 만들어 둔 eval_probes.json 을 그대로 재사용
         # (파일 없음/비었으면 자동 생성으로 폴백해 저장). user_questions 보다 우선한다.
-        if resolve_probe_source() == PROBE_SOURCE_MADE:
+        probe_source = resolve_probe_source()
+        if probe_source == PROBE_SOURCE_MADE:
             probes = load_probes(version, ignore_version=True)
             if probes:
                 print(f"[Eval] STEP1: made 소스 — 저장된 Probe {len(probes)}개 재사용")
@@ -104,6 +105,11 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 print("[Eval] STEP1: made 소스지만 저장된 Probe 없음 → 자동 생성 후 저장")
                 probes = generate_probes(state)
                 save_probes(probes, version)
+        elif probe_source == PROBE_SOURCE_TAXONOMY:
+            # taxonomy 는 version 키(index_config+청크)에 없는 입력(QA 파일·KORQUAD_MAX_DOCS/
+            # QA_LIMIT)에 좌우되므로 캐시를 타면 auto/다른 QA 의 Probe 를 재사용해 오염된다.
+            # 파일 로드+resync 는 LLM 없이 저비용이라 매번 새로 만든다(캐시 우회).
+            probes = generate_probes(state)
         elif uses_user_log(state):
             probes = generate_probes(state)
         else:

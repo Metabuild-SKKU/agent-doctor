@@ -215,11 +215,10 @@ def _ingest_korquad_corpus(source_url: str) -> list[Document]:
     같은 규칙으로 문서를 고르므로 corpus/qa 가 같은 문서 집합을 본다.
     """
     from agents.eval.datasets.korquad import reconstruct_documents, DEFAULT_CORPUS
+    from agents.eval.types import korquad_max_docs   # 파싱은 공용 헬퍼로 단일화(qa 로더와 동일)
 
     path = source_url or DEFAULT_CORPUS
-    raw = os.getenv("KORQUAD_MAX_DOCS", "").strip()
-    max_docs = int(raw) if raw.isdigit() and int(raw) > 0 else None  # 0/비정수/미설정 = 전체
-    docs = reconstruct_documents(path, max_docs=max_docs)
+    docs = reconstruct_documents(path, max_docs=korquad_max_docs())
     if not docs:
         raise ValueError(f"KorQuAD corpus 가 비어있습니다: {path}")
     return docs

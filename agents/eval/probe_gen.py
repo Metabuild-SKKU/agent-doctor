@@ -129,17 +129,13 @@ def _from_taxonomy(state: AgentDoctorState) -> list[Probe]:
     가져온다 — Ingest 가 문서를 복원한 바로 그 파일이라 좌표계가 일치한다(설정 단일화).
     KORQUAD_MAX_DOCS / KORQUAD_QA_LIMIT 로 규모 제한(스모크). MAX_DOCS 는 Ingest 의
     corpus 로더와 같은 규칙이라 corpus/qa 가 같은 문서 집합을 본다."""
-    import os
     from agents.eval.datasets.korquad import load_taxonomy_probes, DEFAULT_CORPUS
-
-    def _pos_int(name):
-        raw = os.getenv(name, "").strip()
-        return int(raw) if raw.isdigit() and int(raw) > 0 else None  # 0/비정수/미설정 = 전체
+    from agents.eval.types import korquad_qa_limit, korquad_max_docs
 
     corpus_path = state.source_url or DEFAULT_CORPUS
     probes = load_taxonomy_probes(taxonomy_qa_path(), corpus_path,
-                                  limit=_pos_int("KORQUAD_QA_LIMIT"),
-                                  max_docs=_pos_int("KORQUAD_MAX_DOCS"))
+                                  limit=korquad_qa_limit(),
+                                  max_docs=korquad_max_docs())
     probes = _resync_gold_chunk_ids(probes, state.chunks, state.documents)
     matched = sum(1 for p in probes if p.gold_chunk_ids)
     print(f"[Eval] STEP1: taxonomy Probe {len(probes)}개 로드 "
@@ -296,6 +292,12 @@ def _build_doc_position_index(doc: Document, chunks: list[Chunk]) -> list[tuple[
     index: list[tuple[str, int, int]] = []
     cursor = 0
     for c in doc_chunks:
+        # Index 가 채운 char_span(원문 좌표)이 있으면 그대로 쓴다 — 본문 재검색은 동일
+        # 텍스트가 반복될 때 여러 청크가 첫 위치로 몰려(cursor 방식) 뒤쪽 gold 가 비는
+        # 모호성이 있다. char_span 은 인덱싱 때 확정된 값이라 그 모호성이 없다.
+        if c.char_span and c.char_span[0] is not None and c.char_span[1] is not None:
+            index.append((c.chunk_id, int(c.char_span[0]), int(c.char_span[1])))
+            continue
         span = _locate_span(doc.content, c.text, cursor)
         if span is None:
             continue
