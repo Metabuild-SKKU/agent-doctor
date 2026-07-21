@@ -11,7 +11,9 @@ tier / 사용 자원:
   tier1 순수 규칙 · tier2 추가 검색 쿼리(top-N 재검색·BM25·코퍼스) · tier3 LLM/RAGAS · tier4 파이프라인 재실행.
 
 diagnose() 가 진입 시 set_mode(mode) 로 현재 실행 모드를 설정하고, 이 모듈의 신호들이 그 값을
-읽어 self-gate 한다. (단일스레드 eval 루프 전제. 병렬화하면 contextvars 로 교체.)
+읽어 self-gate 한다. (단일스레드 전제 — STEP2 병렬화(agent.py) 이후에도 diagnose 는
+Phase C 순차 구간에서만 실행되므로 유효하다. probe 전체를 스레드화하려면 _active_mode 를
+contextvars 로 교체해야 한다.)
 """
 from __future__ import annotations
 

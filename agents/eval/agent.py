@@ -26,11 +26,12 @@ import json
 
 from core.schema import Probe
 from core.llm_usage import print_summary
+from core.parallel import parallel_map
 from core.state import AgentDoctorState
 
 from agents.eval.types import (
     EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled,
-    resolve_probe_source, PROBE_SOURCE_MADE,
+    resolve_llm_concurrency, resolve_probe_source, PROBE_SOURCE_MADE,
 )
 from agents.eval.probe_gen import generate_probes
 from agents.eval.probe_store import save_probes, load_probes
@@ -132,13 +133,38 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
         #   진단 중 계산한 비싼 신호가 state 에 누적되어 재진단 시 재사용된다.
+        #   LLM 호출(답변 생성)만 병렬화하고 검색·진단은 순차 유지 — Qdrant/임베딩/
+        #   signals 전역이 병렬 구간에 들어가지 않게 하는 설계(계획 B안).
         print(f"\n[Eval] STEP2-4: probe별 평가 ({len(probes)}개)\n")
+
+        # Phase A(순차): 검색 + record 준비, 답변 생성 태스크 수집
         records = []
-        for i, p in enumerate(probes, 1):
-            rec = _evaluate_probe(p, retriever, state.chunks, chunk_text, top_k, mode,
+        gen_tasks: list[tuple[EvalRecord, str, list[str]]] = []
+        for p in probes:
+            rec = _prepare_record(p, retriever, chunk_text, top_k,
                                   state.diagnosis_cache.setdefault(p.probe_id, {}))
-            _log_probe(i, len(probes), rec)
             records.append(rec)
+            gen_tasks.append((rec, "real", rec.retrieved_context))
+            if rec.oracle_context:  # gold context 가 있을 때만 Oracle 트랙 (기존 동일)
+                gen_tasks.append((rec, "oracle", rec.oracle_context))
+
+        # Phase B(병렬): LLM 답변 생성만 동시 실행 (EVAL_LLM_CONCURRENCY, 1이면 순차)
+        concurrency = resolve_llm_concurrency()
+        if concurrency > 1 and len(gen_tasks) > 1:
+            print(f"[Eval] STEP2: 답변 생성 {len(gen_tasks)}건 병렬 실행 (동시성 {concurrency})")
+        answers = parallel_map(lambda t: generate_answer(t[0].probe.question, t[2]),
+                               gen_tasks, concurrency)
+        for (rec, track, _ctx), answer in zip(gen_tasks, answers):
+            if track == "real":
+                rec.generated_answer = answer
+            else:
+                rec.oracle_answer = answer
+
+        # Phase C(순차): 지표·진단·로그 — diagnose 는 signals 전역·진단 캐시·tier2
+        # 재검색을 쓰므로 병렬 구간 밖에서 실행한다.
+        for i, rec in enumerate(records, 1):
+            rec.findings = diagnose(rec, mode)
+            _log_probe(i, len(records), rec)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
         state.probes = probes
@@ -208,16 +234,16 @@ def _pipeline_version(state: AgentDoctorState) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
-def _evaluate_probe(
+def _prepare_record(
     probe: Probe,
     retriever: Retriever,
-    chunks: list,
     chunk_text: dict[str, str],
     top_k: int,
-    mode: int,
     sig_cache: dict,
 ) -> EvalRecord:
-    """한 Probe 에 대해 검색·생성·지표·판정을 수행하고 EvalRecord 반환.
+    """[STEP2 Phase A·순차] 검색을 수행하고 답변 생성 직전까지의 EvalRecord 를 준비한다.
+    답변 생성(LLM)은 run() 의 Phase B 에서 병렬로, 지표·진단(STEP3~4, diagnose)은
+    Phase C 에서 순차로 이어진다 — record 는 raw I/O(검색·생성 결과)만 담는다.
     sig_cache 는 state.diagnosis_cache[probe_id] 뷰 — 진단 신호 memoize 가 여기(=state)에 누적된다."""
     rec = EvalRecord(probe=probe, signals=sig_cache)
 
@@ -227,17 +253,8 @@ def _evaluate_probe(
     rec.retrieved_context = [h.get("text", "") for h in hits]
     rec.retrieved_chunk_ids = [h.get("chunk_id", "") for h in hits]
 
-    # STEP2: 답변 생성 (실제 트랙)
-    rec.generated_answer = generate_answer(probe.question, rec.retrieved_context)
-
-    # STEP2: Oracle 답변 (gold context 가 있을 때만)
+    # Oracle 트랙 컨텍스트 (gold context 가 있을 때만 — 답변은 Phase B 에서 생성)
     gold_ctx = [chunk_text[cid] for cid in probe.gold_chunk_ids if cid in chunk_text]
     if gold_ctx:
         rec.oracle_context = gold_ctx
-        rec.oracle_answer = generate_answer(probe.question, gold_ctx)
-
-    # STEP3-1(지표)·STEP3-2(RAGAS)·STEP4(진단)는 전부 diagnose 안에서 계산·판정한다.
-    # 구조를 계산 -> diagnose에서 diagnose -> 모든 계산으로 변경함.
-    #   agent 는 STEP2(파이프라인 실행)까지만 — record 는 raw I/O(검색·생성 결과)만 담는다.
-    rec.findings = diagnose(rec, mode)
     return rec
