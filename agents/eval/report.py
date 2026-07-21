@@ -24,6 +24,7 @@ from agents.eval.types import (
     EvalRecord, RAGAS_WEIGHTS, PASS_SCORE_THRESHOLD, F1_PASS_THRESHOLD,
     resolve_mode,
 )
+from agents.eval.scoring import compute_composite, format_composite
 
 _RAGAS_KEYS = ("faithfulness", "context_precision", "context_recall", "response_relevancy")
 
@@ -72,6 +73,7 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
         ragas_scores=scores,
         oracle_accuracy=oracle_acc,
         overall_score=overall_val,
+        composite_score=compute_composite(records).as_dict(),   # 종합점수(0~100) — scoring 모듈
         pass_threshold=pass_thr,
         iteration=iteration,
     )
@@ -187,6 +189,7 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     fs = report.findings_summary
     print(f"[Eval] STEP5: 리포트 생성 - probe {n}개, 실패 {fail}개, "
           f"overall={report.overall_score}, pass={report.pass_threshold} (모드 {fs.get('mode')})")
+    print(f"[Eval]        종합점수: {format_composite(report.composite_score)}")
     if report.findings:
         # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
         # (타입=처방 그룹 4종, 라벨=세분화 진단명. 타입만 보면 gap 처럼 뭉뚱그려져 원인이 안 보인다.)

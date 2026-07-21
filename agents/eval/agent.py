@@ -9,7 +9,7 @@ Eval Agent — RAG 파이프라인 품질 진단
     STEP1  Probe 생성            → probe_gen.generate_probes
     STEP2  각 Probe로 검색·생성   → retrieval.retrieve / generate_answer
     STEP3-1 규칙 지표            → diagnose 내부 _compute_metrics (recall_at_k / token_f1)
-    STEP3-2 LLM(RAGAS) 진단      → diagnose 내부 signals RAGAS 신호 (옵션, 기본 꺼짐)
+    STEP3-2 LLM(RAGAS) 진단      → diagnose 내부 _compute_ragas (DEEP 이상에서 전 probe 측정)
     STEP4  원인 판정(Finding)     → diagnose.diagnose
     STEP5  DiagnosticReport 생성  → report.build_report
 
@@ -46,7 +46,7 @@ def _retrieve_with_rag(retriever: Retriever, chunks, question: str, top_k: int) 
 
 
 def _ragas_track(record: EvalRecord, track: str) -> dict:
-    """diagnose 가 lazy 로 부르는 RAGAS 트랙 계산기(set_context 로 주입).
+    """diagnose 가 트랙별 1회 부르는 RAGAS 계산기(set_context 로 주입).
     비활성(EVAL_ENABLE_LLM)·키없음·실패 → {} 폴백. (DEEP 게이트는 diagnose 신호가 담당.)"""
     if not llm_eval_enabled():
         return {}
