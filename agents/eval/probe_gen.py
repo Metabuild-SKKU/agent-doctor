@@ -601,7 +601,19 @@ def _gold_spans_from_evidence(
             continue
         seen.add(key)
         deduped.append(span)
-    return deduped, located_sources, exact_span_count, fallback_span_count
+    # 상태 문자열과 실제 저장 span 목록이 어긋나지 않도록 dedup 이후 다시 센다.
+    deduped_exact_count = sum(
+        span.get("_grounding_quality") == "exact" for span in deduped
+    )
+    deduped_fallback_count = sum(
+        span.get("_grounding_quality") == "chunk_fallback" for span in deduped
+    )
+    return (
+        deduped,
+        located_sources,
+        deduped_exact_count,
+        deduped_fallback_count,
+    )
 
 
 def _set_probe_gold_spans(

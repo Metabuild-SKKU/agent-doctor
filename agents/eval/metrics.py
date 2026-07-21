@@ -108,7 +108,11 @@ def span_recall_at_k(
     all_positions: dict[str, list[tuple[int, int]]] = {}
     retrieved_positions: dict[str, list[tuple[int, int]]] = {}
     retrieved = set(retrieved_chunk_ids)
+    gold_doc_ids = {doc_id for doc_id, _start, _end in valid_spans}
+    retrieved_gold_chunk_without_position = False
     for chunk in chunks:
+        doc_id = getattr(chunk, "doc_id", None)
+        chunk_id = getattr(chunk, "chunk_id", None)
         raw = getattr(chunk, "char_span", None)
         metadata = getattr(chunk, "metadata", None)
         if raw is None and isinstance(metadata, dict):
@@ -123,17 +127,21 @@ def span_recall_at_k(
             or raw[0] < 0
             or raw[1] <= raw[0]
         ):
+            if doc_id in gold_doc_ids and chunk_id in retrieved:
+                retrieved_gold_chunk_without_position = True
             continue
-        doc_id = getattr(chunk, "doc_id", None)
         if not isinstance(doc_id, str):
             continue
         position = (raw[0], raw[1])
         all_positions.setdefault(doc_id, []).append(position)
-        if getattr(chunk, "chunk_id", None) in retrieved:
+        if chunk_id in retrieved:
             retrieved_positions.setdefault(doc_id, []).append(position)
 
-    # gold 문서의 현재 청크 좌표 자체가 없으면 span 기반 판정이 불가능하다.
-    if any(not all_positions.get(doc_id) for doc_id, _start, _end in valid_spans):
+    # gold 문서 좌표가 없거나 검색된 gold 문서 청크의 좌표가 일부라도 빠지면
+    # span 기반 0점으로 단정하지 않고 기존 chunk-id Recall로 폴백한다.
+    if retrieved_gold_chunk_without_position or any(
+        not all_positions.get(doc_id) for doc_id, _start, _end in valid_spans
+    ):
         return None
 
     covered = 0

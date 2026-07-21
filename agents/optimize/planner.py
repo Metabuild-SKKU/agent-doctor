@@ -340,6 +340,8 @@ def _knee(required: list[int]) -> int:
     커버하려고 값을 크게 올리는 대가가 이득보다 커서"라는 점이 중요하다.
     평균/최댓값과 달리 이상치 하나에 끌려가지 않는다.
     """
+    if not required:
+        raise ValueError("무릎 분석에는 하나 이상의 필요값이 있어야 합니다.")
     candidates = sorted(set(required))
     best = candidates[0]
     covered = sum(1 for r in required if r <= best)
@@ -978,11 +980,30 @@ def _finding_search_space(
     )
 
     resolved: dict[str, list] = {}
-    for raw_path, fallback_values in fallback.items():
+    for raw_path, patch_value in changes.items():
         path = canonicalize_path(raw_path)
+        fallback_values = fallback.get(raw_path) or fallback.get(path) or []
         supplied_values = supplied.get(path)
         grounded_values = grounded.get(raw_path) or grounded.get(path)
-        values = supplied_values or grounded_values
+        evidence_values = supplied_values or grounded_values
+        values = list(evidence_values) if evidence_values else []
+        current = get_current_value(state.index_config, path)
+        if (
+            path == "retriever.top_k"
+            and patch_value in ("increase", "decrease")
+            and isinstance(current, (int, float))
+            and not isinstance(current, bool)
+        ):
+            values = [
+                value
+                for value in values
+                if isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and (
+                    (patch_value == "increase" and value > current)
+                    or (patch_value == "decrease" and value < current)
+                )
+            ]
         label = findings[0].label if findings else ""
         blocks_symbolic_fallback = (
             label == "chunking_context_mismatch"
@@ -992,7 +1013,7 @@ def _finding_search_space(
         )
         if values:
             resolved[path] = list(values)
-        elif not blocks_symbolic_fallback:
+        elif not evidence_values and not blocks_symbolic_fallback:
             resolved[path] = list(fallback_values)
         if supplied_values and path in {
             "chunker.chunk_size",

@@ -90,7 +90,11 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             )
             rejection = (request.failure_label, prescription_id)
             if not prescription_id or rejection in state.blacklist:
-                state.status = "skipped"
+                state.status = "rolled_back" if rolled_back else "skipped"
+                if rolled_back:
+                    state.optimization_report = reporter.build_trial_report(
+                        judged_item, verdict
+                    )
                 return state
             state.blacklist.add(rejection)
 
@@ -110,6 +114,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
         # 검증된 처방을 실제 index_config 에 반영(canonical→flat 변환은 mapper 담당)
         config_mapper.apply_config_patch(state.index_config, result.config_patch)
+        state.reindex_required = bool(result.needs_reindex)
 
         # pending 이력 생성(다음 방문에서 finalize) + iteration 1회 증가
         prescription_id = (
@@ -118,6 +123,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         item = history.create_pending_item(
             state, request, prescription_id, before_config, before_report
         )
+        item.metadata["reindex_required"] = bool(result.needs_reindex)
         state.optimization_history.append(item)
         if starts_new_label:
             state.iteration += 1
@@ -133,6 +139,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     "trial_results": list(result.metadata.get("trial_results", [])),
                     "current_candidate": dict(result.config_patch.changes),
                     "study_baseline_config": dict(before_config),
+                    "reindex_required": bool(result.needs_reindex),
                 }
             )
         state.status = "applied"
@@ -197,6 +204,7 @@ def _continue_internal_study(
         and result.metadata.get("adapter_status") == "needs_evaluation"
     ):
         config_mapper.apply_config_patch(state.index_config, result.config_patch)
+        state.reindex_required = bool(result.needs_reindex)
         item.metadata["current_candidate"] = dict(result.config_patch.changes)
         item.after_config = dict(state.index_config)
         state.status = "applied"
@@ -212,6 +220,7 @@ def _continue_internal_study(
         state,
         item,
         result.error or result.message or "internal study를 완료하지 못했습니다.",
+        retryable=True,
     )
 
 
@@ -225,6 +234,11 @@ def _finish_internal_study(
     best_score = result.metadata.get("best_score")
     after_score = float(best_score) if isinstance(best_score, (int, float)) else before_score
     baseline_selected = result.metadata.get("error_code") == "baseline_selected"
+    best_metrics = _best_trial_metrics(
+        item.metadata.get("trial_results", []),
+        result,
+    )
+    floor_violations = _study_floor_violations(best_metrics)
 
     if baseline_selected:
         changed = state.index_config != item.before_config
@@ -239,19 +253,37 @@ def _finish_internal_study(
         if label and item.selected_prescription_id:
             state.blacklist.add((label, item.selected_prescription_id))
         state.status = "rolled_back" if changed else "verified"
+        state.reindex_required = bool(item.metadata.get("reindex_required", True))
     elif result.status == "proposed" and result.config_patch is not None:
-        config_mapper.apply_config_patch(state.index_config, result.config_patch)
-        verdict = Verdict(
-            keep=True,
-            before_score=before_score,
-            after_score=after_score,
-            reason="모든 top_k 후보 평가 후 가장 좋은 후보를 선택",
-        )
-        state.status = (
-            "applied"
-            if state.index_config != item.after_config
-            else "verified"
-        )
+        if floor_violations:
+            changed = state.index_config != item.before_config
+            state.index_config = dict(item.before_config)
+            verdict = Verdict(
+                keep=False,
+                before_score=before_score,
+                after_score=after_score,
+                floor_violations=floor_violations,
+                reason=f"sweep 최적 후보가 하한선을 위반함 {floor_violations} → baseline 복원",
+            )
+            label = item.failure_labels[0] if item.failure_labels else ""
+            if label and item.selected_prescription_id:
+                state.blacklist.add((label, item.selected_prescription_id))
+            state.status = "rolled_back" if changed else "verified"
+            state.reindex_required = bool(item.metadata.get("reindex_required", True))
+        else:
+            config_mapper.apply_config_patch(state.index_config, result.config_patch)
+            verdict = Verdict(
+                keep=True,
+                before_score=before_score,
+                after_score=after_score,
+                reason="모든 top_k 후보 평가 후 가장 좋은 후보를 선택",
+            )
+            state.status = (
+                "applied"
+                if state.index_config != item.after_config
+                else "verified"
+            )
+            state.reindex_required = bool(result.needs_reindex)
     else:
         return _fail_active_study(
             state,
@@ -264,10 +296,7 @@ def _finish_internal_study(
         baseline_report = item.metadata.get("before_report")
         item.after_metrics = dict(getattr(baseline_report, "ragas_scores", {}) or {})
     else:
-        item.after_metrics = _best_trial_metrics(
-            item.metadata.get("trial_results", []),
-            result,
-        )
+        item.after_metrics = best_metrics
     item.status = "applied" if verdict.keep else "failed"
     item.rollback_reason = None if verdict.keep else verdict.reason
     item.metadata.update(
@@ -288,8 +317,10 @@ def _fail_active_study(
     state: AgentDoctorState,
     item: OptimizationHistoryItem,
     reason: str,
+    *,
+    retryable: bool = False,
 ) -> AgentDoctorState:
-    """study 계약 오류 시 baseline으로 안전하게 복원하고 실패를 기록한다."""
+    """study 오류 시 baseline으로 복원하고 재시도 가능 여부를 구분한다."""
     changed = state.index_config != item.before_config
     state.index_config = dict(item.before_config)
     item.status = "failed"
@@ -298,12 +329,29 @@ def _fail_active_study(
     item.metadata["pending"] = False
     item.metadata["active_study"] = False
     item.metadata["study_error"] = reason
+    item.metadata["study_retryable"] = retryable
     item.metadata.pop("before_report", None)
     label = item.failure_labels[0] if item.failure_labels else ""
-    if label and item.selected_prescription_id:
-        state.blacklist.add((label, item.selected_prescription_id))
+    prescription_id = item.selected_prescription_id
+    previous_same_errors = sum(
+        1
+        for previous in state.optimization_history
+        if previous is not item
+        and previous.selected_prescription_id == prescription_id
+        and (previous.failure_labels[0] if previous.failure_labels else "") == label
+        and previous.metadata.get("study_error")
+    )
+    # 상태 계약 손상은 같은 처방으로 회복되지 않으므로 즉시 차단한다. 일시적인
+    # adapter 오류는 한 번 재시도하되 반복되면 무한 루프 방지를 위해 차단한다.
+    if (
+        label
+        and prescription_id
+        and (not retryable or previous_same_errors >= 1)
+    ):
+        state.blacklist.add((label, prescription_id))
     state.status = "rolled_back" if changed else "error"
-    state.error = reason
+    state.reindex_required = bool(item.metadata.get("reindex_required", True))
+    state.error = None if changed else reason
     return state
 
 
@@ -335,6 +383,18 @@ def _best_trial_metrics(trials: list, result: OptimizationResult) -> dict:
         if isinstance(trial, dict) and trial.get("config") == best_config:
             return dict(trial.get("metrics") or {})
     return {}
+
+
+def _study_floor_violations(metrics: dict) -> list[str]:
+    """sweep 승자에도 일반 처방과 같은 지표 하한선을 적용한다."""
+    numeric_metrics = {
+        key: value
+        for key, value in metrics.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    if "context_recall" not in numeric_metrics and "mean_recall_at_k" in numeric_metrics:
+        numeric_metrics["context_recall"] = numeric_metrics["mean_recall_at_k"]
+    return history.check_floor(numeric_metrics)
 
 
 def _judge_pending_trial(
@@ -370,6 +430,7 @@ def _judge_pending_trial(
         if restored.get("embedding_model") != after_config.get("embedding_model"):
             restored["recreate_collection_on_dimension_mismatch"] = True
         state.index_config = restored
+        state.reindex_required = bool(pending.metadata.get("reindex_required", True))
         label = pending.failure_labels[0] if pending.failure_labels else ""
         if label and pending.selected_prescription_id:
             state.blacklist.add((label, pending.selected_prescription_id))

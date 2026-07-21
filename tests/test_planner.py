@@ -85,6 +85,10 @@ class KneeTest(unittest.TestCase):
         # 2 → 50 은 probe 1개에 48을 쓰는 셈이라 멈춘다(4/5 커버).
         self.assertEqual(_knee([2, 2, 2, 2, 50]), 2)
 
+    def test_empty_input_has_clear_contract_error(self):
+        with self.assertRaisesRegex(ValueError, "하나 이상의 필요값"):
+            _knee([])
+
 
 class KneeCandidatesTest(unittest.TestCase):
     """sweep 후보: 무릎 위 구간은 '추측이 밑진다고 본' 곳이라 실측으로 확인한다."""
@@ -185,6 +189,19 @@ class GroundedValueTest(unittest.TestCase):
 
         self.assertEqual(request.search_space, {"retriever.top_k": [6, 9]})
 
+    def test_top_k_candidates_are_clamped_to_prescription_direction(self):
+        findings = [
+            make_finding(
+                "p1",
+                "retrieval_missing_gold",
+                candidates={"top_k": [3, 15]},
+            )
+        ]
+
+        request, _decision = planner.plan(make_state(findings, top_k=10))
+
+        self.assertEqual(request.search_space, {"retriever.top_k": [15]})
+
 
 class GroupingTest(unittest.TestCase):
     """같은 라벨의 finding 을 묶어야 빈도가 제대로 계산된다."""
@@ -267,8 +284,8 @@ class PlannerCandidateListTest(unittest.TestCase):
 
         self.assertEqual(decision.mode, "apply_optimize")
         self.assertEqual(request.optimizer, "internal")
-        self.assertEqual(request.search_space, {"retriever.top_k": [3, 7, 9]})
-        self.assertEqual(request.max_trials, 3)
+        self.assertEqual(request.search_space, {"retriever.top_k": [7, 9]})
+        self.assertEqual(request.max_trials, 2)
 
     def test_chunk_candidates_include_preview_inputs(self):
         finding = make_finding(

@@ -122,8 +122,9 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     """정답 근거가 현재 청크 경계에 나뉘어 한 청크에 온전히 없음을 판정한다.
 
     gold span과 현재 청크의 원문 좌표만 비교해 경계 분할 후보를 찾는다.
-    검색이 실패했다면 FAST에서도 확정하고, 검색은 성공했지만 답변이 실패했다면
-    FULL 모드에서 분할 조각 병합 재생성으로 실제 원인인지 확인한다.
+    검색 실패와 경계 분할이 함께 보여도 좌표의 동시 발생만으로 인과를 확정하지
+    않는다. 검색은 성공했지만 답변이 실패한 경우에만 FULL 모드의 분할 조각 병합
+    재생성으로 실제 원인인지 확인한다.
     """
 
     analysis = _gold_span_boundary_analysis(record)
@@ -131,7 +132,9 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
         return None
     confirmed = False
     if _retrieval_failed(record):
-        confirmed = True
+        # 경계가 나뉘었다는 사실만으로 검색 실패 원인을 청킹으로 단정할 수 없다.
+        # 예비 Finding으로 남겨 _pick이 실측된 정석 검색 원인을 우선하게 한다.
+        confirmed = False
     elif _context_applicable(record):
         helps = _boundary_merge_helps(record)
         if helps is False:

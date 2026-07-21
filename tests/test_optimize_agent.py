@@ -69,6 +69,7 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertEqual(state.iteration, 1)
         self.assertEqual(state.current_agent, "optimize")
         self.assertEqual(state.index_config["top_k"], 2)  # 가장 싼 top-k 처방이 먼저 적용됨
+        self.assertFalse(state.reindex_required)
         self.assertIsNotNone(history.find_pending(state.optimization_history))
 
     def test_manual_label_makes_no_change(self):
@@ -148,6 +149,27 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(state.index_config["chunk_size"], 256)
         self.assertEqual(state.status, "applied")
 
+    def test_baseline_dead_end_preserves_same_visit_rollback(self):
+        state = agent.run(make_state(overall=60.0))
+        state.report = make_report(50.0)
+        request, decision = agent.planner.plan(make_state(overall=60.0))
+        baseline_result = OptimizationResult(
+            request_id=request.request_id,
+            status="skipped",
+            optimizer="internal",
+            selected_candidate=request.candidates[0],
+            metadata={"error_code": "baseline_selected"},
+        )
+
+        with patch("agents.optimize.agent.planner.plan", return_value=(request, decision)), patch(
+            "agents.optimize.agent.optimizer.run", return_value=baseline_result
+        ):
+            state = agent.run(state)
+
+        self.assertEqual(state.status, "rolled_back")
+        self.assertEqual(state.index_config["top_k"], 4)
+        self.assertEqual(state.optimization_report.status, "failed")
+
 
 class OptimizeTopKSweepTest(unittest.TestCase):
     @staticmethod
@@ -156,7 +178,7 @@ class OptimizeTopKSweepTest(unittest.TestCase):
             finding_id="sweep", type="retrieval_failure", severity="warning",
             description="gold가 검색 결과에 없음", label="retrieval_missing_gold",
             affected_probes=["p1"],
-            metadata={"parameter_candidates": {"retriever.top_k": [3, 7, 9]}},
+            metadata={"parameter_candidates": {"retriever.top_k": [7, 9, 11]}},
         )
         return DiagnosticReport(
             report_id="sweep-report", findings=[finding], overall_score=score,
@@ -178,19 +200,19 @@ class OptimizeTopKSweepTest(unittest.TestCase):
 
     def test_candidates_share_one_iteration_and_best_is_selected(self):
         state = agent.run(self._state())
-        self.assertEqual((state.index_config["top_k"], state.iteration), (3, 1))
+        self.assertEqual((state.index_config["top_k"], state.iteration), (7, 1))
 
         state.report = self._report(55.0)
         state = agent.run(state)
-        self.assertEqual((state.index_config["top_k"], state.iteration), (7, 1))
+        self.assertEqual((state.index_config["top_k"], state.iteration), (9, 1))
 
         state.report = self._report(70.0)
         state = agent.run(state)
-        self.assertEqual((state.index_config["top_k"], state.iteration), (9, 1))
+        self.assertEqual((state.index_config["top_k"], state.iteration), (11, 1))
 
         state.report = self._report(65.0)
         state = agent.run(state)
-        self.assertEqual(state.index_config["top_k"], 7)
+        self.assertEqual(state.index_config["top_k"], 9)
         self.assertEqual(state.iteration, 1)
         self.assertIsNone(history.find_pending(state.optimization_history))
         self.assertEqual(len(state.optimization_history[0].metadata["trial_results"]), 4)
@@ -198,21 +220,21 @@ class OptimizeTopKSweepTest(unittest.TestCase):
     def test_baseline_is_restored_only_after_all_candidates(self):
         state = self._state()
         state.report.findings[0].metadata["parameter_candidates"] = {
-            "retriever.top_k": [3, 7]
+            "retriever.top_k": [7, 9]
         }
         state = agent.run(state)
 
         state.report = self._report(55.0)
         state.report.findings[0].metadata["parameter_candidates"] = {
-            "retriever.top_k": [3, 7]
+            "retriever.top_k": [7, 9]
         }
         state = agent.run(state)
-        self.assertEqual(state.index_config["top_k"], 7)
+        self.assertEqual(state.index_config["top_k"], 9)
         self.assertFalse(state.blacklist)
 
         state.report = self._report(58.0)
         state.report.findings[0].metadata["parameter_candidates"] = {
-            "retriever.top_k": [3, 7]
+            "retriever.top_k": [7, 9]
         }
         state = agent.run(state)
         self.assertEqual(state.index_config["top_k"], 5)
@@ -222,7 +244,7 @@ class OptimizeTopKSweepTest(unittest.TestCase):
             state.blacklist,
         )
 
-    def test_broken_active_study_restores_baseline_and_blacklists(self):
+    def test_broken_active_study_restores_without_fake_error(self):
         state = agent.run(self._state())
         state.optimization_history[0].metadata.pop("study_request")
 
@@ -230,10 +252,47 @@ class OptimizeTopKSweepTest(unittest.TestCase):
 
         self.assertEqual(state.index_config["top_k"], 5)
         self.assertEqual(state.status, "rolled_back")
+        self.assertIsNone(state.error)
         self.assertIn(
-            ("retrieval_missing_gold", "increase_top_k"),
-            state.blacklist,
+            ("retrieval_missing_gold", "increase_top_k"), state.blacklist
         )
+
+    def test_transient_adapter_failure_does_not_immediately_blacklist(self):
+        state = agent.run(self._state())
+        failed = OptimizationResult(
+            request_id="failed-study",
+            status="failed",
+            optimizer="internal",
+            error="adapter 일시 실패",
+        )
+
+        with patch("agents.optimize.agent.optimizer.run", return_value=failed):
+            state = agent.run(state)
+
+        self.assertEqual(state.index_config["top_k"], 5)
+        self.assertEqual(state.status, "rolled_back")
+        self.assertIsNone(state.error)
+        self.assertNotIn(
+            ("retrieval_missing_gold", "increase_top_k"), state.blacklist
+        )
+
+    def test_floor_violating_sweep_winner_restores_baseline(self):
+        state = self._state()
+        state.report.findings[0].metadata["parameter_candidates"] = {
+            "retriever.top_k": [7, 9]
+        }
+        state = agent.run(state)
+
+        state.report = self._report(90.0)
+        state.report.ragas_scores["context_recall"] = 0.2
+        state = agent.run(state)
+
+        state.report = self._report(80.0)
+        state = agent.run(state)
+
+        self.assertEqual(state.index_config["top_k"], 5)
+        self.assertEqual(state.status, "rolled_back")
+        self.assertIn("context_recall", state.optimization_history[0].rollback_reason)
 
 
 class OptimizeReportWiringTest(unittest.TestCase):

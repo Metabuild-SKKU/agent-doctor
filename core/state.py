@@ -95,6 +95,9 @@ class AgentDoctorState:
     #   원소 타입은 OptimizationReport(agents/optimize/schemas.py). core가 optimize를
     #   import하지 않도록 타입은 느슨하게 둔다. Serve가 마지막 방문 리포트를 읽는다.
     optimization_report: Optional[object] = None
+    # Optimize가 바꾼 설정 때문에 청크/임베딩을 다시 만들 필요가 있는지 표시한다.
+    # Index는 False를 한 번 소비하면 기존 인덱스를 유지한 채 Eval로 넘기고 True로 복원한다.
+    reindex_required: bool = True
 
     # Serve Agent 결과
     mcp_endpoint: Optional[str] = None

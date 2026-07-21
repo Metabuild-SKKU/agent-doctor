@@ -42,7 +42,7 @@ class ChunkBoundaryDiagnosisTest(unittest.TestCase):
         signals.set_context()
         signals.set_mode(Mode.FAST)
 
-    def test_split_exact_span_is_confirmed_without_llm(self):
+    def test_split_span_does_not_override_confirmed_retrieval_cause(self):
         chunks = _fixed_chunks("d1", 1000, 400, 50)
         signals.set_context(chunks=chunks)
         probe = Probe(
@@ -64,13 +64,9 @@ class ChunkBoundaryDiagnosisTest(unittest.TestCase):
 
         findings = diagnose.diagnose(record, Mode.FAST)
 
-        self.assertEqual(findings[0].label, "chunking_context_mismatch")
+        self.assertEqual(findings[0].label, "retrieval_incomplete_enumeration")
         self.assertTrue(findings[0].confirmed)
         self.assertEqual(findings[0].metadata["group"], "A")
-        self.assertEqual(
-            findings[0].metadata["boundary_analysis"]["boundary_split_count"],
-            1,
-        )
 
     def test_chunk_fallback_span_is_not_used_for_boundary_diagnosis(self):
         chunks = _fixed_chunks("d1", 1000, 400, 50)

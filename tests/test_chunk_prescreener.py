@@ -100,6 +100,22 @@ class ChunkPrescreenerTest(unittest.TestCase):
             "missing_chunk_precheck_context",
         )
 
+    def test_previewer_import_error_is_reported_as_unavailable(self):
+        request = self.make_request(
+            path="chunker.chunk_size",
+            values=[400, 600],
+            baseline={"chunk_size": 512, "chunk_overlap": 50},
+            spans=[{"doc_id": "doc-1", "start": 100, "end": 200}],
+        )
+
+        def unavailable_previewer(*_args):
+            raise ImportError("qdrant_client 없음")
+
+        result = run(request, previewer=unavailable_previewer)
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(result.metadata["error_code"], "chunk_precheck_unavailable")
+
 
 if __name__ == "__main__":
     unittest.main()

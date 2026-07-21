@@ -182,6 +182,29 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(second.chunks[0].metadata["top_k"], 9)
         self.assertTrue(second.chunks[0].metadata["use_reranker"])
 
+    def test_runtime_only_config_change_skips_reindex_work(self):
+        state = self._state()
+        state.documents = [_document("doc-1", "기존 문서")]
+        state.chunks = [
+            Chunk("c1", "doc-1", "기존 문서", embedding=[1.0, 0.0, 0.0, 0.0])
+        ]
+        state.reindex_required = False
+        tools = IndexTools(
+            get_retriever=Mock(),
+            embed=Mock(),
+            count_tokens=Mock(),
+            build_sparse_vector=Mock(),
+            build_graph_artifacts=Mock(),
+        )
+
+        result = run(state, tools=tools)
+
+        self.assertEqual(result.status, "indexed")
+        self.assertTrue(result.index_artifacts["reindex_skipped"])
+        self.assertTrue(result.reindex_required)
+        tools.get_retriever.assert_not_called()
+        tools.embed.assert_not_called()
+
     def test_reused_chunks_still_seed_chunk_deduplication(self):
         state = self._state()
         state.index_config.update(
