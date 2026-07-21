@@ -105,6 +105,7 @@ class DiagnosticReport:
     ragas_scores: dict = field(default_factory=dict)
     oracle_accuracy: Optional[float] = None
     overall_score: Optional[float] = None
+    composite_score: Optional[dict] = None  # 종합점수(0~100)+성분별 점수. agents/eval/scoring.py 산출
     pass_threshold: bool = False
     created_at: datetime = field(default_factory=datetime.now)
     iteration: int = 1
