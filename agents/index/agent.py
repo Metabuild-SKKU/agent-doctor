@@ -1,11 +1,10 @@
 # Index 단계에서 만지는 상태:
-# - read: state.documents, state.index_config
-# - write: state.chunks, state.index_artifacts, state.status, state.error
+# - read: state.documents, state.index_config, state.reindex_required
+# - write: state.chunks, state.index_artifacts, state.reindex_required, state.status, state.error
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import unicodedata
 from dataclasses import dataclass, replace
@@ -15,14 +14,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
     DEFAULT_EMBEDDING_MODEL,
-    build_client,
     build_sparse_vector,
     count_tokens,
-    delete_document_chunks,
     embed,
-    ensure_collection,
-    upsert_chunks,
 )
+from agents.rag.retriever import get_retriever
 from core.schema import Chunk, Document
 from core.state import AgentDoctorState
 
@@ -46,10 +42,7 @@ class _SectionDraft:
 @dataclass(frozen=True)
 class IndexTools:
     # 실험/테스트 때 저장소, 임베딩, 그래프 구현만 바꿔 끼우기 위한 얇은 묶음.
-    build_client: Callable[..., Any]
-    ensure_collection: Callable[..., Any]
-    delete_document_chunks: Callable[..., Any]
-    upsert_chunks: Callable[..., Any]
+    get_retriever: Callable[..., Any]
     embed: Callable[..., list[float]]
     count_tokens: Callable[..., int]
     build_sparse_vector: Callable[..., dict]
@@ -354,10 +347,7 @@ def _configured_chunk_strategy(config: dict) -> str:
 
 def _default_tools() -> IndexTools:
     return IndexTools(
-        build_client=build_client,
-        ensure_collection=ensure_collection,
-        delete_document_chunks=delete_document_chunks,
-        upsert_chunks=upsert_chunks,
+        get_retriever=get_retriever,
         embed=embed,
         count_tokens=count_tokens,
         build_sparse_vector=build_sparse_vector,
@@ -652,6 +642,19 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
         state.error = "문서가 없습니다. Ingest Agent 완료 여부를 확인하세요."
         return state
 
+    # top_k처럼 검색 시점에만 쓰는 설정은 기존 청크와 벡터를 그대로 사용할 수 있다.
+    # 그래프의 Index→Eval 흐름은 유지하되 실제 재청킹·재임베딩·upsert는 생략한다.
+    if not state.reindex_required and state.chunks:
+        state.reindex_required = True
+        state.status = "indexed"
+        state.index_artifacts = {
+            **state.index_artifacts,
+            "reindex_skipped": True,
+            "skip_reason": "검색 시점 설정만 변경됨",
+        }
+        print("[Index] 검색 시점 설정만 변경됨 — 기존 인덱스 재사용")
+        return state
+
     config = {
         "chunk_size": state.index_config.get("chunk_size", 600),
         "chunk_overlap": state.index_config.get("chunk_overlap", 80),
@@ -718,24 +721,15 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
             )
 
         vector_dim = len(next(chunk.embedding for chunk in all_chunks if chunk.embedding))
-        client = tools.build_client(
-            url=os.getenv("QDRANT_URL", ":memory:"),
-            api_key=os.getenv("QDRANT_API_KEY"),
-        )
-        tools.ensure_collection(
-            client,
-            vector_dim=vector_dim,
-            recreate_on_mismatch=bool(
-                config.get("recreate_collection_on_dimension_mismatch", False)
-            ),
-        )
+        # 컬렉션 준비·증분 삭제·upsert를 공통 retriever에 위임한다. 뒤이어 도는
+        # Eval/Serve가 같은 청크로 get_retriever를 부르면 이 적재 결과를 그대로 쓴다.
+        # 재생성 플래그는 config를 통해 ensure_collection까지 전달된다.
+        tools.get_retriever(all_chunks, config, delete_doc_ids=list(seen_doc_ids))
         # one-shot: 재생성 플래그는 소비 즉시 끈다. 켠 채로 두면 이후 모든
         # 재색인과 retriever(resolve_retrieval_settings)까지 차원 가드가
         # 풀린 채 남아, mismatch 시 에러 대신 컬렉션이 조용히 삭제된다.
         if state.index_config.get("recreate_collection_on_dimension_mismatch"):
             state.index_config["recreate_collection_on_dimension_mismatch"] = False
-        tools.delete_document_chunks(client, list(seen_doc_ids))
-        tools.upsert_chunks(client, all_chunks)
 
         state.chunks = all_chunks
         if config.get("graph_enabled", True):

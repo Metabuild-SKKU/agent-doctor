@@ -21,6 +21,7 @@ from agents.index.agent import run as index_run
 from agents.eval.agent import run as eval_run
 from agents.optimize.agent import run as optimize_run
 from agents.optimize import history   # 판정 대기(pending) 처방 조회용
+from agents.optimize import gate      # serve/optimize 게이트 정책(점수 + 검색 바닥선)
 from agents.serve.agent import run as serve_run
 
 try:
@@ -37,7 +38,7 @@ def route_after_eval(state: AgentDoctorState) -> str:
       반복 예산 소진 + 대기 없음       → Serve
       품질 미달(예산 남음)            → Optimize
     """
-    if state.report and state.report.pass_threshold:
+    if gate.passes_report(state.report):
         print(f"[Orchestrator] 품질 통과 ({state.report.overall_score}점) → Serve")
         return "serve"
 
@@ -144,8 +145,19 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
-    run_pipeline(
-        source_url="https://notion.so/example-page",
-        source_type="notion",
-        user_questions=["휴가 정책이 어떻게 돼?", "신입사원 온보딩 기간은?"],
-    )
+    import os
+
+    # 소스는 env 로 받는다(run_local_pipeline.py 와 동일 계약: SOURCE_TYPE / SOURCE_URL).
+    #   SOURCE_TYPE=korquad SOURCE_URL=data/corpus.jsonl python graph.py   # 기본
+    #   SOURCE_TYPE=notion  SOURCE_URL=https://notion.so/... python graph.py
+    source_type = os.getenv("SOURCE_TYPE", "korquad").strip().lower()
+    defaults = {
+        "korquad": "data/corpus.jsonl",
+        "file": "sample_docs/hr_policy.md",
+        "notion": "https://notion.so/example-page",
+    }
+    source_url = os.getenv("SOURCE_URL", defaults.get(source_type, ""))
+    if source_type == "korquad":
+        os.environ.setdefault("EVAL_PROBE_SOURCE", "taxonomy")  # qa 를 taxonomy 로
+
+    run_pipeline(source_url, source_type=source_type)

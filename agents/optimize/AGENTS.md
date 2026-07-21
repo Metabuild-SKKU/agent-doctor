@@ -41,9 +41,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 - 예외는 바깥으로 그대로 전파하지 말고 `state.status = "error"`, 원인을 알 수 있는
   `state.error`, `state.current_agent = "optimize"`를 기록한 뒤 `state`를 반환한다.
   다만 실패를 `applied`나 `skipped`로 위장하지 않는다.
-- `iteration`은 실제 처방을 적용해 다음 Eval 검증으로 넘기는 한 번의 시도마다
-  `agent.py`에서 정확히 한 번만 증가시킨다. 제안만 생성하거나 현재 설정을 유지하는
-  경로가 반복 횟수를 소비하게 만들지 않는다.
+- `iteration`은 후보 trial 수가 아니라 라벨 처리 단계를 센다. 이전에 실제 적용한
+  라벨이 없거나 새 request의 라벨과 다를 때만 `agent.py`에서 정확히 한 번 증가시킨다.
+  같은 라벨의 top-k sweep 후보와 후속 처방은 반복 횟수를 소비하지 않으며 Eval도
+  `iteration`을 증가시키지 않는다.
 - `graph.py`는 이 모듈 작업 범위에서 수정하지 않는다. 사용자 선택 분기나 새 route가
   필요하면 상태·오케스트레이터 소유자와 계약을 먼저 확정하고 통합 차단 요인으로
   기록한다.
@@ -218,8 +219,9 @@ adapter 하위 기능만 검증하며, Optimize 노드나 전체 파이프라인
   복수 finding, `applies_when` 테스트를 추가한다.
 - optimizer에는 backend dispatch, constraint로 빈 search space가 된 경우, 외부 실패와
   검증된 후보 fallback, 결과 정규화 테스트를 추가한다.
-- agent에는 모든 분기에서 동일 state 반환, 오류 변환, iteration 단일 증가, 실제 diff만
-  적용, 제안/수동/현재 유지 분기 테스트를 추가한다.
+- agent에는 모든 분기에서 동일 state 반환, 오류 변환, 라벨 전환 시 iteration 단일 증가,
+  같은 라벨 후보에서 카운터 유지, 실제 diff만 적용, 제안/수동/현재 유지 분기 테스트를
+  추가한다.
 - history/reporter에는 rollback·blacklist와 applied/proposed/manual/failed별 테스트를
   추가한다.
 - 마지막으로 `eval -> optimize -> index -> eval` 반복 통합 테스트를 추가하되 외부 API와

@@ -37,15 +37,16 @@ Optimize는 항상 설정을 즉시 바꾸지 않는다. 진단 결과에 따라
 - `manual_required`: corpus gap, bad gold answer처럼 config 수정으로 해결할 수 없는 문제를 안내한다.
 - `failed`: optimize 요청 생성 또는 실행 중 실패했다.
 
-향후 `graph.py`에는 optimize 이후 조건부 branch가 필요하다.
+`graph.py`에는 optimize 이후 조건부 branch가 구현돼 있다(`route_after_optimize`).
 
 ```text
-applied -> index
-proposed -> serve 또는 END
-already_optimal -> serve
-manual_required -> serve 또는 END
-failed -> END 또는 error handling
+applied / rolled_back -> index (재색인 필요)
+그 외(proposed/already_optimal/manual_required/failed/verified) -> serve
 ```
+
+또한 반복 예산(`max_iterations`)을 다 썼어도 직전에 적용한 처방이 아직 판정(유지/롤백)
+안 됐으면, `route_after_eval`이 마지막으로 한 번 더 optimize로 보내 판정 기회를 준다
+(그렇지 않으면 나빠진 처방이 판정 없이 그대로 서빙될 수 있었다).
 
 ## 문제 그룹
 
@@ -106,29 +107,26 @@ OptimizationRequest
 
 같은 처방을 반복하지 않고, 처방 실패 시 되돌리기 위해 optimization history를 기록한다.
 
-초기 구현에서는 `AgentDoctorState`를 크게 바꾸지 않고 동적 속성으로 관리한다.
+`AgentDoctorState`에 정식 필드로 구현돼 있다(`core/state.py`). 원소 타입은
+`OptimizationHistoryItem`(schemas.py)이며, core가 optimize를 import하지 않도록
+state 쪽 타입 선언은 느슨하게 둔다.
 
 ```python
-state.optimization_history = [
-    {
-        "trial_id": "opt-001",
-        "iteration": 1,
-        "failure_labels": ["retrieval_low_rank"],
-        "optimizer": "internal",
-        "status": "applied",
-        "before_config": {"top_k": 5, "use_reranker": False},
-        "after_config": {"top_k": 8, "use_reranker": True},
-        "target_metrics": ["context_recall"],
-        "reason": "gold chunk가 후보에는 있으나 LLM 전달 범위 밖에 있음",
-    }
-]
+state.optimization_history: list        # OptimizationHistoryItem 목록
+state.blacklist: set                    # {(label, prescription_id), ...}
+state.optimization_report: object | None  # 이번 방문의 사용자 리포트(OptimizationReport)
 ```
 
-추후 rollback 기준:
+판정이 다음 Eval 재측정 후에야 가능하다는 시점 문제 때문에, 이력은 2단계로 기록된다.
+처방을 적용한 시점엔 before만 채운 pending 항목을 만들고(`history.create_pending_item`),
+다음 Optimize 방문에서 재측정된 리포트로 확정한다(`history.finalize_item`).
 
-- guardrail metric이 하한선 아래로 내려가면 rollback한다.
-- 종합 점수가 이전보다 떨어지면 rollback한다.
-- 실패한 `[label, prescription]` 조합은 blacklist로 기록한다.
+실제 rollback 기준(`history.judge`, `history.check_floor`에 구현됨):
+
+- ragas 하한선(FLOORS)을 위반하면 무조건 rollback한다. 현재 더미값이며,
+  실제 파이프라인을 돌려본 실험 결과로 나중에 튜닝하기로 팀 결정.
+- Eval이 계산한 종합 점수(`overall_score`)가 이전보다 오르지 않으면 rollback한다.
+- 실패한 `(label, prescription_id)` 조합은 blacklist로 기록해 재시도를 막는다.
 
 ## 파일별 구현 계획
 
@@ -239,13 +237,17 @@ B 담당 파일이다.
 
 ## MVP 구현 순서
 
-1. 파일 구조와 README 정리
-2. B fallback dataclass 정의
-3. internal adapter의 label 기반 patch 구현
-4. config mapper 구현
-5. reporter 구현
-6. agent fallback 흐름 연결
-7. history 동적 속성 기록
-8. 단위 테스트 추가
-9. graph 조건부 branch는 통합 시점에 별도 반영
+1. ~~파일 구조와 README 정리~~ 완료
+2. ~~B fallback dataclass 정의~~ 완료
+3. internal adapter의 label 기반 patch 구현 — 미착수(`internal_adapter.py`는 향후 자체
+   탐색 backend용으로 의도적 유보, PROGRESS.md 참고)
+4. ~~config mapper 구현~~ 완료
+5. ~~reporter 구현~~ 완료
+6. ~~agent 흐름 연결~~ 완료(Phase 1 순방향 + Phase 2 방문 간 판정·롤백)
+7. ~~history 기록~~ 완료(동적 속성이 아니라 state 정식 필드로 구현)
+8. ~~단위 테스트 추가~~ 완료(59개 통과, PROGRESS.md 7-1절 참고)
+9. ~~graph 조건부 branch~~ 완료(`route_after_optimize`, `route_after_eval`)
+
+남은 항목은 3번(자체 탐색 backend)뿐이며, 이건 요구사항이 확정될 때까지 의도적으로
+미루기로 한 것이다.
 

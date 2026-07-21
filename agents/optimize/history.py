@@ -172,6 +172,32 @@ def find_pending(
     return None
 
 
+def find_active_study(
+    history: list[OptimizationHistoryItem],
+) -> OptimizationHistoryItem | None:
+    """후보 sweep를 진행 중인 가장 최근 라벨 study를 찾는다.
+
+    별도 ActiveStudy 스키마를 추가하지 않고 기존 이력 항목의 metadata를
+    사용한다. ``pending``은 다음 Eval을 기다린다는 뜻이고,
+    ``active_study``는 개별 후보가 아니라 전체 후보 묶음의 판정이 아직
+    끝나지 않았다는 뜻이다.
+    """
+    for item in reversed(history):
+        if item.metadata.get("pending") and item.metadata.get("active_study"):
+            return item
+    return None
+
+
+def last_failure_label(
+    history: list[OptimizationHistoryItem],
+) -> str | None:
+    """가장 최근에 실제 적용을 시작한 라벨을 반환한다."""
+    for item in reversed(history):
+        if item.failure_labels:
+            return item.failure_labels[0]
+    return None
+
+
 def finalize_item(
     item: OptimizationHistoryItem,
     verdict: Verdict,

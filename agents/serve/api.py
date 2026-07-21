@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents.rag.generator import answer_question
-from agents.rag.retriever import Retriever, build_retriever
+from agents.rag.retriever import Retriever, get_retriever
 
 app = FastAPI(title="Agent Doctor API", version="0.1.0")
 
@@ -39,7 +39,7 @@ def init_qdrant(chunks_file: str) -> None:
     _chunks_raw = json.loads(Path(chunks_file).read_text(encoding="utf-8"))
     print(f"[API] loaded {len(_chunks_raw)} chunks")
 
-    _retriever = build_retriever(
+    _retriever = get_retriever(
         _chunks_raw,
         {
             "qdrant_url": os.getenv("QDRANT_URL", ":memory:"),

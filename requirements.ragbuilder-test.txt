@@ -1,0 +1,2 @@
+# ragbuilder_adapter.py가 검증한 외부 optimizer 버전
+ragbuilder==0.1.6

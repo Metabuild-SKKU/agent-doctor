@@ -73,6 +73,96 @@ def recall_at_k(gold_chunk_ids: list[str], retrieved_chunk_ids: list[str]) -> fl
     return hit / len(gold_chunk_ids)
 
 
+def span_recall_at_k(
+    gold_spans: list[dict],
+    retrieved_chunk_ids: list[str],
+    chunks: list,
+) -> float | None:
+    """검색된 청크 좌표가 gold span을 얼마나 온전히 덮는지 계산한다.
+
+    한 청크가 span 전체를 포함해도 성공이고, 여러 검색 청크의 좌표 합집합이
+    빈틈없이 span을 덮어도 성공이다. 청크 좌표가 없어 계산할 수 없는 legacy
+    환경에서는 None을 반환해 호출부가 기존 chunk-id Recall로 폴백하게 한다.
+    """
+
+    valid_spans: list[tuple[str, int, int]] = []
+    for span in gold_spans:
+        if not isinstance(span, dict):
+            continue
+        doc_id = span.get("doc_id")
+        start = span.get("start")
+        end = span.get("end")
+        if (
+            isinstance(doc_id, str)
+            and isinstance(start, int)
+            and not isinstance(start, bool)
+            and isinstance(end, int)
+            and not isinstance(end, bool)
+            and start >= 0
+            and end > start
+        ):
+            valid_spans.append((doc_id, start, end))
+    if not valid_spans:
+        return None
+
+    all_positions: dict[str, list[tuple[int, int]]] = {}
+    retrieved_positions: dict[str, list[tuple[int, int]]] = {}
+    retrieved = set(retrieved_chunk_ids)
+    gold_doc_ids = {doc_id for doc_id, _start, _end in valid_spans}
+    retrieved_gold_chunk_without_position = False
+    for chunk in chunks:
+        doc_id = getattr(chunk, "doc_id", None)
+        chunk_id = getattr(chunk, "chunk_id", None)
+        raw = getattr(chunk, "char_span", None)
+        metadata = getattr(chunk, "metadata", None)
+        if raw is None and isinstance(metadata, dict):
+            raw = metadata.get("char_span")
+        if (
+            not isinstance(raw, (list, tuple))
+            or len(raw) != 2
+            or isinstance(raw[0], bool)
+            or isinstance(raw[1], bool)
+            or not isinstance(raw[0], int)
+            or not isinstance(raw[1], int)
+            or raw[0] < 0
+            or raw[1] <= raw[0]
+        ):
+            if doc_id in gold_doc_ids and chunk_id in retrieved:
+                retrieved_gold_chunk_without_position = True
+            continue
+        if not isinstance(doc_id, str):
+            continue
+        position = (raw[0], raw[1])
+        all_positions.setdefault(doc_id, []).append(position)
+        if chunk_id in retrieved:
+            retrieved_positions.setdefault(doc_id, []).append(position)
+
+    # gold 문서 좌표가 없거나 검색된 gold 문서 청크의 좌표가 일부라도 빠지면
+    # span 기반 0점으로 단정하지 않고 기존 chunk-id Recall로 폴백한다.
+    if retrieved_gold_chunk_without_position or any(
+        not all_positions.get(doc_id) for doc_id, _start, _end in valid_spans
+    ):
+        return None
+
+    covered = 0
+    for doc_id, start, end in valid_spans:
+        intersections = sorted(
+            (max(start, c_start), min(end, c_end))
+            for c_start, c_end in retrieved_positions.get(doc_id, [])
+            if c_start < end and c_end > start
+        )
+        cursor = start
+        for covered_start, covered_end in intersections:
+            if covered_start > cursor:
+                break
+            cursor = max(cursor, covered_end)
+            if cursor >= end:
+                break
+        if cursor >= end:
+            covered += 1
+    return covered / len(valid_spans)
+
+
 # ── 무응답(기권) 판별 ─────────────────────────────────────────────
 
 _ABSTENTION_MARKERS = (
