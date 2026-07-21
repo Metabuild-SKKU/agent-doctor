@@ -48,7 +48,10 @@ from agents.eval.types import (
     RAGAS_QUADRANT_WEIGHTS,
     PROBE_SOURCE_AUTO,
     PROBE_SOURCE_USER_LOG,
+    PROBE_SOURCE_TAXONOMY,
     resolve_probe_source,
+    taxonomy_qa_path,
+    taxonomy_corpus_path,
 )
 
 # 자동 생성 기본 개수 (설계: testset_size=5~10 으로 시작해 비용 확인 후 확대)
@@ -71,6 +74,9 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
 
     읽기: state.user_questions, state.chunks, state.documents
     """
+    if resolve_probe_source() == PROBE_SOURCE_TAXONOMY:
+        return _from_taxonomy(state)
+
     if uses_user_log(state):
         probes = _from_user_questions(state.user_questions)
         print(f"[Eval] STEP1: user_log Probe {len(probes)}개 생성")
@@ -107,11 +113,36 @@ def uses_user_log(state: AgentDoctorState) -> bool:
     agent.py STEP1 도 이 술어로 캐시 여부를 정한다 — state.user_questions 유무만 보면
     auto 일 때 실제로는 LLM 생성으로 가는데도 캐시를 건너뛴다."""
     source = resolve_probe_source()
-    if source == PROBE_SOURCE_AUTO:
-        return False
+    if source in (PROBE_SOURCE_AUTO, PROBE_SOURCE_TAXONOMY):
+        return False    # 둘 다 자체 생성 경로(generate_probes 내부 분기)를 탄다
     if source == PROBE_SOURCE_USER_LOG:
         return bool(state.user_questions)
     return bool(state.user_questions)   # 미지정 → 기존 동작
+
+
+# ── taxonomy: 외부 사람작성 QA 데이터셋 (KorQuAD 등) ──────────────
+
+def _from_taxonomy(state: AgentDoctorState) -> list[Probe]:
+    """EVAL_TAXONOMY_QA/CORPUS 에서 taxonomy Probe(gold_spans 포함)를 로드하고,
+    현재 청크에 맞춰 gold_chunk_ids 를 resync 한다(재청킹돼도 gold 유지).
+
+    KORQUAD_MAX_DOCS / KORQUAD_QA_LIMIT 로 규모 제한(스모크). MAX_DOCS 는 Ingest 의
+    corpus 로더와 같은 규칙이라 corpus/qa 가 같은 문서 집합을 본다."""
+    import os
+    from agents.eval.datasets.korquad import load_taxonomy_probes
+
+    def _pos_int(name):
+        raw = os.getenv(name, "").strip()
+        return int(raw) if raw.isdigit() and int(raw) > 0 else None  # 0/비정수/미설정 = 전체
+
+    probes = load_taxonomy_probes(taxonomy_qa_path(), taxonomy_corpus_path(),
+                                  limit=_pos_int("KORQUAD_QA_LIMIT"),
+                                  max_docs=_pos_int("KORQUAD_MAX_DOCS"))
+    probes = _resync_gold_chunk_ids(probes, state.chunks, state.documents)
+    matched = sum(1 for p in probes if p.gold_chunk_ids)
+    print(f"[Eval] STEP1: taxonomy Probe {len(probes)}개 로드 "
+          f"(gold 매칭 {matched}/{len(probes)})")
+    return probes
 
 
 # ── user_log: 실사용 질문 기반 ────────────────────────────────────

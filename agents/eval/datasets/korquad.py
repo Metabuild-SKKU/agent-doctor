@@ -1,32 +1,31 @@
 """
 agents/eval/datasets/korquad.py
-KorQuAD 2.1(전처리본) 로더 — Agent Doctor 파이프라인 입력으로 변환.
+KorQuAD 2.1(전처리본, data/) 어댑터 — 정규 파이프라인 입력으로 변환.
 
-data/ 전처리본 스키마:
-    corpus.jsonl  : {doc_id, chunk_id, title, text, char_start, char_end}   ← 이미 청킹됨
+data/ 스키마:
+    corpus.jsonl  : {doc_id, chunk_id, title, text, char_start, char_end}  (문서별 청크)
     qa_pairs.jsonl: {qa_id, question, answer_text, doc_id, positive_chunk_ids}
 
-설계상 이 데이터셋은 사람이 만든 골든 QA 이므로 Probe.source="taxonomy" 로 넣는다
-(신뢰도: user_log > taxonomy > llm_generated). 핵심은 두 가지 매핑이다:
+이 데이터셋은 사람이 만든 골든 QA 이므로 Probe.source="taxonomy" 로 쓴다
+(신뢰도 user_log > taxonomy > llm_generated).
 
-    corpus.chunk_id          → Chunk.chunk_id       (그대로)
-    qa.positive_chunk_ids    → Probe.gold_chunk_ids (그대로)
+- reconstruct_documents(): corpus 청크를 doc_id 별로 원문 좌표(char_start/end)에 되붙여
+  Document 로 복원한다 → Ingest 가 이걸 수집하고 Index 가 자기 전략으로 재청킹한다.
+- load_taxonomy_probes(): qa 를 taxonomy Probe 로 만들되, positive_chunk_ids 의 원문
+  좌표(corpus 에서 조회)를 gold_spans 로 실어 준다 → Eval 이 재청킹된 현재 청크에
+  맞춰 _resync_gold_chunk_ids 로 gold_chunk_ids 를 다시 잡는다(청킹 전략이 바뀌어도 유지).
 
-corpus 가 이미 청킹돼 있고 qa 의 gold 가 그 chunk_id 를 직접 가리키므로,
-Ingest/Index 의 재청킹이나 gold_spans→gold_chunk_ids resync 없이 정답 청크가
-정확히 맞는다. 그래서 이 로더는 코퍼스를 Document 가 아니라 Chunk 로 직접 만들어
-Index 청킹을 건너뛴다.
+두 함수의 좌표계는 동일하다: _stitch 가 text 를 char_start 위치에 그대로 놓으므로,
+복원된 Document.content 의 좌표 == corpus 의 char_start/end == gold_spans 좌표.
 
-[한계] 청크 경계가 고정이라 Optimize 의 chunk_size/overlap 계열 처방은 이 데이터셋에
-적용되지 않는다(검색/생성/리랭킹 계열 진단·처방은 그대로 유효).
+max_docs 는 두 함수가 같은 규칙(corpus 등장 순서 앞 N개 doc)으로 제한해 corpus/qa 가
+같은 문서 집합을 보도록 맞춘다(소규모 스모크용).
 """
 from __future__ import annotations
 
-import hashlib
 import json
-from pathlib import Path
 
-from core.schema import Chunk, Probe
+from core.schema import Document, Probe
 
 DEFAULT_CORPUS = "data/corpus.jsonl"
 DEFAULT_QA = "data/qa_pairs.jsonl"
@@ -40,96 +39,103 @@ def _iter_jsonl(path: str):
                 yield json.loads(line)
 
 
-def _chunk_index(chunk_id: str) -> int:
-    """'doc_xxx_3' → 3 (chunk_index). 재청킹 유틸이 청크 순번으로 쓰는 값."""
-    tail = (chunk_id or "").rsplit("_", 1)[-1]
-    return int(tail) if tail.isdigit() else 0
+def _selected_doc_ids(corpus_path: str, max_docs):
+    """corpus 등장 순서로 앞 max_docs 개 doc_id 집합. max_docs 없음/<=0 → None(전체)."""
+    if not max_docs or max_docs <= 0:
+        return None
+    picked: list[str] = []
+    seen: set[str] = set()
+    for o in _iter_jsonl(corpus_path):
+        did = o["doc_id"]
+        if did not in seen:
+            seen.add(did)
+            picked.append(did)
+            if len(picked) >= max_docs:
+                break
+    return set(picked)
 
 
-def _to_chunk(o: dict) -> Chunk:
-    text = o.get("text", "") or ""
-    return Chunk(
-        chunk_id=o["chunk_id"],
-        doc_id=o["doc_id"],
-        text=text,
-        char_span=(o.get("char_start"), o.get("char_end")),
-        hash=hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
-        metadata={"title": o.get("title", ""), "chunk_index": _chunk_index(o["chunk_id"])},
-    )
+def _stitch(spans: list[tuple[int, int, str]]) -> str:
+    """(start, end, text) 조각들을 원문 좌표에 채워 하나의 문자열로 복원.
+    겹치는 구간은 같은 글자로 덮어써지고, 빈 구간은 공백으로 남는다."""
+    if not spans:
+        return ""
+    total = max(max(e for _, e, _ in spans),
+                max(s + len(t) for s, _, t in spans))
+    buf = [" "] * total
+    for start, _end, text in spans:
+        for i, ch in enumerate(text):
+            buf[start + i] = ch
+    return "".join(buf)
 
 
-def _to_probe(o: dict) -> Probe:
-    return Probe(
-        probe_id=f"probe_qa_{o['qa_id']}",
-        question=o["question"],
-        source="taxonomy",
-        expected_difficulty="medium",
-        answer_exists=True,
-        ground_truth=o.get("answer_text"),
-        gold_chunk_ids=list(o.get("positive_chunk_ids", []) or []),
-        gold_doc_id=o.get("doc_id"),
-        qtype=None,
-        metadata={"qa_id": str(o.get("qa_id")), "dataset": "korquad2.1"},
-    )
-
-
-def load_corpus_chunks(path: str = DEFAULT_CORPUS, *, doc_ids=None) -> list[Chunk]:
-    """corpus.jsonl → Chunk 리스트. doc_ids 를 주면 그 문서들만 적재."""
-    keep = set(doc_ids) if doc_ids is not None else None
-    return [_to_chunk(o) for o in _iter_jsonl(path)
-            if keep is None or o["doc_id"] in keep]
-
-
-def load_qa_probes(path: str = DEFAULT_QA, *, limit=None, doc_ids=None) -> list[Probe]:
-    """qa_pairs.jsonl → taxonomy Probe 리스트(정답+gold 청크 포함). limit=앞에서 N개."""
-    keep = set(doc_ids) if doc_ids is not None else None
-    probes: list[Probe] = []
-    for o in _iter_jsonl(path):
-        if keep is not None and o["doc_id"] not in keep:
+def reconstruct_documents(corpus_path: str = DEFAULT_CORPUS, *, max_docs=None) -> list[Document]:
+    """corpus.jsonl → Document 리스트(doc_id 당 1개)."""
+    keep = _selected_doc_ids(corpus_path, max_docs)
+    by_doc: dict[str, dict] = {}
+    for o in _iter_jsonl(corpus_path):
+        did = o["doc_id"]
+        if keep is not None and did not in keep:
             continue
-        probes.append(_to_probe(o))
+        d = by_doc.setdefault(did, {"title": o.get("title", ""), "spans": []})
+        d["spans"].append((int(o.get("char_start", 0)),
+                           int(o.get("char_end", 0)),
+                           o.get("text", "") or ""))
+
+    docs: list[Document] = []
+    for did, d in by_doc.items():
+        docs.append(Document(
+            doc_id=did,
+            source=f"korquad:{corpus_path}",
+            format="txt",  # 순수 텍스트 → Index 청킹이 substring 을 보존해 resync 가 안전
+            content=_stitch(d["spans"]),
+            metadata={"title": d["title"], "dataset": "korquad2.1",
+                      "chunk_count": len(d["spans"])},
+        ))
+    return docs
+
+
+def _chunk_span_index(corpus_path: str, keep) -> dict[str, tuple[str, int, int]]:
+    """chunk_id → (doc_id, start, end). keep(집합/None)로 문서 제한."""
+    idx: dict[str, tuple[str, int, int]] = {}
+    for o in _iter_jsonl(corpus_path):
+        did = o["doc_id"]
+        if keep is not None and did not in keep:
+            continue
+        idx[o["chunk_id"]] = (did, int(o.get("char_start", 0)), int(o.get("char_end", 0)))
+    return idx
+
+
+def load_taxonomy_probes(qa_path: str = DEFAULT_QA, corpus_path: str = DEFAULT_CORPUS,
+                         *, limit=None, max_docs=None) -> list[Probe]:
+    """qa_pairs.jsonl → taxonomy Probe(gold_spans 포함). 재청킹 후 resync 로 gold 확정."""
+    keep = _selected_doc_ids(corpus_path, max_docs)
+    span_of = _chunk_span_index(corpus_path, keep)
+
+    probes: list[Probe] = []
+    for o in _iter_jsonl(qa_path):
+        did = o.get("doc_id")
+        if keep is not None and did not in keep:
+            continue
+        gold_spans = []
+        for cid in (o.get("positive_chunk_ids") or []):
+            hit = span_of.get(cid)
+            if hit:
+                _d, s, e = hit
+                gold_spans.append({"doc_id": _d, "start": s, "end": e})
+        probes.append(Probe(
+            probe_id=f"probe_qa_{o['qa_id']}",
+            question=o["question"],
+            source="taxonomy",
+            expected_difficulty="medium",
+            answer_exists=True,
+            ground_truth=o.get("answer_text"),
+            gold_chunk_ids=[],           # resync 가 현재 청크 기준으로 채운다
+            gold_doc_id=did,
+            gold_spans=gold_spans,
+            qtype=None,
+            metadata={"qa_id": str(o.get("qa_id")), "dataset": "korquad2.1"},
+        ))
         if limit is not None and len(probes) >= limit:
             break
     return probes
-
-
-def load_dataset(
-    corpus_path: str = DEFAULT_CORPUS,
-    qa_path: str = DEFAULT_QA,
-    *,
-    qa_limit: int | None = None,
-    distractor_docs: int = 0,
-) -> tuple[list[Chunk], list[Probe]]:
-    """(chunks, probes) 반환.
-
-    1) qa 를 앞에서부터 qa_limit 개 고른다(None=전체).
-    2) 그 qa 들의 gold 문서는 코퍼스에 반드시 포함(정답 검색 가능).
-    3) distractor_docs > 0 : gold 외 문서를 그만큼 더 섞는다(검색 난이도↑).
-       distractor_docs < 0 : 전체 코퍼스 사용.
-       distractor_docs = 0 : gold 문서만(검색이 쉬워 검색 진단은 약함).
-    4) gold_chunk_ids 가 로드된 청크에 실제로 있는지 검증 후 경고.
-    """
-    probes = load_qa_probes(qa_path, limit=qa_limit)
-    gold_docs = {p.gold_doc_id for p in probes if p.gold_doc_id}
-
-    chunks: list[Chunk] = []
-    picked: set[str] = set()
-    for o in _iter_jsonl(corpus_path):
-        did = o["doc_id"]
-        if did in gold_docs or distractor_docs < 0 or did in picked:
-            chunks.append(_to_chunk(o))
-        elif len(picked) < distractor_docs:
-            picked.add(did)
-            chunks.append(_to_chunk(o))
-
-    _warn_missing_gold(chunks, probes)
-    return chunks, probes
-
-
-def _warn_missing_gold(chunks: list[Chunk], probes: list[Probe]) -> None:
-    ids = {c.chunk_id for c in chunks}
-    missing = [p.probe_id for p in probes
-               if p.gold_chunk_ids and not any(g in ids for g in p.gold_chunk_ids)]
-    if missing:
-        print(f"[KorQuAD] 경고: gold 청크가 코퍼스에 없는 probe {len(missing)}개 "
-              f"(예: {missing[:3]}) — 이 probe 는 recall 0 으로 집계된다")
