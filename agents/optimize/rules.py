@@ -183,7 +183,11 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     "retrieval_incomplete_enumeration": {
         "group": "A",
         "assigned": "이승준",
-        "status": "draft",              # 3개 처방 다 스키마 미정, 실행은 아직 불가
+        # dynamic_top_k 하나가 실행 가능해져 ready 로 승격(나머지 2개는 여전히 스키마 미정).
+        # top_k 는 STATE_MAPPABLE_PATHS 에 있고 Eval 이 index_config["top_k"] 를 실제로
+        # 읽어 검색에 쓴다. mmr/adaptive_retrieval 은 매핑 불가라 optimizer 가 후보
+        # 단계에서 자동으로 걸러내므로, 그 둘 때문에 라벨 전체를 막아둘 이유는 없다.
+        "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 나열형 gold 일부 누락(recall@k 부분) 보완
         "prescriptions": [
@@ -251,7 +255,9 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     "chunking_context_mismatch": {
         "group": "A",
         "assigned": "권성우",
-        "status": "draft",              # chunking_strategy 필드 합의 필요
+        # gold span/청크 절대좌표로 경계 분할을 확정하고 overlap 후보를
+        # 사전검증할 수 있으므로 실행 가능한 라벨로 승격한다.
+        "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 청크 경계에서 잘린 gold를 온전히 검색되게
         "prescriptions": [
@@ -262,13 +268,22 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
+                # overlap 안전 상한으로 회복할 수 없는 긴 정답은 다음 단계에서
+                # chunk_size를 늘려 검증한다.
+                "id": "increase_chunk_size",
+                "patch": {"chunk_size": "increase"},
+                "reindex": True,
+                "cost": None,
+            },
+            {
                 "id": "switch_chunking_strategy",
                 "patch": {"chunking_strategy": "recursive_sentence"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # NOTE: overlap 증가는 현재 index_config에 존재하지만 chunking_strategy는 추가 합의 필요.
+        # NOTE: 앞의 두 처방은 현재 index_config로 실행 가능하다.
+        # chunking_strategy는 지원 경로 합의 전까지 mapper에서 제외된다.
     },
 
     "chunking_overchunking": {

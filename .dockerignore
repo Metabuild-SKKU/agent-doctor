@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.env
+eval.db
+*.log
+
+# adapter 테스트 이미지에 필요하지 않은 로컬 산출물
+*.pdf
+*.docx
+*.xlsx
+*.hwp

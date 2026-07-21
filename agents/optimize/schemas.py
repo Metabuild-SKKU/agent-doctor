@@ -28,6 +28,21 @@ TargetProfile = Literal["accuracy", "speed", "cost", "balanced"]
 # optimizer.py가 선택할 수 있는 최적화 backend 종류.
 OptimizerBackend = Literal["rules", "internal", "ragbuilder", "autorag"]
 
+# 자체 optimizer가 사용하는 목적함수 방향과 실행 상태.
+ObjectiveDirection = Literal["maximize", "minimize"]
+InternalAdapterStatus = Literal[
+    "needs_evaluation",
+    "completed",
+    "failed",
+    "skipped",
+]
+InternalTrialStatus = Literal[
+    "completed",
+    "failed",
+    "inconclusive",
+    "rejected",
+]
+
 # optimize를 제안만 할지, 실제 적용할지, 수동 처리할지 결정하는 모드.
 DecisionMode = Literal[
     "propose_only",
@@ -196,6 +211,51 @@ class RAGBuilderResult:
 
 
 @dataclass
+class InternalTrialResult:
+    """
+    AgentDoctor 자체 optimizer가 관리하는 단일 trial 결과.
+
+    아직 평가하지 않은 후보는 이 모델에 넣지 않는다. ``config``는 canonical
+    경로로 표현한 단일 축 변경이며, baseline trial은 빈 dict와
+    ``is_baseline=True``를 사용한다.
+    """
+
+    trial_id: str
+    config: dict[str, Any]
+    score: float | None = None
+    metrics: dict[str, Any] = field(default_factory=dict)
+    status: InternalTrialStatus = "completed"
+    is_baseline: bool = False
+    fingerprint: str = ""
+    error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class InternalAdapterResult:
+    """
+    자체 search-space optimizer의 표준 결과.
+
+    ``next_config``는 아직 실제 Eval이 필요한 후보이고, ``best_config``는
+    평가가 끝난 trial 중에서 선택된 설정이다. 두 값을 분리해 미평가 후보를
+    최적 설정으로 오인하지 않게 한다.
+    """
+
+    request_id: str
+    status: InternalAdapterStatus
+    next_config: dict[str, Any] | None = None
+    best_config: dict[str, Any] | None = None
+    best_score: float | None = None
+    trial_results: list[InternalTrialResult] = field(default_factory=list)
+    objective_metric: str = "overall_score"
+    direction: ObjectiveDirection = "maximize"
+    search_space: dict[str, list[Any]] = field(default_factory=dict)
+    error: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class OptimizationRequest:
     """
     planner가 만들고 optimizer/adapter가 소비하는 최적화 요청.
@@ -204,7 +264,8 @@ class OptimizationRequest:
     현재 baseline config, 처방 후보, search space를 하나로 묶은 wrapper다.
     rules backend는 candidates와 search_space에서 검증된 단일 변경을 고르고,
     RAGBuilder/AutoRAG adapter는 search_space와 fixed_config를 외부 도구 입력
-    형식으로 변환한다. internal은 향후 자체 탐색 backend용으로 예약한다.
+    형식으로 변환한다. internal은 자체 evaluator 또는 이전 trial 관측을 이용해
+    다음 후보와 평가 완료된 best config를 선택한다.
 
     Attributes:
         request_id: 최적화 요청 고유 ID.

@@ -1,6 +1,6 @@
 # Index 단계에서 만지는 상태:
-# - read: state.documents, state.index_config
-# - write: state.chunks, state.index_artifacts, state.status, state.error
+# - read: state.documents, state.index_config, state.reindex_required
+# - write: state.chunks, state.index_artifacts, state.reindex_required, state.status, state.error
 from __future__ import annotations
 
 import hashlib
@@ -640,6 +640,19 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
     if not state.documents:
         state.status = "error"
         state.error = "문서가 없습니다. Ingest Agent 완료 여부를 확인하세요."
+        return state
+
+    # top_k처럼 검색 시점에만 쓰는 설정은 기존 청크와 벡터를 그대로 사용할 수 있다.
+    # 그래프의 Index→Eval 흐름은 유지하되 실제 재청킹·재임베딩·upsert는 생략한다.
+    if not state.reindex_required and state.chunks:
+        state.reindex_required = True
+        state.status = "indexed"
+        state.index_artifacts = {
+            **state.index_artifacts,
+            "reindex_skipped": True,
+            "skip_reason": "검색 시점 설정만 변경됨",
+        }
+        print("[Index] 검색 시점 설정만 변경됨 — 기존 인덱스 재사용")
         return state
 
     config = {

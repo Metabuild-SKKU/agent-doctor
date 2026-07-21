@@ -38,10 +38,11 @@ from agents.eval.signals import (
     set_mode, set_context, _compute_metrics, _compute_ragas, _no_diagnosis,
     _retrieval_failed, _generation_failed, _context_applicable,
     _is_multi_hop, _enumeration_cache,
-    _gold_in_wider_candidates, _bm25_hits_gold, _gold_in_corpus,
+    _gold_in_wider_candidates, _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
     _faith, _faith_oracle, _rel, _rel_oracle, _both_high,
     _context_shorten_helps, _gold_front_helps, _noise_removal_helps,
-    _bridge_decompose_recovers,
+    _bridge_decompose_recovers, _gold_span_boundary_analysis,
+    _boundary_merge_helps,
 )
 
 
@@ -115,6 +116,37 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
         )
     if in_corpus is False:
         return None
+
+
+def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
+    """정답 근거가 현재 청크 경계에 나뉘어 한 청크에 온전히 없음을 판정한다.
+
+    gold span과 현재 청크의 원문 좌표만 비교해 경계 분할 후보를 찾는다.
+    검색 실패와 경계 분할이 함께 보여도 좌표의 동시 발생만으로 인과를 확정하지
+    않는다. 검색은 성공했지만 답변이 실패한 경우에만 FULL 모드의 분할 조각 병합
+    재생성으로 실제 원인인지 확인한다.
+    """
+
+    analysis = _gold_span_boundary_analysis(record)
+    if not isinstance(analysis, dict) or analysis.get("boundary_split_count", 0) <= 0:
+        return None
+    confirmed = False
+    if _retrieval_failed(record):
+        # 경계가 나뉘었다는 사실만으로 검색 실패 원인을 청킹으로 단정할 수 없다.
+        # 예비 Finding으로 남겨 _pick이 실측된 정석 검색 원인을 우선하게 한다.
+        confirmed = False
+    elif _context_applicable(record):
+        helps = _boundary_merge_helps(record)
+        if helps is False:
+            return None
+        confirmed = helps is True
+    else:
+        return None
+    finding = _finding(
+        record, "chunking_context_mismatch", "retrieval_failure", confirmed
+    )
+    finding.metadata["boundary_analysis"] = dict(analysis)
+    return finding
 
 
 def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]:
@@ -369,7 +401,8 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 _RETRIEVAL_CAUSE = (
-    retrieval_incomplete_enumeration, retrieval_missing_bridge_dependency,
+    chunking_context_mismatch, retrieval_incomplete_enumeration,
+    retrieval_missing_bridge_dependency,
     retrieval_low_rank, retrieval_lexical_mismatch, retrieval_semantic_mismatch, retrieval_missing_gold,
 )
 _GENERATION_CAUSE = (
@@ -420,6 +453,8 @@ def _group_of(label: str, ftype: str) -> str:
     """label·ftype 에서 그룹(A/B/C/D)을 파생 — 처방 순서 정렬용."""
     if ftype == "gap":
         return "D"
+    if label == "chunking_context_mismatch":
+        return "A"
     if label.startswith("retrieval_"):
         return "A"
     if label.startswith("generation_"):
@@ -437,6 +472,18 @@ def _severity_of(label: str) -> str:
     if label in _CRITICAL_LABELS:
         return "critical"
     return "warning"
+
+
+# gold 순위(top-N 재검색)가 top_k 근거값 계산에 쓰이는 라벨.
+# 이 라벨의 Finding 에만 gold_ranks 를 실어 planner(_GROUNDED_VALUES)가 개수 대신
+# 순위로 top_k 를 산정하게 한다. tier2(STANDARD+) 에서만 순위가 나오고, 그 아래
+# 모드에선 gold_ranks 가 안 실려 planner 가 개수 근사로 폴백한다.
+# retrieval_low_rank 는 제외: 정석 처방이 리랭커라 top_k 근거값을 planner 가 쓰지
+#   않는다(planner._GROUNDED_VALUES 참고). 순위를 실어봤자 안 쓰이는 무효 데이터다.
+_RANK_LABELS = {
+    "retrieval_incomplete_enumeration",
+    "retrieval_missing_gold",
+}
 
 
 def _v(x) -> str:
@@ -459,6 +506,13 @@ def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool, reason
     probe = record.probe
     group = _group_of(label, ftype)
     prefix = "" if confirmed else "[예비] "
+    metadata: dict = {"group": group, "reason": reason}
+    if label in _RANK_LABELS:
+        # planner 가 top_k 근거값을 계산할 원시 순위(집계는 planner 소관).
+        # None(모드·자원 미충족)이면 싣지 않아 planner 가 개수 폴백을 쓰게 둔다.
+        ranks = _gold_ranks(record)
+        if ranks:
+            metadata["gold_ranks"] = ranks
     return Finding(
         finding_id=f"{probe.probe_id}:{label}",
         type=ftype,
@@ -468,7 +522,7 @@ def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool, reason
         confirmed=confirmed,
         affected_chunks=list(probe.gold_chunk_ids),
         affected_probes=[probe.probe_id],
-        metadata={"group": group, "reason": reason},
+        metadata=metadata,
     )
 
 

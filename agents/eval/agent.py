@@ -2,8 +2,8 @@
 agents/eval/agent.py
 Eval Agent — RAG 파이프라인 품질 진단
 
-읽기: state.chunks, state.user_questions, state.index_config, state.iteration
-쓰기: state.probes, state.report, state.iteration, state.status, state.error, state.current_agent
+읽기: state.documents, state.chunks, state.user_questions, state.index_config, state.iteration
+쓰기: state.probes, state.report, state.status, state.error, state.current_agent
 
 설계 문서(Evaluate Module)의 STEP 1~5 를 순서대로 실행한다:
     STEP1  Probe 생성            → probe_gen.generate_probes
@@ -14,7 +14,8 @@ Eval Agent — RAG 파이프라인 품질 진단
     STEP5  DiagnosticReport 생성  → report.build_report
 
 그 뒤 graph.route_after_eval() 이 report.pass_threshold 로 Serve/Optimize 를 정한다.
-반복 카운터(state.iteration)는 이 에이전트가 증가시킨다(측정 시점 = 반복 경계).
+반복 카운터(state.iteration)는 Optimize가 새 라벨 study를 시작할 때만 증가시킨다.
+Eval은 같은 라벨의 후보별 측정에서 카운터를 바꾸지 않는다.
 
 계약(AGENTS.md): run() 은 반드시 state 를 반환한다. 오류는 예외를 던지지 말고
 state.status="error" / state.error 에 기록하고 state 를 반환한다.
@@ -33,8 +34,8 @@ from agents.eval.types import (
     EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled,
     resolve_llm_concurrency, resolve_probe_source, PROBE_SOURCE_MADE,
 )
-from agents.eval.probe_gen import generate_probes, uses_user_log
-from agents.eval.probe_store import save_probes, load_probes
+from agents.eval.probe_gen import generate_probes, uses_user_log, _resync_gold_chunk_ids
+from agents.eval.probe_store import save_probes, load_probes, corpus_version
 from agents.index.qdrant_store import keyword_search
 from agents.rag.generator import generate_answer
 from agents.rag.retriever import Retriever, get_retriever
@@ -75,18 +76,21 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         print(f"[Eval] 오류: {state.error}")
         return state
 
-    # 반복 카운터 증가 (route_after_eval 의 종료 조건)
-    state.iteration += 1
-
     # 진단 모드(비용 tier 상한): EVAL_MODE 환경변수. STEP3-2/STEP4/리포트가 이 값으로 게이팅된다.
     mode = resolve_mode()
     print(f"[Eval] 진단 모드 = {mode} (1=fast·2=standard·3=deep·4=full)")
 
     # 진단 신호 캐시: 파이프라인 버전(index_config+코퍼스)이 바뀌면 무효화 → stale 재사용 방지.
+    # 진단 신호(예: gold_in_wider_candidates)는 top_k 로 검색한 결과에 의존하므로,
+    # 이 캐시는 index_config 를 포함하는 _pipeline_version 을 그대로 쓴다.
     version = _pipeline_version(state)
     if state.diagnosis_cache_version != version:
         state.diagnosis_cache = {}
         state.diagnosis_cache_version = version
+
+    # Probe 캐시는 원문 문서에 의존한다. top_k뿐 아니라 chunk_size가 바뀌어도 같은
+    # 질문/gold_spans를 유지하고, 불러온 뒤 현재 청크 기준 gold_chunk_ids만 재동기화한다.
+    probe_version = corpus_version(state.chunks, state.documents)
 
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
@@ -99,21 +103,31 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # made: 코퍼스 버전과 무관하게 이미 만들어 둔 eval_probes.json 을 그대로 재사용
         # (파일 없음/비었으면 자동 생성으로 폴백해 저장). user_questions 보다 우선한다.
         if resolve_probe_source() == PROBE_SOURCE_MADE:
-            probes = load_probes(version, ignore_version=True)
+            probes = load_probes(probe_version, ignore_version=True)
             if probes:
+                probes = _resync_gold_chunk_ids(
+                    probes,
+                    state.chunks,
+                    state.documents,
+                )
                 print(f"[Eval] STEP1: made 소스 — 저장된 Probe {len(probes)}개 재사용")
             else:
                 print("[Eval] STEP1: made 소스지만 저장된 Probe 없음 → 자동 생성 후 저장")
                 probes = generate_probes(state)
-                save_probes(probes, version)
+                save_probes(probes, probe_version)
         elif uses_user_log(state):
             probes = generate_probes(state)
         else:
-            probes = load_probes(version)
+            probes = load_probes(probe_version)
             if probes is None:
                 probes = generate_probes(state)
-                save_probes(probes, version)
+                save_probes(probes, probe_version)
             else:
+                probes = _resync_gold_chunk_ids(
+                    probes,
+                    state.chunks,
+                    state.documents,
+                )
                 print(f"[Eval] STEP1: 저장된 Probe {len(probes)}개 재사용(버전 일치)")
         if not probes:
             print("[Eval] 경고: Probe 0개 생성 → 평가 불가, 통과 처리")
