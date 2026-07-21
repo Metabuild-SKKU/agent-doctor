@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from agents.rag.retriever import Retriever
+from core.llm_retry import run_with_retry
 from core.llm_usage import log_usage
 
 # 답변, context, citation, 검색 상세 정보 보관
@@ -242,19 +243,28 @@ def _llm_generate(
             allow_common_model=selected != "auto",
         )
         try:
+            # rate limit(429)은 재시도 — 재시도 없이 폴백되면 병렬 실행 시 429 가
+            # 조용히 추출식 답변으로 대체돼 평가 결과가 왜곡된다. 그 외 예외는 즉시
+            # 다음 provider 폴백(기존 동작).
             if name == "openai" and os.getenv("OPENAI_API_KEY"):
-                result = _openai_generate(system, user, model=selected_model, config=config)
+                result = run_with_retry(
+                    lambda: _openai_generate(system, user, model=selected_model, config=config),
+                    "생성", tag="RAG")
                 if result:
                     return result
             if name == "gemini" and os.getenv("GEMINI_API_KEY"):
-                result = _gemini_generate(system, user, model=selected_model, config=config)
+                result = run_with_retry(
+                    lambda: _gemini_generate(system, user, model=selected_model, config=config),
+                    "생성", tag="RAG")
                 if result:
                     return result
             if name in {"github", "github_models"}:
                 # auto 모드에선 전용 토큰(GITHUB_MODELS_TOKEN)이 있을 때만 GitHub를 시도한다
                 # (범용 GITHUB_TOKEN이 우연히 있다고 auto가 GitHub로 새지 않도록).
                 if _github_api_key(allow_repo_token=selected != "auto"):
-                    result = _github_generate(system, user, model=selected_model, config=config)
+                    result = run_with_retry(
+                        lambda: _github_generate(system, user, model=selected_model, config=config),
+                        "생성", tag="RAG")
                     if result:
                         return result
         except Exception as exc:
@@ -373,5 +383,8 @@ def _gemini_generate(
     )
     usage = getattr(resp, "usage_metadata", None)
     if usage:
-        log_usage(selected_model, usage.prompt_token_count, usage.candidates_token_count, tag="RAG")
+        # 과금되는 출력 = 답변(candidates) + 내부 사고(thoughts). 추론 모델은 thoughts 가
+        # 답변보다 클 수 있어 candidates 만 세면 비용이 과소집계된다.
+        out = (usage.candidates_token_count or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
+        log_usage(selected_model, usage.prompt_token_count, out, tag="RAG")
     return (resp.text or "").strip() or None

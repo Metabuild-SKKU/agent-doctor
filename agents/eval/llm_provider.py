@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import json
 import os
-import time
 
+from core.llm_retry import run_with_retry
 from core.llm_usage import log_usage
 
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
@@ -40,53 +40,11 @@ def _log_usage(model: str, prompt_tokens, output_tokens) -> None:
     log_usage(model, prompt_tokens, output_tokens, tag="Eval")
 
 
-# ── rate limit(429) 재시도 ────────────────────────────────────────
-# Gemini 무료 티어 등에서 "too many requests"(429)가 나면 잠시 대기 후 재시도한다.
-#   EVAL_LLM_RETRY_WAIT   대기 시간(초, 기본 5)
-#   EVAL_LLM_MAX_RETRIES  재시도 횟수 상한(기본 5). 소진하면 마지막 예외를 그대로 올린다.
-# rate limit 이 아닌 예외(인증 실패·잘못된 모델명 등)는 재시도 없이 즉시 전파한다.
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return max(0, int(os.getenv(name, str(default))))
-    except (TypeError, ValueError):
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return max(0.0, float(os.getenv(name, str(default))))
-    except (TypeError, ValueError):
-        return default
-
-
-def _is_rate_limit(exc: Exception) -> bool:
-    """rate limit(429/quota/RESOURCE_EXHAUSTED) 계열 예외인지 status/메시지로 느슨히 판별.
-    provider별 예외 타입을 직접 import 하지 않기 위함."""
-    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-    if status == 429:
-        return True
-    msg = str(exc).lower()
-    markers = ("429", "too many requests", "rate limit", "ratelimit",
-               "resource_exhausted", "resourceexhausted", "quota", "exceeded")
-    return any(m in msg for m in markers)
-
+# ── rate limit(429) 재시도 (core/llm_retry.py 공용 구현) ──────────
+# env(EVAL_LLM_RETRY_WAIT/EVAL_LLM_MAX_RETRIES)·jitter 동작은 core 쪽 참고.
 
 def _run_with_retry(fn, label: str = "LLM"):
-    """fn()을 호출하되 rate limit 예외면 EVAL_LLM_RETRY_WAIT초 대기 후 재시도.
-    최대 EVAL_LLM_MAX_RETRIES회까지 재시도하고, 그래도 실패하면 마지막 예외를 전파한다."""
-    max_retries = _env_int("EVAL_LLM_MAX_RETRIES", 5)
-    wait = _env_float("EVAL_LLM_RETRY_WAIT", 5.0)
-    attempt = 0
-    while True:
-        try:
-            return fn()
-        except Exception as e:
-            if not _is_rate_limit(e) or attempt >= max_retries:
-                raise
-            attempt += 1
-            print(f"[Eval] {label} rate limit(429) — {wait:.0f}초 대기 후 재시도 ({attempt}/{max_retries})")
-            time.sleep(wait)
+    return run_with_retry(fn, label, tag="Eval")
 
 
 # ── 답변 생성 (retrieval_temp.py 가 사용) ─────────────────────────
@@ -222,7 +180,10 @@ def _gemini_generate(system: str, user: str, model: str, json_mode: bool = False
     resp = client.models.generate_content(model=model, contents=user, config=config)
     usage = getattr(resp, "usage_metadata", None)
     if usage:
-        _log_usage(model, usage.prompt_token_count, usage.candidates_token_count)
+        # 과금되는 출력 = 답변(candidates) + 내부 사고(thoughts). 추론 모델(3.5-flash 등)은
+        # thoughts 가 답변보다 클 수 있어 candidates 만 세면 비용이 절반 이하로 과소집계된다.
+        out = (usage.candidates_token_count or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
+        _log_usage(model, usage.prompt_token_count, out)
     return resp.text or ""
 
 
