@@ -16,8 +16,9 @@ venv/
 .venv/
 env/
 
-# 데이터 (용량 큼)
-data/
+# 데이터 (용량 큼) — 디렉터리 대신 내용물을 무시해야 README 예외가 먹는다
+data/*
+!data/README.md
 *.json
 !sample_data/*.json
 
