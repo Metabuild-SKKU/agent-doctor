@@ -113,8 +113,8 @@ PROBE_SOURCE_AUTO = "auto"
 PROBE_SOURCE_USER_LOG = "user_log"
 PROBE_SOURCE_MADE = "made"
 #   taxonomy : 외부 사람작성 QA 데이터셋(KorQuAD 등)을 gold 포함 Probe 로 로드.
-#              EVAL_TAXONOMY_QA/EVAL_TAXONOMY_CORPUS 경로에서 읽고, gold_spans 를
-#              실어 재청킹 후 resync 로 gold_chunk_ids 를 확정한다.
+#              qa 는 EVAL_TAXONOMY_QA 에서, corpus(좌표 조회용)는 state.source_url 에서
+#              가져와(=Ingest 와 동일 소스) gold_spans 를 실어 재청킹 후 resync 로 확정한다.
 PROBE_SOURCE_TAXONOMY = "taxonomy"
 
 
@@ -128,11 +128,6 @@ def resolve_probe_source() -> str:
 def taxonomy_qa_path() -> str:
     """taxonomy 소스 qa 파일 경로(EVAL_TAXONOMY_QA, 기본 data/qa_pairs.jsonl)."""
     return os.getenv("EVAL_TAXONOMY_QA", "data/qa_pairs.jsonl")
-
-
-def taxonomy_corpus_path() -> str:
-    """taxonomy gold_spans 좌표 조회용 corpus 경로(EVAL_TAXONOMY_CORPUS, 기본 data/corpus.jsonl)."""
-    return os.getenv("EVAL_TAXONOMY_CORPUS", "data/corpus.jsonl")
 
 
 def llm_eval_enabled() -> bool:

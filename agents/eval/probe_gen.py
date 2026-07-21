@@ -51,7 +51,6 @@ from agents.eval.types import (
     PROBE_SOURCE_TAXONOMY,
     resolve_probe_source,
     taxonomy_qa_path,
-    taxonomy_corpus_path,
 )
 
 # 자동 생성 기본 개수 (설계: testset_size=5~10 으로 시작해 비용 확인 후 확대)
@@ -123,19 +122,22 @@ def uses_user_log(state: AgentDoctorState) -> bool:
 # ── taxonomy: 외부 사람작성 QA 데이터셋 (KorQuAD 등) ──────────────
 
 def _from_taxonomy(state: AgentDoctorState) -> list[Probe]:
-    """EVAL_TAXONOMY_QA/CORPUS 에서 taxonomy Probe(gold_spans 포함)를 로드하고,
-    현재 청크에 맞춰 gold_chunk_ids 를 resync 한다(재청킹돼도 gold 유지).
+    """taxonomy Probe(gold_spans 포함)를 로드하고, 현재 청크에 맞춰 gold_chunk_ids 를
+    resync 한다(재청킹돼도 gold 유지).
 
+    qa 는 EVAL_TAXONOMY_QA 에서, corpus(gold 좌표 조회용)는 state.source_url 에서
+    가져온다 — Ingest 가 문서를 복원한 바로 그 파일이라 좌표계가 일치한다(설정 단일화).
     KORQUAD_MAX_DOCS / KORQUAD_QA_LIMIT 로 규모 제한(스모크). MAX_DOCS 는 Ingest 의
     corpus 로더와 같은 규칙이라 corpus/qa 가 같은 문서 집합을 본다."""
     import os
-    from agents.eval.datasets.korquad import load_taxonomy_probes
+    from agents.eval.datasets.korquad import load_taxonomy_probes, DEFAULT_CORPUS
 
     def _pos_int(name):
         raw = os.getenv(name, "").strip()
         return int(raw) if raw.isdigit() and int(raw) > 0 else None  # 0/비정수/미설정 = 전체
 
-    probes = load_taxonomy_probes(taxonomy_qa_path(), taxonomy_corpus_path(),
+    corpus_path = state.source_url or DEFAULT_CORPUS
+    probes = load_taxonomy_probes(taxonomy_qa_path(), corpus_path,
                                   limit=_pos_int("KORQUAD_QA_LIMIT"),
                                   max_docs=_pos_int("KORQUAD_MAX_DOCS"))
     probes = _resync_gold_chunk_ids(probes, state.chunks, state.documents)

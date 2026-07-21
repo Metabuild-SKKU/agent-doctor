@@ -144,8 +144,19 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
-    run_pipeline(
-        source_url="https://notion.so/example-page",
-        source_type="notion",
-        user_questions=["휴가 정책이 어떻게 돼?", "신입사원 온보딩 기간은?"],
-    )
+    import os
+
+    # 소스는 env 로 받는다(run_local_pipeline.py 와 동일 계약: SOURCE_TYPE / SOURCE_URL).
+    #   SOURCE_TYPE=korquad SOURCE_URL=data/corpus.jsonl python graph.py   # 기본
+    #   SOURCE_TYPE=notion  SOURCE_URL=https://notion.so/... python graph.py
+    source_type = os.getenv("SOURCE_TYPE", "korquad").strip().lower()
+    defaults = {
+        "korquad": "data/corpus.jsonl",
+        "file": "sample_docs/hr_policy.md",
+        "notion": "https://notion.so/example-page",
+    }
+    source_url = os.getenv("SOURCE_URL", defaults.get(source_type, ""))
+    if source_type == "korquad":
+        os.environ.setdefault("EVAL_PROBE_SOURCE", "taxonomy")  # qa 를 taxonomy 로
+
+    run_pipeline(source_url, source_type=source_type)
