@@ -232,7 +232,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     try:
         docs = ingester(state.source_url)
         state.documents = docs
-        print(f"[Ingest] 완료 — {len(docs)}개 문서 수집")
+        print(f"[Ingest] 완료 - {len(docs)}개 문서 수집")
     except NotImplementedError as e:
         state.status = "error"
         state.error = str(e)

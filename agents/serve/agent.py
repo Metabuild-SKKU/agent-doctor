@@ -144,7 +144,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.status = "done"
 
         print("\n" + "=" * 50)
-        print(f"✅ 완료!")
+        print(f"[Serve] 완료!")
         print(f"   API 서버: http://localhost:{API_PORT}")
         print(f"   Claude Desktop을 재시작하면 MCP 연결됩니다.")
         print("=" * 50)
