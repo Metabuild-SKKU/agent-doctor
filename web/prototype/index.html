@@ -395,11 +395,12 @@
         </div>
 
         <div class="panel" id="panel-doc" role="tabpanel" aria-labelledby="tab-doc">
-          <div class="dropzone" tabindex="0">
+          <div class="dropzone" id="dropzone" tabindex="0">
+            <input type="file" id="fileInput" accept=".pdf" hidden>
             <svg class="dz-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 16V4m0 0 4 4m-4-4-4 4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke-linecap="round"/></svg>
-            <div class="dz-main">문서를 끌어다 놓거나 클릭해 업로드</div>
-            <div class="dz-sub">진단할 지식 문서를 넣으면 검색 파이프라인을 만들어 검사합니다</div>
-            <div class="dz-formats">PDF · MARKDOWN · TXT · DOCX · HTML</div>
+            <div class="dz-main" id="dzMain">문서를 끌어다 놓거나 클릭해 업로드</div>
+            <div class="dz-sub" id="dzSub">진단할 지식 문서를 넣으면 검색 파이프라인을 만들어 검사합니다</div>
+            <div class="dz-formats">PDF (현재 지원 형식)</div>
           </div>
         </div>
 
@@ -477,7 +478,7 @@
         <div class="ticker" id="ticker" aria-live="polite"></div>
 
         <div class="done-row" id="doneRow" hidden>
-          <div class="done-summary">진단 완료 · 문제 <b>4</b>건 · 종합점수 <b>62</b> <span class="up">→ 84 ↑</span></div>
+          <div class="done-summary" id="doneSummary">진단 완료</div>
           <a class="btn-report" id="btnReport" href="report.html">
             결과 리포트 보기
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14m-6-6 6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -517,12 +518,41 @@
   });
 
   var etaMap = { fast: '약 30초', standard: '약 2분', full: '약 6분' };
+  var selectedDepth = 'standard';
   document.querySelectorAll('.seg').forEach(function (s) {
     s.addEventListener('click', function () {
       document.querySelectorAll('.seg').forEach(function (o) { o.setAttribute('aria-pressed', 'false'); });
       s.setAttribute('aria-pressed', 'true');
       document.getElementById('etaNote').textContent = etaMap[s.dataset.depth];
+      selectedDepth = s.dataset.depth;
     });
+  });
+
+  /* file upload wiring */
+  var WEB_API_BASE = 'http://localhost:8767';
+  var selectedFile = null;
+  var dropzone = document.getElementById('dropzone');
+  var fileInput = document.getElementById('fileInput');
+  var btnRun = document.getElementById('btnRun');
+
+  function setSelectedFile(file) {
+    if (!file) return;
+    if (!/\.pdf$/i.test(file.name)) {
+      document.getElementById('dzSub').textContent = 'PDF 파일만 지원합니다.';
+      return;
+    }
+    selectedFile = file;
+    document.getElementById('dzMain').textContent = file.name;
+    document.getElementById('dzSub').textContent = '업로드 준비됨 · ' + Math.round(file.size / 1024) + 'KB';
+  }
+
+  dropzone.addEventListener('click', function () { fileInput.click(); });
+  dropzone.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+  fileInput.addEventListener('change', function () { setSelectedFile(fileInput.files[0]); });
+  dropzone.addEventListener('dragover', function (e) { e.preventDefault(); });
+  dropzone.addEventListener('drop', function (e) {
+    e.preventDefault();
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) setSelectedFile(e.dataTransfer.files[0]);
   });
 
   /* ECG canvas — subtle oscilloscope trace */
@@ -568,91 +598,136 @@
     draw();
   }
 
-  var stageDefs = [
-    { key: 'ingest',   dur: 900,  lines: [['수집', '문서 3건 · 42페이지 읽어들임', 'ok']] },
-    { key: 'index',    dur: 1400, lines: [['색인', '512자 청크 218개 생성 · 임베딩 완료', 'ok']] },
-    { key: 'probe',    dur: 1500, lines: [['질문', '테스트 질문 47개 생성 (나열형 9 · 멀티홉 12)', 'ok']] },
-    { key: 'diagnose', dur: 2600, lines: [
-        ['진단', '47개 질문으로 검색·답변 품질 검사 중…', ''],
-        ['발견', '나열형 질문에서 정답 누락 — 검색 실패 3건', 'find'],
-        ['발견', '컨텍스트가 길어 답이 흐려짐 1건', 'find']
-      ] },
-    { key: 'optimize', dur: 2800, lines: [
-        ['처방', 'top_k 5 → 12 조정 · 재평가', ''],
-        ['검증', 'context_recall 0.60 → 0.85 · 종합 62 → 70 ↑ 유지', 'ok'],
-        ['처방', 'chunk_size 512 → 256 · 종합 70 → 66 ↓ 롤백', 'find'],
-        ['처방', '리랭커 켜기 · 종합 70 → 84 ↑ 최종 채택', 'ok']
-      ] }
-  ];
+  // 백엔드 노드(ingest/index/eval/optimize/serve) → UI 5단계 매핑.
+  // eval 완료는 probe·diagnose 두 UI 스테이지를 한꺼번에 만족시킨다.
+  var STAGE_UI_MAP = {
+    ingest: ['ingest'],
+    index: ['index'],
+    eval: ['probe', 'diagnose'],
+    optimize: ['optimize'],
+    serve: []
+  };
 
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
   function stamp(t) { return pad(Math.floor(t / 60)) + ':' + pad(t % 60); }
 
-  document.getElementById('btnRun').addEventListener('click', function () {
+  btnRun.addEventListener('click', function () {
+    if (!selectedFile) {
+      document.getElementById('dzSub').textContent = '먼저 진단할 PDF 문서를 선택하세요.';
+      dropzone.focus();
+      return;
+    }
     document.getElementById('inputView').style.display = 'none';
     document.getElementById('progressView').hidden = false;
     document.getElementById('consoleLabel').textContent = 'running';
-    runStages();
+    startRun();
   });
 
-  function runStages() {
-    var stagesEl = document.getElementById('stages');
+  function markStageDone(key) {
+    var el = document.querySelector('#stages [data-stage="' + key + '"]');
+    if (!el || el.dataset.state === 'done') return;
+    el.dataset.state = 'done';
+    el.querySelector('.stage-ic').innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    el.querySelector('.stage-status').textContent = '완료';
+  }
+
+  function markStageActive(key) {
+    var el = document.querySelector('#stages [data-stage="' + key + '"]');
+    if (!el || el.dataset.state !== 'pending') return;
+    el.dataset.state = 'active';
+    el.querySelector('.stage-ic').innerHTML = '<span class="spinner"></span>';
+    el.querySelector('.stage-status').textContent = '진행 중';
+  }
+
+  function startRun() {
     var ticker = document.getElementById('ticker');
     var pctNum = document.getElementById('pctNum');
     var fill = document.getElementById('trackFill');
-    var total = stageDefs.length;
-    var i = 0, tClock = 3;
     var cursor = document.createElement('span');
     cursor.className = 'ticker-cursor';
     ticker.appendChild(cursor);
 
-    function addLine(entry) {
+    function addLine(tag, text, kind) {
       var row = document.createElement('div');
       row.className = 'ticker-line';
-      var cls = entry[2] === 'find' ? 'tk-find' : (entry[2] === 'ok' ? 'tk-ok' : '');
-      row.innerHTML = '<span class="tk-time">' + stamp(tClock) + '</span>' +
-        '<span class="tk-tag">' + entry[0] + '</span>' +
-        '<span class="' + cls + '">' + entry[1] + '</span>';
+      var cls = kind === 'find' ? 'tk-find' : (kind === 'ok' ? 'tk-ok' : '');
+      row.innerHTML = '<span class="tk-time">' + stamp(Math.floor((Date.now() - startedAt) / 1000)) + '</span>' +
+        '<span class="tk-tag">' + tag + '</span>' +
+        '<span class="' + cls + '">' + text + '</span>';
       ticker.insertBefore(row, cursor);
       ticker.scrollTop = ticker.scrollHeight;
-      tClock += 7 + Math.floor(Math.random() * 12);
     }
 
-    function step() {
-      if (i >= total) return finish();
-      var def = stageDefs[i];
-      var el = stagesEl.querySelector('[data-stage="' + def.key + '"]');
-      el.dataset.state = 'active';
-      el.querySelector('.stage-ic').innerHTML = '<span class="spinner"></span>';
-      el.querySelector('.stage-status').textContent = '진행 중';
+    var startedAt = Date.now();
+    var cursorPos = 0;
+    var runId = null;
+    var pollTimer = null;
 
-      var li = 0;
-      var lineTimer = setInterval(function () {
-        if (li < def.lines.length) { addLine(def.lines[li]); li++; }
-      }, def.dur / (def.lines.length + 1));
+    var form = new FormData();
+    form.append('file', selectedFile);
+    form.append('depth', selectedDepth);
 
-      setTimeout(function () {
-        clearInterval(lineTimer);
-        while (li < def.lines.length) { addLine(def.lines[li]); li++; }
-        el.dataset.state = 'done';
-        el.querySelector('.stage-ic').innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-        el.querySelector('.stage-status').textContent = '완료';
-        i++;
-        var pct = Math.round((i / total) * 100);
-        pctNum.textContent = pct;
-        fill.style.width = pct + '%';
-        step();
-      }, def.dur);
+    fetch(WEB_API_BASE + '/runs', { method: 'POST', body: form })
+      .then(function (res) {
+        if (!res.ok) throw new Error('업로드 실패 (' + res.status + ')');
+        return res.json();
+      })
+      .then(function (data) {
+        runId = data.run_id;
+        pollTimer = setInterval(poll, 1500);
+        poll();
+      })
+      .catch(function (err) {
+        addLine('오류', err.message || '진단을 시작하지 못했습니다.', 'find');
+      });
+
+    function poll() {
+      fetch(WEB_API_BASE + '/runs/' + runId + '/status?since=' + cursorPos)
+        .then(function (res) {
+          if (!res.ok) throw new Error('상태 조회 실패 (' + res.status + ')');
+          return res.json();
+        })
+        .then(function (data) {
+          cursorPos = data.cursor;
+          data.events.forEach(function (e) { addLine(e.tag, e.text, e.kind); });
+
+          var uiStages = STAGE_UI_MAP[data.stage] || [];
+          uiStages.forEach(markStageActive);
+
+          var pct = data.percent || 0;
+          pctNum.textContent = pct;
+          fill.style.width = pct + '%';
+
+          if (data.status === 'error') {
+            clearInterval(pollTimer);
+            addLine('오류', data.error || '파이프라인 실행 중 오류가 발생했습니다.', 'find');
+            return;
+          }
+          if (data.status === 'done') {
+            clearInterval(pollTimer);
+            Object.keys(STAGE_UI_MAP).forEach(function (k) {
+              STAGE_UI_MAP[k].forEach(markStageDone);
+            });
+            pctNum.textContent = 100;
+            fill.style.width = '100%';
+            finish(runId);
+          }
+        })
+        .catch(function (err) {
+          clearInterval(pollTimer);
+          addLine('오류', err.message || '상태 조회 중 오류가 발생했습니다.', 'find');
+        });
     }
-    step();
   }
 
-  function finish() {
+  function finish(runId) {
     var ticker = document.getElementById('ticker');
     var c = ticker.querySelector('.ticker-cursor');
     if (c) c.remove();
     document.querySelector('#progressView .pt').textContent = '진단이 끝났습니다';
     document.getElementById('consoleLabel').textContent = 'done';
+    document.getElementById('doneSummary').textContent = '진단 완료 — 결과 리포트에서 자세히 확인하세요.';
+    document.getElementById('btnReport').href = 'report.html?run_id=' + encodeURIComponent(runId);
     document.getElementById('doneRow').hidden = false;
   }
 })();

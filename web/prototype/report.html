@@ -71,6 +71,7 @@
   .gauge-center .cap { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin-top: 10px; }
   .hero-side .verdict { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 560; padding: 6px 13px; border-radius: 100px; border: 1px solid; }
   .verdict.pass { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); background: var(--good-glow); }
+  .verdict.fail { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 40%, transparent); background: var(--critical-glow); }
   .hero-side h3 { font-size: 21px; font-weight: 600; letter-spacing: -.02em; margin: 16px 0 0; line-height: 1.35; }
   .hero-side p { color: var(--muted); font-size: 14.5px; margin: 12px 0 0; max-width: 52ch; }
   .hero-stats { display: flex; gap: 28px; margin-top: 24px; }
@@ -262,10 +263,10 @@
       <span class="wm">Agent<span class="doc">Doctor</span></span>
     </div>
     <div class="meta">
-      <span class="chip">코퍼스 <b>사내 제품 문서</b></span>
-      <span class="chip">진단 깊이 <b>표준 검진</b></span>
-      <span class="chip">테스트 질문 <b>47</b></span>
-      <span class="chip">2026-07-20 14:32</span>
+      <span class="chip">코퍼스 <b id="metaCorpus">사내 제품 문서</b></span>
+      <span class="chip">진단 깊이 <b id="metaDepth">표준 검진</b></span>
+      <span class="chip">테스트 질문 <b id="metaQuestionCount">47</b></span>
+      <span class="chip" id="metaCreatedAt">2026-07-20 14:32</span>
     </div>
     <h1><b>진단 리포트</b></h1>
   </div>
@@ -289,10 +290,10 @@
       </div>
     </div>
     <div class="hero-side">
-      <span class="verdict pass"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg> 처방 후 기준선 통과</span>
-      <h3>문제 4건을 찾아 3번 처방했고, 종합점수가 <span style="color:var(--good)">62에서 84로</span> 올랐습니다.</h3>
-      <p>검색이 나열형 정답을 놓치고 있었고, 정답 순위가 낮았습니다. top_k 확대와 리랭커로 해결했으며, 컨텍스트 축소는 오히려 품질을 떨어뜨려 되돌렸습니다.</p>
-      <div class="hero-stats">
+      <span class="verdict pass" id="verdictBadge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg> <span id="verdictText">처방 후 기준선 통과</span></span>
+      <h3 id="heroHeadline">문제 4건을 찾아 3번 처방했고, 종합점수가 <span style="color:var(--good)">62에서 84로</span> 올랐습니다.</h3>
+      <p id="heroSummary">검색이 나열형 정답을 놓치고 있었고, 정답 순위가 낮았습니다. top_k 확대와 리랭커로 해결했으며, 컨텍스트 축소는 오히려 품질을 떨어뜨려 되돌렸습니다.</p>
+      <div class="hero-stats" id="heroStats">
         <div class="hero-stat"><div class="n">4</div><div class="l">발견된 문제</div></div>
         <div class="hero-stat"><div class="n up">2</div><div class="l">채택된 처방</div></div>
         <div class="hero-stat"><div class="n warn">1</div><div class="l">롤백</div></div>
@@ -304,7 +305,7 @@
   <!-- PRIORITY -->
   <section class="section">
     <div class="section-head"><span class="idx">01</span><h2>가장 시급한 문제</h2><span class="sub">심각도·영향 질문 수 기준</span></div>
-    <div class="prio">
+    <div class="prio" id="prioList">
       <div class="prio-card sev-critical">
         <div class="prio-top"><span class="prio-grp">A · 검색 실패</span><span class="badge crit">치명</span></div>
         <div class="prio-title">나열형 질문에서 정답 누락</div>
@@ -420,87 +421,14 @@
     root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
   });
 
-  /* ── metrics dumbbell ── */
-  var metrics = [
+  var WEB_API_BASE = 'http://localhost:8767';
+  var DUMMY_METRICS = [
     { name: '충실도', en: 'faithfulness', tip: '답이 근거 문서에 충실한 정도. 낮으면 지어낼 위험이 있습니다.', before: .72, after: .89 },
     { name: '정답 회수율', en: 'context_recall', tip: '필요한 정답 조각을 검색이 얼마나 가져왔는지입니다.', before: .60, after: .88 },
     { name: '검색 정확도', en: 'context_precision', tip: '가져온 조각 중 실제로 정답에 쓸모 있는 비율입니다.', before: .66, after: .79 },
     { name: '답변 관련성', en: 'response_relevancy', tip: '답이 질문에 얼마나 들어맞는지입니다.', before: .70, after: .85 }
   ];
-  var SCALE_MIN = 0.5, SCALE_MAX = 0.95;
-  function pos(v) { return ((v - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)) * 100; }
-  var mHtml = metrics.map(function (m) {
-    var pb = pos(m.before), pa = pos(m.after);
-    var lo = Math.min(pb, pa), hi = Math.max(pb, pa);
-    var delta = '+' + Math.round((m.after - m.before) * 100) / 100;
-    return '<div class="metric-row">' +
-      '<div class="metric-name"><span class="term" tabindex="0" data-tip="' + m.tip + '">' + m.name + '</span><span class="en">' + m.en + '</span></div>' +
-      '<div class="dumbbell"><div class="track"></div>' +
-        '<div class="connect" style="left:' + lo + '%;width:' + (hi - lo) + '%"></div>' +
-        '<div class="pt before" style="left:' + pb + '%"></div>' +
-        '<div class="pt after" style="left:' + pa + '%"></div>' +
-      '</div>' +
-      '<div class="metric-vals"><span class="b">' + m.before.toFixed(2) + '</span> → <span class="a">' + m.after.toFixed(2) + '</span><span class="d">' + delta + '</span></div>' +
-    '</div>';
-  }).join('');
-  document.getElementById('metrics').innerHTML = mHtml;
-
-  /* ── course line chart ── */
-  (function () {
-    var svg = document.getElementById('courseSvg');
-    var NS = 'http://www.w3.org/2000/svg';
-    var L = 46, R = 634, T = 24, B = 178;
-    var sMin = 55, sMax = 90;
-    var pts = [
-      { x: L, label: '기준선', score: 62, kept: true },
-      { x: L + (R - L) * 0.32, label: 'Rx1 · top_k', score: 70, kept: true },
-      { x: L + (R - L) * 0.64, label: 'Rx2 · chunk', score: 70, kept: true, roll: 66 },
-      { x: R, label: 'Rx3 · 리랭커', score: 84, kept: true }
-    ];
-    function y(s) { return B - (s - sMin) / (sMax - sMin) * (B - T); }
-    function el(n, a) { var e = document.createElementNS(NS, n); for (var k in a) e.setAttribute(k, a[k]); return e; }
-
-    // gridlines
-    [60, 70, 80, 90].forEach(function (g) {
-      svg.appendChild(el('line', { x1: L, y1: y(g), x2: R, y2: y(g), stroke: 'var(--border)', 'stroke-width': 1 }));
-      svg.appendChild(el('text', { x: L - 10, y: y(g) + 3.5, 'text-anchor': 'end', fill: 'var(--faint)', 'font-size': 10.5, 'font-family': 'var(--mono)' })).textContent = g;
-    });
-
-    // main adopted path
-    var d = 'M' + pts.map(function (p) { return p.x + ' ' + y(p.score); }).join(' L');
-    // area
-    var area = d + ' L' + R + ' ' + B + ' L' + L + ' ' + B + ' Z';
-    var ag = el('linearGradient', { id: 'cg', x1: 0, y1: 0, x2: 0, y2: 1 });
-    ag.appendChild(el('stop', { offset: '0%', 'stop-color': 'var(--accent)', 'stop-opacity': .18 }));
-    ag.appendChild(el('stop', { offset: '100%', 'stop-color': 'var(--accent)', 'stop-opacity': 0 }));
-    var defs = el('defs', {}); defs.appendChild(ag); svg.appendChild(defs);
-    svg.appendChild(el('path', { d: area, fill: 'url(#cg)' }));
-    svg.appendChild(el('path', { d: d, fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
-
-    // rollback branch (Rx2 down to 66, X)
-    var rb = pts[2];
-    svg.appendChild(el('path', { d: 'M' + rb.x + ' ' + y(rb.score) + ' L' + rb.x + ' ' + y(rb.roll), stroke: 'var(--faint)', 'stroke-width': 1.8, 'stroke-dasharray': '3 3', fill: 'none' }));
-    var xm = el('g', {});
-    xm.appendChild(el('line', { x1: rb.x - 4, y1: y(rb.roll) - 4, x2: rb.x + 4, y2: y(rb.roll) + 4, stroke: 'var(--critical)', 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
-    xm.appendChild(el('line', { x1: rb.x - 4, y1: y(rb.roll) + 4, x2: rb.x + 4, y2: y(rb.roll) - 4, stroke: 'var(--critical)', 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
-    svg.appendChild(xm);
-    svg.appendChild(el('text', { x: rb.x + 10, y: y(rb.roll) + 4, fill: 'var(--critical)', 'font-size': 10.5, 'font-family': 'var(--mono)' })).textContent = '66 롤백';
-
-    // points + labels
-    pts.forEach(function (p, i) {
-      var isBase = i === 0;
-      svg.appendChild(el('circle', { cx: p.x, cy: y(p.score), r: 4.5, fill: isBase ? 'var(--faint)' : 'var(--accent)', stroke: 'var(--surface)', 'stroke-width': 2 }));
-      if (!isBase && p.score !== pts[i - 1].score) {
-        svg.appendChild(el('text', { x: p.x, y: y(p.score) - 12, 'text-anchor': i === pts.length - 1 ? 'end' : 'middle', fill: 'var(--ink)', 'font-size': 12, 'font-weight': 600, 'font-family': 'var(--mono)' })).textContent = p.score;
-      }
-      if (isBase) svg.appendChild(el('text', { x: p.x, y: y(p.score) - 12, 'text-anchor': 'start', fill: 'var(--muted)', 'font-size': 12, 'font-family': 'var(--mono)' })).textContent = p.score;
-      var t = el('text', { x: p.x, y: B + 20, 'text-anchor': i === 0 ? 'start' : (i === pts.length - 1 ? 'end' : 'middle'), fill: 'var(--faint)', 'font-size': 10.5, 'font-family': 'var(--mono)' });
-      t.textContent = p.label; svg.appendChild(t);
-    });
-  })();
-
-  /* ── prescriptions ── */
-  var rxs = [
+  var DUMMY_RXS = [
     {
       state: 'kept', num: '01', change: ['top_k', '5', '12'], target: '나열형 정답 누락을 겨냥',
       reason: ['GOLD_RANK', '정답이 최대 12위까지 흩어져 있어, 다 담으려면 top_k ≥ 12 필요'],
@@ -522,6 +450,203 @@
       drill: { label: '효과', rows: [], caption: 'top_k를 더 키우는 대신 리랭커로 순위만 올려 노이즈 없이 정답을 상위로 이동시켰습니다. 검색 정확도 0.66→0.79, 종합점수 70→84로 최종 채택되었습니다.' }
     }
   ];
+  var DUMMY_DXS = [
+    { grp: 'A · 검색 실패', title: '나열형 질문에서 정답 누락', code: 'retrieval_incomplete_enumeration', badge: ['confirm', '확정'], desc: '정답이 여러 청크에 흩어진 나열형 질문에서, 고정된 top_k가 뒤쪽 정답을 놓칩니다. 정답 청크가 최대 12위까지 분포했습니다.', foot: '질문 3건 영향', rx: 'Rx1 top_k' },
+    { grp: 'A · 검색 실패', title: '정답 순위가 낮음', code: 'retrieval_low_rank', badge: ['confirm', '확정'], desc: '정답이 검색 후보에는 있으나 6~15위에 있어 상위 컷 밖으로 밀립니다. 순위를 올리는 처방이 적합합니다.', foot: '질문 2건 영향', rx: 'Rx3 리랭커' },
+    { grp: 'C · 컨텍스트', title: '컨텍스트가 너무 김', code: 'too_long_context', badge: ['confirm', '확정'], desc: '가져온 조각이 많아 정답이 컨텍스트 중간에 묻혀 답변 품질이 떨어집니다. 청크 축소를 시도했으나 회수율이 나빠져 롤백했습니다.', foot: '질문 1건 영향', rx: 'Rx2 (롤백)' },
+    { grp: 'B · 생성 실패', title: '부분 답변', code: 'generation_partial_answer', badge: ['prelim', '의심'], desc: '정답 근거는 컨텍스트에 있으나 답변이 일부 조건을 누락합니다. 생성 원인은 LLM 심층 진단(정밀 검진)에서만 확정할 수 있습니다.', foot: '질문 1건 영향', rx: '미처방' }
+  ];
+  var DUMMY_QAS = [
+    { label: 'A · 나열형 누락', solved: true,
+      q: '결제 모듈에서 지원하는 결제 수단을 모두 알려줘',
+      gold: '카드 · 계좌이체 · 간편결제 · 포인트 · 상품권 (5종)',
+      before: '신용카드, 계좌이체, 간편결제를 지원합니다.', bnote: '포인트·상품권 2종 누락',
+      after: '카드, 계좌이체, 간편결제, 포인트, 상품권 5가지를 지원합니다.',
+      fix: '정답이 3·7·12위에 흩어져 있어 top_k=5로는 뒤쪽을 놓침 → top_k 12로 확대해 전부 회수' },
+    { label: 'A · 순위 낮음', solved: true,
+      q: '관리자 권한을 다른 사용자에게 위임하는 절차는?',
+      gold: '설정 → 멤버 → 역할 변경 → 승인 요청',
+      before: '제공된 문서에서 관련 정보를 찾을 수 없습니다.', bnote: '정답이 11위라 상위 5 밖으로 밀림',
+      after: '설정 > 멤버에서 대상 사용자의 역할을 변경하고 승인을 요청하면 됩니다.',
+      fix: '정답이 검색은 됐으나 11위 → 리랭커로 2위까지 끌어올려 답변에 반영' },
+    { label: 'C · 컨텍스트 김', solved: false,
+      q: '무료 체험 기간은 며칠인가요?',
+      gold: '14일',
+      before: '플랜에 따라 30일 또는 14일이며, 전환 조건과 결제 수단에 따라 달라질 수 있어…', bnote: '정답이 긴 컨텍스트 중간에 묻힘',
+      after: '청크 축소 처방이 회수율을 떨어뜨려 롤백 — 이 질문은 아직 해결되지 않았습니다.',
+      fix: '다른 처방 후보(컨텍스트 재정렬 등)를 다음 반복에서 시도할 예정' }
+  ];
+  var DUMMY_SCORE = { before: 62, after: 84 };
+  var DUMMY_PRIORITY = [
+    { group: 'A · 검색 실패', severity: 'critical', title: '나열형 질문에서 정답 누락', desc: '정답이 여러 청크에 흩어져 있는데 top_k가 5로 고정돼 뒤쪽 정답을 못 가져옵니다.', confirmed: true, affected: 3 },
+    { group: 'A · 검색 실패', severity: 'warning', title: '정답 순위가 낮음', desc: '정답이 검색은 되지만 6~15위라 상위 컷 밖으로 밀려 답변에 안 쓰입니다.', confirmed: true, affected: 2 },
+    { group: 'C · 컨텍스트', severity: 'warning', title: '컨텍스트가 너무 김', desc: '가져온 조각이 많아 정답이 중간에 묻혀 답이 흐려집니다.', confirmed: true, affected: 1 }
+  ];
+  var DUMMY_META = { corpus: '사내 제품 문서', depth: '표준 검진', question_count: 47, created_at: '2026-07-20T14:32:00' };
+
+  /* data가 실제 서버 응답이면 true, run_id 없음/fetch 실패로 인한 빈 프리뷰({})면 false.
+     실제 응답인데 배열이 비어 있는 경우("처방 0건" 등)는 더미로 치환하지 않고 빈 상태를 그대로 보여준다. */
+  function renderReport(data, isLive) {
+    var metrics = isLive ? (data.metrics || []) : DUMMY_METRICS;
+    var rxs = isLive ? (data.rxs || []) : DUMMY_RXS;
+    var dxs = isLive ? (data.dxs || []) : DUMMY_DXS;
+    var qas = isLive ? (data.qas || []) : DUMMY_QAS;
+    var priority = isLive ? (data.priority || []) : DUMMY_PRIORITY;
+    var score = isLive ? (data.score || DUMMY_SCORE) : DUMMY_SCORE;
+    var meta = isLive ? (data.meta || DUMMY_META) : DUMMY_META;
+
+    renderMetrics(metrics);
+    renderCourse(data.course);
+    renderRxs(rxs);
+    renderDxs(dxs);
+    renderQas(qas);
+    renderGauge(score);
+    renderPriority(priority);
+    renderHero(score, meta);
+    renderMeta(meta);
+  }
+
+  /* ── priority top3 ── */
+  var SEV_LABEL = { critical: '치명', warning: '주의' };
+  function renderPriority(items) {
+    var el = document.getElementById('prioList');
+    if (!items.length) {
+      el.innerHTML = '<p style="color:var(--faint);font-size:13px">확정된 우선 문제가 없습니다.</p>';
+      return;
+    }
+    el.innerHTML = items.map(function (p) {
+      var sev = p.severity === 'critical' ? 'critical' : 'warning';
+      return '<div class="prio-card sev-' + sev + '">' +
+        '<div class="prio-top"><span class="prio-grp">' + (p.group || '') + '</span><span class="badge ' + (sev === 'critical' ? 'crit' : 'warn') + '">' + (SEV_LABEL[p.severity] || p.severity) + '</span></div>' +
+        '<div class="prio-title">' + p.title + '</div>' +
+        '<div class="prio-desc">' + p.desc + '</div>' +
+        '<div class="prio-foot"><span class="badge ' + (p.confirmed ? 'confirm' : 'prelim') + '">' +
+          (p.confirmed ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>확정' : '의심') +
+        '</span> · 질문 ' + p.affected + '건 영향</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  /* ── hero summary/stats ── */
+  function renderHero(score, meta) {
+    var pass = !!score.pass_threshold;
+    document.getElementById('verdictBadge').className = 'verdict ' + (pass ? 'pass' : 'fail');
+    document.getElementById('verdictText').textContent = pass ? '처방 후 기준선 통과' : '기준선 미달';
+    var before = score.before != null ? score.before : 0;
+    var after = score.after != null ? score.after : 0;
+    var rxCount = (score.kept || 0) + (score.rolled || 0) + (score.pending || 0);
+    var trend = after > before ? '올랐습니다.' : (after < before ? '내려갔습니다.' : '변화가 없었습니다.');
+    document.getElementById('heroHeadline').innerHTML =
+      '문제 ' + (score.findings_count || 0) + '건을 찾아 ' + rxCount + '번 처방했고, 종합점수가 ' +
+      '<span style="color:var(--good)">' + before + '에서 ' + after + '로</span> ' + trend;
+    document.getElementById('heroSummary').textContent = meta.corpus ? (meta.corpus + ' 문서를 ' + (meta.question_count || 0) + '개 질문으로 진단한 결과입니다.') : '';
+    document.getElementById('heroStats').innerHTML =
+      '<div class="hero-stat"><div class="n">' + (score.findings_count || 0) + '</div><div class="l">발견된 문제</div></div>' +
+      '<div class="hero-stat"><div class="n up">' + (score.kept || 0) + '</div><div class="l">채택된 처방</div></div>' +
+      '<div class="hero-stat"><div class="n warn">' + (score.rolled || 0) + '</div><div class="l">롤백</div></div>' +
+      '<div class="hero-stat"><div class="n">' + (score.pending || 0) + '</div><div class="l">추가 확인 필요</div></div>';
+  }
+
+  /* ── header meta chips ── */
+  function renderMeta(meta) {
+    document.getElementById('metaCorpus').textContent = meta.corpus || '-';
+    document.getElementById('metaDepth').textContent = meta.depth || '-';
+    document.getElementById('metaQuestionCount').textContent = meta.question_count || 0;
+    var d = meta.created_at ? new Date(meta.created_at) : null;
+    document.getElementById('metaCreatedAt').textContent = (d && !isNaN(d)) ?
+      (d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' +
+       String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')) : '';
+  }
+
+  /* ── metrics dumbbell ── */
+  var SCALE_MIN = 0.5, SCALE_MAX = 0.95;
+  function pos(v) { return ((v - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)) * 100; }
+  function renderMetrics(metrics) {
+  var mHtml = metrics.map(function (m) {
+    var pb = pos(m.before), pa = pos(m.after);
+    var lo = Math.min(pb, pa), hi = Math.max(pb, pa);
+    var delta = '+' + Math.round((m.after - m.before) * 100) / 100;
+    return '<div class="metric-row">' +
+      '<div class="metric-name"><span class="term" tabindex="0" data-tip="' + m.tip + '">' + m.name + '</span><span class="en">' + m.en + '</span></div>' +
+      '<div class="dumbbell"><div class="track"></div>' +
+        '<div class="connect" style="left:' + lo + '%;width:' + (hi - lo) + '%"></div>' +
+        '<div class="pt before" style="left:' + pb + '%"></div>' +
+        '<div class="pt after" style="left:' + pa + '%"></div>' +
+      '</div>' +
+      '<div class="metric-vals"><span class="b">' + m.before.toFixed(2) + '</span> → <span class="a">' + m.after.toFixed(2) + '</span><span class="d">' + delta + '</span></div>' +
+    '</div>';
+  }).join('');
+  document.getElementById('metrics').innerHTML = mHtml;
+  }
+
+  /* ── course line chart ── */
+  var DUMMY_COURSE = [
+    { label: '기준선', score: 62, kept: true },
+    { label: 'Rx1 · top_k', score: 70, kept: true },
+    { label: 'Rx2 · chunk', score: 70, kept: true, roll: 66 },
+    { label: 'Rx3 · 리랭커', score: 84, kept: true }
+  ];
+  function renderCourse(coursePoints) {
+    var raw = coursePoints && coursePoints.length ? coursePoints : DUMMY_COURSE;
+    var svg = document.getElementById('courseSvg');
+    svg.innerHTML = '';
+    var NS = 'http://www.w3.org/2000/svg';
+    var L = 46, R = 634, T = 24, B = 178;
+    var scores = raw.map(function (p) { return p.score; }).concat(raw.map(function (p) { return p.roll; }).filter(function (v) { return v !== undefined; }));
+    var sMin = Math.max(0, Math.min.apply(null, scores) - 10);
+    var sMax = Math.min(100, Math.max.apply(null, scores) + 10);
+    var pts = raw.map(function (p, i) {
+      return {
+        x: raw.length > 1 ? L + (R - L) * (i / (raw.length - 1)) : L,
+        label: p.label, score: p.score, kept: p.kept, roll: p.roll
+      };
+    });
+    function y(s) { return B - (s - sMin) / (sMax - sMin) * (B - T); }
+    function el(n, a) { var e = document.createElementNS(NS, n); for (var k in a) e.setAttribute(k, a[k]); return e; }
+
+    // gridlines
+    var gStep = (sMax - sMin) / 4;
+    [1, 2, 3, 4].map(function (i) { return Math.round(sMin + gStep * i); }).forEach(function (g) {
+      svg.appendChild(el('line', { x1: L, y1: y(g), x2: R, y2: y(g), stroke: 'var(--border)', 'stroke-width': 1 }));
+      svg.appendChild(el('text', { x: L - 10, y: y(g) + 3.5, 'text-anchor': 'end', fill: 'var(--faint)', 'font-size': 10.5, 'font-family': 'var(--mono)' })).textContent = g;
+    });
+
+    // main adopted path
+    var d = 'M' + pts.map(function (p) { return p.x + ' ' + y(p.score); }).join(' L');
+    // area
+    var area = d + ' L' + R + ' ' + B + ' L' + L + ' ' + B + ' Z';
+    var ag = el('linearGradient', { id: 'cg', x1: 0, y1: 0, x2: 0, y2: 1 });
+    ag.appendChild(el('stop', { offset: '0%', 'stop-color': 'var(--accent)', 'stop-opacity': .18 }));
+    ag.appendChild(el('stop', { offset: '100%', 'stop-color': 'var(--accent)', 'stop-opacity': 0 }));
+    var defs = el('defs', {}); defs.appendChild(ag); svg.appendChild(defs);
+    svg.appendChild(el('path', { d: area, fill: 'url(#cg)' }));
+    svg.appendChild(el('path', { d: d, fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+
+    // rollback branches — 데이터에 roll 값이 있는 지점마다 표시
+    pts.forEach(function (rb) {
+      if (rb.roll === undefined) return;
+      svg.appendChild(el('path', { d: 'M' + rb.x + ' ' + y(rb.score) + ' L' + rb.x + ' ' + y(rb.roll), stroke: 'var(--faint)', 'stroke-width': 1.8, 'stroke-dasharray': '3 3', fill: 'none' }));
+      var xm = el('g', {});
+      xm.appendChild(el('line', { x1: rb.x - 4, y1: y(rb.roll) - 4, x2: rb.x + 4, y2: y(rb.roll) + 4, stroke: 'var(--critical)', 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
+      xm.appendChild(el('line', { x1: rb.x - 4, y1: y(rb.roll) + 4, x2: rb.x + 4, y2: y(rb.roll) - 4, stroke: 'var(--critical)', 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
+      svg.appendChild(xm);
+      svg.appendChild(el('text', { x: rb.x + 10, y: y(rb.roll) + 4, fill: 'var(--critical)', 'font-size': 10.5, 'font-family': 'var(--mono)' })).textContent = rb.roll + ' 롤백';
+    });
+
+    // points + labels
+    pts.forEach(function (p, i) {
+      var isBase = i === 0;
+      svg.appendChild(el('circle', { cx: p.x, cy: y(p.score), r: 4.5, fill: isBase ? 'var(--faint)' : 'var(--accent)', stroke: 'var(--surface)', 'stroke-width': 2 }));
+      if (!isBase && p.score !== pts[i - 1].score) {
+        svg.appendChild(el('text', { x: p.x, y: y(p.score) - 12, 'text-anchor': i === pts.length - 1 ? 'end' : 'middle', fill: 'var(--ink)', 'font-size': 12, 'font-weight': 600, 'font-family': 'var(--mono)' })).textContent = p.score;
+      }
+      if (isBase) svg.appendChild(el('text', { x: p.x, y: y(p.score) - 12, 'text-anchor': 'start', fill: 'var(--muted)', 'font-size': 12, 'font-family': 'var(--mono)' })).textContent = p.score;
+      var t = el('text', { x: p.x, y: B + 20, 'text-anchor': i === 0 ? 'start' : (i === pts.length - 1 ? 'end' : 'middle'), fill: 'var(--faint)', 'font-size': 10.5, 'font-family': 'var(--mono)' });
+      t.textContent = p.label; svg.appendChild(t);
+    });
+  }
+
+  /* ── prescriptions ── */
   function rxCard(r) {
     var scoreCls = r.score[2] === 'up' ? 'up' : 'down';
     var arrowUp = r.score[2] === 'up';
@@ -547,18 +672,15 @@
         '<div class="drill-caption">' + r.drill.caption + '</div></div>' +
     '</div>';
   }
+  function renderRxs(rxs) {
   document.getElementById('rxList').innerHTML = rxs.map(rxCard).join('');
   document.querySelectorAll('.rx-main').forEach(function (m) {
     m.addEventListener('click', function () { m.parentElement.classList.toggle('open'); });
   });
+  }
 
   /* ── diagnosis detail ── */
-  var dxs = [
-    { grp: 'A · 검색 실패', title: '나열형 질문에서 정답 누락', code: 'retrieval_incomplete_enumeration', badge: ['confirm', '확정'], desc: '정답이 여러 청크에 흩어진 나열형 질문에서, 고정된 top_k가 뒤쪽 정답을 놓칩니다. 정답 청크가 최대 12위까지 분포했습니다.', foot: '질문 3건 영향', rx: 'Rx1 top_k' },
-    { grp: 'A · 검색 실패', title: '정답 순위가 낮음', code: 'retrieval_low_rank', badge: ['confirm', '확정'], desc: '정답이 검색 후보에는 있으나 6~15위에 있어 상위 컷 밖으로 밀립니다. 순위를 올리는 처방이 적합합니다.', foot: '질문 2건 영향', rx: 'Rx3 리랭커' },
-    { grp: 'C · 컨텍스트', title: '컨텍스트가 너무 김', code: 'too_long_context', badge: ['confirm', '확정'], desc: '가져온 조각이 많아 정답이 컨텍스트 중간에 묻혀 답변 품질이 떨어집니다. 청크 축소를 시도했으나 회수율이 나빠져 롤백했습니다.', foot: '질문 1건 영향', rx: 'Rx2 (롤백)' },
-    { grp: 'B · 생성 실패', title: '부분 답변', code: 'generation_partial_answer', badge: ['prelim', '의심'], desc: '정답 근거는 컨텍스트에 있으나 답변이 일부 조건을 누락합니다. 생성 원인은 LLM 심층 진단(정밀 검진)에서만 확정할 수 있습니다.', foot: '질문 1건 영향', rx: '미처방' }
-  ];
+  function renderDxs(dxs) {
   document.getElementById('dxList').innerHTML = dxs.map(function (d) {
     return '<div class="dx-card">' +
       '<div class="dx-top"><span class="dx-grp">' + d.grp + '</span><span class="badge ' + d.badge[0] + '">' +
@@ -569,53 +691,65 @@
       '<div class="dx-foot">' + d.foot + '<span class="rx-link">' + d.rx + '</span></div>' +
     '</div>';
   }).join('');
+  }
 
   /* ── failed validation QA ── */
-  var qas = [
-    { label: 'A · 나열형 누락', solved: true,
-      q: '결제 모듈에서 지원하는 결제 수단을 모두 알려줘',
-      gold: '카드 · 계좌이체 · 간편결제 · 포인트 · 상품권 (5종)',
-      before: '신용카드, 계좌이체, 간편결제를 지원합니다.', bnote: '포인트·상품권 2종 누락',
-      after: '카드, 계좌이체, 간편결제, 포인트, 상품권 5가지를 지원합니다.',
-      fix: '정답이 3·7·12위에 흩어져 있어 top_k=5로는 뒤쪽을 놓침 → top_k 12로 확대해 전부 회수' },
-    { label: 'A · 순위 낮음', solved: true,
-      q: '관리자 권한을 다른 사용자에게 위임하는 절차는?',
-      gold: '설정 → 멤버 → 역할 변경 → 승인 요청',
-      before: '제공된 문서에서 관련 정보를 찾을 수 없습니다.', bnote: '정답이 11위라 상위 5 밖으로 밀림',
-      after: '설정 > 멤버에서 대상 사용자의 역할을 변경하고 승인을 요청하면 됩니다.',
-      fix: '정답이 검색은 됐으나 11위 → 리랭커로 2위까지 끌어올려 답변에 반영' },
-    { label: 'C · 컨텍스트 김', solved: false,
-      q: '무료 체험 기간은 며칠인가요?',
-      gold: '14일',
-      before: '플랜에 따라 30일 또는 14일이며, 전환 조건과 결제 수단에 따라 달라질 수 있어…', bnote: '정답이 긴 컨텍스트 중간에 묻힘',
-      after: '청크 축소 처방이 회수율을 떨어뜨려 롤백 — 이 질문은 아직 해결되지 않았습니다.',
-      fix: '다른 처방 후보(컨텍스트 재정렬 등)를 다음 반복에서 시도할 예정' }
-  ];
   var okIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   var xIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12M18 6 6 18" stroke-linecap="round"/></svg>';
   var dashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 12h12" stroke-linecap="round"/></svg>';
+  function renderQas(qas) {
   document.getElementById('qaList').innerHTML = qas.map(function (x) {
     var afterTag = x.solved ? (okIcon + ' 처방 후') : (dashIcon + ' 미해결');
     return '<div class="qa-card ' + (x.solved ? 'solved' : 'unsolved') + '">' +
-      '<div class="qa-head"><span class="qm">Q</span><span class="qt">' + x.q + '</span><span class="ql">' + x.label + '</span></div>' +
-      '<div class="qa-gold"><span class="gl">기대 정답</span><b>' + x.gold + '</b></div>' +
+      '<div class="qa-head"><span class="qm">Q</span><span class="qt">' + (x.q || '(질문 없이 처방 라벨 기준 확인됨)') + '</span><span class="ql">' + x.label + '</span></div>' +
+      '<div class="qa-gold"><span class="gl">기대 정답</span><b>' + (x.gold || '-') + '</b></div>' +
       '<div class="qa-ans">' +
-        '<div class="col before"><div class="tag">' + xIcon + ' 처방 전</div><div class="atext">"' + x.before + '"</div><div class="note">' + x.bnote + '</div></div>' +
+        '<div class="col before"><div class="tag">' + xIcon + ' 처방 전</div><div class="atext">"' + x.before + '"</div><div class="note">' + (x.bnote || '') + '</div></div>' +
         '<div class="col after"><div class="tag">' + afterTag + '</div><div class="atext">' + (x.solved ? '"' + x.after + '"' : x.after) + '</div></div>' +
       '</div>' +
-      '<div class="qa-fix"><span class="fl">처방</span><span>' + x.fix + '</span></div>' +
+      '<div class="qa-fix"><span class="fl">처방</span><span>' + (x.fix || '미처방') + '</span></div>' +
     '</div>';
   }).join('');
+  }
 
   /* gauge animate */
-  requestAnimationFrame(function () {
-    setTimeout(function () {
-      var arc = document.getElementById('gaugeArc');
-      var ARC = 452.4;            // length of the 270° usable sweep
-      var frac = 84 / 100;        // score / 100
-      arc.setAttribute('stroke-dashoffset', ARC * (1 - frac));
-    }, 120);
-  });
+  function renderGauge(score) {
+    requestAnimationFrame(function () {
+      setTimeout(function () {
+        var arc = document.getElementById('gaugeArc');
+        var ARC = 452.4;            // length of the 270° usable sweep
+        var frac = (score.after || 0) / 100;
+        arc.setAttribute('stroke-dashoffset', ARC * (1 - frac));
+        document.getElementById('scoreNum').textContent = Math.round(score.after || 0);
+        var deltaEl = document.querySelector('.gauge-center .delta');
+        var delta = Math.round((score.after || 0) - (score.before || 0));
+        deltaEl.lastChild.textContent = ' ' + (delta >= 0 ? '+' : '') + delta;
+      }, 120);
+    });
+  }
+
+  /* ── run_id 가 있으면 실제 리포트를 fetch, 없으면 더미 데이터로 정적 프리뷰 ── */
+  var runId = new URLSearchParams(location.search).get('run_id');
+  if (runId) {
+    fetch(WEB_API_BASE + '/runs/' + runId + '/report')
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (b) { throw new Error(b.detail || ('리포트 조회 실패 (' + res.status + ')')); });
+        return res.json();
+      })
+      .then(function (data) {
+        renderReport(data, true);
+      })
+      .catch(function (err) {
+        var wrap = document.querySelector('.wrap');
+        var banner = document.createElement('div');
+        banner.style.cssText = 'margin:20px 0;padding:14px 18px;border:1px solid var(--critical);border-radius:10px;color:var(--critical);font-size:13.5px;';
+        banner.textContent = '리포트를 불러오지 못했습니다: ' + err.message + ' (더미 데이터로 표시합니다)';
+        wrap.insertBefore(banner, wrap.firstChild.nextSibling);
+        renderReport({}, false);
+      });
+  } else {
+    renderReport({}, false);
+  }
 })();
 </script>
 </body>
