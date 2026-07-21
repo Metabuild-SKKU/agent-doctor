@@ -25,8 +25,7 @@ class EvalIterationContractTest(unittest.TestCase):
 
     @patch("agents.eval.agent.build_report")
     @patch("agents.eval.agent._log_probe")
-    @patch("agents.eval.agent._evaluate_probe", return_value=object())
-    @patch("agents.eval.agent.get_retriever", return_value=object())
+    @patch("agents.eval.agent.get_retriever")
     @patch("agents.eval.agent.generate_probes")
     @patch("agents.eval.agent.load_probes")
     def test_cached_probe_is_resynced_after_rechunking(
@@ -34,7 +33,6 @@ class EvalIterationContractTest(unittest.TestCase):
         load_probes,
         generate_probes,
         _get_retriever,
-        _evaluate,
         _log_probe,
         build_report,
     ):
@@ -62,8 +60,13 @@ class EvalIterationContractTest(unittest.TestCase):
                 Chunk("new_1", "d1", content[100:], char_span=(100, len(content))),
             ],
         )
+        _get_retriever.return_value.search.return_value = []
 
-        result = agent.run(state)
+        with (
+            patch("agents.eval.agent.generate_answer", return_value=""),
+            patch("agents.eval.agent.diagnose", return_value=[]),
+        ):
+            result = agent.run(state)
 
         generate_probes.assert_not_called()
         self.assertEqual(result.probes[0].gold_chunk_ids, ["new_1"])
