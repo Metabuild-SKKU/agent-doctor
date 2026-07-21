@@ -51,8 +51,10 @@ from agents.eval.types import (
     RAGAS_QUADRANT_WEIGHTS,
     PROBE_SOURCE_AUTO,
     PROBE_SOURCE_USER_LOG,
+    PROBE_SOURCE_TAXONOMY,
     resolve_llm_concurrency,
     resolve_probe_source,
+    taxonomy_qa_path,
 )
 from core.parallel import parallel_map
 
@@ -93,6 +95,9 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
 
     읽기: state.user_questions, state.chunks, state.documents
     """
+    if resolve_probe_source() == PROBE_SOURCE_TAXONOMY:
+        return _from_taxonomy(state)
+
     if uses_user_log(state):
         probes = _from_user_questions(state.user_questions)
         print(f"[Eval] STEP1: user_log Probe {len(probes)}개 생성")
@@ -145,11 +150,35 @@ def uses_user_log(state: AgentDoctorState) -> bool:
     agent.py STEP1 도 이 술어로 캐시 여부를 정한다 — state.user_questions 유무만 보면
     auto 일 때 실제로는 LLM 생성으로 가는데도 캐시를 건너뛴다."""
     source = resolve_probe_source()
-    if source == PROBE_SOURCE_AUTO:
-        return False
+    if source in (PROBE_SOURCE_AUTO, PROBE_SOURCE_TAXONOMY):
+        return False    # 둘 다 자체 생성 경로(generate_probes 내부 분기)를 탄다
     if source == PROBE_SOURCE_USER_LOG:
         return bool(state.user_questions)
     return bool(state.user_questions)   # 미지정 → 기존 동작
+
+
+# ── taxonomy: 외부 사람작성 QA 데이터셋 (KorQuAD 등) ──────────────
+
+def _from_taxonomy(state: AgentDoctorState) -> list[Probe]:
+    """taxonomy Probe(gold_spans 포함)를 로드하고, 현재 청크에 맞춰 gold_chunk_ids 를
+    resync 한다(재청킹돼도 gold 유지).
+
+    qa 는 EVAL_TAXONOMY_QA 에서, corpus(gold 좌표 조회용)는 state.source_url 에서
+    가져온다 — Ingest 가 문서를 복원한 바로 그 파일이라 좌표계가 일치한다(설정 단일화).
+    KORQUAD_MAX_DOCS / KORQUAD_QA_LIMIT 로 규모 제한(스모크). MAX_DOCS 는 Ingest 의
+    corpus 로더와 같은 규칙이라 corpus/qa 가 같은 문서 집합을 본다."""
+    from agents.eval.datasets.korquad import load_taxonomy_probes, DEFAULT_CORPUS
+    from agents.eval.types import korquad_qa_limit, korquad_max_docs
+
+    corpus_path = state.source_url or DEFAULT_CORPUS
+    probes = load_taxonomy_probes(taxonomy_qa_path(), corpus_path,
+                                  limit=korquad_qa_limit(),
+                                  max_docs=korquad_max_docs())
+    probes = _resync_gold_chunk_ids(probes, state.chunks, state.documents)
+    matched = sum(1 for p in probes if p.gold_chunk_ids)
+    print(f"[Eval] STEP1: taxonomy Probe {len(probes)}개 로드 "
+          f"(gold 매칭 {matched}/{len(probes)})")
+    return probes
 
 
 # ── user_log: 실사용 질문 기반 ────────────────────────────────────
@@ -395,6 +424,9 @@ def _build_doc_position_index(doc: Document, chunks: list[Chunk]) -> list[tuple[
     index: list[tuple[str, int, int]] = []
     cursor = 0
     for c in doc_chunks:
+        # Index 가 확정한 char_span(원문 좌표)을 우선 쓴다 — 본문 재검색은 동일 텍스트가
+        # 반복될 때 여러 청크가 첫 위치로 몰려(cursor 방식) 뒤쪽 gold 가 비는 모호성이 있다.
+        # 선언 span 이 실제 원문과 맞는지 검증 후 채택하고, 아니면 텍스트 검색으로 폴백.
         declared = _declared_chunk_span(c)
         span = None
         if declared is not None and _valid_document_span(
