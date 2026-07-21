@@ -34,6 +34,16 @@ if not has_key() or "..." in _key or len(_key) < 20:
     print(f"실제 {_KEY_ENV} 없음(비었거나 placeholder) → 스킵  [provider={_PROVIDER}]")
     print(f"  .env 의 {_KEY_ENV} 를 진짜 키로 바꾸고 다시 실행하세요.")
     sys.exit(0)
+
+# github provider 는 채팅만 GitHub Models 로 하고 임베딩(response_relevancy)은
+# _openai_embed 로 내려가므로 OPENAI_API_KEY 도 필요하다. 없으면 임베딩 테스트에서
+# Missing credentials 로 죽으니 여기서 명확히 스킵한다.
+if _PROVIDER == "github":
+    _oai = os.getenv("OPENAI_API_KEY", "").strip()
+    if not _oai or "..." in _oai or len(_oai) < 20:
+        print("github provider 는 임베딩(response_relevancy)에 OPENAI_API_KEY 도 필요 → 스킵")
+        sys.exit(0)
+
 print(f"provider = {_PROVIDER}")
 
 os.environ["EVAL_ENABLE_LLM"] = "1"   # RAGAS 진단 활성화
