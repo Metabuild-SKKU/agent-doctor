@@ -238,6 +238,26 @@ def evaluate_oracle_track(record: EvalRecord, judge) -> dict:
     })
 
 
+def answer_similarity(record: EvalRecord, track: str):
+    """생성 답변↔gold 정답의 임베딩 코사인 유사도(tier3 의미 게이트용).
+    lexical(정규화 F1/recall)이 임계 미달일 때 '표면형은 달라도 의미는 정답'을 구제하는 승급 신호.
+        track: 'real'(generated_answer) | 'oracle'(oracle_answer)
+    키 없음·재료(정답/답변) 없음·임베딩 실패 → None(미측정)."""
+    ref = record.probe.ground_truth
+    ans = record.oracle_answer if track == "oracle" else record.generated_answer
+    if not (ref or "").strip() or not (ans or "").strip():
+        return None
+    if _judge() is None:
+        return None
+    try:
+        vecs = _embed(None, [ref, ans])
+    except Exception:
+        return None
+    if not vecs or len(vecs) < 2:
+        return None
+    return _cosine(vecs[0], vecs[1])
+
+
 def evaluate_aspect_critics(record: EvalRecord, judge) -> dict:
     """커스텀 AspectCritic(이진): contradiction.
     [예약] 현재 라이브 진단 경로는 record.aspect 를 소비하지 않는다 — diagnose.generation_contradiction

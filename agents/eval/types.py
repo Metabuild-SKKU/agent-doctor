@@ -32,6 +32,10 @@ RAGAS_CONTEXT_PRECISION_MIN = 0.7
 RAGAS_CONTEXT_RECALL_MIN = 0.7
 RAGAS_RESPONSE_RELEVANCY_MIN = 0.7
 
+# 정답 판정 tier3 승급 임계값 — 답변↔gold 정답 임베딩 코사인.
+# lexical(F1_PASS_THRESHOLD) 미달이어도 이 이상이면 '표면형만 다른 정답'으로 보고 통과.
+ANSWER_SIM_MIN = 0.8
+
 # STEP5 최종 판정
 # graph.route_after_eval() 이 이 값 기반 pass_threshold 로 Serve/Optimize 를 분기한다.
 # 스케일 주의: overall_score 는 0~1 (RAGAS 가중 평균 또는 규칙 지표 평균). 설계 문서가 언급하는

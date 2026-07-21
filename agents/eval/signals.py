@@ -18,13 +18,14 @@ contextvars 로 교체해야 한다.)
 from __future__ import annotations
 
 from agents.eval.types import (
-    Mode, EvalRecord, DEFAULT_TOP_K, F1_PASS_THRESHOLD,
+    Mode, EvalRecord, DEFAULT_TOP_K, F1_PASS_THRESHOLD, ANSWER_SIM_MIN,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
 )
 from agents.eval.metrics import (
     recall_at_k,
     span_recall_at_k,
     token_f1,
+    answer_match,
     is_abstention,
 )
 
@@ -58,6 +59,7 @@ class _Ctx:
     keyword_fn = None        # (chunks, query, top_n) -> list[{"chunk_id",...}]
     generate_fn = None       # (question, contexts) -> str   (tier4 ablation 재생성)
     ragas_fn = None          # (record, track) -> dict  track: "real"|"oracle"  (tier3 RAGAS lazy)
+    sim_fn = None            # (record, track) -> float|None  답변↔gold 정답 의미 유사도(tier3 게이트)
     wide_n: int = 100        # top-N 재검색·BM25 후보 크기
 
 
@@ -65,7 +67,7 @@ _ctx = _Ctx()
 
 
 def set_context(client=None, chunks=None, retrieve_fn=None, keyword_fn=None,
-                generate_fn=None, ragas_fn=None, wide_n=100):
+                generate_fn=None, ragas_fn=None, sim_fn=None, wide_n=100):
     """tier2~4 판별 훅이 쓸 자원 주입. agent.run 이 진단 전 1회 호출.
     미주입이면 해당 훅은 자원 없음으로 None(=미확보) 반환."""
     _ctx.client = client
@@ -75,6 +77,7 @@ def set_context(client=None, chunks=None, retrieve_fn=None, keyword_fn=None,
     _ctx.keyword_fn = keyword_fn
     _ctx.generate_fn = generate_fn
     _ctx.ragas_fn = ragas_fn
+    _ctx.sim_fn = sim_fn
     _ctx.wide_n = wide_n
 
 
@@ -108,8 +111,9 @@ def _compute_metrics(record: EvalRecord) -> None:
         if span_recall is not None
         else recall_at_k(record.probe.gold_chunk_ids, record.retrieved_chunk_ids)
     )
-    record.f1_score = token_f1(record.generated_answer, gt) if gt else 0.0
-    record.oracle_f1 = token_f1(record.oracle_answer, gt) if (gt and record.oracle_answer) else 0.0
+    # answer_match: 정규화(숫자·시간 포맷)+짧은 정답 recall 위주 — 표면형에 강건한 tier1 정답 매칭.
+    record.f1_score = answer_match(record.generated_answer, gt) if gt else 0.0
+    record.oracle_f1 = answer_match(record.oracle_answer, gt) if (gt and record.oracle_answer) else 0.0
 
 
 def _compute_ragas(record: EvalRecord) -> None:
@@ -140,14 +144,24 @@ def _retrieval_failed(record: EvalRecord) -> bool:
     return 0 <= record.recall_at_k < 1
 
 
+def _answer_correct(record: EvalRecord, track: str, lexical: float) -> bool:
+    """정답 판정(레이어드): tier1 lexical(정규화·recall) 통과면 True.
+    미달이면 tier3 의미 유사도(_answer_sim, DEEP+)로 승급 — '표면형만 다른 정답' 구제.
+    둘 다 미달이면 False. (FAST/STANDARD 에선 sim=None → 순수 lexical 판정.)"""
+    if lexical >= F1_PASS_THRESHOLD:
+        return True
+    sim = _answer_sim(record, track)
+    return sim is not None and sim >= ANSWER_SIM_MIN
+
+
 def _f1_ok(record: EvalRecord) -> bool:
-    """실제 답이 정답과 일치(token_f1 통과). ground_truth 없으면 판정 불가 → False."""
-    return bool(record.probe.ground_truth) and record.f1_score >= F1_PASS_THRESHOLD
+    """실제 답이 정답과 일치(정답 매칭 통과). ground_truth 없으면 판정 불가 → False."""
+    return bool(record.probe.ground_truth) and _answer_correct(record, "real", record.f1_score)
 
 
 def _oracle_ok(record: EvalRecord) -> bool:
-    """gold 컨텍스트로 생성한 답이 정답과 일치(oracle_f1 통과). oracle 답 없으면 False."""
-    return record.oracle_answer is not None and record.oracle_f1 >= F1_PASS_THRESHOLD
+    """gold 컨텍스트로 생성한 답이 정답과 일치(정답 매칭 통과). oracle 답 없으면 False."""
+    return record.oracle_answer is not None and _answer_correct(record, "oracle", record.oracle_f1)
 
 
 def _generation_failed(record: EvalRecord) -> bool:
@@ -545,6 +559,15 @@ def _ensure_ragas(record: EvalRecord, track: str):
     elif not record.ragas_done:
         record.ragas_done = True
         record.ragas = _ctx.ragas_fn(record, "real") or {}
+
+
+def _answer_sim(record: EvalRecord, track: str):
+    """답변↔gold 정답 의미 유사도(임베딩 코사인) — tier3, DEEP+ & sim_fn 주입 시만 (lazy·memoize).
+    lexical 미달을 구제하는 정답 판정 승급 신호. 0~1 실수 / None(미실행·자원없음).
+        track: 'real'(generated_answer) | 'oracle'(oracle_answer)."""
+    if _active_mode < Mode.DEEP or _ctx.sim_fn is None:
+        return None
+    return _cache(record, f"answer_sim_{track}", lambda: _ctx.sim_fn(record, track))
 
 
 def _faith(record: EvalRecord):

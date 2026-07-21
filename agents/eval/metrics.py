@@ -22,14 +22,22 @@ from collections import Counter
 # ── 토큰화 ────────────────────────────────────────────────────────
 
 _PUNCT = re.compile(r"[^\w가-힣]+")
+_UNIT_AFTER_NUM = re.compile(r"(?<=\d)(년|월|일|시|분|초)")   # 숫자 뒤 날짜/시간 단위 → 구분자
+
+
+def _normalize(text: str) -> str:
+    """소문자화 + 날짜/시간 단위(년월일시분초) 분리 + 구두점 제거.
+    '14시 33분'↔'14:33', '2018년'↔'2018' 같은 표면형(surface) 차이를 흡수한다.
+    [구현 포인트] 형태소 분석기(kiwi/mecab) 도입 시 여기서 조사/어미까지 분리하면 된다."""
+    if not text:
+        return ""
+    text = _UNIT_AFTER_NUM.sub(" ", text.lower())   # 14시33분 → 14 33, 2018년 → 2018
+    return _PUNCT.sub(" ", text)                     # 구두점 → 공백 (14:33 → 14 33)
 
 
 def _tokenize(text: str) -> list[str]:
-    """소문자화 + 구두점 제거 후 공백 분리. [구현 포인트] 형태소 분석기로 교체 가능."""
-    if not text:
-        return []
-    text = _PUNCT.sub(" ", text.lower())
-    return [t for t in text.split() if t]
+    """정규화 후 공백 분리. [구현 포인트] 형태소 분석기로 교체 가능."""
+    return [t for t in _normalize(text).split() if t]
 
 
 # ── 생성 지표 ─────────────────────────────────────────────────────
@@ -56,6 +64,54 @@ def token_f1(prediction: str, reference: str) -> float:
     precision = overlap / len(pred_tokens)
     recall = overlap / len(ref_tokens)
     return 2 * precision * recall / (precision + recall)
+
+
+# ── 정답 매칭 (recall/포함 위주 — 표면형 강건) ────────────────────
+# token_f1 은 precision 을 함께 보므로, gold 가 짧은 추출형 span 인데 답변이 완결 문장이면
+# 프레이밍 토큰('…시점은 …입니다')에 precision 이 깎여 의미가 맞아도 점수가 낮게 나온다.
+# 짧은 정답은 recall(정답이 답변에 담겼나)만 보는 게 추출형 QA(KorQuAD 등)의 정석이다.
+
+_SHORT_REF_MAX_TOKENS = 5   # 이하 토큰이면 '추출형 짧은 정답'으로 보고 recall 위주로 채점
+
+
+def _covers(pred_tok: str, gold_tok: str) -> bool:
+    """pred 토큰이 gold 토큰을 '커버'하나 — 조사/어미 부착은 허용, 숫자 오확장은 금지.
+      · 단어: 접두 일치('사이프러스입니다' ⊇ '사이프러스').
+      · 숫자: gold 뒤에 숫자가 더 붙으면 다른 수(145 ≠ 1450) → 불인정."""
+    if not pred_tok.startswith(gold_tok):
+        return False
+    rest = pred_tok[len(gold_tok):]
+    if gold_tok[-1:].isdigit() and rest[:1].isdigit():
+        return False
+    return True
+
+
+def token_recall(prediction: str, reference: str) -> float:
+    """정답(reference) 토큰이 답변(prediction)에 얼마나 담겼는지(포함 비율).
+    조사/어미 부착·프레이밍 문장에 강건 — 각 gold 토큰이 pred 토큰 하나에 커버되면 인정."""
+    ref = _tokenize(reference)
+    if not ref:
+        return 0.0
+    pred = _tokenize(prediction)
+    covered = sum(1 for g in ref if any(_covers(p, g) for p in pred))
+    return covered / len(ref)
+
+
+def answer_match(prediction: str, reference: str) -> float:
+    """정답 매칭 점수(규칙 기반 tier1). 짧은 정답은 recall(포함) 위주, 긴 정답은 token F1.
+    숫자·시간 포맷, 조사·어미, 프레이밍 문장 같은 표면형 차이에 강건하다.
+    reference 없으면(정답 미보유) 0.0.
+
+    [트레이드오프] 짧은 정답에서 recall 위주라, gold 를 담고도 다른 답을 말하는 드문 경우를
+    정답으로 볼 수 있다(false negative↓·false positive↑). 그런 애매 케이스는 tier3 의미
+    유사도 게이트(signals._answer_correct)가 승급 검증한다."""
+    ref = _tokenize(reference)
+    if not ref:
+        return 0.0
+    f1 = token_f1(prediction, reference)
+    if len(ref) <= _SHORT_REF_MAX_TOKENS:
+        return max(f1, token_recall(prediction, reference))
+    return f1
 
 
 # ── 검색 지표 ─────────────────────────────────────────────────────
