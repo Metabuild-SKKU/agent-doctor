@@ -29,6 +29,7 @@ gold_spans 가 채워진 probe(taxonomy 등 외부 소스)는 _resync_gold_chunk
 """
 from __future__ import annotations
 
+import os
 import random
 import re
 
@@ -48,11 +49,21 @@ from agents.eval.types import (
     RAGAS_QUADRANT_WEIGHTS,
     PROBE_SOURCE_AUTO,
     PROBE_SOURCE_USER_LOG,
+    resolve_llm_concurrency,
     resolve_probe_source,
 )
+from core.parallel import parallel_map
 
 # 자동 생성 기본 개수 (설계: testset_size=5~10 으로 시작해 비용 확인 후 확대)
+# EVAL_TESTSET_SIZE 환경변수로 오버라이드 가능 (임계값 캘리브레이션 시 30~50 권장)
 DEFAULT_TESTSET_SIZE = 10
+
+
+def _testset_size() -> int:
+    try:
+        return max(1, int(os.getenv("EVAL_TESTSET_SIZE", str(DEFAULT_TESTSET_SIZE))))
+    except (TypeError, ValueError):
+        return DEFAULT_TESTSET_SIZE
 
 
 def generate_probes(state: AgentDoctorState) -> list[Probe]:
@@ -77,11 +88,12 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
         return probes
 
     graph = knowledge_graph.build_graph(state.chunks)
-    budget = _allocate_budget(DEFAULT_TESTSET_SIZE)
+    testset_size = _testset_size()
+    budget = _allocate_budget(testset_size)
 
     ragas_probes = _generate_ragas_probes(graph, budget["ragas"])
     if not ragas_probes:
-        probes = _from_chunks(state.chunks, DEFAULT_TESTSET_SIZE)
+        probes = _from_chunks(state.chunks, testset_size)
         print(f"[Eval] STEP1: llm_generated(폴백) Probe {len(probes)}개 생성")
         return probes
 
@@ -152,8 +164,12 @@ def _from_chunks(chunks: list[Chunk], size: int) -> list[Probe]:
     probes: list[Probe] = []
     # 너무 짧은 청크는 스킵, 앞에서부터 size 개 사용
     usable = [c for c in chunks if c.text and len(c.text.strip()) >= 20]
-    for i, chunk in enumerate(usable[:size]):
-        question, ground_truth = _llm_generate_single_hop(chunk.text) or _heuristic_single_hop(chunk.text)
+    targets = usable[:size]
+    # LLM 합성만 병렬(각 태스크는 실패 시 None 반환·예외 무전파), 조립은 순서대로
+    results = parallel_map(lambda c: _llm_generate_single_hop(c.text), targets,
+                           resolve_llm_concurrency())
+    for i, (chunk, result) in enumerate(zip(targets, results)):
+        question, ground_truth = result or _heuristic_single_hop(chunk.text)
         probes.append(Probe(
             probe_id=f"probe_gen_{i:03d}",
             question=question,
@@ -407,7 +423,10 @@ def _generate_ragas_probes(graph: knowledge_graph.KGraph, n: int) -> list[Probe]
         ))
     )
 
-    probes: list[Probe] = []
+    # plan 단계(순차): 노드 선택·pair 소비·시나리오 샘플링 등 random 소비를 전부
+    # 여기서 확정한다 — 병렬화가 RNG 소비 순서/공유 리스트(remaining_pairs)에
+    # 영향을 주지 않도록 LLM 호출과 분리(동시성 1이든 4든 plan 은 동일).
+    specs: list[dict] = []
     for quadrant, subtype in plan:
         if quadrant.startswith("single"):
             nodes = [random.choice(usable)] if usable else []
@@ -416,7 +435,15 @@ def _generate_ragas_probes(graph: knowledge_graph.KGraph, n: int) -> list[Probe]
             nodes = [graph.nodes[cid] for cid in pair_ids if cid in graph.nodes] if pair_ids else []
         if len(nodes) < (1 if quadrant.startswith("single") else 2):
             continue
-        probe = _make_ragas_probe(nodes, quadrant, subtype, len(probes))
+        specs.append(_plan_ragas_probe(nodes, quadrant, subtype))
+
+    # 합성 단계(병렬): LLM 호출만. 실패는 태스크 안에서 None 으로 흡수(예외 무전파).
+    results = parallel_map(_synthesize_ragas_query, specs, resolve_llm_concurrency())
+
+    # 조립 단계(순차, plan 순서): probe_id 번호(성공분만 카운트) 규칙 보존
+    probes: list[Probe] = []
+    for spec, result in zip(specs, results):
+        probe = _build_ragas_probe(spec, result, len(probes))
         if probe is not None:
             probes.append(probe)
     return probes
@@ -434,23 +461,31 @@ def _generate_datamorgana_probes(graph: knowledge_graph.KGraph, n: int) -> list[
     if n <= 0:
         return []
     usable = [node for node in graph.nodes.values() if node.text and len(node.text.strip()) >= 20]
-    probes: list[Probe] = []
+    # plan(순차): 노드·페르소나 샘플링 확정 → 합성(병렬) → 조립(순차, 번호 규칙 보존)
+    specs: list[dict] = []
     for i in range(n):
         if not usable:
             break
-        node = random.choice(usable)
-        result = _llm_synthesize_query(
-            node.text, "single_specific", None,
-            persona=random.choice(PERSONAS), style="conversational",
+        specs.append({"index": i, "node": random.choice(usable),
+                      "persona": random.choice(PERSONAS)})
+    results = parallel_map(
+        lambda s: _llm_synthesize_query(
+            s["node"].text, "single_specific", None,
+            persona=s["persona"], style="conversational",
             length="long", evol_dir="breadth",
-        )
+        ),
+        specs, resolve_llm_concurrency())
+
+    probes: list[Probe] = []
+    for spec, result in zip(specs, results):
+        node = spec["node"]
         if result is None:
             result = _heuristic_synthesize_query([node])
         question, ground_truth = result
         if not question or not ground_truth:
             continue
         probes.append(Probe(
-            probe_id=f"probe_datamorgana_{i:03d}",
+            probe_id=f"probe_datamorgana_{spec['index']:03d}",
             question=question,
             source="llm_generated",
             expected_difficulty="medium",
@@ -517,16 +552,22 @@ def _generate_false_premise_probes(graph: knowledge_graph.KGraph, n: int, start_
     if n <= 0:
         return []
     usable = [node for node in graph.nodes.values() if node.text and len(node.text.strip()) >= 20]
-    probes: list[Probe] = []
+    # plan(순차): 노드 샘플링 확정 → 질문 생성(병렬, 태스크 내 휴리스틱 폴백) → 조립(순차)
+    specs: list[dict] = []
     for i in range(n):
         if not usable:
             break
-        node = random.choice(usable)
-        question = _false_premise_question(node.text)
+        specs.append({"index": i, "node": random.choice(usable)})
+    results = parallel_map(lambda s: _false_premise_question(s["node"].text),
+                           specs, resolve_llm_concurrency())
+
+    probes: list[Probe] = []
+    for spec, question in zip(specs, results):
+        node = spec["node"]
         if question is None:
             continue
         probes.append(Probe(
-            probe_id=f"probe_false_premise_{start_index + i:03d}",
+            probe_id=f"probe_false_premise_{start_index + spec['index']:03d}",
             question=question,
             source="llm_generated",
             expected_difficulty="medium",
@@ -565,18 +606,34 @@ def _false_premise_question(chunk_text: str) -> str | None:
     return f"{topic}과 관련된 특별 예외 규정은 정확히 몇 조 몇 항에 명시되어 있나요?"
 
 
-def _make_ragas_probe(
-    nodes: list[KGNode], quadrant: str, subtype: str | None, index: int
-) -> Probe | None:
-    """노드(들)로 시나리오를 샘플링하고 질문을 합성해 Probe 하나를 만든다."""
-    persona = random.choice(PERSONAS)
-    style = random.choice(QUERY_STYLES)
-    length = random.choice(QUERY_LENGTHS)
-    evol_dir = random.choice(EVOL_DIRECTIONS)
-    is_multi = quadrant.startswith("multi")
-    context = "\n\n".join(node.text for node in nodes)
+def _plan_ragas_probe(nodes: list[KGNode], quadrant: str, subtype: str | None) -> dict:
+    """[plan 단계·순차] 노드(들)에 시나리오(페르소나/어투/길이/진화 방향)를 샘플링해
+    합성 spec 을 확정한다. random 소비는 전부 여기서 끝난다."""
+    return {
+        "nodes": nodes,
+        "quadrant": quadrant,
+        "subtype": subtype,
+        "persona": random.choice(PERSONAS),
+        "style": random.choice(QUERY_STYLES),
+        "length": random.choice(QUERY_LENGTHS),
+        "evol_dir": random.choice(EVOL_DIRECTIONS),
+    }
 
-    result = _llm_synthesize_query(context, quadrant, subtype, persona, style, length, evol_dir)
+
+def _synthesize_ragas_query(spec: dict) -> tuple[str, str] | None:
+    """[합성 단계·병렬 가능] spec 하나로 LLM 합성 1회. 실패 시 None (조립이 폴백)."""
+    context = "\n\n".join(node.text for node in spec["nodes"])
+    return _llm_synthesize_query(
+        context, spec["quadrant"], spec["subtype"],
+        spec["persona"], spec["style"], spec["length"], spec["evol_dir"],
+    )
+
+
+def _build_ragas_probe(spec: dict, result: tuple[str, str] | None, index: int) -> Probe | None:
+    """[조립 단계·순차] 합성 결과(실패면 휴리스틱 폴백)로 Probe 하나를 만든다."""
+    nodes, quadrant, subtype = spec["nodes"], spec["quadrant"], spec["subtype"]
+    is_multi = quadrant.startswith("multi")
+
     if result is None:
         result = _heuristic_synthesize_query(nodes)
     question, ground_truth = result
@@ -595,10 +652,10 @@ def _make_ragas_probe(
         qtype=subtype if is_multi else None,
         metadata={
             "gen_method": gen_method,
-            "persona": persona,
-            "style": style,
-            "length": length,
-            "evol_direction": evol_dir,
+            "persona": spec["persona"],
+            "style": spec["style"],
+            "length": spec["length"],
+            "evol_direction": spec["evol_dir"],
         },
     )
 
