@@ -84,6 +84,15 @@ def _read_score(report: DiagnosticReport) -> float:
     return report.overall_score if report.overall_score is not None else 0.0
 
 
+def _read_composite(report: DiagnosticReport | None) -> float | None:
+    """설계 종합점수(composite_score.total, 0~100)를 읽는다. 표시·게이트용.
+    (판정은 overall 로 하고 이 값은 리포트에 함께 실어주기 위한 것 — 없으면 None.)"""
+    if report is None:
+        return None
+    total = (report.composite_score or {}).get("total")
+    return float(total) if total is not None else None
+
+
 def judge(
     before_report: DiagnosticReport,
     after_report: DiagnosticReport,
@@ -93,9 +102,24 @@ def judge(
       ① after 가 하한선을 위반하면 → 무조건 롤백 (지표별 원값으로 검사)
       ② Eval 단일 점수가 올랐으면 → 유지, 아니면 → 롤백
     단일 점수는 Eval 이 계산한 overall_score 를 그대로 쓴다(여기서 재계산 안 함).
+
+    ── 탐색 신호는 overall 이어야 한다 (composite 로 바꾸지 말 것) ──────────────
+    표시·게이트(gate.py)는 설계 종합점수 composite(품질×신뢰도 조화평균)를 쓰지만,
+    최적화 탐색(이 judge 의 유지/롤백)은 반드시 overall(품질 단일축, 연속값)을 써야 한다.
+    이유: composite 의 조화평균은 신뢰도가 낮은 구간(=최적화가 가장 필요한 지점)에서
+    거의 평평해지거나 0 으로 붕괴해, "합격선을 아직 못 넘은 부분 진전"을 신호로 못 준다.
+    그러면 통과선 직전의 좋은 처방까지 롤백돼 최적화가 구멍에서 못 나온다.
+    overall 은 통과 판정을 이루는 지표(recall·faithfulness 등)의 연속 평균이라 신뢰도가
+    오를 방향으로 매끄럽게 움직인다 → 등반용 나침반으로 적합. "매끄러운 대리지표로 탐색,
+    정직한 종합점수(composite)로 게이트/표시"라는 분리가 이 설계의 핵심이다.
+    (composite 를 탐색에 넣으려면 조화평균이 아닌 매끄러운 blend 여야 하며, 근거 측정
+     없이는 도입하지 않는다.)
     """
     before_score = _read_score(before_report)
     after_score = _read_score(after_report)
+    # 판정은 overall(탐색 신호)로 하되, 표시·게이트용 composite 도 함께 실어 보낸다.
+    before_composite = _read_composite(before_report)
+    after_composite = _read_composite(after_report)
 
     violations = check_floor(after_report.ragas_scores)
     if violations:
@@ -103,6 +127,8 @@ def judge(
             keep=False,
             before_score=before_score,
             after_score=after_score,
+            before_composite=before_composite,
+            after_composite=after_composite,
             floor_violations=violations,
             reason=f"하한선 위반 {violations} → 무조건 롤백",
         )
@@ -112,6 +138,8 @@ def judge(
             keep=True,
             before_score=before_score,
             after_score=after_score,
+            before_composite=before_composite,
+            after_composite=after_composite,
             reason=f"점수 상승 {before_score:.1f}→{after_score:.1f} → 유지",
         )
 
@@ -119,6 +147,8 @@ def judge(
         keep=False,
         before_score=before_score,
         after_score=after_score,
+        before_composite=before_composite,
+        after_composite=after_composite,
         reason=f"점수 미상승 {before_score:.1f}→{after_score:.1f} → 롤백",
     )
 
@@ -158,6 +188,7 @@ def create_pending_item(
         metadata={
             "pending": True,               # 아직 판정되지 않음
             "before_report": before_report,  # judge 용(MVP: 객체 참조 보관)
+            "before_composite": _read_composite(before_report),  # 표시용 baseline 종합점수
         },
     )
 
@@ -214,5 +245,15 @@ def finalize_item(
     item.metadata["pending"] = False
     item.metadata["before_score"] = verdict.before_score
     item.metadata["after_score"] = verdict.after_score
+    # 표시·게이트용 종합점수(0~100). verdict 가 실어줬으면 그걸, 아니면 리포트에서 직접.
+    before_report = item.metadata.get("before_report")
+    item.metadata["before_composite"] = (
+        verdict.before_composite if verdict.before_composite is not None
+        else _read_composite(before_report)
+    )
+    item.metadata["after_composite"] = (
+        verdict.after_composite if verdict.after_composite is not None
+        else _read_composite(after_report)
+    )
     item.metadata["floor_violations"] = verdict.floor_violations
     item.metadata.pop("before_report", None)   # 판정 끝 — 무거운 참조 제거
