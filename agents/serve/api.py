@@ -6,8 +6,6 @@ Run:
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 from pathlib import Path
 
@@ -18,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents.rag.generator import answer_question
-from agents.rag.retriever import Retriever, get_retriever
+from agents.rag.retriever import Retriever, get_retriever, load_chunks
 
 app = FastAPI(title="Agent Doctor API", version="0.1.0")
 
@@ -34,73 +32,67 @@ _chunks_raw: list[dict] = []
 
 
 def init_qdrant(chunks_file: str) -> None:
+    """Load serialized chunks and prepare the shared retriever."""
     global _retriever, _chunks_raw
 
-    _chunks_raw = json.loads(Path(chunks_file).read_text(encoding="utf-8"))
+    _chunks_raw = load_chunks(chunks_file)
     print(f"[API] loaded {len(_chunks_raw)} chunks")
-
-    _retriever = get_retriever(
-        _chunks_raw,
-        {
-            "qdrant_url": os.getenv("QDRANT_URL", ":memory:"),
-            "qdrant_api_key": os.getenv("QDRANT_API_KEY"),
-        },
-    )
+    _retriever = get_retriever(_chunks_raw)
     if _retriever.client is None:
-        print("[API] Qdrant unavailable or embeddings missing; using keyword fallback")
+        print("[API] Qdrant unavailable or embeddings missing; keyword fallback enabled")
     else:
         print("[API] RAG retriever ready")
 
 
 def _require_retriever() -> Retriever:
-    if not _chunks_raw or _retriever is None:
-        raise HTTPException(status_code=503, detail="No indexed documents are loaded.")
+    if _retriever is None or not _chunks_raw:
+        raise HTTPException(status_code=503, detail="indexed chunks are not loaded")
     return _retriever
 
 
 @app.get("/health")
 def health():
+    settings = _retriever.settings.__dict__ if _retriever else {}
     return {
         "status": "ok",
         "chunks": len(_chunks_raw),
-        "qdrant": _retriever is not None and _retriever.client is not None,
+        "qdrant": bool(_retriever and _retriever.client is not None),
+        "index_settings": settings,
     }
 
 
 @app.get("/search")
-def search(query: str, top_k: int = 3):
-    """Return chunks relevant to the query."""
+def search(query: str, top_k: int | None = None):
+    """Search indexed chunks using the same retriever that Eval/RAG use."""
     retriever = _require_retriever()
-    retrieval = retriever.search_with_details(query, top_k=top_k)
-    return {
-        "query": query,
-        "results": retrieval["results"],
-        "search_mode": retrieval["search_mode"],
-        "fallback_used": retrieval["fallback_used"],
-        "reranked": retrieval["reranked"],
-    }
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="query must not be blank")
+    if top_k is not None and top_k <= 0:
+        raise HTTPException(status_code=400, detail="top_k must be positive")
+    return retriever.search_with_details(query, top_k=top_k)
 
 
 @app.get("/answer")
-def answer(query: str, top_k: int = 3):
-    """Run retrieval plus answer generation and return the RAG payload."""
+def answer(query: str, top_k: int | None = None):
+    """Search documents and generate a grounded answer."""
     retriever = _require_retriever()
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="query must not be blank")
+    if top_k is not None and top_k <= 0:
+        raise HTTPException(status_code=400, detail="top_k must be positive")
     return answer_question(query, retriever, top_k=top_k)
 
 
 @app.get("/documents")
 def documents():
-    """Return indexed document ids and titles."""
+    """Return indexed document list."""
     seen = {}
     for chunk in _chunks_raw:
         doc_id = chunk.get("doc_id", "")
         seen[doc_id] = chunk.get("metadata", {}).get("title", doc_id)
     return {
         "total": len(seen),
-        "documents": [
-            {"doc_id": doc_id, "title": title}
-            for doc_id, title in seen.items()
-        ],
+        "documents": [{"doc_id": doc_id, "title": title} for doc_id, title in seen.items()],
     }
 
 

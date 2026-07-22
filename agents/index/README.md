@@ -94,6 +94,7 @@ state = run(
 agents/index/
 ├── agent.py          # 검증·중복 제거·청킹·전체 실행
 ├── qdrant_store.py   # 임베딩·dense/hybrid 검색·reranker·Qdrant
+├── retriever.py      # Eval/Serve/RAG 공용 검색 인터페이스
 ├── graph_index.py    # entity/relation graph와 시각화
 └── README.md
 ```
@@ -126,6 +127,28 @@ state.index_artifacts = {
 `embedding_model`과 검색 설정이 들어간다. Eval은 `char_span`으로 재청킹
 후에도 gold 위치를 다시 찾고, Serve API는 저장된 모델 설정으로 질문을
 동일한 벡터 공간에 임베딩한다.
+
+## Eval/RAG 검색 인터페이스
+
+Eval의 임시 `retrieval_temp.py`는 아래 호출로 대체한다.
+
+```python
+from agents.index.retriever import build_retriever
+from agents.rag.generator import answer_text
+
+retriever = build_retriever(state.chunks, state.index_config)
+answer = answer_text(
+    probe.question,
+    retriever,
+    top_k=state.index_config.get("top_k", 5),
+    config=state.index_config,
+)
+```
+
+`build_retriever()`는 임베딩이 있으면 Qdrant dense/hybrid 검색을 준비하고,
+Qdrant 준비 실패나 임베딩 누락 시 같은 모듈의 keyword fallback으로 내려간다.
+`use_hybrid`, `use_reranker`, `top_k`, `embedding_model`, `embedding_dimension`은
+`state.index_config`와 Chunk metadata에서 복원된다.
 
 ## Graph 추출
 

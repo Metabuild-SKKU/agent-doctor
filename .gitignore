@@ -29,6 +29,7 @@ eval_probes.json
 # 결과물
 results/
 output/
+lib/
 
 # IDE
 .vscode/

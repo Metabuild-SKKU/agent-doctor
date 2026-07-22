@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from agents.index.corpus_visualization import build_corpus_visualization_artifacts
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
     DEFAULT_EMBEDDING_MODEL,
@@ -736,6 +737,16 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
             state.index_artifacts = tools.build_graph_artifacts(all_chunks, config)
         else:
             state.index_artifacts = {}
+
+        if config.get("corpus_visualization_enabled", True):
+            try:
+                state.index_artifacts["corpus_visualization"] = (
+                    build_corpus_visualization_artifacts(all_chunks, config)
+                )
+            except Exception as exc:
+                state.index_artifacts["corpus_visualization"] = {"error": str(exc)}
+                print(f"[Index] corpus visualization skipped: {exc}")
+
         state.index_artifacts.update(
             {
                 "documents": len(seen_documents),
