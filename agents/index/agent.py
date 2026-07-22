@@ -360,24 +360,6 @@ def _default_tools() -> IndexTools:
     )
 
 
-# 예전 fixed-size 호출부는 깨지지 않게 그대로 둔다.
-def _chunk_text(
-    text: str,
-    chunk_size: int,
-    chunk_overlap: int,
-) -> list[tuple[str, int, int]]:
-    trimmed, start, _ = _trimmed_slice(text, 0, len(text))
-    return [
-        (draft.text, draft.start, draft.end)
-        for draft in _fixed_chunks(
-            trimmed,
-            chunk_size,
-            chunk_overlap,
-            base_offset=start,
-        )
-    ]
-
-
 # Index 본문에서는 여기만 호출해서 chunking 전략을 교체한다.
 def _chunk_document(
     document: Document,

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from agents.index.agent import CHUNK_STRATEGIES, IndexTools, _chunk_document, _chunk_text, run
+from agents.index.agent import CHUNK_STRATEGIES, IndexTools, _chunk_document, run
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
     build_client,
@@ -49,11 +49,12 @@ class ChunkingTests(unittest.TestCase):
 
     def test_overlap_and_max_size_are_respected(self):
         source = "가나다라마바사 " * 30
-        chunks = _chunk_text(source, chunk_size=40, chunk_overlap=8)
+        document = _document("fixed-doc", source)
+        drafts = _chunk_document(document, chunk_size=40, chunk_overlap=8, strategy="fixed")
 
-        self.assertGreater(len(chunks), 1)
-        self.assertTrue(all(0 < len(text) <= 40 for text, _, _ in chunks))
-        self.assertTrue(all(source[start:end] == text for text, start, end in chunks))
+        self.assertGreater(len(drafts), 1)
+        self.assertTrue(all(0 < len(d.text) <= 40 for d in drafts))
+        self.assertTrue(all(document.content[d.start:d.end] == d.text for d in drafts))
 
     def test_markdown_section_is_preserved(self):
         document = _document(
