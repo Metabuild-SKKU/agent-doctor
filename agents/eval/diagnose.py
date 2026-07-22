@@ -16,11 +16,13 @@ Finding에 label을 담고 다음단계로 진행된다.
 Finding.type 필드에 라벨 그룹을 담고, Finding.label 필드에 세분화 라벨을 담는다.
 
 진단 모드:
-  - 1[FAST], 2[STANDARD], 3[DEEP], 4[FULL]
+  - 1[FAST], 2[STANDARD], 3[DEEP]
   - diagnose() 진입 시 signals.set_mode 로 현재 실행 모드를 설정한다.
   - 지정된 진단 모드 이하 tier 까지만 확정할 수 있다(그 위 tier 라벨은 예비).
   - 각 라벨은 확정 신호(비용 큼)·예비 신호(비용 작음, 없는 경우가 많음)를 가진다.
   - 생성 원인(B)은 전부 RAGAS(DEEP) 의존 → DEEP 미만이면 예비 generation_failure 로 롤업한다.
+  - 파이프라인 재실행(tier4)로 context 원인을 확정하던 경로는 제거됨 — 그 검증은 optimize 가
+    config 를 바꿔 재실행하며 수행한다. 관련 라벨은 예비 Finding 으로만 남긴다.
 
 판별 신호·지표·전제·진단 자원(_ctx)·모드 상태는 agents/eval/signals.py 에 존재한다.
 여기서는 라벨 함수와 조립(diagnose)만 담당한다.
@@ -36,13 +38,11 @@ from agents.eval.types import (
 )
 from agents.eval.signals import (
     set_mode, set_context, _compute_metrics, _compute_ragas, _no_diagnosis,
-    _retrieval_failed, _generation_failed, _context_applicable,
+    _retrieval_failed, _generation_failed, _context_failed,
     _is_multi_hop, _enumeration_cache,
     _gold_in_wider_candidates, _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
     _faith, _faith_oracle, _rel, _rel_oracle, _both_high,
-    _context_shorten_helps, _gold_front_helps, _noise_removal_helps,
-    _bridge_decompose_recovers, _gold_span_boundary_analysis,
-    _boundary_merge_helps,
+    _gold_span_boundary_analysis,
 )
 
 
@@ -121,29 +121,21 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
 def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     """정답 근거가 현재 청크 경계에 나뉘어 한 청크에 온전히 없음을 판정한다.
 
-    gold span과 현재 청크의 원문 좌표만 비교해 경계 분할 후보를 찾는다.
-    검색 실패와 경계 분할이 함께 보여도 좌표의 동시 발생만으로 인과를 확정하지
-    않는다. 검색은 성공했지만 답변이 실패한 경우에만 FULL 모드의 분할 조각 병합
-    재생성으로 실제 원인인지 확인한다.
+    gold span과 현재 청크의 원문 좌표만 비교해 경계 분할 후보를 찾는다(저비용).
+    검색 실패든 답변 실패든, 경계 분할은 '후보 원인'일 뿐 좌표의 동시 발생만으로
+    인과를 확정하지 않는다. 실제 원인인지는 optimize 가 청킹 파라미터를 바꿔
+    재실행하며 검증하므로, 여기서는 항상 예비 Finding 으로만 남긴다.
     """
 
     analysis = _gold_span_boundary_analysis(record)
     if not isinstance(analysis, dict) or analysis.get("boundary_split_count", 0) <= 0:
         return None
-    confirmed = False
-    if _retrieval_failed(record):
-        # 경계가 나뉘었다는 사실만으로 검색 실패 원인을 청킹으로 단정할 수 없다.
-        # 예비 Finding으로 남겨 _pick이 실측된 정석 검색 원인을 우선하게 한다.
-        confirmed = False
-    elif _context_applicable(record):
-        helps = _boundary_merge_helps(record)
-        if helps is False:
-            return None
-        confirmed = helps is True
-    else:
+    if not (_retrieval_failed(record) or _context_failed(record)):
         return None
     finding = _finding(
-        record, "chunking_context_mismatch", "retrieval_failure", confirmed
+        record, "chunking_context_mismatch", "retrieval_failure", confirmed=False,
+        reason=f"boundary_split={analysis.get('boundary_split_count')}, "
+               f"recall@k={_v(record.recall_at_k)}, f1={_v(record.f1_score)}",
     )
     finding.metadata["boundary_analysis"] = dict(analysis)
     return finding
@@ -152,27 +144,16 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
 def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]:
     """
     멀티홉 연쇄형: 2번째 hop 근거가 1번째 hop에 의존.
-    확정: decompose 재실행 시 회복(tier4).
-    예비: 멀티홉+recall<1(tier1).
+    예비: 멀티홉+recall<1(tier1). decompose 재검색으로 회복되는지는 optimize 가
+    query_rewrite:"decompose" 를 적용해 재실행하며 검증한다.
     """
     if not _retrieval_failed(record) or not _is_multi_hop(record):
         return None
 
-    recovers = _bridge_decompose_recovers(record)
-    if recovers is True:
-        return _finding(
-            record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=True,
-            reason=f"bridge_decompose_recovers=True, qtype={record.probe.qtype}, "
-                   f"recall@k={_v(record.recall_at_k)}",
-        )
-    if recovers is None:
-        return _finding(
-            record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False,
-            reason=f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}, "
-                   f"bridge_decompose_recovers=-",
-        )
-    if recovers is False:
-        return None
+    return _finding(
+        record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False,
+        reason=f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
+    )
 
 
 def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
@@ -274,55 +255,33 @@ def generation_failure(record: EvalRecord) -> Optional[Finding]:
 def too_long_context(record: EvalRecord) -> Optional[Finding]:
     """
     context가 너무 길어 잡음·과부하로 품질 저하.
-    확정: 축소 재실행 시 회복(tier4).
-    예비: 없음
+    tier4(축소 재실행) 확정 신호가 유일한 발동 경로였으나 optimize 재실행으로 대체됨.
+    # TODO(tier4 제거): 예비 발동 조건(저비용 휴리스틱) 재설계 전까지 dormant.
     """
-    if not _context_applicable(record):
-        return None
-    if _context_shorten_helps(record) is True:
-        return _finding(
-            record, "too_long_context", "retrieval_failure", confirmed=True,
-            reason=f"context_shorten_helps=True, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
-        )
     return None
 
 
 def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
     """
     청크가 긴 context 중간이라 LLM이 참조 못함.
-    확정: gold 앞배치 재실행 시 회복(tier4).
-    예비: 없음
+    tier4(gold 앞배치 재실행) 확정 신호가 유일한 발동 경로였으나 optimize 재실행으로 대체됨.
+    # TODO(tier4 제거): 예비 발동 조건(저비용 휴리스틱) 재설계 전까지 dormant.
     """
-    if not _context_applicable(record):
-        return None
-    if _gold_front_helps(record) is True:
-        return _finding(
-            record, "lost_in_the_middle", "retrieval_failure", confirmed=True,
-            reason=f"gold_front_helps=True, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
-        )
     return None
 
 
 def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     """
     비-gold 청크의 상충 정보에 이끌림.
-    확정: 노이즈 제거 재실행 시 회복(tier4).
-    예비: 확정 전엔 항상 예비.
+    예비: recall=1·oracle 통과인데 실제 답만 틀림. 노이즈 제거로 회복되는지는
+    optimize 가 top_k 축소·리랭커를 적용해 재실행하며 검증한다.
     """
-    if not _context_applicable(record):
+    if not _context_failed(record):
         return None
-    helps = _noise_removal_helps(record)
-    if helps is True:
-        return _finding(
-            record, "context_noise_interference", "retrieval_failure", confirmed=True,
-            reason=f"noise_removal_helps=True, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
-        )
-    if helps is None:
-        return _finding(
-            record, "context_noise_interference", "retrieval_failure", confirmed=False,
-            reason=f"noise_removal_helps=-, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
-        )
-    return None
+    return _finding(
+        record, "context_noise_interference", "retrieval_failure", confirmed=False,
+        reason=f"f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
+    )
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -334,7 +293,7 @@ def bad_gold_answer(record: EvalRecord) -> Optional[Finding]:
     정답셋 자체 오류/모호(충실도·관련성 모두 고득점인데 gold만 불일치) — 실제 트랙(컨텍스트 계열).
     확정(자동): faith·rel 둘 다 측정 고득점(tier3). [진짜 확정은 사람 검수.]
     """
-    if not _context_applicable(record):
+    if not _context_failed(record):
         return None
     faith, rel = _faith(record), _rel(record)
     if _both_high(faith, rel):

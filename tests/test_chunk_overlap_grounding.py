@@ -123,41 +123,9 @@ class ChunkBoundaryDiagnosisTest(unittest.TestCase):
         self.assertEqual(record.recall_at_k, 1.0)
         self.assertFalse(finding.confirmed)
 
-    def test_boundary_merge_ablation_confirms_recall_success_case(self):
-        chunks = [
-            Chunk("c0", "d1", "가" * 400, char_span=(0, 400)),
-            Chunk("c1", "d1", "나" * 400, char_span=(400, 800)),
-        ]
-        merged_evidence = "가" * 50 + "나" * 50
-
-        def generate(_question, contexts):
-            return "정답" if merged_evidence in contexts else "오답"
-
-        signals.set_context(chunks=chunks, generate_fn=generate)
-        probe = Probe(
-            probe_id="p1",
-            question="정답은?",
-            source="taxonomy",
-            answer_exists=True,
-            ground_truth="정답",
-            gold_chunk_ids=["c0", "c1"],
-            gold_spans=[{"doc_id": "d1", "start": 350, "end": 450}],
-            metadata={"span_grounding": {"status": "exact"}},
-        )
-        record = EvalRecord(
-            probe=probe,
-            retrieved_chunk_ids=["c0", "c1"],
-            retrieved_context=[chunks[0].text, chunks[1].text],
-            generated_answer="오답",
-            oracle_answer="정답",
-        )
-
-        findings = diagnose.diagnose(record, Mode.FULL)
-        finding = next(
-            item for item in findings if item.label == "chunking_context_mismatch"
-        )
-
-        self.assertTrue(finding.confirmed)
+    # tier4(파이프라인 재실행) 제거로 boundary-merge ablation 확정 경로는 없어졌다.
+    # recall 성공 + 경계 분할 케이스는 항상 예비이며, optimize 가 청킹 파라미터를
+    # 바꿔 재실행하며 검증한다(위 test_recall_success_..._preliminary 로 커버).
 
 
 class ChunkOverlapGroundingTest(unittest.TestCase):

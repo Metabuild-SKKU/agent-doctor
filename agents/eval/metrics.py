@@ -67,7 +67,7 @@ def char_f1(prediction: str, reference: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-# 하위호환 별칭 — 기존 호출부(signals._ablation_helps, tests)가 token_f1 이름을 쓴다.
+# 하위호환 별칭 — 기존 호출부(tests)가 token_f1 이름을 쓴다.
 # 이제 어절이 아니라 KorQuAD 문자 단위 F1이다.
 token_f1 = char_f1
 

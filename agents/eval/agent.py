@@ -41,7 +41,7 @@ from agents.index.qdrant_store import keyword_search
 from agents.rag.generator import generate_answer
 from agents.rag.retriever import Retriever, get_retriever
 from agents.eval.metrics_ragas import (
-    evaluate_real_track, evaluate_oracle_track, answer_similarity, _judge as _ragas_judge,
+    evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge,
 )
 from agents.eval.diagnose import diagnose, set_context as set_diag_context
 from agents.eval.report import build_report
@@ -66,18 +66,6 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
     except Exception as e:
         print(f"[Eval] RAGAS({track}) 실패({e}) → 폴백")
         return {}
-
-
-def _answer_sim_track(record: EvalRecord, track: str):
-    """diagnose 가 lazy 로 부르는 답변↔gold 정답 의미 유사도(set_context 로 주입).
-    tier3 게이트 — 비활성(EVAL_ENABLE_LLM)·키없음·실패 → None. (DEEP 게이트는 diagnose 신호가 담당.)"""
-    if not llm_eval_enabled():
-        return None
-    try:
-        return answer_similarity(record, track)
-    except Exception as e:
-        print(f"[Eval] 의미 유사도({track}) 실패({e}) → 폴백")
-        return None
 
 
 def run(state: AgentDoctorState) -> AgentDoctorState:
@@ -165,11 +153,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         chunk_text = {c.chunk_id: c.text for c in state.chunks}
         top_k = int(state.index_config.get("top_k", DEFAULT_TOP_K))
 
-        # tier2/tier4 판별 훅(재검색·코퍼스·재생성)이 쓸 자원 주입
+        # tier2/tier3 판별 훅(재검색·코퍼스·RAGAS)이 쓸 자원 주입
         set_diag_context(client=retriever, chunks=state.chunks,
                          retrieve_fn=_retrieve_with_rag, keyword_fn=keyword_search,
-                         generate_fn=generate_answer, ragas_fn=_ragas_track,
-                         sim_fn=_answer_sim_track)
+                         ragas_fn=_ragas_track)
 
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
