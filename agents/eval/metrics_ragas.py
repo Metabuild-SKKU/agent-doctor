@@ -34,7 +34,8 @@ import math
 import os
 
 from agents.eval import llm_provider
-from agents.eval.types import EvalRecord
+from agents.eval.types import Mode, EvalRecord
+from agents.eval.metrics_common import _ctx, active_mode
 
 
 def _env_int(name: str, default: int) -> int:
@@ -553,3 +554,85 @@ def _truthy(v) -> bool:
 def _drop_none(d: dict) -> dict:
     """value가 None이면 버리기"""
     return {k: v for k, v in d.items() if v is not None}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  진입 시 RAGAS 측정 + 트랙별 값 접근자 (diagnose 가 소비하는 tier3 측정 API)
+#    실제 트랙  = record.ragas        (검색결과 컨텍스트로 생성한 답)
+#    오라클 트랙 = record.oracle_ragas  (gold 컨텍스트로 생성한 답)
+#  자원(_ctx.ragas_fn)은 agent 가 set_context 로 주입한다. 임계값 판정은 diagnose 소관.
+# ══════════════════════════════════════════════════════════════════
+
+def _compute_ragas(record: EvalRecord) -> None:
+    """RAGAS 점수(실제·오라클 트랙)를 record 에 계산·저장. (STEP3-2, diagnose 진입 시 1회.)
+
+    _compute_metrics 와 같은 자리에서 항상 돌린다 — 진단이 필요 없는 probe(성공·정답셋 없음·
+    올바른 무응답)도 faithfulness/response_relevancy 를 갖게 된다. 예전엔 라벨 함수가 필요할 때만
+    lazy 로 불러서, report 의 RAGAS 평균이 '진단이 돌아간 실패 probe'만의 평균이었다.
+
+    비용 게이트는 DEEP 유지 — 그 미만 모드에선 LLM 을 한 번도 부르지 않는다.
+    이후 접근자(_faith/_rel/_answer_correctness_value)의 호출은 *_done 플래그로 재호출되지 않는다."""
+    if active_mode() < Mode.DEEP:
+        return
+    _ensure_ragas(record, "real")
+    _ensure_ragas(record, "oracle")
+
+
+def _ensure_ragas(record: EvalRecord, track: str):
+    """트랙 RAGAS 점수를 record 에 계산·저장(트랙별 1회만). 실제로는 diagnose 진입 시
+    _compute_ragas 가 두 트랙을 먼저 채우고, 접근자들의 호출은 그 결과를 재사용한다.
+    빈 결과({})여도 *_done 플래그로 '시도함'을 기록해 같은 트랙 재-LLM호출을 막는다.
+    (oracle 답이 없으면 _ctx.ragas_fn 이 {} 를 돌려준다.)"""
+    if _ctx.ragas_fn is None:
+        return
+    if track == "oracle":
+        if not record.oracle_ragas_done:
+            record.oracle_ragas_done = True
+            record.oracle_ragas = _ctx.ragas_fn(record, "oracle") or {}
+    elif not record.ragas_done:
+        record.ragas_done = True
+        record.ragas = _ctx.ragas_fn(record, "real") or {}
+
+
+def _faith(record: EvalRecord):
+    """faithfulness(충실도) 값 — 실제 트랙. tier3, DEEP+ / 미측정 None."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "real")
+    return record.ragas.get("faithfulness")
+
+
+def _faith_oracle(record: EvalRecord):
+    """faithfulness(충실도) 값 — 오라클 트랙. tier3, DEEP+ / 미측정 None."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "oracle")
+    return record.oracle_ragas.get("faithfulness")
+
+
+def _rel(record: EvalRecord):
+    """response_relevancy(관련성) 값 — 실제 트랙. tier3, DEEP+ / 미측정 None."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "real")
+    return record.ragas.get("response_relevancy")
+
+
+def _rel_oracle(record: EvalRecord):
+    """response_relevancy(관련성) 값 — 오라클 트랙. tier3, DEEP+ / 미측정 None."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "oracle")
+    return record.oracle_ragas.get("response_relevancy")
+
+
+def _answer_correctness_value(record: EvalRecord, track: str):
+    """answer_correctness(답변↔gold 비교) 값. tier3, DEEP+ / 미측정 None.
+    diagnose 의 정답 강등 판정이 소비한다. track: 'real' | 'oracle'.
+    (임계값 판정은 diagnose 소관 — 여기선 측정값만 돌려준다.)"""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, track)
+    ragas = record.oracle_ragas if track == "oracle" else record.ragas
+    value = ragas.get("answer_correctness")
+    return value if isinstance(value, (int, float)) else None

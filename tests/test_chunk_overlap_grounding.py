@@ -1,6 +1,6 @@
 import unittest
 
-from agents.eval import diagnose, signals
+from agents.eval import diagnose, metrics_common
 from agents.eval.types import EvalRecord, Mode
 from agents.optimize import optimizer, planner
 from agents.optimize.adapters.chunk_prescreener import run as run_prescreener
@@ -39,12 +39,12 @@ def _fixed_chunks(doc_id: str, length: int, size: int, overlap: int) -> list[Chu
 
 class ChunkBoundaryDiagnosisTest(unittest.TestCase):
     def tearDown(self):
-        signals.set_context()
-        signals.set_mode(Mode.FAST)
+        metrics_common.set_context()
+        metrics_common.set_mode(Mode.FAST)
 
     def test_split_span_does_not_override_confirmed_retrieval_cause(self):
         chunks = _fixed_chunks("d1", 1000, 400, 50)
-        signals.set_context(chunks=chunks)
+        metrics_common.set_context(chunks=chunks)
         probe = Probe(
             probe_id="p1",
             question="정답은?",
@@ -70,7 +70,7 @@ class ChunkBoundaryDiagnosisTest(unittest.TestCase):
 
     def test_chunk_fallback_span_is_not_used_for_boundary_diagnosis(self):
         chunks = _fixed_chunks("d1", 1000, 400, 50)
-        signals.set_context(chunks=chunks)
+        metrics_common.set_context(chunks=chunks)
         probe = Probe(
             probe_id="p1",
             question="정답은?",
@@ -96,7 +96,7 @@ class ChunkBoundaryDiagnosisTest(unittest.TestCase):
 
     def test_recall_success_but_split_context_is_preliminary_in_fast_mode(self):
         chunks = _fixed_chunks("d1", 1000, 400, 0)
-        signals.set_context(chunks=chunks)
+        metrics_common.set_context(chunks=chunks)
         probe = Probe(
             probe_id="p1",
             question="정답은?",

@@ -43,7 +43,8 @@ from agents.rag.retriever import Retriever, get_retriever
 from agents.eval.metrics_ragas import (
     evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge,
 )
-from agents.eval.diagnose import diagnose, set_context as set_diag_context
+from agents.eval.metrics_common import set_context as set_diag_context
+from agents.eval.diagnose import diagnose
 from agents.eval.report import build_report
 
 

@@ -20,7 +20,7 @@ from agents.eval.types import resolve_mode, DEFAULT_TOP_K
 from agents.rag.retriever import build_retriever
 
 # ── 1) 순수 규칙 지표 단위 확인 (의존성 0, 결정적) ────────────────
-from agents.eval.metrics import token_f1, recall_at_k, is_abstention
+from agents.eval.metrics_basic import token_f1, recall_at_k, is_abstention
 
 print("=" * 50)
 print("Eval Agent 테스트 - (1) 규칙 지표 단위 확인")

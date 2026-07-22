@@ -1,6 +1,6 @@
 """
-agents/eval/metrics.py
-STEP3-1: 규칙 기반(LLM 불필요) 지표 계산
+agents/eval/metrics_basic.py
+STEP3-1: 규칙 기반(LLM 불필요) 지표·측정 계산
 
 설계 문서 'STEP3-1: Metric 진단' 구현.
 세 지표(Recall@k, token F1, Oracle F1)와 무응답 판별을 제공한다. 이 지표들의 조합으로
@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import string
 from collections import Counter
+
+from agents.eval.types import Mode, DEFAULT_TOP_K, EvalRecord
+from agents.eval.metrics_common import _ctx, _cache, active_mode
 
 
 # ── 정규화 (KorQuAD 공식 normalize_answer) ────────────────────────
@@ -244,3 +247,142 @@ def is_abstention(answer: str) -> bool:
         return True
     low = answer.lower()
     return any(m in low for m in _ABSTENTION_MARKERS)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  진입 시 지표 계산 (diagnose 진입 시 1회 — 판정 전, 스킵 없음)
+# ══════════════════════════════════════════════════════════════════
+
+def _compute_metrics(record: EvalRecord) -> None:
+    """규칙 지표(recall/f1/oracle_f1/EM)를 record 에 계산·저장. (STEP3-1, diagnose 진입 시 1회.)
+    diagnose 의 전제 판정·report 가 record.recall_at_k / f1_score / oracle_f1 로 읽는다."""
+    gt = record.probe.ground_truth
+    span_recall = span_recall_at_k(
+        record.probe.gold_spans,
+        record.retrieved_chunk_ids,
+        _ctx.chunks,
+    )
+    record.recall_at_k = (
+        span_recall
+        if span_recall is not None
+        else recall_at_k(record.probe.gold_chunk_ids, record.retrieved_chunk_ids)
+    )
+    # answer_match: KorQuAD 문자 F1(+짧은 정답 recall) — 표면형에 강건한 tier1 정답 매칭.
+    record.f1_score = answer_match(record.generated_answer, gt) if gt else 0.0
+    record.oracle_f1 = answer_match(record.oracle_answer, gt) if (gt and record.oracle_answer) else 0.0
+    # KorQuAD 공식 EM — 관측용으로만 남긴다(게이트·overall_score 미반영, 리포트에 F1 과 나란히).
+    record.exact_match = exact_match(record.generated_answer, gt) if gt else False
+
+
+# ══════════════════════════════════════════════════════════════════
+#  tier1 · 순수 규칙 측정 (자원: 이미 계산된 지표/probe 메타 — 추가 조회 없음)
+# ══════════════════════════════════════════════════════════════════
+
+def _is_multi_hop(record: EvalRecord) -> bool:
+    """멀티홉 질문 여부(probe.qtype). bridge / hop_binding / corpus_gap_partial_hop 판별용."""
+    return record.probe.qtype in ("bridge", "comparison", "aggregation")
+
+
+def _enumeration_cache(record: EvalRecord) -> bool:
+    """gold 개수가 top-k(=검색 결과 수)에 근접/초과 → 나열형 누락. incomplete_enumeration 용."""
+    k = len(record.retrieved_chunk_ids) or DEFAULT_TOP_K
+    gold_n = len(record.probe.gold_chunk_ids)
+    return gold_n >= 2 and gold_n >= int(k * 0.8)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  tier2 · 추가 검색 쿼리 측정 (자원: top-N 재검색 / BM25 / 코퍼스 조회) — set_context 로 주입
+# ══════════════════════════════════════════════════════════════════
+
+def _wide_hits(record: EvalRecord):
+    """top-N(wide_n) 재검색 결과(순위 내림차순)를 probe 당 1회만 계산·공유.
+
+    같은 질문의 wide 재검색은 gold_in_wider_candidates(존재 여부)와 gold_ranks(순위)가
+    함께 필요로 한다. 검색 1회를 memoize 로 공유해 tier2 비용을 중복 지불하지 않는다.
+    True 결과가 아니라 원본 hits(list[dict{"chunk_id",...}])를 그대로 캐시한다.
+    None=자원·모드 미충족.
+    """
+    if active_mode() < Mode.STANDARD or _ctx.retrieve_fn is None:
+        return None
+
+    def compute():
+        return _ctx.retrieve_fn(
+            _ctx.client, _ctx.chunks, record.probe.question, _ctx.wide_n
+        )
+
+    return _cache(record, "wide_hits", compute)
+
+
+def _gold_in_wider_candidates(record: EvalRecord):
+    """top-N 재검색에서, top-k 가 놓친 gold 가 넓은 후보엔 있나 확인. retrieval_low_rank 용.
+    True=놓친 gold 찾음 / False=후보에도 없음 / None=자원·모드 미충족."""
+    if active_mode() < Mode.STANDARD or _ctx.retrieve_fn is None:
+        return None
+
+    def compute():
+        missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)  # 차집합 - 놓친 골드
+        if not missed:
+            return None
+        hits = _wide_hits(record)  # 넓은 n으로 검색(memoize 공유)
+        wide_ids = {h.get("chunk_id") for h in hits}
+        return bool(missed & wide_ids)  # 교집합 - 하나라도 찾았으면 True.
+
+    return _cache(record, "gold_in_wider_candidates", compute)
+
+
+def _gold_ranks(record: EvalRecord):
+    """probe 의 각 gold 청크가 wide_n 재검색에서 몇 위인지(1-based) 매핑.
+
+    planner 가 top_k 근거값을 계산할 원시 순위 측정치다(집계·후보화는 planner 소관).
+    "gold 가 5개니 top_k=5" 같은 개수 추정과 달리, "가장 늦게 나오는 gold 가 20위면
+    top_k 는 최소 20" 이라는 실측을 준다(multi-hop/나열형에서 개수 ≪ 순위).
+
+    반환: {gold_id: rank}  rank 는 1-based, wide_n 밖이면 None(=top_k 로 도달 불가).
+          gold 없음 → None / 모드·자원 미충족 → None.
+    """
+    if active_mode() < Mode.STANDARD or _ctx.retrieve_fn is None:
+        return None
+
+    def compute():
+        golds = record.probe.gold_chunk_ids
+        if not golds:
+            return None
+        hits = _wide_hits(record)
+        if hits is None:
+            return None
+        order = {h.get("chunk_id"): i + 1 for i, h in enumerate(hits)}  # 1-based 순위
+        return {g: order.get(g) for g in golds}  # wide_n 밖이면 None
+
+    return _cache(record, "gold_ranks", compute)
+
+
+def _bm25_hits_gold(record: EvalRecord):
+    """키워드(BM25) 검색이 dense top-k 가 놓친 gold 를 잡나. lexical/semantic mismatch 용.
+    True=키워드로 잡힘(단어 불일치) / False=키워드도 놓침(의미 불일치) / None=자원·모드 미충족."""
+    if active_mode() < Mode.STANDARD or _ctx.keyword_fn is None:
+        return None
+
+    def compute():
+        missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)
+        if not missed:
+            return None
+        hits = _ctx.keyword_fn(_ctx.chunks, record.probe.question, _ctx.wide_n)  # 위와 같으나 검색 함수만 다름
+        kw_ids = {h.get("chunk_id") for h in hits}
+        return bool(missed & kw_ids)
+
+    return _cache(record, "bm25_hits_gold", compute)
+
+
+def _gold_in_corpus(record: EvalRecord):
+    """gold 가 코퍼스에 존재하나(멤버십 조회). True→missing_gold / False→corpus_gap.
+    gold 전부 존재 True / 하나라도 없으면 False / gold·자원 없으면 None."""
+    if active_mode() < Mode.STANDARD or not _ctx.corpus_ids:
+        return None
+
+    def compute():
+        golds = record.probe.gold_chunk_ids
+        if not golds:
+            return None
+        return all(g in _ctx.corpus_ids for g in golds)  # 코퍼스 전체와 대조
+
+    return _cache(record, "gold_in_corpus", compute)
