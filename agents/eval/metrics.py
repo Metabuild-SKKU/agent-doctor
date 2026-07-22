@@ -22,17 +22,40 @@ from collections import Counter
 # ── 토큰화 ────────────────────────────────────────────────────────
 
 _PUNCT = re.compile(r"[^\w가-힣]+")
-_UNIT_AFTER_NUM = re.compile(r"(?<=\d)(년|월|일|시|분|초)")   # 숫자 뒤 날짜/시간 단위 → 구분자
+_COMMA_IN_NUM = re.compile(r"(?<=\d),(?=\d)")                    # 1,450 → 1450 (천단위 콤마)
+_DATE_KO = re.compile(r"(\d+)\s*년\s*(\d+)\s*월\s*(\d+)\s*일")   # 2018년 3월 27일
+_DATE_ISO = re.compile(r"(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})")  # 2018-03-27, 2018.3.27
+_TIME_KO = re.compile(r"(\d+)\s*시\s*(\d+)\s*분")               # 14시 33분
+_TIME_COLON = re.compile(r"(\d{1,2}):(\d{2})")                  # 14:33
+
+
+def _ymd(m) -> str:
+    """날짜 매치 → ' Y M D '(선행 0 제거). 2018-03-27 ↔ 2018년 3월 27일 을 같은 토큰열로."""
+    y, mo, d = (int(g) for g in m.groups())
+    return f" {y} {mo} {d} "
+
+
+def _hm(m) -> str:
+    """시간 매치 → ' H M '(선행 0 제거). 14:33 ↔ 14시 33분 을 같은 토큰열로."""
+    h, mi = (int(g) for g in m.groups())
+    return f" {h} {mi} "
 
 
 def _normalize(text: str) -> str:
-    """소문자화 + 날짜/시간 단위(년월일시분초) 분리 + 구두점 제거.
-    '14시 33분'↔'14:33', '2018년'↔'2018' 같은 표면형(surface) 차이를 흡수한다.
+    """소문자화 + 천단위 콤마 제거 + 날짜/시간 '패턴'을 숫자열로 정규화 + 구두점 제거.
+    포맷 차이만 흡수한다: '2018년 3월 27일'↔'2018-03-27', '14시 33분'↔'14:33'.
+    단위 통삭제가 아니라 '완결 패턴'만 바꾸므로 단위 구분은 보존된다 — 단독 '3월'·'3일'·'14시'는
+    collapse 되지 않는다(예전 년/월/일/시/분/초 통삭제가 만들던 3월=3일=3 오정규화 교정).
     [구현 포인트] 형태소 분석기(kiwi/mecab) 도입 시 여기서 조사/어미까지 분리하면 된다."""
     if not text:
         return ""
-    text = _UNIT_AFTER_NUM.sub(" ", text.lower())   # 14시33분 → 14 33, 2018년 → 2018
-    return _PUNCT.sub(" ", text)                     # 구두점 → 공백 (14:33 → 14 33)
+    text = text.lower()
+    text = _COMMA_IN_NUM.sub("", text)   # 1,450 → 1450
+    text = _DATE_KO.sub(_ymd, text)      # 2018년 3월 27일 → 2018 3 27
+    text = _DATE_ISO.sub(_ymd, text)     # 2018-03-27    → 2018 3 27
+    text = _TIME_KO.sub(_hm, text)       # 14시 33분     → 14 33
+    text = _TIME_COLON.sub(_hm, text)    # 14:33         → 14 33
+    return _PUNCT.sub(" ", text)         # 나머지 구두점 → 공백
 
 
 def _tokenize(text: str) -> list[str]:
