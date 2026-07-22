@@ -24,8 +24,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)   # 셸/OS 값보다 .env 우선(수정한 .env 가 항상 반영되게)
 except ImportError:
+    print("error")
     pass
 
 from core.run_logger import setup_run_logging

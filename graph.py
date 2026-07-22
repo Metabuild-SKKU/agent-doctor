@@ -13,6 +13,16 @@ Agent Doctor v2 메인 LangGraph 그래프
 """
 
 from __future__ import annotations
+
+# .env 를 '다른 모든 import 보다 먼저' 로드한다 — 아래 모듈들이 import 시점에 읽는 최상위 env
+# (metrics_ragas.EVAL_RELEVANCY_STRICTNESS, serve.AGENT_DOCTOR_API_* 등)까지 .env 값이 반영되도록.
+# override=True: 셸/OS 에 이미 있는 값보다 .env 를 우선(수정한 .env 가 항상 반영되게).
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+except ImportError:
+    pass
+
 from langgraph.graph import StateGraph, END
 
 from core.state import AgentDoctorState
@@ -23,12 +33,6 @@ from agents.optimize.agent import run as optimize_run
 from agents.optimize import history   # 판정 대기(pending) 처방 조회용
 from agents.optimize import gate      # serve/optimize 게이트 정책(점수 + 검색 바닥선)
 from agents.serve.agent import run as serve_run
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
 
 def route_after_eval(state: AgentDoctorState) -> str:
     """
