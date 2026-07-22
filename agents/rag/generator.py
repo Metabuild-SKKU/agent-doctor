@@ -10,8 +10,8 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from agents.rag.retriever import Retriever
+from core.llm_clients import GITHUB_MODELS_BASE_URL, gemini_chat, openai_chat
 from core.llm_retry import run_with_retry
-from core.llm_usage import log_usage
 
 # 답변, context, citation, 검색 상세 정보 보관
 @dataclass
@@ -297,6 +297,9 @@ def _build_prompt(
     return system, user
 
 
+# provider 별 transport 는 core/llm_clients.py 공용 구현에 위임한다.
+# 여기 래퍼는 RAG 규약(키 없으면 None, 빈 응답 None, RAG_* 모델 env)만 담당.
+
 # OpenAI (openai SDK)
 def _openai_generate(
     system: str,
@@ -305,30 +308,13 @@ def _openai_generate(
     model: str | None = None,
     config: dict | None = None,   # 미사용(호출부 시그니처 호환용)
 ) -> str | None:
-    from openai import OpenAI
-
     if not os.getenv("OPENAI_API_KEY"):
         return None
-
-    client = OpenAI()
     selected_model = model or os.getenv("RAG_OPENAI_MODEL", "gpt-4o")
-    response = client.chat.completions.create(
-        model=selected_model,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
-    if response.usage:
-        log_usage(selected_model, response.usage.prompt_tokens, response.usage.completion_tokens, tag="RAG")
-    content = response.choices[0].message.content
-    return content.strip() if content else None
+    return openai_chat(system, user, selected_model, tag="RAG").strip() or None
 
 
 # GitHub Models (OpenAI 호환 API, GitHub PAT 인증)
-GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
-
 def _github_generate(
     system: str,
     user: str,
@@ -336,28 +322,16 @@ def _github_generate(
     model: str | None = None,
     config: dict | None = None,   # 미사용(호출부 시그니처 호환용)
 ) -> str | None:
-    from openai import OpenAI
-
     # 토큰 해석: GITHUB_MODELS_TOKEN 우선, 없으면 GITHUB_TOKEN.
     # (auto 모드에서 GITHUB_TOKEN으로 새는 것은 위 호출부 가드가 이미 막는다)
     api_key = _github_api_key(allow_repo_token=True)
     if not api_key:
         return None
-
-    client = OpenAI(base_url=GITHUB_MODELS_BASE_URL, api_key=api_key)
     selected_model = model or os.getenv("RAG_GITHUB_MODEL", "openai/gpt-4o")
-    response = client.chat.completions.create(
-        model=selected_model,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
-    if response.usage:
-        log_usage(selected_model, response.usage.prompt_tokens, response.usage.completion_tokens, tag="RAG")
-    content = response.choices[0].message.content
-    return content.strip() if content else None
+    return openai_chat(
+        system, user, selected_model,
+        api_key=api_key, base_url=GITHUB_MODELS_BASE_URL, tag="RAG",
+    ).strip() or None
 
 
 # Gemini (google-genai SDK)
@@ -368,23 +342,7 @@ def _gemini_generate(
     model: str | None = None,
     config: dict | None = None,   # base_url 등은 SDK가 처리하므로 현재 미사용(시그니처 호환용)
 ) -> str | None:
-    from google import genai
-
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
+    if not os.getenv("GEMINI_API_KEY"):
         return None
     selected_model = model or os.getenv("RAG_GEMINI_MODEL", "gemini-flash-latest")
-
-    client = genai.Client(api_key=api_key)
-    resp = client.models.generate_content(
-        model=selected_model,
-        contents=user,
-        config={"temperature": 0, "system_instruction": system},
-    )
-    usage = getattr(resp, "usage_metadata", None)
-    if usage:
-        # 과금되는 출력 = 답변(candidates) + 내부 사고(thoughts). 추론 모델은 thoughts 가
-        # 답변보다 클 수 있어 candidates 만 세면 비용이 과소집계된다.
-        out = (usage.candidates_token_count or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
-        log_usage(selected_model, usage.prompt_token_count, out, tag="RAG")
-    return (resp.text or "").strip() or None
+    return gemini_chat(system, user, selected_model, tag="RAG").strip() or None

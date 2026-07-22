@@ -30,6 +30,7 @@ eval_probes.json
 results/
 output/
 lib/
+uploads/
 
 # IDE
 .vscode/

@@ -13,6 +13,16 @@ Agent Doctor v2 메인 LangGraph 그래프
 """
 
 from __future__ import annotations
+
+# .env 를 '다른 모든 import 보다 먼저' 로드한다 — 아래 모듈들이 import 시점에 읽는 최상위 env
+# (metrics_ragas.EVAL_RELEVANCY_STRICTNESS, serve.AGENT_DOCTOR_API_* 등)까지 .env 값이 반영되도록.
+# override=True: 셸/OS 에 이미 있는 값보다 .env 를 우선(수정한 .env 가 항상 반영되게).
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+except ImportError:
+    pass
+
 from langgraph.graph import StateGraph, END
 
 from core.state import AgentDoctorState
@@ -23,12 +33,6 @@ from agents.optimize.agent import run as optimize_run
 from agents.optimize import history   # 판정 대기(pending) 처방 조회용
 from agents.optimize import gate      # serve/optimize 게이트 정책(점수 + 검색 바닥선)
 from agents.serve.agent import run as serve_run
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
 
 def route_after_eval(state: AgentDoctorState) -> str:
     """
@@ -149,7 +153,10 @@ if __name__ == "__main__":
 
     # 소스는 env 로 받는다(run_local_pipeline.py 와 동일 계약: SOURCE_TYPE / SOURCE_URL).
     #   SOURCE_TYPE=korquad SOURCE_URL=data/corpus.jsonl python graph.py   # 기본
+    #   SOURCE_TYPE=file    SOURCE_URL=sample_docs/hr_policy.md python graph.py
     #   SOURCE_TYPE=notion  SOURCE_URL=https://notion.so/... python graph.py
+    # run_local_pipeline.py 와 달리 Serve 까지 띄우고, 품질 미달 시 재색인·재평가
+    # 루프(route_after_eval/optimize)를 예산 소진까지 반복한다.
     source_type = os.getenv("SOURCE_TYPE", "korquad").strip().lower()
     defaults = {
         "korquad": "data/corpus.jsonl",
@@ -157,7 +164,19 @@ if __name__ == "__main__":
         "notion": "https://notion.so/example-page",
     }
     source_url = os.getenv("SOURCE_URL", defaults.get(source_type, ""))
+    user_questions: list[str] = []
+
     if source_type == "korquad":
         os.environ.setdefault("EVAL_PROBE_SOURCE", "taxonomy")  # qa 를 taxonomy 로
+        # 규모 제한(스모크). .env·shell 값이 있으면 그쪽이 우선(setdefault).
+        # 전체를 쓰려면 두 값을 0/미설정으로.
+        os.environ.setdefault("KORQUAD_MAX_DOCS", "20")
+        os.environ.setdefault("KORQUAD_QA_LIMIT", "50")
+    elif source_type == "file":
+        user_questions = [
+            "재택근무 며칠까지 가능해?",
+            "연차는 며칠이야?",
+            "성과급은 언제 나와?",
+        ]
 
-    run_pipeline(source_url, source_type=source_type)
+    run_pipeline(source_url, source_type=source_type, user_questions=user_questions)
