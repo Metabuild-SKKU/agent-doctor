@@ -8,132 +8,108 @@ STEP3-1: 규칙 기반(LLM 불필요) 지표 계산
 외부 API·모델 없이 항상 동작한다.
 
 [구현 포인트]
-  - 토큰화가 공백 기준이라 한국어 조사/어미를 분리하지 못한다.
-    형태소 분석기(kiwi, mecab) 도입 시 `_tokenize()` 만 교체하면 된다.
+  - 정답 매칭은 KorQuAD 공식 지표를 따른다: normalize_answer(구두점 제거·소문자화·공백정리)
+    후 '문자 단위(bag-of-characters) F1'. 한국어는 완벽한 형태소 분석기가 없고 어절 단위
+    F1이 F1 취지를 못 살려서, KorQuAD 1.0 이 문자 단위를 표준으로 채택했다.
+    (근거: KorQuAD 1.0 논문 / evaluate-v1.0.py)
+  - 문자 단위라 조사·어미·숫자 포맷(1,450↔1450, 14:33↔14시33분) 차이가 대부분 흡수된다.
+    단 부정·근접오답 같은 의미 판정은 문자 겹침으로 못 잡으므로 tier3(RAGAS)가 담당한다.
   - 설계상 추가 지표(Precision, MRR, nDCG, No-Hit, EHR, Number Match 등)는
     여기에 함수로 덧붙여 확장한다.
 """
 from __future__ import annotations
 
-import re
+import string
 from collections import Counter
 
 
-# ── 토큰화 ────────────────────────────────────────────────────────
+# ── 정규화 (KorQuAD 공식 normalize_answer) ────────────────────────
+# KorQuAD 1.0 evaluate-v1.0.py 와 동일: 따옴표·괄호류 → 공백, 소문자화, ASCII 구두점 제거, 공백 정리.
+# 숫자·날짜 특수 규칙은 두지 않는다 — 콤마·콜론·하이픈은 구두점 제거로 흡수되고(1,450→1450,
+# 14:33→1433), 조사·어미·포맷 차이는 아래 '문자 단위' 채점이 흡수한다.
 
-_PUNCT = re.compile(r"[^\w가-힣]+")
-_COMMA_IN_NUM = re.compile(r"(?<=\d),(?=\d)")                    # 1,450 → 1450 (천단위 콤마)
-_DATE_KO = re.compile(r"(\d+)\s*년\s*(\d+)\s*월\s*(\d+)\s*일")   # 2018년 3월 27일
-_DATE_ISO = re.compile(r"(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})")  # 2018-03-27, 2018.3.27
-_TIME_KO = re.compile(r"(\d+)\s*시\s*(\d+)\s*분")               # 14시 33분
-_TIME_COLON = re.compile(r"(\d{1,2}):(\d{2})")                  # 14:33
-
-
-def _ymd(m) -> str:
-    """날짜 매치 → ' Y M D '(선행 0 제거). 2018-03-27 ↔ 2018년 3월 27일 을 같은 토큰열로."""
-    y, mo, d = (int(g) for g in m.groups())
-    return f" {y} {mo} {d} "
-
-
-def _hm(m) -> str:
-    """시간 매치 → ' H M '(선행 0 제거). 14:33 ↔ 14시 33분 을 같은 토큰열로."""
-    h, mi = (int(g) for g in m.groups())
-    return f" {h} {mi} "
+_REMOVE_CHARS = "'\"《》<>〈〉()" + "‘’“”"   # remove_: 따옴표·괄호류
+_REMOVE_TABLE = {ord(c): " " for c in _REMOVE_CHARS}
+_PUNCT_SET = set(string.punctuation)
 
 
 def _normalize(text: str) -> str:
-    """소문자화 + 천단위 콤마 제거 + 날짜/시간 '패턴'을 숫자열로 정규화 + 구두점 제거.
-    포맷 차이만 흡수한다: '2018년 3월 27일'↔'2018-03-27', '14시 33분'↔'14:33'.
-    단위 통삭제가 아니라 '완결 패턴'만 바꾸므로 단위 구분은 보존된다 — 단독 '3월'·'3일'·'14시'는
-    collapse 되지 않는다(예전 년/월/일/시/분/초 통삭제가 만들던 3월=3일=3 오정규화 교정).
-    [구현 포인트] 형태소 분석기(kiwi/mecab) 도입 시 여기서 조사/어미까지 분리하면 된다."""
+    """KorQuAD normalize_answer: 따옴표·괄호류 → 공백 → 소문자화 → ASCII 구두점 제거 → 공백 정리."""
     if not text:
         return ""
-    text = text.lower()
-    text = _COMMA_IN_NUM.sub("", text)   # 1,450 → 1450
-    text = _DATE_KO.sub(_ymd, text)      # 2018년 3월 27일 → 2018 3 27
-    text = _DATE_ISO.sub(_ymd, text)     # 2018-03-27    → 2018 3 27
-    text = _TIME_KO.sub(_hm, text)       # 14시 33분     → 14 33
-    text = _TIME_COLON.sub(_hm, text)    # 14:33         → 14 33
-    return _PUNCT.sub(" ", text)         # 나머지 구두점 → 공백
+    text = text.translate(_REMOVE_TABLE)                     # remove_
+    text = text.lower()                                      # lower
+    text = "".join(c for c in text if c not in _PUNCT_SET)   # remove_punc
+    return " ".join(text.split())                            # white_space_fix
 
 
-def _tokenize(text: str) -> list[str]:
-    """정규화 후 공백 분리. [구현 포인트] 형태소 분석기로 교체 가능."""
-    return [t for t in _normalize(text).split() if t]
+def _chars(text: str) -> list[str]:
+    """정규화 후 '문자 리스트'(공백 제외) — KorQuAD F1 의 채점 단위(bag of characters)."""
+    return [c for tok in _normalize(text).split() for c in tok]
 
 
-# ── 생성 지표 ─────────────────────────────────────────────────────
+# ── 생성 지표 (KorQuAD 문자 단위) ─────────────────────────────────
 
-def token_f1(prediction: str, reference: str) -> float:
-    """
-    답변(prediction)과 정답(reference)의 토큰 겹침 F1.
-        Precision = 겹친 토큰 수 / 답변 토큰 수
-        Recall    = 겹친 토큰 수 / 정답 토큰 수
-        F1        = 2PR / (P+R)
-    reference 가 없으면(=정답 미보유) 계산 불가 → 0.0.
-    """
-    pred_tokens = _tokenize(prediction)
-    ref_tokens = _tokenize(reference)
-    if not pred_tokens or not ref_tokens:
+def char_f1(prediction: str, reference: str) -> float:
+    """KorQuAD 공식 문자 단위 F1 (bag-of-characters).
+        Precision = 겹친 문자 수 / 답변 문자 수,  Recall = 겹친 문자 수 / 정답 문자 수,  F1 = 2PR/(P+R)
+    한국어는 완벽한 형태소 분석기가 없어 어절 단위 F1이 부적절 → KorQuAD가 문자 단위를 표준으로 쓴다.
+    reference 없으면(정답 미보유) 0.0."""
+    pred = _chars(prediction)
+    ref = _chars(reference)
+    if not pred or not ref:
         return 0.0
-
-    # 다중 등장 토큰까지 고려한 겹침 수(멀티셋 교집합)
-    common = Counter(pred_tokens) & Counter(ref_tokens)
-    overlap = sum(common.values())
-    if overlap == 0:
+    num_same = sum((Counter(pred) & Counter(ref)).values())   # 멀티셋 교집합(문자 중복 고려)
+    if num_same == 0:
         return 0.0
-
-    precision = overlap / len(pred_tokens)
-    recall = overlap / len(ref_tokens)
+    precision = num_same / len(pred)
+    recall = num_same / len(ref)
     return 2 * precision * recall / (precision + recall)
 
 
-# ── 정답 매칭 (recall/포함 위주 — 표면형 강건) ────────────────────
-# token_f1 은 precision 을 함께 보므로, gold 가 짧은 추출형 span 인데 답변이 완결 문장이면
-# 프레이밍 토큰('…시점은 …입니다')에 precision 이 깎여 의미가 맞아도 점수가 낮게 나온다.
-# 짧은 정답은 recall(정답이 답변에 담겼나)만 보는 게 추출형 QA(KorQuAD 등)의 정석이다.
-
-_SHORT_REF_MAX_TOKENS = 5   # 이하 토큰이면 '추출형 짧은 정답'으로 보고 recall 위주로 채점
+# 하위호환 별칭 — 기존 호출부(signals._ablation_helps, tests)가 token_f1 이름을 쓴다.
+# 이제 어절이 아니라 KorQuAD 문자 단위 F1이다.
+token_f1 = char_f1
 
 
-def _covers(pred_tok: str, gold_tok: str) -> bool:
-    """pred 토큰이 gold 토큰을 '커버'하나 — 조사/어미 부착은 허용, 숫자 오확장은 금지.
-      · 단어: 접두 일치('사이프러스입니다' ⊇ '사이프러스').
-      · 숫자: gold 뒤에 숫자가 더 붙으면 다른 수(145 ≠ 1450) → 불인정."""
-    if not pred_tok.startswith(gold_tok):
-        return False
-    rest = pred_tok[len(gold_tok):]
-    if gold_tok[-1:].isdigit() and rest[:1].isdigit():
-        return False
-    return True
+def exact_match(prediction: str, reference: str) -> bool:
+    """KorQuAD 공식 EM — 정규화 문자열 완전 일치."""
+    return _normalize(prediction) == _normalize(reference)
 
 
-def token_recall(prediction: str, reference: str) -> float:
-    """정답(reference) 토큰이 답변(prediction)에 얼마나 담겼는지(포함 비율).
-    조사/어미 부착·프레이밍 문장에 강건 — 각 gold 토큰이 pred 토큰 하나에 커버되면 인정."""
-    ref = _tokenize(reference)
+# ── 정답 매칭 (KorQuAD 문자 F1 + 짧은 정답 문자-recall) ───────────
+# char_f1 도 결국 F1(P·R 조화평균)이라, gold 가 짧은 추출형 span 인데 답변이 완결 문장이면
+# 프레이밍 문자에 precision 이 깎인다. 짧은 정답은 recall(정답 문자가 답변에 담겼나)만 보는 게
+# 추출형 QA 의 정석 — 표준 char-F1 위에 얹는 확장이다.
+
+_SHORT_REF_MAX_CHARS = 10   # 정규화 후 정답 문자 수 이하면 '짧은 정답'으로 보고 recall 위주 채점
+
+
+def char_recall(prediction: str, reference: str) -> float:
+    """정답 문자가 답변에 담긴 비율(문자 단위 recall = 겹친 문자 / 정답 문자).
+    완결 문장의 프레이밍 문자에 precision 이 깎이는 짧은 정답용."""
+    ref = _chars(reference)
     if not ref:
         return 0.0
-    pred = _tokenize(prediction)
-    covered = sum(1 for g in ref if any(_covers(p, g) for p in pred))
-    return covered / len(ref)
+    pred = _chars(prediction)
+    num_same = sum((Counter(pred) & Counter(ref)).values())
+    return num_same / len(ref)
 
 
 def answer_match(prediction: str, reference: str) -> float:
-    """정답 매칭 점수(규칙 기반 tier1). 짧은 정답은 recall(포함) 위주, 긴 정답은 token F1.
-    숫자·시간 포맷, 조사·어미, 프레이밍 문장 같은 표면형 차이에 강건하다.
-    reference 없으면(정답 미보유) 0.0.
+    """정답 매칭 점수(규칙 기반 tier1). 기준은 KorQuAD 문자 단위 F1이고, 짧은 정답(정규화 후 ≤10자)은
+    문자 recall(포함) 위주로 봐 완결 문장의 precision 감점을 피한다. reference 없으면 0.0.
 
-    [트레이드오프] 짧은 정답에서 recall 위주라, gold 를 담고도 다른 답을 말하는 드문 경우를
-    정답으로 볼 수 있다(false negative↓·false positive↑). 그런 애매 케이스는 tier3 의미
-    유사도 게이트(signals._answer_correct)가 승급 검증한다."""
-    ref = _tokenize(reference)
+    [트레이드오프] 짧은 정답 recall 위주라 (1) gold 문자를 담고도 부정/모순하는 답('145가 아니라 150'),
+    (2) 문자를 소수 공유하는 근접 오답('3월'↔'3일')을 정답으로 볼 수 있다(false positive↑).
+    이는 문자 단위 지표의 알려진 성질이며 KorQuAD도 EM 을 병기한다 — 의미 판정은 tier3
+    (signals._answer_correct / RAGAS)가 담당한다."""
+    ref = _chars(reference)
     if not ref:
         return 0.0
-    f1 = token_f1(prediction, reference)
-    if len(ref) <= _SHORT_REF_MAX_TOKENS:
-        return max(f1, token_recall(prediction, reference))
+    f1 = char_f1(prediction, reference)
+    if len(ref) <= _SHORT_REF_MAX_CHARS:
+        return max(f1, char_recall(prediction, reference))
     return f1
 
 
