@@ -22,7 +22,7 @@ from typing import Iterable
 import numpy as np
 
 
-DEFAULT_OUTPUT_DIR = Path("output/corpus_visualization")
+DEFAULT_OUTPUT_DIR = Path("output/korquad_corpus_visualization")
 DEFAULT_INPUT_NAME = "korquad2.1_train_02.json"
 
 TOKEN_RE = re.compile(
@@ -557,9 +557,13 @@ def _svd_2d(matrix: np.ndarray) -> tuple[np.ndarray, list[float]]:
     centered = matrix - matrix.mean(axis=0, keepdims=True)
     _, singular_values, components = np.linalg.svd(centered, full_matrices=False)
     coords = centered @ components[:2].T
+    if coords.shape[1] < 2:
+        coords = np.pad(coords, ((0, 0), (0, 2 - coords.shape[1])), mode="constant")
     variances = singular_values**2
     total = float(variances.sum()) or 1.0
     explained = [(float(value) / total) for value in variances[:2]]
+    while len(explained) < 2:
+        explained.append(0.0)
     return coords, explained
 
 

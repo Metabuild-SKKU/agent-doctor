@@ -1,4 +1,4 @@
-"""Render a presentation-ready corpus dashboard from corpus_summary.json."""
+"""Render a presentation-ready KorQuAD corpus dashboard."""
 from __future__ import annotations
 
 import argparse
@@ -8,8 +8,8 @@ import re
 from pathlib import Path
 
 
-DEFAULT_SUMMARY = Path("output/corpus_visualization/corpus_summary.json")
-DEFAULT_HTML = Path("output/corpus_visualization/corpus_visualization.html")
+DEFAULT_SUMMARY = Path("output/korquad_corpus_visualization/corpus_summary.json")
+DEFAULT_HTML = Path("output/korquad_corpus_visualization/corpus_visualization.html")
 
 STOP_TERMS = {
     "the", "and", "for", "of", "to", "in", "on", "by", "with", "from", "as", "is", "are",
@@ -39,6 +39,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _dashboard_payload(data: dict) -> dict:
+    _validate_korquad_schema(data)
     summary = data["summary"]
     points = [
         {
@@ -128,6 +129,61 @@ def _dashboard_payload(data: dict) -> dict:
         "clusters": clusters,
         "explained": data["projection"]["explained_variance"],
     }
+
+
+def _validate_korquad_schema(data: dict) -> None:
+    required_summary = {
+        "source_file",
+        "version",
+        "documents",
+        "qas",
+        "contexts_with_qas",
+        "chunks",
+        "sampled_points",
+        "median_tokens_per_chunk",
+        "p90_tokens_per_chunk",
+        "short_chunks",
+        "long_chunks",
+        "duplicate_chunks",
+        "duplicate_ratio",
+    }
+    required_top = {
+        "summary",
+        "documents",
+        "token_bins",
+        "chunk_doc_bins",
+        "qa_bins",
+        "top_terms",
+        "projection",
+    }
+    _require_keys(data, required_top, "KorQuAD dashboard root")
+    _require_keys(data["summary"], required_summary, "KorQuAD summary")
+    projection = data["projection"]
+    _require_keys(projection, {"points", "clusters", "explained_variance"}, "KorQuAD projection")
+
+    required_point = {
+        "x",
+        "y",
+        "cluster",
+        "tokens",
+        "chars",
+        "qa_count",
+        "title",
+        "doc_id",
+        "chunk_id",
+        "preview",
+    }
+    for index, point in enumerate(projection["points"]):
+        _require_keys(point, required_point, f"KorQuAD projection.points[{index}]")
+
+
+def _require_keys(row: dict, keys: set[str], label: str) -> None:
+    missing = sorted(key for key in keys if key not in row)
+    if missing:
+        raise ValueError(
+            f"{label} is missing required KorQuAD dashboard fields: {', '.join(missing)}. "
+            "Use tools/korquad_corpus_visualization.py or pass a KorQuAD-specific summary file."
+        )
 
 
 def _clean_term_rows(rows: list[dict], *, limit: int) -> list[dict]:

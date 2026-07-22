@@ -94,7 +94,6 @@ state = run(
 agents/index/
 ├── agent.py          # 검증·중복 제거·청킹·전체 실행
 ├── qdrant_store.py   # 임베딩·dense/hybrid 검색·reranker·Qdrant
-├── retriever.py      # Eval/Serve/RAG 공용 검색 인터페이스
 ├── graph_index.py    # entity/relation graph와 시각화
 └── README.md
 ```
@@ -133,10 +132,10 @@ state.index_artifacts = {
 Eval의 임시 `retrieval_temp.py`는 아래 호출로 대체한다.
 
 ```python
-from agents.index.retriever import build_retriever
+from agents.rag.retriever import get_retriever
 from agents.rag.generator import answer_text
 
-retriever = build_retriever(state.chunks, state.index_config)
+retriever = get_retriever(state.chunks, state.index_config)
 answer = answer_text(
     probe.question,
     retriever,
@@ -145,8 +144,10 @@ answer = answer_text(
 )
 ```
 
-`build_retriever()`는 임베딩이 있으면 Qdrant dense/hybrid 검색을 준비하고,
-Qdrant 준비 실패나 임베딩 누락 시 같은 모듈의 keyword fallback으로 내려간다.
+`get_retriever()`는 임베딩이 있으면 Qdrant dense/hybrid 검색을 준비하고,
+Qdrant 준비 실패나 임베딩 누락 시 keyword fallback으로 내려간다.
+같은 프로세스에서 같은 청크 집합을 반복 검색할 때는 적재 캐시를 사용하고,
+공유 컬렉션에 여러 코퍼스가 올라가도 현재 청크 scope로 검색 결과를 제한한다.
 `use_hybrid`, `use_reranker`, `top_k`, `embedding_model`, `embedding_dimension`은
 `state.index_config`와 Chunk metadata에서 복원된다.
 

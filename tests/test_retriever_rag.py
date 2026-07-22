@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from agents.index.qdrant_store import build_client
 from agents.rag.retriever import build_retriever
 from agents.rag.generator import answer_question, answer_text, generate_answer
 from core.schema import Chunk
@@ -63,6 +64,40 @@ class RetrieverTests(unittest.TestCase):
         self.assertFalse(response["fallback_used"])
         self.assertEqual(response["search_mode"], "dense")
         self.assertEqual(response["results"][0]["chunk_id"], "remote")
+
+    def test_shared_qdrant_client_is_limited_to_current_corpus(self):
+        client = build_client(":memory:")
+        build_retriever(
+            [
+                Chunk(
+                    chunk_id="a-remote",
+                    doc_id="corpus-a",
+                    text="remote policy from another corpus",
+                    embedding=[1.0, 0.0],
+                )
+            ],
+            config={"embedding_model": "test-model", "embedding_dimension": 2},
+            client=client,
+        )
+        retriever = build_retriever(
+            [
+                Chunk(
+                    chunk_id="b-vacation",
+                    doc_id="corpus-b",
+                    text="vacation policy for this corpus",
+                    embedding=[0.0, 1.0],
+                )
+            ],
+            config={"embedding_model": "test-model", "embedding_dimension": 2},
+            client=client,
+        )
+
+        with patch("agents.rag.retriever.embed", return_value=[1.0, 0.0]):
+            response = retriever.search_with_details("remote policy", top_k=1)
+
+        self.assertFalse(response["fallback_used"])
+        self.assertEqual(response["search_mode"], "dense")
+        self.assertEqual([item["doc_id"] for item in response["results"]], ["corpus-b"])
 
 
 class RagGeneratorTests(unittest.TestCase):

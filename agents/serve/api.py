@@ -50,14 +50,31 @@ def _require_retriever() -> Retriever:
     return _retriever
 
 
+def _public_index_settings(retriever: Retriever | None) -> dict:
+    if retriever is None:
+        return {}
+    settings = retriever.settings
+    return {
+        "embedding_model": settings.embedding_model,
+        "embedding_dimension": settings.embedding_dimension,
+        "top_k": settings.top_k,
+        "use_hybrid": settings.use_hybrid,
+        "hybrid_dense_weight": settings.hybrid_dense_weight,
+        "use_reranker": settings.use_reranker,
+        "reranker_model": settings.reranker_model,
+        "recreate_collection_on_dimension_mismatch": (
+            settings.recreate_collection_on_dimension_mismatch
+        ),
+    }
+
+
 @app.get("/health")
 def health():
-    settings = _retriever.settings.__dict__ if _retriever else {}
     return {
         "status": "ok",
         "chunks": len(_chunks_raw),
         "qdrant": bool(_retriever and _retriever.client is not None),
-        "index_settings": settings,
+        "index_settings": _public_index_settings(_retriever),
     }
 
 
