@@ -82,12 +82,14 @@ def exact_match(prediction: str, reference: str) -> bool:
 # 프레이밍 문자에 precision 이 깎인다. 짧은 정답은 recall(정답 문자가 답변에 담겼나)만 보는 게
 # 추출형 QA 의 정석 — 표준 char-F1 위에 얹는 확장이다.
 
-_SHORT_REF_MAX_CHARS = 10   # 정규화 후 정답 문자 수 이하면 '짧은 정답'으로 보고 recall 위주 채점
+_SHORT_REF_MAX_CHARS = 10   # 정규화 후 정답 문자 수 이하면 '짧은 정답'으로 보고 recall 경로 허용
+_CONTAINMENT_MIN = 0.9      # 짧은 정답은 recall 이 이 이상(정답이 거의 다 담김)일 때만 recall 로 통과
 
 
 def char_recall(prediction: str, reference: str) -> float:
     """정답 문자가 답변에 담긴 비율(문자 단위 recall = 겹친 문자 / 정답 문자).
-    완결 문장의 프레이밍 문자에 precision 이 깎이는 짧은 정답용."""
+    Counter 멀티셋 교집합으로 겹친 문자 수(중복 고려)를 세고 정답 문자 수로 나눈다.
+    답변 길이·순서·위치는 보지 않는다 — 완결 문장의 프레이밍 문자에 precision 이 깎이는 짧은 정답용."""
     ref = _chars(reference)
     if not ref:
         return 0.0
@@ -98,18 +100,23 @@ def char_recall(prediction: str, reference: str) -> float:
 
 def answer_match(prediction: str, reference: str) -> float:
     """정답 매칭 점수(규칙 기반 tier1). 기준은 KorQuAD 문자 단위 F1이고, 짧은 정답(정규화 후 ≤10자)은
-    문자 recall(포함) 위주로 봐 완결 문장의 precision 감점을 피한다. reference 없으면 0.0.
+    '정답 문자가 답변에 거의 다 담겼을 때(recall ≥ 0.9, containment)'에 한해 recall 로 통과시켜
+    완결 문장의 precision 감점을 피한다. reference 없으면 0.0.
 
-    [트레이드오프] 짧은 정답 recall 위주라 (1) gold 문자를 담고도 부정/모순하는 답('145가 아니라 150'),
-    (2) 문자를 소수 공유하는 근접 오답('3월'↔'3일')을 정답으로 볼 수 있다(false positive↑).
-    이는 문자 단위 지표의 알려진 성질이며 KorQuAD도 EM 을 병기한다 — 의미 판정은 tier3
-    (signals._answer_correct / RAGAS)가 담당한다."""
+    recall 문턱(containment)을 둔 이유: 문턱 없이 max(f1, recall) 이면 정답 문자를 일부만 공유하는
+    근접 오답(gold '145' ↔ 답 '150' → recall 0.67)도 통과해 너무 후해진다. recall 을 '거의 완전
+    포함'으로 제한하면 verbose 정답(recall≈1.0, '332cm입니다')은 살리고 near-miss 오답은 char_f1 로 떨어진다.
+
+    [남는 한계] 부정/모순('사망'⊂'사망하지 않았다', recall=1.0)과 '3월'↔'3일'(char_f1=0.5)은
+    문자 단위로 못 거른다 → 의미 판정은 tier3(RAGAS), 관측은 EM 병기가 담당한다."""
     ref = _chars(reference)
     if not ref:
         return 0.0
     f1 = char_f1(prediction, reference)
     if len(ref) <= _SHORT_REF_MAX_CHARS:
-        return max(f1, char_recall(prediction, reference))
+        rc = char_recall(prediction, reference)
+        if rc >= _CONTAINMENT_MIN:              # 정답이 거의 다 담김 → recall 로 precision 감점 상쇄
+            return max(f1, rc)
     return f1
 
 
