@@ -35,7 +35,7 @@ tiktoken
 google-genai            # only when EVAL_LLM_PROVIDER=gemini (temp bridge before OpenAI token approval)
 
 # Optimize Agent
-ragbuilder==0.1.6       # version pinned for adapter contract checks
+#ragbuilder==0.1.6       # version pinned for adapter contract checks
 
 # Tests (개발용) — tests/ 의 pytest 방식 테스트 실행에 필요 (예: tests/test_korquad.py)
 pytest>=8.0
