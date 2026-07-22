@@ -15,14 +15,24 @@ from datetime import datetime
 
 
 class _Tee:
-    """write/flush 를 여러 스트림에 그대로 위임하는 최소 Tee (콘솔+파일 동시 출력용)."""
+    """write/flush 를 여러 스트림에 그대로 위임하는 최소 Tee (콘솔+파일 동시 출력용).
+
+    Windows 콘솔은 기본 인코딩이 cp949 등 UTF-8이 아닌 경우가 많아, 이모지나
+    em-dash 같은 문자를 담은 print() 가 UnicodeEncodeError 를 던질 수 있다.
+    그 예외가 agent.py 의 try/except 에 잡혀 정상 완료된 단계를 error 로
+    오염시키는 걸 막기 위해, 인코딩 실패한 스트림에는 대체 문자로 바꿔 쓴다.
+    """
 
     def __init__(self, *streams):
         self._streams = streams
 
     def write(self, data):
         for s in self._streams:
-            s.write(data)
+            try:
+                s.write(data)
+            except UnicodeEncodeError:
+                encoding = getattr(s, "encoding", None) or "ascii"
+                s.write(data.encode(encoding, errors="replace").decode(encoding))
         return len(data)
 
     def flush(self):
