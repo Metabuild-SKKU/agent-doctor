@@ -210,3 +210,17 @@ class EvalRecord:
     # 진단 신호 memoize 뷰: agent 가 state.diagnosis_cache[probe_id] 를 주입 → 쓰기가 state 로 전파.
     # 비싼 판별 신호(_signal)가 여기 캐시돼 재진단 시 재사용된다.
     signals: dict = field(default_factory=dict)
+
+    # ragas/oracle_ragas dict 의 answer_correctness 를 속성으로 노출(diagnose 정답 강등 판정용).
+    # _compute_ragas 가 진입 시 채우므로(DEEP+), 그 미만·미측정 모드에선 빈 dict → None.
+    @property
+    def ragas_answer_correctness(self) -> Optional[float]:
+        """answer_correctness(답변↔gold 비교) — 실제 트랙. 미측정·DEEP 미만이면 None."""
+        v = self.ragas.get("answer_correctness")
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    @property
+    def oracle_ragas_answer_correctness(self) -> Optional[float]:
+        """answer_correctness(답변↔gold 비교) — 오라클 트랙. 미측정·DEEP 미만이면 None."""
+        v = self.oracle_ragas.get("answer_correctness")
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None

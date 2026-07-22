@@ -626,13 +626,5 @@ def _rel_oracle(record: EvalRecord):
     return record.oracle_ragas.get("response_relevancy")
 
 
-def _answer_correctness_value(record: EvalRecord, track: str):
-    """answer_correctness(답변↔gold 비교) 값. tier3, DEEP+ / 미측정 None.
-    diagnose 의 정답 강등 판정이 소비한다. track: 'real' | 'oracle'.
-    (임계값 판정은 diagnose 소관 — 여기선 측정값만 돌려준다.)"""
-    if active_mode() < Mode.DEEP:
-        return None
-    _ensure_ragas(record, track)
-    ragas = record.oracle_ragas if track == "oracle" else record.ragas
-    value = ragas.get("answer_correctness")
-    return value if isinstance(value, (int, float)) else None
+    # answer_correctness 값은 record.ragas_answer_correctness / oracle_ragas_answer_correctness
+    # 속성으로 노출된다(EvalRecord). diagnose 의 정답 강등 판정이 그 속성을 직접 읽는다.

@@ -85,9 +85,9 @@ class GoldRanksTest(unittest.TestCase):
         metrics_common.set_context(retrieve_fn=retriever, chunks=[])
         record = _record(["g_a", "g_b"], ["g_a"])  # g_b 놓침
 
-        self.assertTrue(metrics_basic._gold_in_wider_candidates(record))
+        self.assertIsNotNone(diagnose.retrieval_low_rank(record))  # low_rank 확정(순위 파생)
         metrics_basic._gold_ranks(record)
-        self.assertEqual(retriever.calls, 1)  # 두 신호가 wide 검색을 한 번만 돌림
+        self.assertEqual(retriever.calls, 1)  # low_rank·순위가 wide 검색을 한 번만 공유
 
 
 class FindingMetadataTest(unittest.TestCase):
