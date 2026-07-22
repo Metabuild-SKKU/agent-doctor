@@ -24,12 +24,14 @@ state.documents
 | 크기 | 512자, overlap 50자 | `state.index_config` |
 | 임베딩 | `BAAI/bge-m3` (1024차원) | `embedding_model`, `embedding_dimension` |
 | Vector DB | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY` |
-| 검색 | Dense, top-k 5 | `top_k` |
-| Hybrid | 기본 OFF | `use_hybrid=True` |
+| 검색 | Dense/Hybrid, top-k 5 | `top_k` |
+| Hybrid | 기본 ON | `use_hybrid=False` |
 | Reranker | 기본 OFF | `use_reranker=True` |
 | Graph | NetworkX + Mermaid/PyVis | `graph_*` 설정 |
 
-Hybrid와 reranker는 baseline 결과를 먼저 측정한 뒤 Optimize가 켜는 기능이다.
+Hybrid는 Qdrant named dense/sparse vector와 RRF fusion을 우선 사용한다. 기존 dense-only
+컬렉션처럼 native sparse 검색을 쓸 수 없는 환경에서는 local dense+keyword fusion으로
+fallback한다. Reranker는 baseline 결과를 먼저 측정한 뒤 Optimize가 켜는 기능이다.
 
 ## 청킹 전략 교체
 
@@ -144,7 +146,8 @@ answer = answer_text(
 )
 ```
 
-`get_retriever()`는 임베딩이 있으면 Qdrant dense/hybrid 검색을 준비하고,
+`get_retriever()`는 임베딩이 있으면 Qdrant dense/hybrid 검색을 준비한다.
+`use_hybrid=True`이면 Qdrant sparse vector prefetch와 dense prefetch를 RRF로 합친다.
 Qdrant 준비 실패나 임베딩 누락 시 keyword fallback으로 내려간다.
 같은 프로세스에서 같은 청크 집합을 반복 검색할 때는 적재 캐시를 사용하고,
 공유 컬렉션에 여러 코퍼스가 올라가도 현재 청크 scope로 검색 결과를 제한한다.

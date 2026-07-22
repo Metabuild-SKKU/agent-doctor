@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 from agents.index.agent import CHUNK_STRATEGIES, IndexTools, _chunk_document, _chunk_text, run
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
+    build_sparse_vector,
     build_client,
     delete_document_chunks,
     ensure_collection,
@@ -414,6 +415,42 @@ class SearchAndGraphTests(unittest.TestCase):
             top_k=2,
             dense_weight=0.5,
         )
+
+        self.assertEqual({item["chunk_id"] for item in results}, {"dense", "keyword"})
+
+    def test_native_hybrid_search_uses_qdrant_sparse_vector(self):
+        client = build_client(":memory:")
+        ensure_collection(client, vector_dim=2)
+        chunks = [
+            Chunk(
+                chunk_id="dense",
+                doc_id="d1",
+                text="semantic policy guide",
+                embedding=[1.0, 0.0],
+                sparse_vector=build_sparse_vector("semantic policy guide"),
+            ),
+            Chunk(
+                chunk_id="keyword",
+                doc_id="d2",
+                text="RAGAS Oracle Test setting",
+                embedding=[0.0, 1.0],
+                sparse_vector=build_sparse_vector("RAGAS Oracle Test setting"),
+            ),
+        ]
+        upsert_chunks(client, chunks)
+
+        with patch(
+            "agents.index.qdrant_store.search",
+            side_effect=AssertionError("local fusion used"),
+        ):
+            results = hybrid_search(
+                client,
+                query_vector=[1.0, 0.0],
+                query="Oracle Test",
+                chunks=[],
+                top_k=2,
+                dense_weight=0.5,
+            )
 
         self.assertEqual({item["chunk_id"] for item in results}, {"dense", "keyword"})
 
