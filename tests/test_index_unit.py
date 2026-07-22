@@ -32,10 +32,7 @@ def _document(doc_id: str, content: str) -> Document:
 
 def _index_tools() -> IndexTools:
     return IndexTools(
-        build_client=lambda **_: object(),
-        ensure_collection=lambda *_args, **_kwargs: None,
-        delete_document_chunks=lambda *_args, **_kwargs: None,
-        upsert_chunks=lambda *_args, **_kwargs: None,
+        get_retriever=lambda *_args, **_kwargs: Mock(),
         embed=lambda _text, **_kwargs: [1.0, 0.0, 0.0, 0.0],
         count_tokens=lambda _text, **_kwargs: 3,
         build_sparse_vector=lambda _text: {"indices": [], "values": []},
@@ -126,12 +123,10 @@ class IndexRunTests(unittest.TestCase):
         )
         return state
 
-    @patch("agents.index.agent.upsert_chunks")
-    @patch("agents.index.agent.ensure_collection")
-    @patch("agents.index.agent.build_client", return_value=Mock())
+    @patch("agents.index.agent.get_retriever")
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
     def test_run_validates_deduplicates_and_writes_metadata(
-        self, mock_embed, _mock_client, _mock_collection, mock_upsert
+        self, mock_embed, mock_get_retriever
     ):
         state = self._state()
         content = "# 규정\n재택근무는 주 2일까지 가능합니다."
@@ -154,14 +149,12 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(result.chunks[0].metadata["embedding_model"], "test-model")
         self.assertIsNotNone(result.chunks[0].sparse_vector)
         self.assertEqual(mock_embed.call_count, len(result.chunks))
-        mock_upsert.assert_called_once()
+        mock_get_retriever.assert_called_once()
 
-    @patch("agents.index.agent.upsert_chunks")
-    @patch("agents.index.agent.ensure_collection")
-    @patch("agents.index.agent.build_client", return_value=Mock())
+    @patch("agents.index.agent.get_retriever")
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
     def test_same_signature_reuses_embeddings(
-        self, first_embed, _mock_client, _mock_collection, _mock_upsert
+        self, first_embed, _mock_get_retriever
     ):
         state = self._state()
         state.documents = [_document("doc-1", "동일한 문서 본문입니다.")]
@@ -188,6 +181,29 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(second.index_artifacts["reused_embeddings"], 1)
         self.assertEqual(second.chunks[0].metadata["top_k"], 9)
         self.assertTrue(second.chunks[0].metadata["use_reranker"])
+
+    def test_runtime_only_config_change_skips_reindex_work(self):
+        state = self._state()
+        state.documents = [_document("doc-1", "기존 문서")]
+        state.chunks = [
+            Chunk("c1", "doc-1", "기존 문서", embedding=[1.0, 0.0, 0.0, 0.0])
+        ]
+        state.reindex_required = False
+        tools = IndexTools(
+            get_retriever=Mock(),
+            embed=Mock(),
+            count_tokens=Mock(),
+            build_sparse_vector=Mock(),
+            build_graph_artifacts=Mock(),
+        )
+
+        result = run(state, tools=tools)
+
+        self.assertEqual(result.status, "indexed")
+        self.assertTrue(result.index_artifacts["reindex_skipped"])
+        self.assertTrue(result.reindex_required)
+        tools.get_retriever.assert_not_called()
+        tools.embed.assert_not_called()
 
     def test_reused_chunks_still_seed_chunk_deduplication(self):
         state = self._state()
@@ -234,12 +250,10 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertIn("chunk_strategy", result.error)
 
-    @patch("agents.index.agent.upsert_chunks")
-    @patch("agents.index.agent.ensure_collection")
-    @patch("agents.index.agent.build_client", return_value=Mock())
+    @patch("agents.index.agent.get_retriever")
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
     def test_chunk_stage_config_overrides_default_strategy(
-        self, _mock_embed, _mock_client, _mock_collection, _mock_upsert
+        self, _mock_embed, _mock_get_retriever
     ):
         state = self._state()
         state.documents = [_document("doc-1", "# 제목\n" + ("본문입니다. " * 8))]
@@ -256,10 +270,7 @@ class IndexRunTests(unittest.TestCase):
         state.documents = [_document("doc-1", "도구 교체 테스트 본문입니다.")]
         upserted: list[list[Chunk]] = []
         tools = IndexTools(
-            build_client=lambda **_: object(),
-            ensure_collection=lambda *_args, **_kwargs: None,
-            delete_document_chunks=lambda *_args, **_kwargs: None,
-            upsert_chunks=lambda _client, chunks: upserted.append(chunks),
+            get_retriever=lambda chunks, *_args, **_kwargs: upserted.append(chunks),
             embed=lambda _text, **_kwargs: [0.0, 1.0, 0.0, 0.0],
             count_tokens=lambda _text, **_kwargs: 7,
             build_sparse_vector=lambda _text: {"indices": [], "values": []},
@@ -283,7 +294,8 @@ class IndexRunTests(unittest.TestCase):
         self.assertIn("문서 검증 실패", result.error)
 
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
-    def test_same_doc_id_with_different_content_is_rejected(self, _mock_embed):
+    def test_same_doc_id_with_different_content_skips_conflicting_document(self, _mock_embed):
+        # 충돌 문서만 건너뛰고 먼저 들어온 문서는 정상 인덱싱되어야 한다.
         state = self._state()
         state.documents = [
             _document("same-id", "첫 번째 본문"),
@@ -292,8 +304,58 @@ class IndexRunTests(unittest.TestCase):
 
         result = run(state)
 
-        self.assertEqual(result.status, "error")
-        self.assertIn("같은 doc_id", result.error)
+        self.assertEqual(result.status, "indexed")
+        self.assertEqual(len(result.chunks), 1)
+        self.assertEqual(result.chunks[0].text, "첫 번째 본문")
+        failed = result.index_artifacts["failed_documents"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["doc_id"], "same-id")
+        self.assertIn("같은 doc_id", failed[0]["error"])
+
+    @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
+    def test_partial_failure_preserves_valid_documents(self, _mock_embed):
+        # 불량 문서 1개가 나머지 정상 문서들의 작업을 버리게 만들면 안 된다.
+        state = self._state()
+        state.documents = [
+            _document("doc-ok-1", "정상 문서 본문입니다."),
+            _document("doc-bad", "   \n"),  # 공백뿐 → pydantic 검증 실패
+            _document("doc-ok-2", "또 다른 정상 문서 본문입니다."),
+        ]
+
+        result = run(state)
+
+        self.assertEqual(result.status, "indexed")
+        indexed_doc_ids = {chunk.doc_id for chunk in result.chunks}
+        self.assertEqual(indexed_doc_ids, {"doc-ok-1", "doc-ok-2"})
+        failed = result.index_artifacts["failed_documents"]
+        self.assertEqual([f["doc_id"] for f in failed], ["doc-bad"])
+
+    def test_failed_document_does_not_pollute_chunk_dedup(self):
+        # 임베딩 도중 실패한 문서의 청크 해시가 dedup 집합에 남으면
+        # 뒤에 오는 동일 텍스트 청크가 중복으로 오인되어 누락된다.
+        state = self._state()
+        shared_text = "실패 후에도 인덱싱되어야 하는 본문입니다."
+        state.documents = [
+            _document("doc-fails", shared_text),
+            _document("doc-succeeds", shared_text),
+        ]
+
+        calls = {"n": 0}
+
+        def flaky_embed(text, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("임베딩 일시 실패")
+            return [1.0, 0.0, 0.0, 0.0]
+
+        with patch("agents.index.agent.embed", side_effect=flaky_embed):
+            result = run(state)
+
+        self.assertEqual(result.status, "indexed")
+        self.assertEqual({c.doc_id for c in result.chunks}, {"doc-succeeds"})
+        self.assertEqual(result.chunks[0].text, shared_text)
+        failed = result.index_artifacts["failed_documents"]
+        self.assertEqual([f["doc_id"] for f in failed], ["doc-fails"])
 
 
 class SearchAndGraphTests(unittest.TestCase):

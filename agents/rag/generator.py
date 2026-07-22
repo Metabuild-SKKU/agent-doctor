@@ -1,7 +1,7 @@
 """
-RAG의 답변 생성 파트 
-retriever에서 찾은 chunk을 이용해서 답변 생성 
-LLM 설정 X, LLM 호출 실패 시 -> 추출식 fallback 사용 
+RAG의 답변 생성 파트
+retriever에서 찾은 chunk을 이용해서 답변 생성
+LLM 설정 X, LLM 호출 실패 시 -> 추출식 fallback 사용
 """
 from __future__ import annotations
 
@@ -10,8 +10,10 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from agents.rag.retriever import Retriever
+from core.llm_retry import run_with_retry
+from core.llm_usage import log_usage
 
-# 답변, context, citation, 검색 상세 정보 보관 
+# 답변, context, citation, 검색 상세 정보 보관
 @dataclass
 class GeneratedAnswer:
     question: str
@@ -21,8 +23,8 @@ class GeneratedAnswer:
     generation_mode: str
     retrieval: dict
 
-# 1) LLM 답변 2) 관련 있는 context 그대로 반환 
-# context 없으면 빈 문자열 반환 
+# 1) LLM 답변 2) 관련 있는 context 그대로 반환
+# context 없으면 빈 문자열 반환
 def generate_answer(
     question: str,
     contexts: list[str],
@@ -33,12 +35,12 @@ def generate_answer(
     max_context_chars: int = 12000,
 ) -> str:
     """Generate an answer from contexts, falling back to the top context."""
-    # 공백 context를 제거해서 LLM에 빈 근거가 들어가지 않도록 
+    # 공백 context를 제거해서 LLM에 빈 근거가 들어가지 않도록
     cleaned_contexts = [context.strip() for context in contexts if context and context.strip()]
     if not cleaned_contexts:
         return ""
 
-    # LLM 답변 생성 -> 실패 시 none 반환, extractive fallback으로 넘어가기 
+    # LLM 답변 생성 -> 실패 시 none 반환, extractive fallback으로 넘어가기
     answer = _llm_generate(
         question,
         cleaned_contexts,
@@ -51,7 +53,7 @@ def generate_answer(
         return answer
     return _extractive_answer(cleaned_contexts)
 
-# retriever 검색 ~ 답변 생성 (전체 RAG 흐름) 
+# retriever 검색 ~ 답변 생성 (전체 RAG 흐름)
 def answer_question(
     question: str,
     retriever: Retriever,
@@ -62,16 +64,16 @@ def answer_question(
     config: dict | None = None,
 ) -> dict:
     """Run retrieval + answer generation and return a JSON-ready payload."""
-    # 질문으로 관련 chunk를 검색, 검색 방식과 fallback 반환 
+    # 질문으로 관련 chunk를 검색, 검색 방식과 fallback 반환
     retrieval = retriever.search_with_details(question, top_k=top_k)
 
     # 검색 결과에서 답변 생성 -> 본문 text만 추출
     contexts = [item.get("text", "") for item in retrieval["results"]]
 
-    # 검색된 context 기반 -> 최종 답변 
+    # 검색된 context 기반 -> 최종 답변
     answer = generate_answer(question, contexts, provider=provider, model=model, config=config)
 
-    # 실제 LLM provider -> llm, X -> extractive 기록 
+    # 실제 LLM provider -> llm, X -> extractive 기록
     generation_mode = "llm" if _has_provider(provider, config=config) else "extractive"
 
     # top context 그대로 반환 -> fallback
@@ -89,10 +91,10 @@ def answer_question(
     return asdict(result)
 
 """
-answer_text(): 최종 답변 문자열만 반환 
+answer_text(): 최종 답변 문자열만 반환
 _citations(): 어떤 chunk/doc/section 근거로 답했는지 추적하기 위해 검색 결과를 citation 형태로 정리
-_extractive_answer(): LLM 사용 불가, 가장 관련 있는 top context 반환 
-_has_provider(): 사용할 수 있는 LLM provider가 설정되어 있는지 확인 
+_extractive_answer(): LLM 사용 불가, 가장 관련 있는 top context 반환
+_has_provider(): 사용할 수 있는 LLM provider가 설정되어 있는지 확인
 _llm_generate()
 """
 def answer_text(
@@ -154,7 +156,7 @@ def _config_value(config: dict | None, *names: str) -> Any:
     return None
 
 
-# LLM provider 결정 
+# LLM provider 결정
 # 우선순위: provider > config 값 > 환경변수 > auto
 def _selected_provider(provider: str | None = None, config: dict | None = None) -> str:
     return str(
@@ -165,45 +167,60 @@ def _selected_provider(provider: str | None = None, config: dict | None = None) 
     ).lower()
 
 
-# LLM model 결정 
+# LLM model 결정
 # 우선순위: 함수 인자 model > config 값 > 환경변수
 def _selected_model(
     provider_name: str,
     model: str | None = None,
     config: dict | None = None,
+    *,
+    allow_common_model: bool = True,
 ) -> str | None:
     provider_key = provider_name.replace("_models", "")
+    provider_model = _config_value(
+        config,
+        f"rag_{provider_key}_model",
+        f"{provider_key}_model",
+    )
+    common_model = None
+    if allow_common_model:
+        common_model = (
+            _config_value(config, "rag_llm_model", "llm_model", "response_model")
+            or os.getenv("RAG_LLM_MODEL")
+        )
     return (
         model
-        or _config_value(
-            config,
-            "rag_llm_model",
-            "llm_model",
-            "response_model",
-            f"rag_{provider_key}_model",
-            f"{provider_key}_model",
-        )
-        or os.getenv("RAG_LLM_MODEL")
+        or provider_model
+        or common_model
     )
 
 
 # API key X, provider가 선택되어 있어도 LLM 호출 X
+def _github_api_key(*, allow_repo_token: bool = False) -> str | None:
+    token = os.getenv("GITHUB_MODELS_TOKEN")
+    if token:
+        return token
+    if allow_repo_token:
+        return os.getenv("GITHUB_TOKEN")
+    return None
+
+
 def _has_provider(provider: str | None = None, config: dict | None = None) -> bool:
     selected = _selected_provider(provider, config)
     if selected in {"openai", "auto"} and os.getenv("OPENAI_API_KEY"):
         return True
     if selected in {"gemini", "auto"} and os.getenv("GEMINI_API_KEY"):
         return True
-    if selected in {"github", "github_models", "auto"} and (
-        os.getenv("GITHUB_MODELS_TOKEN") or os.getenv("GITHUB_TOKEN")
-    ):
+    if selected == "auto" and _github_api_key(allow_repo_token=False):
+        return True
+    if selected in {"github", "github_models"} and _github_api_key(allow_repo_token=True):
         return True
     return False
 
 
 # LLM provider를 선택 -> 실제 provider별 생성 함수를 호출
 # auto 모드에서는 OpenAI -> Gemini -> GitHub 순서로 사용 가능한 provider 시도
-# 모두 실패하면 None을 반환해 extractive fallback으로 넘어가기 
+# 모두 실패하면 None을 반환해 extractive fallback으로 넘어가기
 def _llm_generate(
     question: str,
     contexts: list[str],
@@ -219,16 +236,37 @@ def _llm_generate(
 
     for name in providers:
         # config/env에서 다시 결정
-        selected_model = _selected_model(name, model, config)
+        selected_model = _selected_model(
+            name,
+            model,
+            config,
+            allow_common_model=selected != "auto",
+        )
         try:
+            # rate limit(429)은 재시도 — 재시도 없이 폴백되면 병렬 실행 시 429 가
+            # 조용히 추출식 답변으로 대체돼 평가 결과가 왜곡된다. 그 외 예외는 즉시
+            # 다음 provider 폴백(기존 동작).
             if name == "openai" and os.getenv("OPENAI_API_KEY"):
-                return _openai_generate(system, user, model=selected_model, config=config)
+                result = run_with_retry(
+                    lambda: _openai_generate(system, user, model=selected_model, config=config),
+                    "생성", tag="RAG")
+                if result:
+                    return result
             if name == "gemini" and os.getenv("GEMINI_API_KEY"):
-                return _gemini_generate(system, user, model=selected_model, config=config)
-            if name in {"github", "github_models"} and (
-                os.getenv("GITHUB_MODELS_TOKEN") or os.getenv("GITHUB_TOKEN")
-            ):
-                return _github_generate(system, user, model=selected_model, config=config)
+                result = run_with_retry(
+                    lambda: _gemini_generate(system, user, model=selected_model, config=config),
+                    "생성", tag="RAG")
+                if result:
+                    return result
+            if name in {"github", "github_models"}:
+                # auto 모드에선 전용 토큰(GITHUB_MODELS_TOKEN)이 있을 때만 GitHub를 시도한다
+                # (범용 GITHUB_TOKEN이 우연히 있다고 auto가 GitHub로 새지 않도록).
+                if _github_api_key(allow_repo_token=selected != "auto"):
+                    result = run_with_retry(
+                        lambda: _github_generate(system, user, model=selected_model, config=config),
+                        "생성", tag="RAG")
+                    if result:
+                        return result
         except Exception as exc:
             print(f"[RAG] {name} generation failed, trying fallback: {exc}")
     return None
@@ -259,110 +297,94 @@ def _build_prompt(
     return system, user
 
 
+# OpenAI (openai SDK)
 def _openai_generate(
     system: str,
     user: str,
     *,
     model: str | None = None,
-    config: dict | None = None,
+    config: dict | None = None,   # 미사용(호출부 시그니처 호환용)
 ) -> str | None:
     from openai import OpenAI
 
-    client_kwargs: dict[str, Any] = {"api_key": os.getenv("OPENAI_API_KEY")}
-    base_url = (
-        _config_value(config, "rag_openai_base_url", "openai_base_url")
-        or os.getenv("RAG_OPENAI_BASE_URL")
-        or os.getenv("OPENAI_BASE_URL")
-    )
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    client = OpenAI(**client_kwargs)
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
 
+    client = OpenAI()
+    selected_model = model or os.getenv("RAG_OPENAI_MODEL", "gpt-4o")
     response = client.chat.completions.create(
-        model=model or os.getenv("RAG_OPENAI_MODEL", "gpt-4o"),
+        model=selected_model,
         temperature=0,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
     )
+    if response.usage:
+        log_usage(selected_model, response.usage.prompt_tokens, response.usage.completion_tokens, tag="RAG")
     content = response.choices[0].message.content
     return content.strip() if content else None
 
 
-# GitHub Models
+# GitHub Models (OpenAI 호환 API, GitHub PAT 인증)
+GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
+
 def _github_generate(
     system: str,
     user: str,
     *,
     model: str | None = None,
-    config: dict | None = None,
+    config: dict | None = None,   # 미사용(호출부 시그니처 호환용)
 ) -> str | None:
     from openai import OpenAI
 
-    client = OpenAI(
-        api_key=os.getenv("GITHUB_MODELS_TOKEN") or os.getenv("GITHUB_TOKEN"),
-        base_url=(
-            _config_value(config, "rag_github_base_url", "github_models_base_url")
-            or os.getenv("RAG_GITHUB_BASE_URL")
-            or os.getenv("GITHUB_MODELS_BASE_URL")
-            or "https://models.github.ai/inference"
-        ),
-    )
+    # 토큰 해석: GITHUB_MODELS_TOKEN 우선, 없으면 GITHUB_TOKEN.
+    # (auto 모드에서 GITHUB_TOKEN으로 새는 것은 위 호출부 가드가 이미 막는다)
+    api_key = _github_api_key(allow_repo_token=True)
+    if not api_key:
+        return None
+
+    client = OpenAI(base_url=GITHUB_MODELS_BASE_URL, api_key=api_key)
+    selected_model = model or os.getenv("RAG_GITHUB_MODEL", "openai/gpt-4o")
     response = client.chat.completions.create(
-        model=model or os.getenv("RAG_GITHUB_MODEL", "openai/gpt-4o"),
+        model=selected_model,
         temperature=0,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
     )
+    if response.usage:
+        log_usage(selected_model, response.usage.prompt_tokens, response.usage.completion_tokens, tag="RAG")
     content = response.choices[0].message.content
     return content.strip() if content else None
 
 
-# Gemini REST API
+# Gemini (google-genai SDK)
 def _gemini_generate(
     system: str,
     user: str,
     *,
     model: str | None = None,
-    config: dict | None = None,
+    config: dict | None = None,   # base_url 등은 SDK가 처리하므로 현재 미사용(시그니처 호환용)
 ) -> str | None:
-    import requests
+    from google import genai
 
     api_key = os.getenv("GEMINI_API_KEY")
-    selected_model = model or os.getenv("RAG_GEMINI_MODEL", "gemini-1.5-flash")
-    api_base = (
-        _config_value(config, "rag_gemini_base_url", "gemini_base_url")
-        or os.getenv("RAG_GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
-    )
-    url = f"{api_base}/models/{selected_model}:generateContent"
-    response = requests.post(
-        url,
-        params={"key": api_key},
-        json={
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": f"{system}\n\n{user}"}],
-                }
-            ],
-            "generationConfig": {"temperature": 0},
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    data = response.json()
-    candidates = data.get("candidates") or []
+    if not api_key:
+        return None
+    selected_model = model or os.getenv("RAG_GEMINI_MODEL", "gemini-flash-latest")
 
-    # 하나의 문자열로 합치기
-    parts = (
-        candidates[0]
-        .get("content", {})
-        .get("parts", [])
-        if candidates
-        else []
+    client = genai.Client(api_key=api_key)
+    resp = client.models.generate_content(
+        model=selected_model,
+        contents=user,
+        config={"temperature": 0, "system_instruction": system},
     )
-    text = "".join(str(part.get("text", "")) for part in parts).strip()
-    return text or None
+    usage = getattr(resp, "usage_metadata", None)
+    if usage:
+        # 과금되는 출력 = 답변(candidates) + 내부 사고(thoughts). 추론 모델은 thoughts 가
+        # 답변보다 클 수 있어 candidates 만 세면 비용이 과소집계된다.
+        out = (usage.candidates_token_count or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
+        log_usage(selected_model, usage.prompt_token_count, out, tag="RAG")
+    return (resp.text or "").strip() or None

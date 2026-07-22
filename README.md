@@ -46,29 +46,49 @@
 agent_doctor_v2/
 ├── core/
 │   ├── schema.py          # 공통 데이터 모델 (Document, Chunk, Probe 등)
-│   └── state.py           # LangGraph 공유 상태 정의
+│   ├── state.py           # LangGraph 공유 상태 정의
+│   └── run_logger.py      # 실행 로그 (stdout/stderr를 콘솔+파일 동시 출력)
 ├── agents/
 │   ├── ingest/
-│   │   ├── agent.py       # 데이터 수집 (Notion / Google Drive / 파일)
+│   │   ├── agent.py       # 데이터 수집 (Notion / 파일 / json_corpus)
 │   │   ├── oauth.py       # Notion 인증 (Access Token / OAuth)
 │   │   └── README.md
 │   ├── index/
-│   │   ├── agent.py       # 청크 분할 + 임베딩 + Qdrant 저장
+│   │   ├── agent.py       # 검증·중복제거 + 전략 청킹 + 임베딩 + Qdrant 저장
 │   │   ├── qdrant_store.py  # Qdrant 클라이언트 / 검색 / 임베딩 공통 모듈
-│   │   └── graph_index.py   # NetworkX 그래프 / Mermaid / PyVis
-│   ├── eval/
-│   │   └── agent.py       # RAG 품질 진단
-│   ├── optimize/
-│   │   └── agent.py       # 파라미터 자동 조정
+│   │   ├── graph_index.py # 지식 그래프 산출물 (NetworkX/Mermaid/PyVis)
+│   │   └── README.md
+│   ├── eval/              # RAG 품질 진단 (STEP1~5, 16개 원인 라벨)
+│   │   ├── agent.py       # STEP1~5 오케스트레이션
+│   │   ├── probe_gen.py / probe_store.py / knowledge_graph.py   # STEP1 Probe 생성·캐시
+│   │   ├── metrics.py / metrics_ragas.py                        # STEP3 규칙 지표·RAGAS
+│   │   ├── diagnose.py / signals.py / report.py                 # STEP4~5 진단·리포트
+│   │   ├── llm_provider.py  # LLM 추상화 (OpenAI/Gemini/GitHub Models)
+│   │   └── README.md
+│   ├── optimize/          # 진단 라벨 기반 처방 (한 번에 하나씩 적용→검증→유지/롤백)
+│   │   ├── agent.py       # planner→optimizer→config_mapper→history→reporter 흐름
+│   │   ├── planner.py / rules.py / schemas.py
+│   │   ├── optimizer.py / adapters/ (internal, ragbuilder)
+│   │   ├── config_mapper.py / history.py / reporter.py
+│   │   └── README.md (+ AGENTS.md, CONTEXT.md, PROGRESS.md)
+│   ├── rag/               # 공용 검색+답변 생성 (Serve API·Eval이 함께 사용)
+│   │   ├── retriever.py   # 벡터 검색 (키워드 폴백)
+│   │   └── generator.py   # LLM 답변 생성 (OpenAI/Gemini/GitHub, 추출식 폴백)
 │   └── serve/
 │       ├── agent.py       # 청크 저장 + API 서버 시작 + Claude Desktop 등록
-│       ├── api.py         # FastAPI 검색 서버 (Qdrant → HTTP)
-│       ├── mcp_server.py  # MCP 서버 (Claude Desktop ↔ API)
+│       ├── api.py         # FastAPI 서버 (/search 벡터 검색, /answer RAG 답변)
+│       ├── mcp_server.py  # MCP 서버 (Claude Desktop ↔ API 위임)
 │       └── README.md
 ├── tests/
-│   ├── test_ingest.py     # Ingest Agent 단독 테스트
-│   ├── test_oauth.py      # Notion OAuth 테스트
-│   └── test_pipeline.py   # Ingest → Index → Serve 전체 파이프라인 테스트
+│   ├── test_ingest.py     # Ingest 단독 (실제 Notion API)
+│   ├── test_oauth.py      # Notion OAuth 브라우저 흐름
+│   ├── test_index.py      # Index 단독 (mock Document)
+│   ├── test_index_unit.py # Index 단위 테스트 (unittest, 임베딩 mock)
+│   ├── test_eval.py       # Eval STEP1~5 단독 (mock chunks, 외부 API 불필요)
+│   ├── test_ragas_eval.py # RAGAS 실측 검증 (OpenAI 키 없으면 자동 스킵)
+│   ├── test_optimizer.py / test_optimize_agent.py               # Optimize 단위 (unittest)
+│   ├── test_config_mapper.py / test_ragbuilder_adapter.py       # Optimize 단위 (unittest)
+│   └── test_pipeline.py   # Ingest → Index → Serve 전체 파이프라인
 ├── graph.py               # LangGraph 파이프라인 (Orchestrator)
 ├── requirements.txt
 └── .env.example
@@ -130,9 +150,8 @@ python tests/test_pipeline.py
       Notion API → 페이지 블록 파싱 → Document 객체 생성
         ↓
   [2] Index Agent
-      Document 검증·중복 제거 → Markdown/문단 경계 청킹
-      → BGE-M3 임베딩 → Qdrant upsert → graph artifact 생성
-      → state.chunks, state.index_artifacts 업데이트
+      Document → 전략 청킹(기본 markdown_recursive, 512자/overlap 50) → BGE-M3 임베딩
+      → Qdrant(in-memory) upsert → state.chunks 업데이트
         ↓
   [3] Serve Agent
       chunks.json 저장(임베딩 포함)
@@ -151,11 +170,9 @@ python tests/test_pipeline.py
 |------|------|------|
 | 문서 수집 | Notion API | 블록 단위 재귀 파싱, 페이지네이션 처리 |
 | 인증 | Access Token / OAuth2 | `.env` 토큰 또는 브라우저 OAuth 흐름 |
-| 청킹 | Markdown + recursive boundary | 기본 600자, overlap 80 |
-| 임베딩 | sentence-transformers | `BAAI/bge-m3` (1024차원, 다국어) |
+| 청킹 | 전략 4종 (fixed/markdown/recursive/markdown_recursive) | 기본 markdown_recursive, 512자/overlap 50 — `register_chunk_strategy()`로 확장 |
+| 임베딩 | sentence-transformers | `BAAI/bge-m3` (1024차원, 한국어 지원) |
 | 벡터 DB | Qdrant in-memory | 운영 시 `QDRANT_URL`로 Cloud 전환 |
-| 검색 | Dense baseline | config로 Hybrid/Reranker 활성화 |
-| 그래프 | NetworkX | Mermaid, GraphML, PyVis 출력 |
 | 검색 API | FastAPI + uvicorn | `GET /search?query=...` → 벡터 검색 결과 반환 |
 | MCP 서버 | FastMCP (stdio) | Claude Desktop이 프로세스로 직접 실행 |
 | 상태 공유 | LangGraph `AgentDoctorState` | 에이전트 간 데이터 전달 |
@@ -167,6 +184,12 @@ python tests/test_pipeline.py
 ```bash
 python tests/test_ingest.py   # Notion 수집 단독 테스트
 python tests/test_oauth.py    # Notion OAuth 브라우저 흐름 테스트
+python tests/test_index.py    # Index 단독 테스트 (mock Document)
+python tests/test_eval.py     # Eval 단독 테스트 (mock chunks, 외부 API 불필요)
+
+# unittest 계열 (Index / Optimize 단위 테스트)
+python -m unittest tests.test_index_unit -v
+python -m unittest tests.test_optimizer tests.test_optimize_agent tests.test_config_mapper tests.test_ragbuilder_adapter
 ```
 
 ### 전체 파이프라인 테스트
@@ -189,17 +212,17 @@ http://localhost:8766/search?query=재택근무     # 벡터 검색 테스트
 
 | 항목 | 현재 (로컬 테스트) | 향후 (운영) |
 |------|------------------|------------|
-| 임베딩 모델 | BAAI/bge-m3 (무료, 1024차원) | Eval 결과에 따라 교체 |
+| 임베딩 모델 | BAAI/bge-m3 (무료, 1024차원) | - |
 | 벡터 DB | Qdrant in-memory (프로세스 내) | Qdrant Cloud (영구 저장) |
 | MCP 연결 | stdio (로컬 파일 경로) | URL 방식 (클라우드 배포 후) |
-| 청킹 전략 | Markdown 구조 + 경계 기반 분할 | Semantic/parent-child 실험 |
+| 청킹 전략 | 고정 크기 | - |
 
 ---
 
 ## 실행
 
 ```bash
-python graph.py  # 전체 파이프라인 (graph.py 완성 후)
+python graph.py  # 전체 파이프라인
 ```
 
 ---
@@ -226,7 +249,8 @@ Eval Agent가 생성. 진단용 질문.
 Eval Agent가 생성. 진단 결과 단위.
 ```python
 # type: "gap" | "contradiction" | "duplicate" | "staleness" | "retrieval_failure" | "generation_failure"
-Finding(finding_id, type, severity, description, affected_chunks, prescription)
+# label: 세분화 진단명(처방 파일 라벨) — Optimize가 label→처방 매핑에 사용
+Finding(finding_id, type, severity, description, label, affected_chunks, prescription)
 ```
 
 ### DiagnosticReport
@@ -242,10 +266,12 @@ DiagnosticReport(ragas_scores, findings, overall_score, pass_threshold)
 | 역할 | 기술 |
 |------|------|
 | 에이전트 오케스트레이션 | LangGraph |
-| 데이터 수집 | - |
-| 파일 파싱 | - |
-| 임베딩 | sentence-transformers (테스트) / OpenAI (운영) |
+| 데이터 수집 | Notion API (Google Drive 예정) |
+| 파일 파싱 | pdfplumber, python-docx, openpyxl, hwp5 |
+| 임베딩 | sentence-transformers `BAAI/bge-m3` |
 | 벡터 DB | Qdrant (in-memory → Cloud) |
 | 검색 API | FastAPI + uvicorn |
-| 진단 지표 | RAGAS |
+| RAG 답변 생성 | OpenAI / Gemini / GitHub Models (키 없으면 추출식 폴백) |
+| 진단 지표 | RAGAS (LLM-as-Judge 자체 구현) + 규칙 지표 |
+| 최적화 | 진단 라벨 기반 처방 + RAGBuilder |
 | MCP 서버 | FastMCP |
