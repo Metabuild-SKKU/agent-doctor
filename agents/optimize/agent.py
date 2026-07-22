@@ -31,6 +31,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from core.state import AgentDoctorState
+from core.schema import DiagnosticReport
 from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate
 from agents.optimize.schemas import (
     OptimizationHistoryItem,
@@ -52,7 +53,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             return _continue_internal_study(state, active_study)
 
         # (1) 지난 처방 판정 + (나빴으면) 롤백/블랙리스트
-        judged_item, verdict = _judge_pending_trial(state)
+        judged_item, verdict, rollback_baseline_report = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
 
         # (2) 새 처방 선택. 저비용 사전검증에서 baseline이 이기면 현재 처방을
@@ -116,7 +117,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
         # 적용 직전 스냅샷(롤백이 있었다면 이미 되돌려진 config 가 before 가 된다)
         before_config = dict(state.index_config)
-        before_report = state.report
+        # 롤백 직후라면 비교 기준을 복원된 baseline 리포트로 잡는다. state.report 는
+        # 롤백 전의 열화된 Eval 이라, 그걸 baseline 으로 쓰면 이 처방이 원래보다
+        # 나빠도 '개선'으로 오판해 유지된다(#2). 롤백이 없었으면 현재 report 가 기준.
+        before_report = rollback_baseline_report if rolled_back else state.report
 
         # 검증된 처방을 실제 index_config 에 반영(canonical→flat 변환은 mapper 담당)
         config_mapper.apply_config_patch(state.index_config, result.config_patch)
@@ -305,12 +309,18 @@ def _finish_internal_study(
         item.after_metrics = best_metrics
     item.status = "applied" if verdict.keep else "failed"
     item.rollback_reason = None if verdict.keep else verdict.reason
+    # 표시·게이트용 종합점수(0~100). before 는 baseline 리포트에서, after 는 baseline
+    # 복원 시 before 와 동일(설정을 되돌렸으므로), 아니면 sweep 이 full report 를 남기지
+    # 않아 미상(None) — 표시부가 fallback 한다.
+    before_composite = history._read_composite(item.metadata.get("before_report"))
     item.metadata.update(
         {
             "pending": False,
             "active_study": False,
             "before_score": verdict.before_score,
             "after_score": verdict.after_score,
+            "before_composite": before_composite,
+            "after_composite": before_composite if baseline_selected else None,
             "best_config": dict(result.best_config or {}),
         }
     )
@@ -405,13 +415,19 @@ def _study_floor_violations(metrics: dict) -> list[str]:
 
 def _judge_pending_trial(
     state: AgentDoctorState,
-) -> tuple[OptimizationHistoryItem | None, Verdict | None]:
+) -> tuple[OptimizationHistoryItem | None, Verdict | None, DiagnosticReport | None]:
     """직전에 적용한 처방(pending)을 판정한다. 나빴으면 config 롤백 + blacklist.
-    판정한 이력 항목과 Verdict 를 반환한다(판정할 게 없으면 (None, None)).
-    호출부가 이 둘로 롤백 여부(not verdict.keep) 판단 + 사용자 리포트를 만든다."""
+    판정한 이력 항목과 Verdict 를 반환한다(판정할 게 없으면 (None, None, None)).
+    호출부가 이 둘로 롤백 여부(not verdict.keep) 판단 + 사용자 리포트를 만든다.
+
+    3번째 반환값(rollback_baseline_report): 롤백했을 때 '복원된 config 가 실제로
+    받았던 점수'를 담은 리포트(=이 처방의 before_report). 롤백 후 같은 방문에서
+    이어서 제안되는 다음 처방의 비교 기준(before_report)으로 써야 한다. state.report
+    는 롤백 직전의 열화된 Eval 이라 baseline 으로 쓰면 원래보다 나빠도 '개선'으로
+    오판해 유지해버린다(#2). 유지/판정없음이면 None."""
     pending = history.find_pending(state.optimization_history)
     if pending is None:
-        return None, None
+        return None, None, None
 
     before_report = pending.metadata.get("before_report")
     after_report = state.report
@@ -442,4 +458,5 @@ def _judge_pending_trial(
             state.blacklist.add((label, pending.selected_prescription_id))
 
     history.finalize_item(pending, verdict, after_config, after_report)
-    return pending, verdict
+    rollback_baseline_report = before_report if not verdict.keep else None
+    return pending, verdict, rollback_baseline_report
