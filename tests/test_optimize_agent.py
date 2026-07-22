@@ -113,6 +113,40 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertEqual(result_state.status, "applied")
         self.assertEqual(result_state.iteration, 1)
 
+    def test_inapplicable_prescription_falls_through_to_next(self):
+        """issue #26: 최우선 라벨의 유일 처방이 적용 불가(enable_reranker 는 reranker
+        미연동으로 unsupported_backend_path)여도, optimize 가 포기하지 않고 그 처방을
+        블랙리스트에 넣은 뒤 다음 actionable finding 을 실제로 처방한다."""
+        def _finding(pid, label):
+            return Finding(
+                finding_id=f"{pid}:{label}", type="retrieval_failure",
+                severity="warning", description=label, label=label,
+                confirmed=True, affected_probes=[pid],
+            )
+        # low_rank(적용 불가) 를 더 흔하게 → 최우선. semantic_mismatch(적용 가능) 는 차선.
+        findings = (
+            [_finding(f"lr{i}", "retrieval_low_rank") for i in range(6)]
+            + [_finding(f"sm{i}", "retrieval_semantic_mismatch") for i in range(3)]
+        )
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="r", findings=findings, overall_score=30.0,
+                ragas_scores={"context_recall": 0.4}, pass_threshold=False,
+            ),
+            index_config={"top_k": 5, "chunk_size": 512, "chunk_overlap": 50},
+            iteration=0, max_iterations=3,
+        )
+        out = agent.run(state)
+        self.assertEqual(out.status, "applied")
+        # 적용 불가 처방은 블랙리스트에 남고
+        self.assertIn(("retrieval_low_rank", "enable_reranker"), out.blacklist)
+        # 실제로는 다음 우선순위(적용 가능) finding 이 처방됐다
+        self.assertEqual(len(out.optimization_history), 1)
+        self.assertEqual(
+            out.optimization_history[-1].failure_labels,
+            ["retrieval_semantic_mismatch"],
+        )
+
     def test_always_returns_state_even_without_report(self):
         result = agent.run(AgentDoctorState(report=None, index_config={}, iteration=0))
         self.assertIsInstance(result, AgentDoctorState)
