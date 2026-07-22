@@ -1,0 +1,761 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentDoctor — 진단 리포트</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #08090b; --bg-2: #0b0c0f; --surface: #0f1114; --surface-2: #15171c;
+    --border: rgba(255,255,255,.08); --border-strong: rgba(255,255,255,.14); --hi: rgba(255,255,255,.04);
+    --ink: #f5f6f7; --muted: #9a9ea7; --faint: #616570;
+    --accent: #6e7bf2; --accent-2: #8a93f8; --accent-ink: #c2c7fb; --accent-glow: rgba(110,123,242,.22);
+    --good: #46c56a; --good-glow: rgba(70,197,106,.16);
+    --warning: #d6a12a; --warning-glow: rgba(214,161,42,.16);
+    --critical: #f0675c; --critical-glow: rgba(240,103,92,.16);
+    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+    --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, monospace;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #fbfbfc; --bg-2: #f5f6f8; --surface: #ffffff; --surface-2: #f6f7f9;
+    --border: rgba(12,14,22,.10); --border-strong: rgba(12,14,22,.17); --hi: rgba(255,255,255,.6);
+    --ink: #14161a; --muted: #565b64; --faint: #8b909a;
+    --accent: #4a52d4; --accent-2: #5f67e0; --accent-ink: #363cad; --accent-glow: rgba(74,82,212,.12);
+    --good: #1f9d4d; --good-glow: rgba(31,157,77,.12);
+    --warning: #b07d15; --warning-glow: rgba(176,125,21,.12);
+    --critical: #d24a3d; --critical-glow: rgba(210,74,61,.12);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.55; letter-spacing: -.006em; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 32px; }
+  ::selection { background: var(--accent-glow); }
+  h2 { font-size: 20px; font-weight: 600; letter-spacing: -.02em; margin: 0; }
+  .section { padding: 42px 0; border-top: 1px solid var(--border); }
+  .section-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 24px; }
+  .section-head .idx { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  .section-head .sub { font-size: 13px; color: var(--faint); margin-left: auto; }
+
+  /* top bar */
+  .topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; justify-content: space-between; padding: 15px 0; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(12px); }
+  .brand { display: flex; align-items: center; gap: 9px; }
+  .brand-mark { width: 25px; height: 25px; }
+  .brand-name { font-weight: 660; font-size: 16px; letter-spacing: -.02em; }
+  .brand-name .doc { color: var(--muted); }
+  .topbar-right { display: flex; align-items: center; gap: 6px; }
+  .back-link { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); text-decoration: none; padding: 7px 11px; border-radius: 8px; }
+  .back-link:hover { color: var(--ink); background: var(--surface-2); }
+  .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: 1px solid var(--border); background: var(--surface); border-radius: 8px; cursor: pointer; color: var(--muted); }
+  .theme-toggle:hover { color: var(--ink); border-color: var(--border-strong); }
+
+  /* report header */
+  .rhead { padding: 34px 0 8px; }
+  .rhead .lockup { display: inline-flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+  .rhead .lockup .lm { width: 27px; height: 27px; flex: none; }
+  .rhead .lockup .wm { font-size: 21px; font-weight: 670; letter-spacing: -.035em; }
+  .rhead .lockup .wm .doc { color: var(--muted); }
+  .rhead .meta { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 12px; color: var(--faint); flex-wrap: wrap; }
+  .rhead .meta .chip { padding: 3px 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); }
+  .rhead .meta .chip b { color: var(--ink); font-weight: 500; }
+  .rhead h1 { font-size: clamp(24px, 3.4vw, 31px); font-weight: 600; letter-spacing: -.03em; margin: 14px 0 0; color: var(--muted); }
+  .rhead h1 b { color: var(--ink); font-weight: 600; }
+
+  /* hero: score */
+  .hero { display: grid; grid-template-columns: 260px 1fr; gap: 36px; align-items: center; padding: 30px 0 44px; }
+  .gauge-wrap { position: relative; width: 240px; height: 240px; }
+  .gauge-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .gauge-center .big { font-size: 56px; font-weight: 640; letter-spacing: -.04em; font-variant-numeric: tabular-nums; line-height: 1; }
+  .gauge-center .delta { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: 13px; color: var(--good); margin-top: 8px; }
+  .gauge-center .cap { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin-top: 10px; }
+  .hero-side .verdict { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 560; padding: 6px 13px; border-radius: 100px; border: 1px solid; }
+  .verdict.pass { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); background: var(--good-glow); }
+  .verdict.fail { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 40%, transparent); background: var(--critical-glow); }
+  .hero-side h3 { font-size: 21px; font-weight: 600; letter-spacing: -.02em; margin: 16px 0 0; line-height: 1.35; }
+  .hero-side p { color: var(--muted); font-size: 14.5px; margin: 12px 0 0; max-width: 52ch; }
+  .hero-stats { display: flex; gap: 28px; margin-top: 24px; }
+  .hero-stat .n { font-size: 22px; font-weight: 620; font-variant-numeric: tabular-nums; }
+  .hero-stat .n.up { color: var(--good); } .hero-stat .n.warn { color: var(--warning); }
+  .hero-stat .l { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 3px; }
+
+  /* priority top3 */
+  .prio { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .prio-card { position: relative; padding: 18px 18px 18px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .prio-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+  .prio-card.sev-critical::before { background: var(--critical); }
+  .prio-card.sev-warning::before { background: var(--warning); }
+  .prio-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .prio-grp { font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; color: var(--faint); text-transform: uppercase; }
+  .prio-title { font-weight: 580; font-size: 14.5px; margin: 11px 0 6px; letter-spacing: -.01em; }
+  .prio-desc { font-size: 12.8px; color: var(--muted); line-height: 1.5; }
+  .prio-foot { display: flex; align-items: center; gap: 8px; margin-top: 13px; font-family: var(--mono); font-size: 11px; color: var(--faint); }
+
+  .badge { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: 10.5px; font-weight: 500; padding: 2px 7px; border-radius: 5px; letter-spacing: .02em; }
+  .badge svg { width: 10px; height: 10px; }
+  .badge.crit { color: var(--critical); background: var(--critical-glow); }
+  .badge.warn { color: var(--warning); background: var(--warning-glow); }
+  .badge.confirm { color: var(--good); background: var(--good-glow); }
+  .badge.prelim { color: var(--faint); background: var(--surface-2); border: 1px solid var(--border); }
+
+  /* metrics dumbbell */
+  .metrics { display: flex; flex-direction: column; gap: 2px; }
+  .metric-row { display: grid; grid-template-columns: 170px 1fr 132px; align-items: center; gap: 20px; padding: 15px 4px; border-bottom: 1px solid var(--border); }
+  .metric-row:last-child { border-bottom: none; }
+  .metric-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 7px; }
+  .metric-name .en { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+  .dumbbell { position: relative; height: 22px; }
+  .dumbbell .track { position: absolute; left: 0; right: 0; top: 50%; height: 3px; transform: translateY(-50%); background: var(--border); border-radius: 3px; }
+  .dumbbell .connect { position: absolute; top: 50%; height: 3px; transform: translateY(-50%); background: linear-gradient(90deg, var(--faint), var(--accent)); border-radius: 3px; }
+  .dumbbell .pt { position: absolute; top: 50%; width: 12px; height: 12px; border-radius: 50%; transform: translate(-50%, -50%); border: 2px solid var(--surface); }
+  .dumbbell .pt.before { background: var(--faint); }
+  .dumbbell .pt.after { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .metric-vals { font-family: var(--mono); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; }
+  .metric-vals .b { color: var(--faint); } .metric-vals .a { color: var(--ink); font-weight: 500; }
+  .metric-vals .d { color: var(--good); font-size: 11px; margin-left: 6px; }
+  .metric-legend { display: flex; gap: 18px; margin-bottom: 18px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .metric-legend .k { display: inline-flex; align-items: center; gap: 6px; }
+  .metric-legend .sw { width: 10px; height: 10px; border-radius: 50%; }
+
+  /* treatment course */
+  .course-chart { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 22px 22px 10px; margin-bottom: 20px; box-shadow: inset 0 1px 0 var(--hi); }
+  .course-chart .cc-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; }
+  .course-chart .cc-title { font-size: 13.5px; font-weight: 560; }
+  .course-chart .cc-legend { font-family: var(--mono); font-size: 11px; color: var(--faint); display: flex; gap: 14px; }
+  .course-chart .cc-legend i { font-style: normal; display: inline-flex; align-items: center; gap: 5px; }
+  .rule-note { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 10px 14px; margin-bottom: 22px; }
+  .rule-note svg { color: var(--accent); flex: none; }
+  .rule-note b { color: var(--ink); font-weight: 550; }
+
+  .rx { display: flex; flex-direction: column; gap: 10px; }
+  .rx-card { border: 1px solid var(--border); border-radius: 13px; background: var(--surface); overflow: hidden; }
+  .rx-main { display: grid; grid-template-columns: 30px 1fr auto; gap: 15px; align-items: start; padding: 17px 20px; cursor: pointer; }
+  .rx-num { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font-family: var(--mono); font-size: 12px; border: 1px solid var(--border); color: var(--muted); }
+  .rx-card.kept .rx-num { border-color: transparent; background: var(--good-glow); color: var(--good); }
+  .rx-card.rolled .rx-num { border-color: transparent; background: var(--surface-2); color: var(--faint); }
+  .rx-body .rx-change { font-family: var(--mono); font-size: 13.5px; font-weight: 500; }
+  .rx-body .rx-change .arrow { color: var(--accent); margin: 0 5px; }
+  .rx-body .rx-target { font-size: 12.5px; color: var(--muted); margin-top: 5px; }
+  .rx-body .rx-reason { font-size: 12.5px; color: var(--faint); margin-top: 8px; display: flex; align-items: baseline; gap: 7px; }
+  .rx-body .rx-reason .rl { font-family: var(--mono); color: var(--accent); font-size: 10.5px; flex: none; }
+  .rx-right { text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+  .rx-scoredelta { font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .rx-scoredelta b.up { color: var(--good); } .rx-scoredelta b.down { color: var(--critical); }
+  .rx-verdict { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: 6px; }
+  .rx-verdict.keep { color: var(--good); background: var(--good-glow); }
+  .rx-verdict.roll { color: var(--warning); background: var(--warning-glow); }
+  .rx-drill { border-top: 1px solid var(--border); padding: 0 20px; max-height: 0; overflow: hidden; transition: max-height .3s ease, padding .3s ease; background: var(--bg-2); }
+  .rx-card.open .rx-drill { max-height: 320px; padding: 18px 20px; }
+  .drill-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-bottom: 12px; }
+  .sweep { display: flex; flex-direction: column; gap: 7px; }
+  .sweep-row { display: grid; grid-template-columns: 96px 1fr 54px; align-items: center; gap: 12px; }
+  .sweep-k { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .sweep-k.win { color: var(--accent); font-weight: 500; }
+  .sweep-bar { height: 7px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+  .sweep-bar i { display: block; height: 100%; background: var(--faint); border-radius: 4px; }
+  .sweep-row.win .sweep-bar i { background: var(--accent); }
+  .sweep-val { font-family: var(--mono); font-size: 11.5px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .drill-caption { font-size: 12px; color: var(--muted); margin-top: 12px; line-height: 1.5; }
+  .rx-expand { font-family: var(--mono); font-size: 10.5px; color: var(--faint); display: inline-flex; align-items: center; gap: 4px; }
+
+  /* diagnosis detail */
+  .dx { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .dx-card { padding: 18px 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+  .dx-top { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .dx-grp { font-family: var(--mono); font-size: 10px; font-weight: 500; padding: 2px 7px; border-radius: 5px; letter-spacing: .04em; background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+  .dx-title { font-weight: 580; font-size: 14.5px; letter-spacing: -.01em; }
+  .dx-code { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .dx-desc { font-size: 12.8px; color: var(--muted); line-height: 1.55; }
+  .dx-foot { display: flex; align-items: center; gap: 8px; margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .dx-foot .rx-link { color: var(--accent); margin-left: auto; }
+
+  /* failed validation QA */
+  .qa { display: flex; flex-direction: column; gap: 12px; }
+  .qa-card { border: 1px solid var(--border); border-radius: 13px; background: var(--surface); overflow: hidden; }
+  .qa-head { display: flex; align-items: flex-start; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+  .qa-head .qm { width: 24px; height: 24px; border-radius: 7px; background: var(--surface-2); color: var(--muted); font-family: var(--mono); font-size: 12px; font-weight: 600; display: grid; place-items: center; flex: none; margin-top: 1px; }
+  .qa-head .qt { font-weight: 550; font-size: 14.5px; letter-spacing: -.01em; flex: 1; line-height: 1.4; }
+  .qa-head .ql { font-family: var(--mono); font-size: 10.5px; color: var(--faint); padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; white-space: nowrap; flex: none; }
+  .qa-gold { padding: 12px 20px; font-size: 12.8px; color: var(--muted); background: var(--bg-2); border-bottom: 1px solid var(--border); }
+  .qa-gold .gl { font-family: var(--mono); font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: .07em; margin-right: 9px; }
+  .qa-gold b { color: var(--ink); font-weight: 500; }
+  .qa-ans { display: grid; grid-template-columns: 1fr 1fr; }
+  .qa-ans .col { padding: 15px 20px; }
+  .qa-ans .col.before { border-right: 1px solid var(--border); }
+  .qa-ans .tag { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; font-weight: 500; margin-bottom: 9px; }
+  .qa-ans .tag svg { width: 12px; height: 12px; }
+  .qa-ans .before .tag { color: var(--critical); }
+  .qa-ans .after .tag { color: var(--good); }
+  .qa-card.unsolved .qa-ans .after .tag { color: var(--warning); }
+  .qa-ans .atext { font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .qa-ans .after .atext { color: var(--ink); }
+  .qa-card.unsolved .qa-ans .after .atext { color: var(--muted); font-style: italic; }
+  .qa-ans .note { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 9px; }
+  .qa-fix { display: flex; align-items: baseline; gap: 9px; padding: 12px 20px; border-top: 1px solid var(--border); background: var(--bg-2); font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .qa-fix .fl { font-family: var(--mono); font-size: 10px; color: var(--accent); flex: none; text-transform: uppercase; letter-spacing: .06em; margin-top: 1px; }
+
+  /* recommendations */
+  .rec { display: flex; flex-direction: column; gap: 10px; }
+  .rec-item { display: grid; grid-template-columns: 34px 1fr auto; gap: 14px; align-items: center; padding: 16px 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+  .rec-ic { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: var(--surface-2); color: var(--muted); }
+  .rec-body .rt { font-weight: 550; font-size: 14px; }
+  .rec-body .rd { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+  .rec-cta { font-family: var(--mono); font-size: 11.5px; color: var(--accent); white-space: nowrap; }
+
+  /* transparency footer */
+  .trans { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-top: 8px; }
+  .trans-cell { background: var(--surface); padding: 18px 20px; }
+  .trans-cell .tn { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .trans-cell .tl { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 4px; }
+  .foot { padding: 30px 0 46px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .foot span { font-size: 12px; color: var(--faint); }
+  .foot .foot-mono { font-family: var(--mono); letter-spacing: .04em; }
+
+  /* tooltip */
+  .term { border-bottom: 1px dotted var(--faint); cursor: help; position: relative; }
+  .term::after {
+    content: attr(data-tip); position: absolute; left: 0; bottom: calc(100% + 8px); width: max-content; max-width: 240px;
+    background: var(--surface-2); color: var(--ink); border: 1px solid var(--border-strong); font-family: var(--sans); font-size: 12px; line-height: 1.45; font-weight: 400; letter-spacing: 0;
+    padding: 9px 12px; border-radius: 9px; box-shadow: 0 12px 30px -12px rgba(0,0,0,.7);
+    opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .16s, transform .16s; z-index: 8; pointer-events: none;
+  }
+  .term:hover::after, .term:focus-visible::after { opacity: 1; visibility: visible; transform: translateY(0); }
+
+  @media (max-width: 860px) {
+    .hero { grid-template-columns: 1fr; justify-items: start; }
+    .prio, .dx { grid-template-columns: 1fr; }
+    .trans { grid-template-columns: repeat(2, 1fr); }
+    .metric-row { grid-template-columns: 120px 1fr 118px; gap: 12px; }
+    .qa-ans { grid-template-columns: 1fr; }
+    .qa-ans .col.before { border-right: none; border-bottom: 1px solid var(--border); }
+  }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .rx-drill { transition: none; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="1" y="1" width="22" height="22" rx="6.5" stroke="var(--accent)" stroke-width="1.2" fill="color-mix(in srgb, var(--accent-glow) 60%, transparent)"/>
+        <path d="M3.5 12.5h3l1.8-4.5 3 9 1.8-5.2 1.3 2.9h4.6" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" fill="none"/>
+      </svg>
+      <div class="brand-name">Agent<span class="doc">Doctor</span></div>
+    </div>
+    <div class="topbar-right">
+      <a class="back-link" href="index.html">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5m6-6-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        새 진단
+      </a>
+      <button class="theme-toggle" id="themeToggle" aria-label="테마 전환" title="테마 전환">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="rhead">
+    <div class="lockup">
+      <svg class="lm" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="1" y="1" width="22" height="22" rx="6.5" stroke="var(--accent)" stroke-width="1.2" fill="color-mix(in srgb, var(--accent-glow) 60%, transparent)"/>
+        <path d="M3.5 12.5h3l1.8-4.5 3 9 1.8-5.2 1.3 2.9h4.6" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" fill="none"/>
+      </svg>
+      <span class="wm">Agent<span class="doc">Doctor</span></span>
+    </div>
+    <div class="meta">
+      <span class="chip">코퍼스 <b id="metaCorpus">사내 제품 문서</b></span>
+      <span class="chip">진단 깊이 <b id="metaDepth">표준 검진</b></span>
+      <span class="chip">테스트 질문 <b id="metaQuestionCount">47</b></span>
+      <span class="chip" id="metaCreatedAt">2026-07-20 14:32</span>
+    </div>
+    <h1><b>진단 리포트</b></h1>
+  </div>
+
+  <!-- HERO: score -->
+  <section class="hero">
+    <div class="gauge-wrap">
+      <svg viewBox="0 0 240 240" width="240" height="240" aria-hidden="true">
+        <circle cx="120" cy="120" r="96" fill="none" stroke="var(--border)" stroke-width="14"
+          stroke-dasharray="452.4 603.2" stroke-dashoffset="0" transform="rotate(135 120 120)" stroke-linecap="round"/>
+        <circle id="gaugeMark" cx="120" cy="120" r="96" fill="none" stroke="var(--faint)" stroke-width="14"
+          stroke-dasharray="2 603.2" stroke-dashoffset="-280.5" transform="rotate(135 120 120)" stroke-linecap="butt"/>
+        <circle id="gaugeArc" cx="120" cy="120" r="96" fill="none" stroke="var(--accent)" stroke-width="14"
+          stroke-dasharray="452.4 603.2" stroke-dashoffset="452.4" transform="rotate(135 120 120)" stroke-linecap="round"
+          style="filter: drop-shadow(0 0 6px var(--accent-glow)); transition: stroke-dashoffset 1.1s cubic-bezier(.4,0,.2,1);"/>
+      </svg>
+      <div class="gauge-center">
+        <div class="big" id="scoreNum">84</div>
+        <div class="delta"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5m0 0-6 6m6-6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg> +22</div>
+        <div class="cap">종합 점수 · 100점</div>
+      </div>
+    </div>
+    <div class="hero-side">
+      <span class="verdict pass" id="verdictBadge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg> <span id="verdictText">처방 후 기준선 통과</span></span>
+      <h3 id="heroHeadline">문제 4건을 찾아 3번 처방했고, 종합점수가 <span style="color:var(--good)">62에서 84로</span> 올랐습니다.</h3>
+      <p id="heroSummary">검색이 나열형 정답을 놓치고 있었고, 정답 순위가 낮았습니다. top_k 확대와 리랭커로 해결했으며, 컨텍스트 축소는 오히려 품질을 떨어뜨려 되돌렸습니다.</p>
+      <div class="hero-stats" id="heroStats">
+        <div class="hero-stat"><div class="n">4</div><div class="l">발견된 문제</div></div>
+        <div class="hero-stat"><div class="n up">2</div><div class="l">채택된 처방</div></div>
+        <div class="hero-stat"><div class="n warn">1</div><div class="l">롤백</div></div>
+        <div class="hero-stat"><div class="n">1</div><div class="l">추가 확인 필요</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PRIORITY -->
+  <section class="section">
+    <div class="section-head"><span class="idx">01</span><h2>가장 시급한 문제</h2><span class="sub">심각도·영향 질문 수 기준</span></div>
+    <div class="prio" id="prioList">
+      <div class="prio-card sev-critical">
+        <div class="prio-top"><span class="prio-grp">A · 검색 실패</span><span class="badge crit">치명</span></div>
+        <div class="prio-title">나열형 질문에서 정답 누락</div>
+        <div class="prio-desc">정답이 여러 청크에 흩어져 있는데 <span class="term" tabindex="0" data-tip="검색이 한 번에 가져오는 문서 조각의 개수입니다.">top_k</span>가 5로 고정돼 뒤쪽 정답을 못 가져옵니다.</div>
+        <div class="prio-foot"><span class="badge confirm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>확정</span> · 질문 3건 영향</div>
+      </div>
+      <div class="prio-card sev-warning">
+        <div class="prio-top"><span class="prio-grp">A · 검색 실패</span><span class="badge warn">주의</span></div>
+        <div class="prio-title">정답 순위가 낮음</div>
+        <div class="prio-desc">정답이 검색은 되지만 6~15위라 <span class="term" tabindex="0" data-tip="검색 결과 상위 몇 개만 답변 생성에 사용됩니다.">상위 컷</span> 밖으로 밀려 답변에 안 쓰입니다.</div>
+        <div class="prio-foot"><span class="badge confirm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>확정</span> · 질문 2건 영향</div>
+      </div>
+      <div class="prio-card sev-warning">
+        <div class="prio-top"><span class="prio-grp">C · 컨텍스트</span><span class="badge warn">주의</span></div>
+        <div class="prio-title">컨텍스트가 너무 김</div>
+        <div class="prio-desc">가져온 조각이 많아 정답이 <span class="term" tabindex="0" data-tip="긴 컨텍스트의 가운데 놓인 정보를 LLM이 놓치는 현상입니다.">중간에 묻혀</span> 답이 흐려집니다.</div>
+        <div class="prio-foot"><span class="badge confirm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>확정</span> · 질문 1건 영향</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- METRICS before/after -->
+  <section class="section">
+    <div class="section-head"><span class="idx">02</span><h2>품질 지표 · 처방 전후</h2><span class="sub">RAGAS 4개 지표</span></div>
+    <div class="metric-legend">
+      <span class="k"><span class="sw" style="background:var(--faint)"></span> 처방 전</span>
+      <span class="k"><span class="sw" style="background:var(--accent)"></span> 처방 후</span>
+    </div>
+    <div class="metrics" id="metrics"></div>
+  </section>
+
+  <!-- TREATMENT COURSE -->
+  <section class="section">
+    <div class="section-head"><span class="idx">03</span><h2>치료 경과</h2><span class="sub">처방을 시도하고 · 검증하고 · 되돌린 과정</span></div>
+
+    <div class="course-chart">
+      <div class="cc-head">
+        <span class="cc-title">종합 점수 추이</span>
+        <span class="cc-legend">
+          <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--accent)" stroke-width="2"/></svg> 채택 경로</i>
+          <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--faint)" stroke-width="2" stroke-dasharray="3 3"/></svg> 롤백</i>
+        </span>
+      </div>
+      <svg viewBox="0 0 660 220" width="100%" height="220" id="courseSvg" aria-label="종합 점수 추이 차트"></svg>
+    </div>
+
+    <div class="rule-note">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3h.01" stroke-linecap="round"/></svg>
+      <span><b>판정 규칙</b> — 처방 후 종합점수가 오르면 그대로 두고, 떨어지면 되돌린 뒤 다른 방법을 시도합니다.</span>
+    </div>
+
+    <div class="rx" id="rxList"></div>
+  </section>
+
+  <!-- DIAGNOSIS DETAIL -->
+  <section class="section">
+    <div class="section-head"><span class="idx">04</span><h2>진단 상세</h2><span class="sub">원인 분류 · A 검색 / B 생성 / C 컨텍스트 / D 데이터</span></div>
+    <div class="dx" id="dxList"></div>
+  </section>
+
+  <!-- FAILED QA -->
+  <section class="section">
+    <div class="section-head"><span class="idx">05</span><h2>실패한 검증 질문</h2><span class="sub">처방 전후 답변 비교</span></div>
+    <div class="qa" id="qaList"></div>
+  </section>
+
+  <!-- RECOMMENDATIONS -->
+  <section class="section">
+    <div class="section-head"><span class="idx">06</span><h2>남은 권고</h2><span class="sub">자동 처방으로 끝나지 않는 항목</span></div>
+    <div class="rec">
+      <div class="rec-item">
+        <div class="rec-ic"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 0-4 10.5V17h8v-3.5A6 6 0 0 0 12 3zM9 21h6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="rec-body">
+          <div class="rt">부분 답변 <span class="badge prelim">의심</span></div>
+          <div class="rd">정답 근거는 있으나 일부 조건이 빠집니다. 생성 원인은 표준 검진으로 확정할 수 없어 <b style="color:var(--muted)">정밀 검진</b>이 필요합니다.</div>
+        </div>
+        <div class="rec-cta">정밀 검진 실행 →</div>
+      </div>
+      <div class="rec-item">
+        <div class="rec-ic"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2M4 7h16M4 7v12a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7M9 11h6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="rec-body">
+          <div class="rt">코퍼스에 없는 질문 2건 <span class="badge" style="color:var(--muted);background:var(--surface-2);border:1px solid var(--border)">D · 데이터</span></div>
+          <div class="rd">파라미터로는 해결되지 않습니다 — 해당 주제를 다루는 문서를 코퍼스에 추가하는 걸 권장합니다.</div>
+        </div>
+        <div class="rec-cta">문서 보강 필요</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TRANSPARENCY -->
+  <section class="section">
+    <div class="section-head"><span class="idx">07</span><h2>진단 내역</h2><span class="sub">이 리포트가 만들어진 근거</span></div>
+    <div class="trans">
+      <div class="trans-cell"><div class="tn">2분 14초</div><div class="tl">진단 소요</div></div>
+      <div class="trans-cell"><div class="tn">47</div><div class="tl">테스트 질문</div></div>
+      <div class="trans-cell"><div class="tn">3</div><div class="tl">처방 시도 (2 채택 · 1 롤백)</div></div>
+      <div class="trans-cell"><div class="tn">218</div><div class="tl">색인 청크</div></div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <span>AgentDoctor — RAG 진단·처방 파이프라인</span>
+    <span class="foot-mono">Ingest · Index · Eval · Optimize</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  document.getElementById('themeToggle').addEventListener('click', function () {
+    var cur = root.getAttribute('data-theme');
+    if (!cur) cur = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+  });
+
+  var WEB_API_BASE = 'http://localhost:8767';
+  var DUMMY_METRICS = [
+    { name: '충실도', en: 'faithfulness', tip: '답이 근거 문서에 충실한 정도. 낮으면 지어낼 위험이 있습니다.', before: .72, after: .89 },
+    { name: '정답 회수율', en: 'context_recall', tip: '필요한 정답 조각을 검색이 얼마나 가져왔는지입니다.', before: .60, after: .88 },
+    { name: '검색 정확도', en: 'context_precision', tip: '가져온 조각 중 실제로 정답에 쓸모 있는 비율입니다.', before: .66, after: .79 },
+    { name: '답변 관련성', en: 'response_relevancy', tip: '답이 질문에 얼마나 들어맞는지입니다.', before: .70, after: .85 }
+  ];
+  var DUMMY_RXS = [
+    {
+      state: 'kept', num: '01', change: ['top_k', '5', '12'], target: '나열형 정답 누락을 겨냥',
+      reason: ['GOLD_RANK', '정답이 최대 12위까지 흩어져 있어, 다 담으려면 top_k ≥ 12 필요'],
+      score: ['62', '70', 'up'], verdict: ['keep', '유지'],
+      drill: { label: '후보 실측 (sweep) — 8·12·15를 돌려 최선을 선택', rows: [
+        { k: 'top_k = 8', val: '65.4', w: 62 }, { k: 'top_k = 12', val: '70.1', w: 100, win: true }, { k: 'top_k = 15', val: '68.9', w: 88 }
+      ], caption: '무릎 분석으로 8·12·15를 후보로 좁힌 뒤 실제로 재평가 — 12에서 종합점수가 가장 높아 채택했습니다. 15는 노이즈가 늘어 오히려 하락.' }
+    },
+    {
+      state: 'rolled', num: '02', change: ['chunk_size', '512', '256'], target: '컨텍스트 과다를 겨냥',
+      reason: ['기하 사전검증', '청크를 줄이면 노이즈가 줄 것으로 예상'],
+      score: ['70', '66', 'down'], verdict: ['roll', '롤백'],
+      drill: { label: '왜 되돌렸나', rows: [], caption: '청크를 절반으로 줄이자 정답이 청크 경계에서 잘려 오히려 회수율이 떨어졌고, 종합점수가 70→66으로 하락했습니다. 판정 규칙에 따라 이전 설정으로 되돌리고 이 처방을 블랙리스트에 넣었습니다.' }
+    },
+    {
+      state: 'kept', num: '03', change: ['리랭커', 'off', 'on'], target: '정답 순위 낮음을 겨냥',
+      reason: ['처방 규칙', '정답이 검색은 되므로, 순위를 재정렬해 앞으로 끌어올림'],
+      score: ['70', '84', 'up'], verdict: ['keep', '유지 · 최종'],
+      drill: { label: '효과', rows: [], caption: 'top_k를 더 키우는 대신 리랭커로 순위만 올려 노이즈 없이 정답을 상위로 이동시켰습니다. 검색 정확도 0.66→0.79, 종합점수 70→84로 최종 채택되었습니다.' }
+    }
+  ];
+  var DUMMY_DXS = [
+    { grp: 'A · 검색 실패', title: '나열형 질문에서 정답 누락', code: 'retrieval_incomplete_enumeration', badge: ['confirm', '확정'], desc: '정답이 여러 청크에 흩어진 나열형 질문에서, 고정된 top_k가 뒤쪽 정답을 놓칩니다. 정답 청크가 최대 12위까지 분포했습니다.', foot: '질문 3건 영향', rx: 'Rx1 top_k' },
+    { grp: 'A · 검색 실패', title: '정답 순위가 낮음', code: 'retrieval_low_rank', badge: ['confirm', '확정'], desc: '정답이 검색 후보에는 있으나 6~15위에 있어 상위 컷 밖으로 밀립니다. 순위를 올리는 처방이 적합합니다.', foot: '질문 2건 영향', rx: 'Rx3 리랭커' },
+    { grp: 'C · 컨텍스트', title: '컨텍스트가 너무 김', code: 'too_long_context', badge: ['confirm', '확정'], desc: '가져온 조각이 많아 정답이 컨텍스트 중간에 묻혀 답변 품질이 떨어집니다. 청크 축소를 시도했으나 회수율이 나빠져 롤백했습니다.', foot: '질문 1건 영향', rx: 'Rx2 (롤백)' },
+    { grp: 'B · 생성 실패', title: '부분 답변', code: 'generation_partial_answer', badge: ['prelim', '의심'], desc: '정답 근거는 컨텍스트에 있으나 답변이 일부 조건을 누락합니다. 생성 원인은 LLM 심층 진단(정밀 검진)에서만 확정할 수 있습니다.', foot: '질문 1건 영향', rx: '미처방' }
+  ];
+  var DUMMY_QAS = [
+    { label: 'A · 나열형 누락', solved: true,
+      q: '결제 모듈에서 지원하는 결제 수단을 모두 알려줘',
+      gold: '카드 · 계좌이체 · 간편결제 · 포인트 · 상품권 (5종)',
+      before: '신용카드, 계좌이체, 간편결제를 지원합니다.', bnote: '포인트·상품권 2종 누락',
+      after: '카드, 계좌이체, 간편결제, 포인트, 상품권 5가지를 지원합니다.',
+      fix: '정답이 3·7·12위에 흩어져 있어 top_k=5로는 뒤쪽을 놓침 → top_k 12로 확대해 전부 회수' },
+    { label: 'A · 순위 낮음', solved: true,
+      q: '관리자 권한을 다른 사용자에게 위임하는 절차는?',
+      gold: '설정 → 멤버 → 역할 변경 → 승인 요청',
+      before: '제공된 문서에서 관련 정보를 찾을 수 없습니다.', bnote: '정답이 11위라 상위 5 밖으로 밀림',
+      after: '설정 > 멤버에서 대상 사용자의 역할을 변경하고 승인을 요청하면 됩니다.',
+      fix: '정답이 검색은 됐으나 11위 → 리랭커로 2위까지 끌어올려 답변에 반영' },
+    { label: 'C · 컨텍스트 김', solved: false,
+      q: '무료 체험 기간은 며칠인가요?',
+      gold: '14일',
+      before: '플랜에 따라 30일 또는 14일이며, 전환 조건과 결제 수단에 따라 달라질 수 있어…', bnote: '정답이 긴 컨텍스트 중간에 묻힘',
+      after: '청크 축소 처방이 회수율을 떨어뜨려 롤백 — 이 질문은 아직 해결되지 않았습니다.',
+      fix: '다른 처방 후보(컨텍스트 재정렬 등)를 다음 반복에서 시도할 예정' }
+  ];
+  var DUMMY_SCORE = { before: 62, after: 84 };
+  var DUMMY_PRIORITY = [
+    { group: 'A · 검색 실패', severity: 'critical', title: '나열형 질문에서 정답 누락', desc: '정답이 여러 청크에 흩어져 있는데 top_k가 5로 고정돼 뒤쪽 정답을 못 가져옵니다.', confirmed: true, affected: 3 },
+    { group: 'A · 검색 실패', severity: 'warning', title: '정답 순위가 낮음', desc: '정답이 검색은 되지만 6~15위라 상위 컷 밖으로 밀려 답변에 안 쓰입니다.', confirmed: true, affected: 2 },
+    { group: 'C · 컨텍스트', severity: 'warning', title: '컨텍스트가 너무 김', desc: '가져온 조각이 많아 정답이 중간에 묻혀 답이 흐려집니다.', confirmed: true, affected: 1 }
+  ];
+  var DUMMY_META = { corpus: '사내 제품 문서', depth: '표준 검진', question_count: 47, created_at: '2026-07-20T14:32:00' };
+
+  /* data가 실제 서버 응답이면 true, run_id 없음/fetch 실패로 인한 빈 프리뷰({})면 false.
+     실제 응답인데 배열이 비어 있는 경우("처방 0건" 등)는 더미로 치환하지 않고 빈 상태를 그대로 보여준다. */
+  function renderReport(data, isLive) {
+    var metrics = isLive ? (data.metrics || []) : DUMMY_METRICS;
+    var rxs = isLive ? (data.rxs || []) : DUMMY_RXS;
+    var dxs = isLive ? (data.dxs || []) : DUMMY_DXS;
+    var qas = isLive ? (data.qas || []) : DUMMY_QAS;
+    var priority = isLive ? (data.priority || []) : DUMMY_PRIORITY;
+    var score = isLive ? (data.score || DUMMY_SCORE) : DUMMY_SCORE;
+    var meta = isLive ? (data.meta || DUMMY_META) : DUMMY_META;
+
+    renderMetrics(metrics);
+    renderCourse(data.course);
+    renderRxs(rxs);
+    renderDxs(dxs);
+    renderQas(qas);
+    renderGauge(score);
+    renderPriority(priority);
+    renderHero(score, meta);
+    renderMeta(meta);
+  }
+
+  /* ── priority top3 ── */
+  var SEV_LABEL = { critical: '치명', warning: '주의' };
+  var ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  function esc(v) {
+    if (v === null || v === undefined) return '';
+    return String(v).replace(/[&<>"']/g, function (c) { return ESC_MAP[c]; });
+  }
+  function renderPriority(items) {
+    var el = document.getElementById('prioList');
+    if (!items.length) {
+      el.innerHTML = '<p style="color:var(--faint);font-size:13px">확정된 우선 문제가 없습니다.</p>';
+      return;
+    }
+    el.innerHTML = items.map(function (p) {
+      var sev = p.severity === 'critical' ? 'critical' : 'warning';
+      return '<div class="prio-card sev-' + sev + '">' +
+        '<div class="prio-top"><span class="prio-grp">' + esc(p.group || '') + '</span><span class="badge ' + (sev === 'critical' ? 'crit' : 'warn') + '">' + esc(SEV_LABEL[p.severity] || p.severity) + '</span></div>' +
+        '<div class="prio-title">' + esc(p.title) + '</div>' +
+        '<div class="prio-desc">' + esc(p.desc) + '</div>' +
+        '<div class="prio-foot"><span class="badge ' + (p.confirmed ? 'confirm' : 'prelim') + '">' +
+          (p.confirmed ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>확정' : '의심') +
+        '</span> · 질문 ' + esc(p.affected) + '건 영향</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  /* ── hero summary/stats ── */
+  function renderHero(score, meta) {
+    var pass = !!score.pass_threshold;
+    document.getElementById('verdictBadge').className = 'verdict ' + (pass ? 'pass' : 'fail');
+    document.getElementById('verdictText').textContent = pass ? '처방 후 기준선 통과' : '기준선 미달';
+    var before = score.before != null ? score.before : 0;
+    var after = score.after != null ? score.after : 0;
+    var rxCount = (score.kept || 0) + (score.rolled || 0) + (score.pending || 0);
+    var trend = after > before ? '올랐습니다.' : (after < before ? '내려갔습니다.' : '변화가 없었습니다.');
+    document.getElementById('heroHeadline').innerHTML =
+      '문제 ' + (score.findings_count || 0) + '건을 찾아 ' + rxCount + '번 처방했고, 종합점수가 ' +
+      '<span style="color:var(--good)">' + before + '에서 ' + after + '로</span> ' + trend;
+    document.getElementById('heroSummary').textContent = meta.corpus ? (meta.corpus + ' 문서를 ' + (meta.question_count || 0) + '개 질문으로 진단한 결과입니다.') : '';
+    document.getElementById('heroStats').innerHTML =
+      '<div class="hero-stat"><div class="n">' + (score.findings_count || 0) + '</div><div class="l">발견된 문제</div></div>' +
+      '<div class="hero-stat"><div class="n up">' + (score.kept || 0) + '</div><div class="l">채택된 처방</div></div>' +
+      '<div class="hero-stat"><div class="n warn">' + (score.rolled || 0) + '</div><div class="l">롤백</div></div>' +
+      '<div class="hero-stat"><div class="n">' + (score.pending || 0) + '</div><div class="l">추가 확인 필요</div></div>';
+  }
+
+  /* ── header meta chips ── */
+  function renderMeta(meta) {
+    document.getElementById('metaCorpus').textContent = meta.corpus || '-';
+    document.getElementById('metaDepth').textContent = meta.depth || '-';
+    document.getElementById('metaQuestionCount').textContent = meta.question_count || 0;
+    var d = meta.created_at ? new Date(meta.created_at) : null;
+    document.getElementById('metaCreatedAt').textContent = (d && !isNaN(d)) ?
+      (d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' +
+       String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')) : '';
+  }
+
+  /* ── metrics dumbbell ── */
+  var SCALE_MIN = 0.5, SCALE_MAX = 0.95;
+  function pos(v) { return ((v - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)) * 100; }
+  function renderMetrics(metrics) {
+  var mHtml = metrics.map(function (m) {
+    var pb = pos(m.before), pa = pos(m.after);
+    var lo = Math.min(pb, pa), hi = Math.max(pb, pa);
+    var delta = '+' + Math.round((m.after - m.before) * 100) / 100;
+    return '<div class="metric-row">' +
+      '<div class="metric-name"><span class="term" tabindex="0" data-tip="' + m.tip + '">' + m.name + '</span><span class="en">' + m.en + '</span></div>' +
+      '<div class="dumbbell"><div class="track"></div>' +
+        '<div class="connect" style="left:' + lo + '%;width:' + (hi - lo) + '%"></div>' +
+        '<div class="pt before" style="left:' + pb + '%"></div>' +
+        '<div class="pt after" style="left:' + pa + '%"></div>' +
+      '</div>' +
+      '<div class="metric-vals"><span class="b">' + m.before.toFixed(2) + '</span> → <span class="a">' + m.after.toFixed(2) + '</span><span class="d">' + delta + '</span></div>' +
+    '</div>';
+  }).join('');
+  document.getElementById('metrics').innerHTML = mHtml;
+  }
+
+  /* ── course line chart ── */
+  var DUMMY_COURSE = [
+    { label: '기준선', score: 62, kept: true },
+    { label: 'Rx1 · top_k', score: 70, kept: true },
+    { label: 'Rx2 · chunk', score: 70, kept: true, roll: 66 },
+    { label: 'Rx3 · 리랭커', score: 84, kept: true }
+  ];
+  function renderCourse(coursePoints) {
+    var raw = coursePoints && coursePoints.length ? coursePoints : DUMMY_COURSE;
+    var svg = document.getElementById('courseSvg');
+    svg.innerHTML = '';
+    var NS = 'http://www.w3.org/2000/svg';
+    var L = 46, R = 634, T = 24, B = 178;
+    var scores = raw.map(function (p) { return p.score; }).concat(raw.map(function (p) { return p.roll; }).filter(function (v) { return v !== undefined; }));
+    var sMin = Math.max(0, Math.min.apply(null, scores) - 10);
+    var sMax = Math.min(100, Math.max.apply(null, scores) + 10);
+    var pts = raw.map(function (p, i) {
+      return {
+        x: raw.length > 1 ? L + (R - L) * (i / (raw.length - 1)) : L,
+        label: p.label, score: p.score, kept: p.kept, roll: p.roll
+      };
+    });
+    function y(s) { return B - (s - sMin) / (sMax - sMin) * (B - T); }
+    function el(n, a) { var e = document.createElementNS(NS, n); for (var k in a) e.setAttribute(k, a[k]); return e; }
+
+    // gridlines
+    var gStep = (sMax - sMin) / 4;
+    [1, 2, 3, 4].map(function (i) { return Math.round(sMin + gStep * i); }).forEach(function (g) {
+      svg.appendChild(el('line', { x1: L, y1: y(g), x2: R, y2: y(g), stroke: 'var(--border)', 'stroke-width': 1 }));
+      svg.appendChild(el('text', { x: L - 10, y: y(g) + 3.5, 'text-anchor': 'end', fill: 'var(--faint)', 'font-size': 10.5, 'font-family': 'var(--mono)' })).textContent = g;
+    });
+
+    // main adopted path
+    var d = 'M' + pts.map(function (p) { return p.x + ' ' + y(p.score); }).join(' L');
+    // area
+    var area = d + ' L' + R + ' ' + B + ' L' + L + ' ' + B + ' Z';
+    var ag = el('linearGradient', { id: 'cg', x1: 0, y1: 0, x2: 0, y2: 1 });
+    ag.appendChild(el('stop', { offset: '0%', 'stop-color': 'var(--accent)', 'stop-opacity': .18 }));
+    ag.appendChild(el('stop', { offset: '100%', 'stop-color': 'var(--accent)', 'stop-opacity': 0 }));
+    var defs = el('defs', {}); defs.appendChild(ag); svg.appendChild(defs);
+    svg.appendChild(el('path', { d: area, fill: 'url(#cg)' }));
+    svg.appendChild(el('path', { d: d, fill: 'none', stroke: 'var(--accent)', 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+
+    // rollback branches — 데이터에 roll 값이 있는 지점마다 표시
+    pts.forEach(function (rb) {
+      if (rb.roll === undefined) return;
+      svg.appendChild(el('path', { d: 'M' + rb.x + ' ' + y(rb.score) + ' L' + rb.x + ' ' + y(rb.roll), stroke: 'var(--faint)', 'stroke-width': 1.8, 'stroke-dasharray': '3 3', fill: 'none' }));
+      var xm = el('g', {});
+      xm.appendChild(el('line', { x1: rb.x - 4, y1: y(rb.roll) - 4, x2: rb.x + 4, y2: y(rb.roll) + 4, stroke: 'var(--critical)', 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
+      xm.appendChild(el('line', { x1: rb.x - 4, y1: y(rb.roll) + 4, x2: rb.x + 4, y2: y(rb.roll) - 4, stroke: 'var(--critical)', 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
+      svg.appendChild(xm);
+      svg.appendChild(el('text', { x: rb.x + 10, y: y(rb.roll) + 4, fill: 'var(--critical)', 'font-size': 10.5, 'font-family': 'var(--mono)' })).textContent = rb.roll + ' 롤백';
+    });
+
+    // points + labels
+    pts.forEach(function (p, i) {
+      var isBase = i === 0;
+      svg.appendChild(el('circle', { cx: p.x, cy: y(p.score), r: 4.5, fill: isBase ? 'var(--faint)' : 'var(--accent)', stroke: 'var(--surface)', 'stroke-width': 2 }));
+      if (!isBase && p.score !== pts[i - 1].score) {
+        svg.appendChild(el('text', { x: p.x, y: y(p.score) - 12, 'text-anchor': i === pts.length - 1 ? 'end' : 'middle', fill: 'var(--ink)', 'font-size': 12, 'font-weight': 600, 'font-family': 'var(--mono)' })).textContent = p.score;
+      }
+      if (isBase) svg.appendChild(el('text', { x: p.x, y: y(p.score) - 12, 'text-anchor': 'start', fill: 'var(--muted)', 'font-size': 12, 'font-family': 'var(--mono)' })).textContent = p.score;
+      var t = el('text', { x: p.x, y: B + 20, 'text-anchor': i === 0 ? 'start' : (i === pts.length - 1 ? 'end' : 'middle'), fill: 'var(--faint)', 'font-size': 10.5, 'font-family': 'var(--mono)' });
+      t.textContent = p.label; svg.appendChild(t);
+    });
+  }
+
+  /* ── prescriptions ── */
+  function rxCard(r) {
+    var scoreCls = r.score[2] === 'up' ? 'up' : 'down';
+    var arrowUp = r.score[2] === 'up';
+    var rowsHtml = r.drill.rows.length ? '<div class="sweep">' + r.drill.rows.map(function (s) {
+      return '<div class="sweep-row' + (s.win ? ' win' : '') + '"><span class="sweep-k' + (s.win ? ' win' : '') + '">' + esc(s.k) + '</span>' +
+        '<span class="sweep-bar"><i style="width:' + s.w + '%"></i></span><span class="sweep-val">' + esc(s.val) + '</span></div>';
+    }).join('') + '</div>' : '';
+    return '<div class="rx-card ' + r.state + '">' +
+      '<div class="rx-main">' +
+        '<div class="rx-num">' + esc(r.num) + '</div>' +
+        '<div class="rx-body">' +
+          '<div class="rx-change">' + esc(r.change[0]) + ' <span style="color:var(--faint)">' + esc(r.change[1]) + '</span><span class="arrow">→</span>' + esc(r.change[2]) + '</div>' +
+          '<div class="rx-target">' + esc(r.target) + '</div>' +
+          '<div class="rx-reason"><span class="rl">' + esc(r.reason[0]) + '</span> ' + esc(r.reason[1]) + '</div>' +
+        '</div>' +
+        '<div class="rx-right">' +
+          '<div class="rx-verdict ' + r.verdict[0] + '">' + (r.verdict[0] === 'keep' ? '✓' : '↩') + ' ' + esc(r.verdict[1]) + '</div>' +
+          '<div class="rx-scoredelta">종합 ' + esc(r.score[0]) + ' <b class="' + scoreCls + '">→ ' + esc(r.score[1]) + (arrowUp ? ' ↑' : ' ↓') + '</b></div>' +
+          '<div class="rx-expand">상세 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="rx-drill"><div class="drill-label">' + esc(r.drill.label) + '</div>' + rowsHtml +
+        '<div class="drill-caption">' + esc(r.drill.caption) + '</div></div>' +
+    '</div>';
+  }
+  function renderRxs(rxs) {
+  document.getElementById('rxList').innerHTML = rxs.map(rxCard).join('');
+  document.querySelectorAll('.rx-main').forEach(function (m) {
+    m.addEventListener('click', function () { m.parentElement.classList.toggle('open'); });
+  });
+  }
+
+  /* ── diagnosis detail ── */
+  function renderDxs(dxs) {
+  document.getElementById('dxList').innerHTML = dxs.map(function (d) {
+    return '<div class="dx-card">' +
+      '<div class="dx-top"><span class="dx-grp">' + esc(d.grp) + '</span><span class="badge ' + d.badge[0] + '">' +
+        (d.badge[0] === 'confirm' ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>' : '') + esc(d.badge[1]) + '</span></div>' +
+      '<div class="dx-title">' + esc(d.title) + '</div>' +
+      '<div class="dx-code">' + esc(d.code) + '</div>' +
+      '<div class="dx-desc" style="margin-top:9px">' + esc(d.desc) + '</div>' +
+      '<div class="dx-foot">' + esc(d.foot) + '<span class="rx-link">' + esc(d.rx) + '</span></div>' +
+    '</div>';
+  }).join('');
+  }
+
+  /* ── failed validation QA ── */
+  var okIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var xIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12M18 6 6 18" stroke-linecap="round"/></svg>';
+  var dashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 12h12" stroke-linecap="round"/></svg>';
+  function renderQas(qas) {
+  document.getElementById('qaList').innerHTML = qas.map(function (x) {
+    var afterTag = x.solved ? (okIcon + ' 처방 후') : (dashIcon + ' 미해결');
+    return '<div class="qa-card ' + (x.solved ? 'solved' : 'unsolved') + '">' +
+      '<div class="qa-head"><span class="qm">Q</span><span class="qt">' + esc(x.q || '(질문 없이 처방 라벨 기준 확인됨)') + '</span><span class="ql">' + esc(x.label) + '</span></div>' +
+      '<div class="qa-gold"><span class="gl">기대 정답</span><b>' + esc(x.gold || '-') + '</b></div>' +
+      '<div class="qa-ans">' +
+        '<div class="col before"><div class="tag">' + xIcon + ' 처방 전</div><div class="atext">"' + esc(x.before) + '"</div><div class="note">' + esc(x.bnote || '') + '</div></div>' +
+        '<div class="col after"><div class="tag">' + afterTag + '</div><div class="atext">' + (x.solved ? '"' + esc(x.after) + '"' : esc(x.after)) + '</div></div>' +
+      '</div>' +
+      '<div class="qa-fix"><span class="fl">처방</span><span>' + esc(x.fix || '미처방') + '</span></div>' +
+    '</div>';
+  }).join('');
+  }
+
+  /* gauge animate */
+  function renderGauge(score) {
+    requestAnimationFrame(function () {
+      setTimeout(function () {
+        var arc = document.getElementById('gaugeArc');
+        var ARC = 452.4;            // length of the 270° usable sweep
+        var frac = (score.after || 0) / 100;
+        arc.setAttribute('stroke-dashoffset', ARC * (1 - frac));
+        document.getElementById('scoreNum').textContent = Math.round(score.after || 0);
+        var deltaEl = document.querySelector('.gauge-center .delta');
+        var delta = Math.round((score.after || 0) - (score.before || 0));
+        deltaEl.lastChild.textContent = ' ' + (delta >= 0 ? '+' : '') + delta;
+      }, 120);
+    });
+  }
+
+  /* ── run_id 가 있으면 실제 리포트를 fetch, 없으면 더미 데이터로 정적 프리뷰 ── */
+  var runId = new URLSearchParams(location.search).get('run_id');
+  if (runId) {
+    fetch(WEB_API_BASE + '/runs/' + runId + '/report')
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (b) { throw new Error(b.detail || ('리포트 조회 실패 (' + res.status + ')')); });
+        return res.json();
+      })
+      .then(function (data) {
+        renderReport(data, true);
+      })
+      .catch(function (err) {
+        var wrap = document.querySelector('.wrap');
+        var banner = document.createElement('div');
+        banner.style.cssText = 'margin:20px 0;padding:14px 18px;border:1px solid var(--critical);border-radius:10px;color:var(--critical);font-size:13.5px;';
+        banner.textContent = '리포트를 불러오지 못했습니다: ' + err.message + ' (더미 데이터로 표시합니다)';
+        wrap.insertBefore(banner, wrap.firstChild.nextSibling);
+        renderReport({}, false);
+      });
+  } else {
+    renderReport({}, false);
+  }
+})();
+</script>
+</body>
+</html>
