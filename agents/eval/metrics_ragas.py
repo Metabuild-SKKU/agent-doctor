@@ -181,12 +181,84 @@ _ASPECT_INSTRUCTION_TMPL = (
 _ASPECT_CONTRADICTION = ("Does the response contain information that contradicts the "
                          "retrieved context?")
 
+# ── Answer Correctness: TP/FP/FN 분류 (CorrectnessClassifierPrompt) ──
+#   ragas/metrics/collections/answer_correctness (0.4.3) 소스와 일치.
+#   답변·정답을 각각 문장으로 분해(위 StatementGenerator 재사용) 후, 답변 문장을 정답 기준
+#   TP/FP/FN 으로 분류 → factual F1. 최종 answer_correctness = w·factual_F1 + (1-w)·의미유사도.
+_CORRECTNESS_INSTRUCTION = (
+    "Given a ground truth and an answer statements, analyze each statement and classify them "
+    "in one of the following categories: TP (true positive): statements that are present in "
+    "answer that are also directly supported by the one or more statements in ground truth, "
+    "FP (false positive): statements present in the answer but not directly supported by any "
+    "statement in ground truth, FN (false negative): statements found in the ground truth but "
+    "not present in answer. Each statement can only belong to one of the categories. Provide a "
+    "reason for each classification."
+)
+_CORRECTNESS_EXAMPLES = [
+    (
+        {"question": "What powers the sun and what is its primary function?",
+         "answer": [
+             "The sun is powered by nuclear fission, similar to nuclear reactors on Earth.",
+             "The primary function of the sun is to provide light to the solar system.",
+         ],
+         "ground_truth": [
+             "The sun is powered by nuclear fusion, where hydrogen atoms fuse to form helium.",
+             "This fusion process in the sun's core releases a tremendous amount of energy.",
+             "The energy from the sun provides heat and light, which are essential for life on Earth.",
+             "The sun's light plays a critical role in Earth's climate system.",
+             "Sunlight helps to drive the weather and ocean currents.",
+         ]},
+        {"TP": [
+            {"statement": "The primary function of the sun is to provide light to the solar system.",
+             "reason": "This statement is somewhat supported by the ground truth mentioning the sun providing light and its roles, though it focuses more broadly on the sun's energy."},
+         ],
+         "FP": [
+            {"statement": "The sun is powered by nuclear fission, similar to nuclear reactors on Earth.",
+             "reason": "This statement is incorrect and contradicts the ground truth which states that the sun is powered by nuclear fusion."},
+         ],
+         "FN": [
+            {"statement": "The sun is powered by nuclear fusion, where hydrogen atoms fuse to form helium.",
+             "reason": "This accurate statement about the sun's power source is not included in the answer."},
+            {"statement": "This fusion process in the sun's core releases a tremendous amount of energy.",
+             "reason": "This process and its significance are not mentioned in the answer."},
+            {"statement": "The energy from the sun provides heat and light, which are essential for life on Earth.",
+             "reason": "The answer only mentions light, omitting the essential aspects of heat and its necessity for life, which the ground truth covers."},
+            {"statement": "The sun's light plays a critical role in Earth's climate system.",
+             "reason": "This broader impact of the sun's light on Earth's climate system is not addressed in the answer."},
+            {"statement": "Sunlight helps to drive the weather and ocean currents.",
+             "reason": "The effect of sunlight on weather patterns and ocean currents is omitted in the answer."},
+         ]},
+    ),
+    (
+        {"question": "What is the boiling point of water?",
+         "answer": ["The boiling point of water is 100 degrees Celsius at sea level"],
+         "ground_truth": [
+             "The boiling point of water is 100 degrees Celsius (212 degrees Fahrenheit) at sea level.",
+             "The boiling point of water can change with altitude.",
+         ]},
+        {"TP": [
+            {"statement": "The boiling point of water is 100 degrees Celsius at sea level",
+             "reason": "This statement is directly supported by the ground truth which specifies the boiling point of water as 100 degrees Celsius at sea level."},
+         ],
+         "FP": [],
+         "FN": [
+            {"statement": "The boiling point of water can change with altitude.",
+             "reason": "This additional information about how the boiling point of water changes with altitude is not mentioned in the answer."},
+         ]},
+    ),
+]
+# answer_correctness = weights[0]·factual_F1 + weights[1]·의미유사도 (ragas 기본 [0.75, 0.25])
+_ANSWER_CORRECTNESS_WEIGHTS = (0.75, 0.25)
+
+
 # 출력 JSON 스키마 힌트 (BasePrompt.to_string 의 output_schema 자리)
 _SCHEMA_STATEMENTS = '{"properties": {"statements": {"items": {"type": "string"}, "type": "array"}}, "required": ["statements"]}'
 _SCHEMA_NLI = '{"properties": {"statements": {"items": {"properties": {"statement": {"type": "string"}, "reason": {"type": "string"}, "verdict": {"type": "integer"}}, "required": ["statement", "reason", "verdict"], "type": "object"}, "type": "array"}}, "required": ["statements"]}'
 _SCHEMA_RELEVANCY = '{"properties": {"question": {"type": "string"}, "noncommittal": {"type": "integer"}}, "required": ["question", "noncommittal"]}'
 _SCHEMA_VERDICT = '{"properties": {"reason": {"type": "string"}, "verdict": {"type": "integer"}}, "required": ["reason", "verdict"]}'
 _SCHEMA_RECALL = '{"properties": {"classifications": {"items": {"properties": {"statement": {"type": "string"}, "reason": {"type": "string"}, "attributed": {"type": "integer"}}, "required": ["statement", "reason", "attributed"], "type": "object"}, "type": "array"}}, "required": ["classifications"]}'
+_TPFPFN_ITEM = '{"items": {"properties": {"statement": {"type": "string"}, "reason": {"type": "string"}}, "required": ["statement", "reason"], "type": "object"}, "type": "array"}'
+_SCHEMA_CORRECTNESS = '{"properties": {"TP": ' + _TPFPFN_ITEM + ', "FP": ' + _TPFPFN_ITEM + ', "FN": ' + _TPFPFN_ITEM + '}, "required": ["TP", "FP", "FN"]}'
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -221,21 +293,26 @@ def evaluate_real_track(record: EvalRecord, judge) -> dict:
         "faithfulness": _faithfulness(judge, q, ans, ctx),
         "response_relevancy": _response_relevancy(judge, q, ans),
     }
-    if ref:  # reference 있어야 Context Precision/Recall(WithReference) 계산 가능
+    if ref:  # reference 있어야 Context Precision/Recall(WithReference)·AnswerCorrectness 계산 가능
         out["context_precision"] = _context_precision(judge, q, ref, ctx)
         out["context_recall"] = _context_recall(judge, q, ref, ctx)
+        out["answer_correctness"] = _answer_correctness(judge, q, ans, ref)
     return _drop_none(out)
 
 
 def evaluate_oracle_track(record: EvalRecord, judge) -> dict:
-    """gold context 로 생성한 답에 대한 지표. faithfulness, response_relevancy."""
+    """gold context 로 생성한 답에 대한 지표. faithfulness, response_relevancy, (+정답 있으면) answer_correctness."""
     q = record.probe.question
     ans = record.oracle_answer or ""
     ctx = record.oracle_context or record.retrieved_context
-    return _drop_none({
+    ref = record.probe.ground_truth
+    out = {
         "faithfulness": _faithfulness(judge, q, ans, ctx),
         "response_relevancy": _response_relevancy(judge, q, ans),
-    })
+    }
+    if ref:
+        out["answer_correctness"] = _answer_correctness(judge, q, ans, ref)
+    return _drop_none(out)
 
 
 def answer_similarity(record: EvalRecord, track: str):
@@ -274,14 +351,22 @@ def evaluate_aspect_critics(record: EvalRecord, judge) -> dict:
 #  RAGAS 지표 알고리즘 (소스와 동일)
 # ══════════════════════════════════════════════════════════════════
 
+def _decompose_statements(judge, question: str, text: str) -> list[str]:
+    """RAGAS StatementGenerator: 텍스트를 대명사 없는 독립 주장 문장들로 분해.
+    faithfulness·answer_correctness 가 공유(답변/정답 모두 이 형식으로 분해)."""
+    if not (text or "").strip():
+        return []
+    d = _chat(judge, _ragas_prompt(_FAITH_STMT_INSTRUCTION, _SCHEMA_STATEMENTS,
+                                   _FAITH_STMT_EXAMPLES, {"question": question, "answer": text}))
+    return [s for s in _as_list(d, "statements") if isinstance(s, str) and s.strip()]
+
+
 def _faithfulness(judge, question: str, answer: str, contexts: list[str]):
     """RAGAS Faithfulness (2단계): 답변→문장 분해 → 각 문장 NLI 판정 → 지지 비율."""
     if not (answer or "").strip() or not contexts:
         return None
     # 1. 문장 분해: 검증가능한 주장들로 분해
-    d1 = _chat(judge, _ragas_prompt(_FAITH_STMT_INSTRUCTION, _SCHEMA_STATEMENTS,
-                                    _FAITH_STMT_EXAMPLES, {"question": question, "answer": answer}))
-    statements = [s for s in _as_list(d1, "statements") if isinstance(s, str) and s.strip()]
+    statements = _decompose_statements(judge, question, answer)
     if not statements:
         return None
     # 2. NLI 판정: 각 주장이 컨텍스트만으로 추론 가능한지 판단
@@ -293,6 +378,36 @@ def _faithfulness(judge, question: str, answer: str, contexts: list[str]):
         return None
     supported = sum(1 for v in verdicts if _truthy(v.get("verdict")))
     return supported / len(verdicts)
+
+
+def _answer_correctness(judge, question: str, answer: str, reference: str):
+    """RAGAS AnswerCorrectness: 답변↔정답(gold) 비교 점수(0~1).
+    factual F1(답변 문장을 정답 기준 TP/FP/FN 분류) 와 의미유사도(임베딩 코사인)의 가중합.
+    답변/정답이 없으면 None. lexical answer_match 오통과를 강등하는 gold-비교 신호."""
+    if not (answer or "").strip() or not (reference or "").strip():
+        return None
+    ans_stmts = _decompose_statements(judge, question, answer)
+    ref_stmts = _decompose_statements(judge, question, reference)
+    if not ans_stmts or not ref_stmts:
+        return None
+    # 답변 문장을 정답 기준 TP/FP/FN 으로 분류 → factual F1
+    d = _chat(judge, _ragas_prompt(_CORRECTNESS_INSTRUCTION, _SCHEMA_CORRECTNESS, _CORRECTNESS_EXAMPLES,
+                                   {"question": question, "answer": ans_stmts, "ground_truth": ref_stmts}))
+    tp, fp, fn = len(_as_list(d, "TP")), len(_as_list(d, "FP")), len(_as_list(d, "FN"))
+    denom = tp + 0.5 * (fp + fn)
+    if denom <= 0:
+        return None
+    factual_f1 = tp / denom
+    # 의미 유사도(답변↔정답 임베딩 코사인). 임베딩 실패 시 factual 만 사용.
+    w_f, w_s = _ANSWER_CORRECTNESS_WEIGHTS
+    try:
+        vecs = _embed(judge, [reference, answer])
+    except Exception:
+        vecs = None
+    if not vecs or len(vecs) < 2:
+        return factual_f1
+    sim = max(_cosine(vecs[0], vecs[1]), 0.0)
+    return w_f * factual_f1 + w_s * sim
 
 
 def _response_relevancy(judge, question: str, answer: str):

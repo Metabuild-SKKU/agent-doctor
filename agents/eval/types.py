@@ -32,6 +32,11 @@ RAGAS_CONTEXT_PRECISION_MIN = 0.7
 RAGAS_CONTEXT_RECALL_MIN = 0.7
 RAGAS_RESPONSE_RELEVANCY_MIN = 0.7
 
+# 정답 강등 임계값 — RAGAS answer_correctness(답변↔gold 비교, tier3).
+# lexical answer_match(F1_PASS_THRESHOLD)는 통과했지만 이 값 미만이면 '표면형만 비슷한
+# 근접 오답(부정문·3월↔3일 등)'으로 보고 성공 판정을 강등한다. DEEP+ 에서만 적용.
+ANSWER_CORRECTNESS_MIN = 0.5
+
 # STEP5 최종 판정
 # graph.route_after_eval() 이 이 값 기반 pass_threshold 로 Serve/Optimize 를 분기한다.
 # 스케일 주의: overall_score 는 0~1 (RAGAS 가중 평균 또는 규칙 지표 평균). 설계 문서가 언급하는

@@ -7,8 +7,10 @@ agents/eval/signals.py
   · memoize: 비싼 신호는 _cache 로 record.signals(=state 캐시)에 저장 → 재진단 시 재사용.
   · 진단 계산(지표·RAGAS·재검색)은 전부 여기서 lazy 로 계산된다.
 
-성공/실패 판정은 recall(검색) + answer_match(정답 일치) 로 결정한다. RAGAS(tier3)는
-실패로 판정된 뒤 생성 원인(B)을 세분화하는 데만 쓴다.
+성공/실패 판정은 recall(검색) + answer_match(정답 일치) 로 결정한다. DEEP+ 에서는 RAGAS
+answer_correctness(답변↔gold 비교)가 문턱 미만이면 lexical 통과를 '강등'해 근접 오답
+(부정문·3월↔3일 등)을 거른다. 그 외 RAGAS(faithfulness/relevancy)는 실패 판정 뒤 생성 원인(B)
+세분화에만 쓴다.
 
 tier / 사용 자원:
   tier1 순수 규칙 · tier2 추가 검색 쿼리(top-N 재검색·BM25·코퍼스) · tier3 LLM/RAGAS.
@@ -22,7 +24,7 @@ contextvars 로 교체해야 한다.)
 from __future__ import annotations
 
 from agents.eval.types import (
-    Mode, EvalRecord, DEFAULT_TOP_K, F1_PASS_THRESHOLD,
+    Mode, EvalRecord, DEFAULT_TOP_K, F1_PASS_THRESHOLD, ANSWER_CORRECTNESS_MIN,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
 )
 from agents.eval.metrics import (
@@ -134,8 +136,9 @@ def _compute_ragas(record: EvalRecord) -> None:
 
 
 # ── 전제 신호 (성공/실패 판정 · 슬롯 self-scope) ───────────
-#   성공/실패는 recall(검색) + answer_match(정답 일치)로 결정한다. RAGAS(tier3)는
-#   실패로 판정된 뒤 생성 원인(B)을 세분화하는 데만 쓰이고, 성공 게이트엔 관여하지 않는다.
+#   성공/실패는 recall(검색) + answer_match(정답 일치)로 결정한다. DEEP+ 에서는 RAGAS
+#   answer_correctness(답변↔gold 비교)가 낮으면 lexical 통과를 '강등'해 근접 오답을 거른다.
+#   그 외 RAGAS(faithfulness/relevancy)는 실패 판정 뒤 생성 원인(B) 세분화에만 쓴다.
 
 def _recall_ok(record: EvalRecord) -> bool:
     """gold 를 top-k 로 다 가져옴(recall==1). (recall==-1 = gold 없음 → 검색 성공으로 본다.)"""
@@ -145,13 +148,22 @@ def _retrieval_failed(record: EvalRecord) -> bool:
     """gold 가 있는데 top-k 로 다 못 가져옴(0 <= recall < 1). 검색 원인(A) 공통 전제."""
     return 0 <= record.recall_at_k < 1
 
+def _answer_ok(record: EvalRecord, track: str, lexical: float) -> bool:
+    """정답 판정(레이어드): lexical answer_match 통과가 기본. 단 DEEP+ 에서 gold-비교
+    신호(RAGAS answer_correctness)가 측정되고 문턱 미만이면 '표면형만 비슷한 근접 오답'
+    으로 보고 강등한다(FAST/STANDARD 는 ac=None → 순수 lexical 판정, 결정적)."""
+    if lexical < F1_PASS_THRESHOLD:
+        return False
+    ac = _answer_correctness(record, track)
+    return not (ac is not None and ac < ANSWER_CORRECTNESS_MIN)
+
 def _f1_ok(record: EvalRecord) -> bool:
-    """실제 답이 정답과 일치(answer_match >= 문턱). ground_truth 없으면 판정 불가 → False."""
-    return bool(record.probe.ground_truth) and record.f1_score >= F1_PASS_THRESHOLD
+    """실제 답이 정답과 일치. ground_truth 없으면 판정 불가 → False."""
+    return bool(record.probe.ground_truth) and _answer_ok(record, "real", record.f1_score)
 
 def _oracle_ok(record: EvalRecord) -> bool:
     """gold 컨텍스트로 생성한 답이 정답과 일치. oracle 답 없으면 False."""
-    return record.oracle_answer is not None and record.oracle_f1 >= F1_PASS_THRESHOLD
+    return record.oracle_answer is not None and _answer_ok(record, "oracle", record.oracle_f1)
 
 def _generation_failed(record: EvalRecord) -> bool:
     """생성 실패 전제(B 공통): gold 컨텍스트로도 답이 틀림, 또는 무응답인데 답을 지어냄."""
@@ -434,6 +446,18 @@ def _ensure_ragas(record: EvalRecord, track: str):
     elif not record.ragas_done:
         record.ragas_done = True
         record.ragas = _ctx.ragas_fn(record, "real") or {}
+
+
+def _answer_correctness(record: EvalRecord, track: str):
+    """RAGAS answer_correctness(답변↔gold 비교) — tier3, DEEP+ (lazy·memoize).
+    성공/실패 게이트의 '강등' 신호: lexical answer_match 오통과(부정문·근접 오답)를 거른다.
+    0~1 실수 / None(미측정·DEEP 미만·자원 없음).  track: 'real' | 'oracle'."""
+    if _active_mode < Mode.DEEP:       # 비용 게이트
+        return None
+    _ensure_ragas(record, track)
+    ragas = record.oracle_ragas if track == "oracle" else record.ragas
+    value = ragas.get("answer_correctness")
+    return value if isinstance(value, (int, float)) else None
 
 
 def _faith(record: EvalRecord):
