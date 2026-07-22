@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 import uuid
 from collections import Counter
@@ -368,13 +369,8 @@ def _fallback_embedding(text: str, vector_dim: int) -> list[float]:
     return [value / norm for value in vector]
 
 
-def embed(
-    text: str,
-    model_name: str = DEFAULT_EMBEDDING_MODEL,
-    vector_dim: int | None = None,
-) -> list[float]:
-    # sentence-transformers가 있으면 실제 모델, 없으면 fallback을 쓴다.
-    dimension = int(vector_dim or VECTOR_DIM)
+def _get_embedding_model(model_name: str) -> Any | None:
+    # 프로세스 내 1회 로드(전역 캐시). 실패 시 None → 호출부가 fallback 사용.
     if model_name not in _models and model_name not in _failed_models:
         try:
             from sentence_transformers import SentenceTransformer
@@ -383,11 +379,54 @@ def embed(
         except Exception as exc:
             _failed_models.add(model_name)
             print(f"[Index] 임베딩 모델 로드 실패, deterministic fallback 사용: {exc}")
+    return _models.get(model_name)
 
-    model = _models.get(model_name)
+
+def embed(
+    text: str,
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+    vector_dim: int | None = None,
+) -> list[float]:
+    # sentence-transformers가 있으면 실제 모델, 없으면 fallback을 쓴다.
+    dimension = int(vector_dim or VECTOR_DIM)
+    model = _get_embedding_model(model_name)
     if model is None:
         return _fallback_embedding(text, dimension)
     return model.encode(text, normalize_embeddings=True).tolist()
+
+
+def embed_batch(
+    texts: list[str],
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+    vector_dim: int | None = None,
+    batch_size: int | None = None,
+) -> list[list[float]]:
+    """텍스트 리스트를 배치 인코딩한다(색인용). 결과는 입력 순서 그대로.
+
+    batch_size: None → env INDEX_EMBED_BATCH(기본 32). 1이면 텍스트별 단건
+    encode 루프로 폴백해 기존 embed() 결과와 완전히 동일하게 만든다(kill-switch).
+    질의 임베딩은 계속 단건 embed()를 쓴다 — 저장 벡터만 같은 방식으로 일괄
+    전환되므로 배치 인코딩의 float 미세차가 검색 순위 비교를 왜곡하지 않는다.
+    """
+    if not texts:
+        return []
+    dimension = int(vector_dim or VECTOR_DIM)
+    if batch_size is None:
+        try:
+            batch_size = int(os.getenv("INDEX_EMBED_BATCH", "32"))
+        except ValueError:
+            batch_size = 32
+    model = _get_embedding_model(model_name)
+    if model is None:
+        return [_fallback_embedding(text, dimension) for text in texts]
+    if batch_size <= 1:
+        return [model.encode(text, normalize_embeddings=True).tolist() for text in texts]
+    return [
+        vector.tolist()
+        for vector in model.encode(
+            texts, normalize_embeddings=True, batch_size=batch_size
+        )
+    ]
 
 
 def count_tokens(

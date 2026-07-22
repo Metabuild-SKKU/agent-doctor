@@ -17,6 +17,7 @@ from agents.index.qdrant_store import (
     build_sparse_vector,
     count_tokens,
     embed,
+    embed_batch,
 )
 from agents.rag.retriever import get_retriever
 from core.schema import Chunk, Document
@@ -47,6 +48,9 @@ class IndexTools:
     count_tokens: Callable[..., int]
     build_sparse_vector: Callable[..., dict]
     build_graph_artifacts: Callable[..., dict]
+    # 배치 임베딩(없으면 단건 embed 루프 폴백) — 필드 끝에 default 로 두어
+    # embed 만 주입하는 기존 테스트/실험 코드가 그대로 동작한다.
+    embed_batch: Callable[..., list[list[float]]] | None = None
 
 
 # Ingest가 넘겨준 Document도 Index 경계에서 한 번 더 확인한다.
@@ -352,6 +356,7 @@ def _default_tools() -> IndexTools:
         count_tokens=count_tokens,
         build_sparse_vector=build_sparse_vector,
         build_graph_artifacts=build_graph_artifacts,
+        embed_batch=embed_batch,
     )
 
 
@@ -581,18 +586,34 @@ def _process_document(
         f"(strategy={chunk_strategy})"
     )
 
-    document_chunks: list[Chunk] = []
+    # pass 1: dedup 판정(해시 기반 — 임베딩과 무관하므로 판정 결과는 기존과 동일)
+    survivors: list[tuple[_ChunkDraft, str]] = []
     for draft in drafts:
         chunk_hash = _sha256(draft.text)
         if _is_duplicate(chunk_hash):
             continue
         new_hashes.add(chunk_hash)
+        survivors.append((draft, chunk_hash))
 
-        vector = tools.embed(
-            draft.text,
+    # pass 2: 살아남은 draft 를 한 번에 배치 임베딩(없으면 기존 단건 루프)
+    if tools.embed_batch is not None:
+        vectors = tools.embed_batch(
+            [draft.text for draft, _ in survivors],
             model_name=config["embedding_model"],
             vector_dim=config.get("embedding_dimension"),
         )
+    else:
+        vectors = [
+            tools.embed(
+                draft.text,
+                model_name=config["embedding_model"],
+                vector_dim=config.get("embedding_dimension"),
+            )
+            for draft, _ in survivors
+        ]
+
+    document_chunks: list[Chunk] = []
+    for (draft, chunk_hash), vector in zip(survivors, vectors):
         chunk_index = len(document_chunks)
         char_span = (draft.start, draft.end)
         metadata = _chunk_metadata(
