@@ -82,11 +82,17 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 return state
 
             result = optimizer.run(request)
-            if result.metadata.get("error_code") != "baseline_selected":
+            # skipped 처방(baseline 무개선·적용 불가 경로·빈 search space)이면 포기하지 않고
+            # 그 처방을 블랙리스트에 넣어 다음 우선순위 처방으로 넘어간다. 한 라벨의 처방이
+            # 막혀도(예: enable_reranker 는 reranker 미연동으로 적용 불가) 다른 actionable
+            # finding 이 처방받을 기회를 준다. (issue #26)
+            if result.status != "skipped":
                 break
 
             prescription_id = (
-                result.selected_candidate.id if result.selected_candidate else None
+                result.selected_candidate.id
+                if result.selected_candidate
+                else (request.candidates[0].id if request.candidates else None)
             )
             rejection = (request.failure_label, prescription_id)
             if not prescription_id or rejection in state.blacklist:
