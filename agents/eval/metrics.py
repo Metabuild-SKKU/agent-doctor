@@ -8,54 +8,116 @@ STEP3-1: 규칙 기반(LLM 불필요) 지표 계산
 외부 API·모델 없이 항상 동작한다.
 
 [구현 포인트]
-  - 토큰화가 공백 기준이라 한국어 조사/어미를 분리하지 못한다.
-    형태소 분석기(kiwi, mecab) 도입 시 `_tokenize()` 만 교체하면 된다.
+  - 정답 매칭은 KorQuAD 공식 지표를 따른다: normalize_answer(구두점 제거·소문자화·공백정리)
+    후 '문자 단위(bag-of-characters) F1'. 한국어는 완벽한 형태소 분석기가 없고 어절 단위
+    F1이 F1 취지를 못 살려서, KorQuAD 1.0 이 문자 단위를 표준으로 채택했다.
+    (근거: KorQuAD 1.0 논문 / evaluate-v1.0.py)
+  - 문자 단위라 조사·어미·숫자 포맷(1,450↔1450, 14:33↔14시33분) 차이가 대부분 흡수된다.
+    단 부정·근접오답 같은 의미 판정은 문자 겹침으로 못 잡으므로 tier3(RAGAS)가 담당한다.
   - 설계상 추가 지표(Precision, MRR, nDCG, No-Hit, EHR, Number Match 등)는
     여기에 함수로 덧붙여 확장한다.
 """
 from __future__ import annotations
 
-import re
+import string
 from collections import Counter
 
 
-# ── 토큰화 ────────────────────────────────────────────────────────
+# ── 정규화 (KorQuAD 공식 normalize_answer) ────────────────────────
+# KorQuAD 1.0 evaluate-v1.0.py 와 동일: 따옴표·괄호류 → 공백, 소문자화, ASCII 구두점 제거, 공백 정리.
+# 숫자·날짜 특수 규칙은 두지 않는다 — 콤마·콜론·하이픈은 구두점 제거로 흡수되고(1,450→1450,
+# 14:33→1433), 조사·어미·포맷 차이는 아래 '문자 단위' 채점이 흡수한다.
 
-_PUNCT = re.compile(r"[^\w가-힣]+")
+_REMOVE_CHARS = "'\"《》<>〈〉()" + "‘’“”"   # remove_: 따옴표·괄호류
+_REMOVE_TABLE = {ord(c): " " for c in _REMOVE_CHARS}
+_PUNCT_SET = set(string.punctuation)
 
 
-def _tokenize(text: str) -> list[str]:
-    """소문자화 + 구두점 제거 후 공백 분리. [구현 포인트] 형태소 분석기로 교체 가능."""
+def _normalize(text: str) -> str:
+    """KorQuAD normalize_answer: 따옴표·괄호류 → 공백 → 소문자화 → ASCII 구두점 제거 → 공백 정리."""
     if not text:
-        return []
-    text = _PUNCT.sub(" ", text.lower())
-    return [t for t in text.split() if t]
+        return ""
+    text = text.translate(_REMOVE_TABLE)                     # remove_
+    text = text.lower()                                      # lower
+    text = "".join(c for c in text if c not in _PUNCT_SET)   # remove_punc
+    return " ".join(text.split())                            # white_space_fix
 
 
-# ── 생성 지표 ─────────────────────────────────────────────────────
+def _chars(text: str) -> list[str]:
+    """정규화 후 '문자 리스트'(공백 제외) — KorQuAD F1 의 채점 단위(bag of characters)."""
+    return [c for tok in _normalize(text).split() for c in tok]
 
-def token_f1(prediction: str, reference: str) -> float:
-    """
-    답변(prediction)과 정답(reference)의 토큰 겹침 F1.
-        Precision = 겹친 토큰 수 / 답변 토큰 수
-        Recall    = 겹친 토큰 수 / 정답 토큰 수
-        F1        = 2PR / (P+R)
-    reference 가 없으면(=정답 미보유) 계산 불가 → 0.0.
-    """
-    pred_tokens = _tokenize(prediction)
-    ref_tokens = _tokenize(reference)
-    if not pred_tokens or not ref_tokens:
+
+# ── 생성 지표 (KorQuAD 문자 단위) ─────────────────────────────────
+
+def char_f1(prediction: str, reference: str) -> float:
+    """KorQuAD 공식 문자 단위 F1 (bag-of-characters).
+        Precision = 겹친 문자 수 / 답변 문자 수,  Recall = 겹친 문자 수 / 정답 문자 수,  F1 = 2PR/(P+R)
+    한국어는 완벽한 형태소 분석기가 없어 어절 단위 F1이 부적절 → KorQuAD가 문자 단위를 표준으로 쓴다.
+    reference 없으면(정답 미보유) 0.0."""
+    pred = _chars(prediction)
+    ref = _chars(reference)
+    if not pred or not ref:
         return 0.0
-
-    # 다중 등장 토큰까지 고려한 겹침 수(멀티셋 교집합)
-    common = Counter(pred_tokens) & Counter(ref_tokens)
-    overlap = sum(common.values())
-    if overlap == 0:
+    num_same = sum((Counter(pred) & Counter(ref)).values())   # 멀티셋 교집합(문자 중복 고려)
+    if num_same == 0:
         return 0.0
-
-    precision = overlap / len(pred_tokens)
-    recall = overlap / len(ref_tokens)
+    precision = num_same / len(pred)
+    recall = num_same / len(ref)
     return 2 * precision * recall / (precision + recall)
+
+
+# 하위호환 별칭 — 기존 호출부(signals._ablation_helps, tests)가 token_f1 이름을 쓴다.
+# 이제 어절이 아니라 KorQuAD 문자 단위 F1이다.
+token_f1 = char_f1
+
+
+def exact_match(prediction: str, reference: str) -> bool:
+    """KorQuAD 공식 EM — 정규화 문자열 완전 일치."""
+    return _normalize(prediction) == _normalize(reference)
+
+
+# ── 정답 매칭 (KorQuAD 문자 F1 + 짧은 정답 문자-recall) ───────────
+# char_f1 도 결국 F1(P·R 조화평균)이라, gold 가 짧은 추출형 span 인데 답변이 완결 문장이면
+# 프레이밍 문자에 precision 이 깎인다. 짧은 정답은 recall(정답 문자가 답변에 담겼나)만 보는 게
+# 추출형 QA 의 정석 — 표준 char-F1 위에 얹는 확장이다.
+
+_SHORT_REF_MAX_CHARS = 10   # 정규화 후 정답 문자 수 이하면 '짧은 정답'으로 보고 recall 경로 허용
+_CONTAINMENT_MIN = 0.9      # 짧은 정답은 recall 이 이 이상(정답이 거의 다 담김)일 때만 recall 로 통과
+
+
+def char_recall(prediction: str, reference: str) -> float:
+    """정답 문자가 답변에 담긴 비율(문자 단위 recall = 겹친 문자 / 정답 문자).
+    Counter 멀티셋 교집합으로 겹친 문자 수(중복 고려)를 세고 정답 문자 수로 나눈다.
+    답변 길이·순서·위치는 보지 않는다 — 완결 문장의 프레이밍 문자에 precision 이 깎이는 짧은 정답용."""
+    ref = _chars(reference)
+    if not ref:
+        return 0.0
+    pred = _chars(prediction)
+    num_same = sum((Counter(pred) & Counter(ref)).values())
+    return num_same / len(ref)
+
+
+def answer_match(prediction: str, reference: str) -> float:
+    """정답 매칭 점수(규칙 기반 tier1). 기준은 KorQuAD 문자 단위 F1이고, 짧은 정답(정규화 후 ≤10자)은
+    '정답 문자가 답변에 거의 다 담겼을 때(recall ≥ 0.9, containment)'에 한해 recall 로 통과시켜
+    완결 문장의 precision 감점을 피한다. reference 없으면 0.0.
+
+    recall 문턱(containment)을 둔 이유: 문턱 없이 max(f1, recall) 이면 정답 문자를 일부만 공유하는
+    근접 오답(gold '145' ↔ 답 '150' → recall 0.67)도 통과해 너무 후해진다. recall 을 '거의 완전
+    포함'으로 제한하면 verbose 정답(recall≈1.0, '332cm입니다')은 살리고 near-miss 오답은 char_f1 로 떨어진다.
+
+    [남는 한계] 부정/모순('사망'⊂'사망하지 않았다', recall=1.0)과 '3월'↔'3일'(char_f1=0.5)은
+    문자 단위로 못 거른다 → 의미 판정은 tier3(RAGAS), 관측은 EM 병기가 담당한다."""
+    ref = _chars(reference)
+    if not ref:
+        return 0.0
+    f1 = char_f1(prediction, reference)
+    if len(ref) <= _SHORT_REF_MAX_CHARS:
+        rc = char_recall(prediction, reference)
+        if rc >= _CONTAINMENT_MIN:              # 정답이 거의 다 담김 → recall 로 precision 감점 상쇄
+            return max(f1, rc)
+    return f1
 
 
 # ── 검색 지표 ─────────────────────────────────────────────────────
