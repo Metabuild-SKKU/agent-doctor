@@ -141,16 +141,20 @@ def _rule_means(records: list[EvalRecord]) -> dict:
     규칙 지표 평균 (관측·폴백 점수용).
       - recall : gold_chunk_ids 있는 record 만 (-1 제외)
       - f1/oracle : ground_truth 있는 record 만 (정답 없으면 무의미)
+      - exact_match : KorQuAD 공식 EM 평균 — 관측용으로만 남긴다(overall_score 는 recall·f1 만 씀).
     """
     recalls = [max(0.0, r.recall_at_k) for r in records if r.recall_at_k >= 0]
     gt = [r for r in records if r.probe.ground_truth]
     f1s = [r.f1_score for r in gt]
     oracles = [r.oracle_f1 for r in gt]
+    ems = [1.0 if r.exact_match else 0.0 for r in gt]
     out = {}
     if recalls:
         out["mean_recall_at_k"] = sum(recalls) / len(recalls)
     if f1s:
         out["mean_f1"] = sum(f1s) / len(f1s)
+    if ems:
+        out["mean_exact_match"] = sum(ems) / len(ems)   # KorQuAD EM (F1 과 나란히, 관측)
     if oracles:
         out["mean_oracle_f1"] = sum(oracles) / len(oracles)
     return out
@@ -192,6 +196,9 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     print(f"[Eval] STEP5: 리포트 생성 - probe {n}개, 실패 {fail}개, "
           f"overall={report.overall_score}, pass={report.pass_threshold} (모드 {fs.get('mode')})")
     print(f"[Eval]        종합점수: {format_composite(report.composite_score)}")
+    rs = report.ragas_scores
+    if "mean_f1" in rs:   # KorQuAD식 관측 지표: F1 과 EM 을 나란히
+        print(f"[Eval]        정답매칭(관측): F1={rs['mean_f1']:.3f}  EM={rs.get('mean_exact_match', 0.0):.3f}")
     if report.findings:
         # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
         # (타입=처방 그룹 4종, 라벨=세분화 진단명. 타입만 보면 gap 처럼 뭉뚱그려져 원인이 안 보인다.)

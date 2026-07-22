@@ -193,6 +193,7 @@ class EvalRecord:
     recall_at_k: float = 0.0
     f1_score: float = 0.0
     oracle_f1: float = 0.0
+    exact_match: bool = False        # KorQuAD 공식 EM — 리포트 관측용(게이트·overall_score 미반영)
 
     # STEP3-2: LLM(RAGAS) 지표 — diagnose 가 lazy 로 채움
     ragas: dict = field(default_factory=dict)          # 실제 트랙

@@ -26,6 +26,7 @@ from agents.eval.metrics import (
     span_recall_at_k,
     token_f1,
     answer_match,
+    exact_match,
     is_abstention,
 )
 
@@ -111,9 +112,11 @@ def _compute_metrics(record: EvalRecord) -> None:
         if span_recall is not None
         else recall_at_k(record.probe.gold_chunk_ids, record.retrieved_chunk_ids)
     )
-    # answer_match: 정규화(숫자·시간 포맷)+짧은 정답 recall 위주 — 표면형에 강건한 tier1 정답 매칭.
+    # answer_match: KorQuAD 문자 F1(+짧은 정답 recall) — 표면형에 강건한 tier1 정답 매칭.
     record.f1_score = answer_match(record.generated_answer, gt) if gt else 0.0
     record.oracle_f1 = answer_match(record.oracle_answer, gt) if (gt and record.oracle_answer) else 0.0
+    # KorQuAD 공식 EM — 관측용으로만 남긴다(게이트·overall_score 미반영, 리포트에 F1 과 나란히).
+    record.exact_match = exact_match(record.generated_answer, gt) if gt else False
 
 
 def _compute_ragas(record: EvalRecord) -> None:
