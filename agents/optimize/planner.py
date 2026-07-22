@@ -1103,6 +1103,8 @@ def _build_request(
     use_internal = candidate_count > 1
     metadata: dict[str, Any] = {
         # 후보별 trade-off의 최종 심판은 항상 Eval의 단일 overall_score다.
+        # (composite 로 바꾸지 말 것 — 탐색 신호는 매끄러운 overall 이어야 한다.
+        #  근거는 history.judge 의 "탐색 신호는 overall 이어야 한다" 주석 참고.)
         "primary_metric": "overall_score",
         "study_baseline_config": dict(state.index_config),
         "baseline_metrics": _report_metrics(state),

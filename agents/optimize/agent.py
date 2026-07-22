@@ -309,12 +309,18 @@ def _finish_internal_study(
         item.after_metrics = best_metrics
     item.status = "applied" if verdict.keep else "failed"
     item.rollback_reason = None if verdict.keep else verdict.reason
+    # 표시·게이트용 종합점수(0~100). before 는 baseline 리포트에서, after 는 baseline
+    # 복원 시 before 와 동일(설정을 되돌렸으므로), 아니면 sweep 이 full report 를 남기지
+    # 않아 미상(None) — 표시부가 fallback 한다.
+    before_composite = history._read_composite(item.metadata.get("before_report"))
     item.metadata.update(
         {
             "pending": False,
             "active_study": False,
             "before_score": verdict.before_score,
             "after_score": verdict.after_score,
+            "before_composite": before_composite,
+            "after_composite": before_composite if baseline_selected else None,
             "best_config": dict(result.best_config or {}),
         }
     )

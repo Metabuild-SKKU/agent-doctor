@@ -44,9 +44,16 @@ class PassesTest(unittest.TestCase):
 class _FakeReport:
     pass_threshold: bool
     ragas_scores: dict = field(default_factory=dict)
+    composite_score: dict = None  # None → pass_threshold 로 폴백(구버전·측정불가)
+
+
+def _composite(total):
+    return {"total": total, "components": []}
 
 
 class PassesReportTest(unittest.TestCase):
+    """composite 미측정(None) → pass_threshold 승계. 아래는 그 폴백 경로 검증."""
+
     def test_none_report_not_passing(self):
         self.assertFalse(gate.passes_report(None))
 
@@ -64,6 +71,29 @@ class PassesReportTest(unittest.TestCase):
 
     def test_score_fail_report_not_passing(self):
         r = _FakeReport(False, {"mean_recall_at_k": 0.9})
+        self.assertFalse(gate.passes_report(r))
+
+
+class PassesReportCompositeTest(unittest.TestCase):
+    """composite 가 있으면 그 값(품질×신뢰도)으로 게이트를 판정한다."""
+
+    def test_high_composite_passes_even_if_pass_threshold_false(self):
+        # composite 89 → 통과. overall 기반 pass_threshold 가 False 여도 composite 가 이긴다.
+        r = _FakeReport(False, {"mean_recall_at_k": 0.9}, _composite(89))
+        self.assertTrue(gate.passes_report(r))
+
+    def test_low_composite_fails_even_if_pass_threshold_true(self):
+        # composite 12(품질 높아도 신뢰도 바닥) → 미통과. overall pass_threshold=True 여도 막는다.
+        r = _FakeReport(True, {"mean_recall_at_k": 0.9}, _composite(12))
+        self.assertFalse(gate.passes_report(r))
+
+    def test_composite_boundary(self):
+        r = _FakeReport(True, {"mean_recall_at_k": 0.9}, _composite(gate.COMPOSITE_PASS_THRESHOLD))
+        self.assertTrue(gate.passes_report(r))
+
+    def test_high_composite_still_needs_recall_floor(self):
+        # composite 통과여도 검색이 새면(recall<floor) 최적화로.
+        r = _FakeReport(False, {"mean_recall_at_k": 0.4}, _composite(89))
         self.assertFalse(gate.passes_report(r))
 
 
