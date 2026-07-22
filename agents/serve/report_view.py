@@ -27,7 +27,7 @@ _METRIC_LABELS = {
 }
 
 
-def build_report_view(state: AgentDoctorState) -> dict[str, Any]:
+def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> dict[str, Any]:
     report = state.report
     history = state.optimization_history or []
 
@@ -41,10 +41,11 @@ def build_report_view(state: AgentDoctorState) -> dict[str, Any]:
     overall_after = report.overall_score if report and report.overall_score is not None else 0.0
     overall_before = _first_score(history, overall_after)
 
+    depth_key = (depth or os.getenv("EVAL_MODE", "")).strip().lower()
     return {
         "meta": {
             "corpus": _corpus_label(state),
-            "depth": _EVAL_MODE_LABELS.get(os.getenv("EVAL_MODE", "").strip().lower(), "표준 검진"),
+            "depth": _EVAL_MODE_LABELS.get(depth_key, "표준 검진"),
             "question_count": len(state.probes),
             "created_at": report.created_at.isoformat() if report else "",
         },

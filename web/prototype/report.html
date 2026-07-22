@@ -508,6 +508,11 @@
 
   /* ── priority top3 ── */
   var SEV_LABEL = { critical: '치명', warning: '주의' };
+  var ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  function esc(v) {
+    if (v === null || v === undefined) return '';
+    return String(v).replace(/[&<>"']/g, function (c) { return ESC_MAP[c]; });
+  }
   function renderPriority(items) {
     var el = document.getElementById('prioList');
     if (!items.length) {
@@ -517,12 +522,12 @@
     el.innerHTML = items.map(function (p) {
       var sev = p.severity === 'critical' ? 'critical' : 'warning';
       return '<div class="prio-card sev-' + sev + '">' +
-        '<div class="prio-top"><span class="prio-grp">' + (p.group || '') + '</span><span class="badge ' + (sev === 'critical' ? 'crit' : 'warn') + '">' + (SEV_LABEL[p.severity] || p.severity) + '</span></div>' +
-        '<div class="prio-title">' + p.title + '</div>' +
-        '<div class="prio-desc">' + p.desc + '</div>' +
+        '<div class="prio-top"><span class="prio-grp">' + esc(p.group || '') + '</span><span class="badge ' + (sev === 'critical' ? 'crit' : 'warn') + '">' + esc(SEV_LABEL[p.severity] || p.severity) + '</span></div>' +
+        '<div class="prio-title">' + esc(p.title) + '</div>' +
+        '<div class="prio-desc">' + esc(p.desc) + '</div>' +
         '<div class="prio-foot"><span class="badge ' + (p.confirmed ? 'confirm' : 'prelim') + '">' +
           (p.confirmed ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>확정' : '의심') +
-        '</span> · 질문 ' + p.affected + '건 영향</div>' +
+        '</span> · 질문 ' + esc(p.affected) + '건 영향</div>' +
       '</div>';
     }).join('');
   }
@@ -651,25 +656,25 @@
     var scoreCls = r.score[2] === 'up' ? 'up' : 'down';
     var arrowUp = r.score[2] === 'up';
     var rowsHtml = r.drill.rows.length ? '<div class="sweep">' + r.drill.rows.map(function (s) {
-      return '<div class="sweep-row' + (s.win ? ' win' : '') + '"><span class="sweep-k' + (s.win ? ' win' : '') + '">' + s.k + '</span>' +
-        '<span class="sweep-bar"><i style="width:' + s.w + '%"></i></span><span class="sweep-val">' + s.val + '</span></div>';
+      return '<div class="sweep-row' + (s.win ? ' win' : '') + '"><span class="sweep-k' + (s.win ? ' win' : '') + '">' + esc(s.k) + '</span>' +
+        '<span class="sweep-bar"><i style="width:' + s.w + '%"></i></span><span class="sweep-val">' + esc(s.val) + '</span></div>';
     }).join('') + '</div>' : '';
     return '<div class="rx-card ' + r.state + '">' +
       '<div class="rx-main">' +
-        '<div class="rx-num">' + r.num + '</div>' +
+        '<div class="rx-num">' + esc(r.num) + '</div>' +
         '<div class="rx-body">' +
-          '<div class="rx-change">' + r.change[0] + ' <span style="color:var(--faint)">' + r.change[1] + '</span><span class="arrow">→</span>' + r.change[2] + '</div>' +
-          '<div class="rx-target">' + r.target + '</div>' +
-          '<div class="rx-reason"><span class="rl">' + r.reason[0] + '</span> ' + r.reason[1] + '</div>' +
+          '<div class="rx-change">' + esc(r.change[0]) + ' <span style="color:var(--faint)">' + esc(r.change[1]) + '</span><span class="arrow">→</span>' + esc(r.change[2]) + '</div>' +
+          '<div class="rx-target">' + esc(r.target) + '</div>' +
+          '<div class="rx-reason"><span class="rl">' + esc(r.reason[0]) + '</span> ' + esc(r.reason[1]) + '</div>' +
         '</div>' +
         '<div class="rx-right">' +
-          '<div class="rx-verdict ' + r.verdict[0] + '">' + (r.verdict[0] === 'keep' ? '✓' : '↩') + ' ' + r.verdict[1] + '</div>' +
-          '<div class="rx-scoredelta">종합 ' + r.score[0] + ' <b class="' + scoreCls + '">→ ' + r.score[1] + (arrowUp ? ' ↑' : ' ↓') + '</b></div>' +
+          '<div class="rx-verdict ' + r.verdict[0] + '">' + (r.verdict[0] === 'keep' ? '✓' : '↩') + ' ' + esc(r.verdict[1]) + '</div>' +
+          '<div class="rx-scoredelta">종합 ' + esc(r.score[0]) + ' <b class="' + scoreCls + '">→ ' + esc(r.score[1]) + (arrowUp ? ' ↑' : ' ↓') + '</b></div>' +
           '<div class="rx-expand">상세 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>' +
         '</div>' +
       '</div>' +
-      '<div class="rx-drill"><div class="drill-label">' + r.drill.label + '</div>' + rowsHtml +
-        '<div class="drill-caption">' + r.drill.caption + '</div></div>' +
+      '<div class="rx-drill"><div class="drill-label">' + esc(r.drill.label) + '</div>' + rowsHtml +
+        '<div class="drill-caption">' + esc(r.drill.caption) + '</div></div>' +
     '</div>';
   }
   function renderRxs(rxs) {
@@ -683,12 +688,12 @@
   function renderDxs(dxs) {
   document.getElementById('dxList').innerHTML = dxs.map(function (d) {
     return '<div class="dx-card">' +
-      '<div class="dx-top"><span class="dx-grp">' + d.grp + '</span><span class="badge ' + d.badge[0] + '">' +
-        (d.badge[0] === 'confirm' ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>' : '') + d.badge[1] + '</span></div>' +
-      '<div class="dx-title">' + d.title + '</div>' +
-      '<div class="dx-code">' + d.code + '</div>' +
-      '<div class="dx-desc" style="margin-top:9px">' + d.desc + '</div>' +
-      '<div class="dx-foot">' + d.foot + '<span class="rx-link">' + d.rx + '</span></div>' +
+      '<div class="dx-top"><span class="dx-grp">' + esc(d.grp) + '</span><span class="badge ' + d.badge[0] + '">' +
+        (d.badge[0] === 'confirm' ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>' : '') + esc(d.badge[1]) + '</span></div>' +
+      '<div class="dx-title">' + esc(d.title) + '</div>' +
+      '<div class="dx-code">' + esc(d.code) + '</div>' +
+      '<div class="dx-desc" style="margin-top:9px">' + esc(d.desc) + '</div>' +
+      '<div class="dx-foot">' + esc(d.foot) + '<span class="rx-link">' + esc(d.rx) + '</span></div>' +
     '</div>';
   }).join('');
   }
@@ -701,13 +706,13 @@
   document.getElementById('qaList').innerHTML = qas.map(function (x) {
     var afterTag = x.solved ? (okIcon + ' 처방 후') : (dashIcon + ' 미해결');
     return '<div class="qa-card ' + (x.solved ? 'solved' : 'unsolved') + '">' +
-      '<div class="qa-head"><span class="qm">Q</span><span class="qt">' + (x.q || '(질문 없이 처방 라벨 기준 확인됨)') + '</span><span class="ql">' + x.label + '</span></div>' +
-      '<div class="qa-gold"><span class="gl">기대 정답</span><b>' + (x.gold || '-') + '</b></div>' +
+      '<div class="qa-head"><span class="qm">Q</span><span class="qt">' + esc(x.q || '(질문 없이 처방 라벨 기준 확인됨)') + '</span><span class="ql">' + esc(x.label) + '</span></div>' +
+      '<div class="qa-gold"><span class="gl">기대 정답</span><b>' + esc(x.gold || '-') + '</b></div>' +
       '<div class="qa-ans">' +
-        '<div class="col before"><div class="tag">' + xIcon + ' 처방 전</div><div class="atext">"' + x.before + '"</div><div class="note">' + (x.bnote || '') + '</div></div>' +
-        '<div class="col after"><div class="tag">' + afterTag + '</div><div class="atext">' + (x.solved ? '"' + x.after + '"' : x.after) + '</div></div>' +
+        '<div class="col before"><div class="tag">' + xIcon + ' 처방 전</div><div class="atext">"' + esc(x.before) + '"</div><div class="note">' + esc(x.bnote || '') + '</div></div>' +
+        '<div class="col after"><div class="tag">' + afterTag + '</div><div class="atext">' + (x.solved ? '"' + esc(x.after) + '"' : esc(x.after)) + '</div></div>' +
       '</div>' +
-      '<div class="qa-fix"><span class="fl">처방</span><span>' + (x.fix || '미처방') + '</span></div>' +
+      '<div class="qa-fix"><span class="fl">처방</span><span>' + esc(x.fix || '미처방') + '</span></div>' +
     '</div>';
   }).join('');
   }

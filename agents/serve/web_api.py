@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -54,7 +55,9 @@ app.add_middleware(
 def _save_upload(run_id: str, upload: UploadFile) -> Path:
     run_dir = UPLOAD_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    dest = run_dir / (upload.filename or "document.pdf")
+    dest = (run_dir / f"{uuid.uuid4().hex}.pdf").resolve()
+    if run_dir.resolve() not in dest.parents:
+        raise HTTPException(status_code=400, detail="잘못된 업로드 경로입니다.")
     with dest.open("wb") as f:
         f.write(upload.file.read())
     return dest
@@ -99,52 +102,60 @@ def _summarize_stage_event(stage: str, snapshot: AgentDoctorState) -> tuple[str,
 
 
 # index.html 이 노출하는 depth 선택지(fast/standard/full) → EVAL_MODE 매핑.
-# "full"은 UI 상 가장 깊은 진단이므로 EVAL_MODE=deep 이상에서만 켜지는 RAGAS까지 실행한다.
-_DEPTH_TO_EVAL_MODE = {"fast": "fast", "standard": "standard", "full": "deep"}
+# "full"은 UI 상 가장 깊은 진단이므로 EVAL_MODE=full 에서만 켜지는 tier 4 검증까지 실행한다.
+_DEPTH_TO_EVAL_MODE = {"fast": "fast", "standard": "standard", "full": "full"}
+
+# Eval 에이전트가 EVAL_MODE/EVAL_ENABLE_LLM 을 프로세스 전역 환경변수로 읽기 때문에(agents/eval/types.py),
+# 백그라운드 스레드 여러 개가 동시에 그래프를 돌리면 서로 값을 덮어쓸 수 있다.
+# run 단위로 상태를 스레드에 넘기려면 Eval 내부까지 리팩터링해야 하므로, 대신 이 락으로
+# "환경변수 설정 → 그래프 실행" 구간 전체를 직렬화해 실행 중 값이 섞이지 않게 한다.
+_PIPELINE_LOCK = threading.Lock()
 
 
 def _run_pipeline_background(run_id: str, file_path: Path, depth: str) -> None:
     from core.run_logger import setup_run_logging
     setup_run_logging(prefix="web_run")  # Windows 콘솔 인코딩 문제로 print 가 예외를 던지지 않도록 보호
 
-    eval_mode = _DEPTH_TO_EVAL_MODE.get(depth, "standard")
-    os.environ["EVAL_MODE"] = eval_mode
-    os.environ["EVAL_ENABLE_LLM"] = "1" if eval_mode in ("deep", "full") else "0"
-
     run_registry.update(run_id, status="running")
-    graph = build_graph()
-    initial_state = AgentDoctorState(
-        source_url=str(file_path),
-        source_type="file",
-        status="running",
-    )
 
     try:
-        last_state: AgentDoctorState | None = None
-        seen_stage_done: set[str] = set()
+        with _PIPELINE_LOCK:
+            eval_mode = _DEPTH_TO_EVAL_MODE.get(depth, "standard")
+            os.environ["EVAL_MODE"] = eval_mode
+            os.environ["EVAL_ENABLE_LLM"] = "1" if eval_mode in ("deep", "full") else "0"
 
-        for snapshot in graph.stream(initial_state, stream_mode="values"):
-            state = AgentDoctorState(**snapshot) if isinstance(snapshot, dict) else snapshot
-            last_state = state
-
-            stage = state.current_agent
-            if not stage:
-                continue
-
-            marker = f"{stage}:{state.iteration}"
-            if marker in seen_stage_done:
-                continue
-            seen_stage_done.add(marker)
-
-            tag, text, kind = _summarize_stage_event(stage, state)
-            run_registry.add_event(run_id, stage=stage, tag=tag, text=text, kind=kind, ts=time.time())
-            run_registry.update(
-                run_id,
-                stage=stage,
-                iteration=state.iteration,
-                max_iterations=state.max_iterations,
-                percent=_percent_for(stage, done=True),
+            graph = build_graph()
+            initial_state = AgentDoctorState(
+                source_url=str(file_path),
+                source_type="file",
+                status="running",
             )
+
+            last_state: AgentDoctorState | None = None
+            seen_stage_done: set[str] = set()
+
+            for snapshot in graph.stream(initial_state, stream_mode="values"):
+                state = AgentDoctorState(**snapshot) if isinstance(snapshot, dict) else snapshot
+                last_state = state
+
+                stage = state.current_agent
+                if not stage:
+                    continue
+
+                marker = f"{stage}:{state.iteration}"
+                if marker in seen_stage_done:
+                    continue
+                seen_stage_done.add(marker)
+
+                tag, text, kind = _summarize_stage_event(stage, state)
+                run_registry.add_event(run_id, stage=stage, tag=tag, text=text, kind=kind, ts=time.time())
+                run_registry.update(
+                    run_id,
+                    stage=stage,
+                    iteration=state.iteration,
+                    max_iterations=state.max_iterations,
+                    percent=_percent_for(stage, done=True),
+                )
 
         if last_state is None or last_state.status == "error":
             error_msg = last_state.error if last_state else "파이프라인이 결과를 반환하지 않았습니다."
@@ -204,7 +215,8 @@ def run_report(run_id: str) -> dict:
     if run.status != "done" or run.final_state is None:
         raise HTTPException(status_code=409, detail="아직 완료되지 않았습니다.")
 
-    return build_report_view(run.final_state)
+    eval_mode = _DEPTH_TO_EVAL_MODE.get(run.depth, "standard")
+    return build_report_view(run.final_state, depth=eval_mode)
 
 
 if __name__ == "__main__":
