@@ -31,7 +31,7 @@ from core.parallel import parallel_map
 from core.state import AgentDoctorState
 
 from agents.eval.types import (
-    EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled,
+    EvalRecord, DEFAULT_TOP_K, Mode, resolve_mode, llm_eval_enabled,
     resolve_llm_concurrency, resolve_probe_source,
     PROBE_SOURCE_MADE, PROBE_SOURCE_TAXONOMY,
 )
@@ -200,6 +200,27 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 rec.generated_answer = answer
             else:
                 rec.oracle_answer = answer
+
+        # Phase B2(병렬): RAGAS 선계산 — probe×track 태스크를 동시 실행하고 *_done
+        # 플래그를 세워, Phase C 의 _compute_ragas→_ensure_ragas 가 캐시 히트만 하게
+        # 한다. _ragas_track 은 signals 전역과 무관한 모듈 함수라 병렬 구간에 안전.
+        # 게이트는 _compute_ragas 와 동일(mode >= DEEP); LLM 비활성·키없음은
+        # _ragas_track 이 {} 폴백이라 기존과 같은 동작으로 수렴한다.
+        # 동시성 1이면 태스크 순서가 기존 Phase C 호출 순서(probe별 real→oracle)와 일치.
+        if mode >= Mode.DEEP:
+            ragas_tasks: list[tuple[EvalRecord, str]] = []
+            for rec in records:
+                ragas_tasks.append((rec, "real"))
+                ragas_tasks.append((rec, "oracle"))
+            if concurrency > 1 and len(ragas_tasks) > 1:
+                print(f"[Eval] STEP3-2: RAGAS {len(ragas_tasks)}트랙 병렬 실행 (동시성 {concurrency})")
+            scores = parallel_map(lambda t: _ragas_track(t[0], t[1]) or {},
+                                  ragas_tasks, concurrency)
+            for (rec, track), score in zip(ragas_tasks, scores):
+                if track == "real":
+                    rec.ragas, rec.ragas_done = score, True
+                else:
+                    rec.oracle_ragas, rec.oracle_ragas_done = score, True
 
         # Phase C(순차): 지표·진단·로그 — diagnose 는 signals 전역·진단 캐시·tier2
         # 재검색을 쓰므로 병렬 구간 밖에서 실행한다.

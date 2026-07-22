@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from agents.index.agent import CHUNK_STRATEGIES, IndexTools, _chunk_document, _chunk_text, run
+from agents.index.agent import CHUNK_STRATEGIES, IndexTools, _chunk_document, run
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
     build_client,
@@ -49,11 +49,12 @@ class ChunkingTests(unittest.TestCase):
 
     def test_overlap_and_max_size_are_respected(self):
         source = "가나다라마바사 " * 30
-        chunks = _chunk_text(source, chunk_size=40, chunk_overlap=8)
+        document = _document("fixed-doc", source)
+        drafts = _chunk_document(document, chunk_size=40, chunk_overlap=8, strategy="fixed")
 
-        self.assertGreater(len(chunks), 1)
-        self.assertTrue(all(0 < len(text) <= 40 for text, _, _ in chunks))
-        self.assertTrue(all(source[start:end] == text for text, start, end in chunks))
+        self.assertGreater(len(drafts), 1)
+        self.assertTrue(all(0 < len(d.text) <= 40 for d in drafts))
+        self.assertTrue(all(document.content[d.start:d.end] == d.text for d in drafts))
 
     def test_markdown_section_is_preserved(self):
         document = _document(
@@ -124,6 +125,7 @@ class IndexRunTests(unittest.TestCase):
         return state
 
     @patch("agents.index.agent.get_retriever")
+    @patch("agents.index.agent.embed_batch", None)  # 단건 embed 폴백 경로로 강제
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
     def test_run_validates_deduplicates_and_writes_metadata(
         self, mock_embed, mock_get_retriever
@@ -152,6 +154,7 @@ class IndexRunTests(unittest.TestCase):
         mock_get_retriever.assert_called_once()
 
     @patch("agents.index.agent.get_retriever")
+    @patch("agents.index.agent.embed_batch", None)
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
     def test_same_signature_reuses_embeddings(
         self, first_embed, _mock_get_retriever
@@ -251,6 +254,7 @@ class IndexRunTests(unittest.TestCase):
         self.assertIn("chunk_strategy", result.error)
 
     @patch("agents.index.agent.get_retriever")
+    @patch("agents.index.agent.embed_batch", None)
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
     def test_chunk_stage_config_overrides_default_strategy(
         self, _mock_embed, _mock_get_retriever
@@ -293,6 +297,7 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertIn("문서 검증 실패", result.error)
 
+    @patch("agents.index.agent.embed_batch", None)
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
     def test_same_doc_id_with_different_content_skips_conflicting_document(self, _mock_embed):
         # 충돌 문서만 건너뛰고 먼저 들어온 문서는 정상 인덱싱되어야 한다.
@@ -312,6 +317,7 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(failed[0]["doc_id"], "same-id")
         self.assertIn("같은 doc_id", failed[0]["error"])
 
+    @patch("agents.index.agent.embed_batch", None)
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
     def test_partial_failure_preserves_valid_documents(self, _mock_embed):
         # 불량 문서 1개가 나머지 정상 문서들의 작업을 버리게 만들면 안 된다.
@@ -348,7 +354,8 @@ class IndexRunTests(unittest.TestCase):
                 raise RuntimeError("임베딩 일시 실패")
             return [1.0, 0.0, 0.0, 0.0]
 
-        with patch("agents.index.agent.embed", side_effect=flaky_embed):
+        with patch("agents.index.agent.embed_batch", None), \
+                patch("agents.index.agent.embed", side_effect=flaky_embed):
             result = run(state)
 
         self.assertEqual(result.status, "indexed")

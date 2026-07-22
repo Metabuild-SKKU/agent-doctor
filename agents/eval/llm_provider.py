@@ -13,10 +13,14 @@ from __future__ import annotations
 import json
 import os
 
+from core.llm_clients import (
+    GITHUB_MODELS_BASE_URL,
+    gemini_chat,
+    gemini_embed,
+    openai_chat,
+    openai_embed,
+)
 from core.llm_retry import run_with_retry
-from core.llm_usage import log_usage
-
-GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 
 
 def _provider() -> str:
@@ -31,13 +35,6 @@ def has_key() -> bool:
     if provider == "github":
         return bool(os.getenv("GITHUB_TOKEN"))
     return bool(os.getenv("OPENAI_API_KEY"))
-
-
-# ── 토큰 사용량·비용 로깅 (core/llm_usage.py 공용 구현) ──────────
-# LLM_LOG_USAGE=0 (또는 EVAL_LOG_USAGE=0) 으로 끄기. 단가표도 core 쪽에 있다.
-
-def _log_usage(model: str, prompt_tokens, output_tokens) -> None:
-    log_usage(model, prompt_tokens, output_tokens, tag="Eval")
 
 
 # ── rate limit(429) 재시도 (core/llm_retry.py 공용 구현) ──────────
@@ -116,79 +113,28 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
     return _run_with_retry(_do, "임베딩")
 
 
-# ── OpenAI 구현 ───────────────────────────────────────────────────
+# ── provider 별 transport (core/llm_clients.py 공용 구현에 위임) ──
+# 모델명 규약: GitHub Models 는 "<publisher>/<model>" 형식(예: openai/gpt-4o-mini).
+# Gemini 모델명/무료 티어 한도는 Google AI Studio 콘솔 참고.
 
 def _openai_generate(system: str, user: str, model: str, json_mode: bool = False) -> str:
-    from openai import OpenAI
-    client = OpenAI()
-    kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
-    resp = client.chat.completions.create(
-        model=model,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        **kwargs,
-    )
-    if resp.usage:
-        _log_usage(model, resp.usage.prompt_tokens, resp.usage.completion_tokens)
-    return resp.choices[0].message.content or ""
+    return openai_chat(system, user, model, json_mode=json_mode, tag="Eval")
 
 
 def _openai_embed(texts: list[str], model: str) -> list[list[float]]:
-    from openai import OpenAI
-    client = OpenAI()
-    resp = client.embeddings.create(model=model, input=texts)
-    if resp.usage:
-        _log_usage(model, resp.usage.prompt_tokens, 0)
-    return [d.embedding for d in resp.data]
+    return openai_embed(texts, model, tag="Eval")
 
-
-# ── GitHub Models 구현 (OpenAI 호환 API, GitHub PAT 인증) ─────────
-# 모델명은 "<publisher>/<model>" 형식(예: openai/gpt-4o-mini, meta/Llama-3.3-70B-Instruct).
-# 사용 가능한 모델·요율 제한은 https://github.com/marketplace/models 참고.
 
 def _github_generate(system: str, user: str, model: str, json_mode: bool = False) -> str:
-    from openai import OpenAI
-    client = OpenAI(base_url=GITHUB_MODELS_BASE_URL, api_key=os.getenv("GITHUB_TOKEN"))
-    kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
-    resp = client.chat.completions.create(
-        model=model,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        **kwargs,
+    return openai_chat(
+        system, user, model, json_mode=json_mode,
+        api_key=os.getenv("GITHUB_TOKEN"), base_url=GITHUB_MODELS_BASE_URL, tag="Eval",
     )
-    if resp.usage:
-        _log_usage(model, resp.usage.prompt_tokens, resp.usage.completion_tokens)
-    return resp.choices[0].message.content or ""
 
-
-# ── Gemini 구현 (google-genai SDK) ────────────────────────────────
-# 참고: Google AI Studio 콘솔에서 실제 사용 가능한 모델명을 확인할 것
-# (모델명/무료 티어 한도는 시점에 따라 바뀔 수 있음).
 
 def _gemini_generate(system: str, user: str, model: str, json_mode: bool = False) -> str:
-    from google import genai
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    config = {"temperature": 0, "system_instruction": system}
-    if json_mode:
-        config["response_mime_type"] = "application/json"
-    resp = client.models.generate_content(model=model, contents=user, config=config)
-    usage = getattr(resp, "usage_metadata", None)
-    if usage:
-        # 과금되는 출력 = 답변(candidates) + 내부 사고(thoughts). 추론 모델(3.5-flash 등)은
-        # thoughts 가 답변보다 클 수 있어 candidates 만 세면 비용이 절반 이하로 과소집계된다.
-        out = (usage.candidates_token_count or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
-        _log_usage(model, usage.prompt_token_count, out)
-    return resp.text or ""
+    return gemini_chat(system, user, model, json_mode=json_mode, tag="Eval")
 
 
 def _gemini_embed(texts: list[str], model: str) -> list[list[float]]:
-    from google import genai
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    resp = client.models.embed_content(model=model, contents=texts)
-    return [e.values for e in resp.embeddings]
+    return gemini_embed(texts, model, tag="Eval")
