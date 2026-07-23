@@ -29,6 +29,7 @@ from core.schema import Probe
 from core.llm_usage import print_summary
 from core.parallel import parallel_map
 from core.state import AgentDoctorState
+from core.timing import StageTimer
 
 from agents.eval.types import (
     EvalRecord, DEFAULT_TOP_K, resolve_mode, llm_eval_enabled,
@@ -81,7 +82,16 @@ def _answer_sim_track(record: EvalRecord, track: str):
 
 
 def run(state: AgentDoctorState) -> AgentDoctorState:
-    """Eval Agent 진입점."""
+    """Eval Agent 진입점과 전체 실행 시간을 함께 기록한다."""
+    timer = StageTimer("Eval")
+    try:
+        return _run(state, timer)
+    finally:
+        timer.finish()
+
+
+def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
+    """Eval STEP1~5 본체."""
     state.current_agent = "eval"
     print(f"[Eval] 청크 {len(state.chunks)}개, 반복 {state.iteration + 1}/{state.max_iterations}")
 
@@ -109,6 +119,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
+        step1_started = timer.begin()
         # user_log 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
         # 판정은 generate_probes 와 같은 술어(uses_user_log)로 한다 — state.user_questions
         # 유무만 보면 EVAL_PROBE_SOURCE=auto 일 때 실제로는 LLM 생성으로 가는데도
@@ -150,10 +161,12 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     state.documents,
                 )
                 print(f"[Eval] STEP1: 저장된 Probe {len(probes)}개 재사용(버전 일치)")
+        timer.end("STEP1 Probe 준비", step1_started)
         if not probes:
             print("[Eval] 경고: Probe 0개 생성 → 평가 불가, 통과 처리")
             state.probes = []
-            state.report = build_report([], state.iteration, mode)
+            with timer.measure("STEP5 리포트"):
+                state.report = build_report([], state.iteration, mode)
             state.status = "evaluated"
             return state
 
@@ -161,6 +174,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # Eval은 검색 구현을 직접 들고 있지 않고, RAG 모듈의 동일한 검색 규칙을 재사용한다.
         # get_retriever(=캐시판): Index가 방금 적재한 같은 청크 집합이면 그 결과를 그대로
         # 재사용한다 — 예전엔 여기서 컬렉션 준비와 upsert를 통째로 한 번 더 했다.
+        retrieval_setup_started = timer.begin()
         retriever = get_retriever(state.chunks, state.index_config)
         chunk_text = {c.chunk_id: c.text for c in state.chunks}
         top_k = int(state.index_config.get("top_k", DEFAULT_TOP_K))
@@ -170,6 +184,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                          retrieve_fn=_retrieve_with_rag, keyword_fn=keyword_search,
                          generate_fn=generate_answer, ragas_fn=_ragas_track,
                          sim_fn=_answer_sim_track)
+        timer.end("검색 인덱스 준비", retrieval_setup_started)
 
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
@@ -179,6 +194,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         print(f"\n[Eval] STEP2-4: probe별 평가 ({len(probes)}개)\n")
 
         # Phase A(순차): 검색 + record 준비, 답변 생성 태스크 수집
+        retrieval_started = timer.begin()
         records = []
         gen_tasks: list[tuple[EvalRecord, str, list[str]]] = []
         for p in probes:
@@ -188,11 +204,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             gen_tasks.append((rec, "real", rec.retrieved_context))
             if rec.oracle_context:  # gold context 가 있을 때만 Oracle 트랙 (기존 동일)
                 gen_tasks.append((rec, "oracle", rec.oracle_context))
+        timer.end("STEP2 검색", retrieval_started)
 
         # Phase B(병렬): LLM 답변 생성만 동시 실행 (EVAL_LLM_CONCURRENCY, 1이면 순차)
         concurrency = resolve_llm_concurrency()
         if concurrency > 1 and len(gen_tasks) > 1:
             print(f"[Eval] STEP2: 답변 생성 {len(gen_tasks)}건 병렬 실행 (동시성 {concurrency})")
+        generation_started = timer.begin()
         answers = parallel_map(lambda t: generate_answer(t[0].probe.question, t[2]),
                                gen_tasks, concurrency)
         for (rec, track, _ctx), answer in zip(gen_tasks, answers):
@@ -200,17 +218,22 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 rec.generated_answer = answer
             else:
                 rec.oracle_answer = answer
+        timer.end("STEP2 답변 생성", generation_started)
 
         # Phase C(순차): 지표·진단·로그 — diagnose 는 signals 전역·진단 캐시·tier2
         # 재검색을 쓰므로 병렬 구간 밖에서 실행한다.
+        diagnosis_started = timer.begin()
         for i, rec in enumerate(records, 1):
             rec.findings = diagnose(rec, mode)
             _log_probe(i, len(records), rec)
+        timer.end("STEP3-4 지표·진단", diagnosis_started)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
+        report_started = timer.begin()
         state.probes = probes
         state.report = build_report(records, state.iteration, mode)
         state.status = "evaluated"
+        timer.end("STEP5 리포트", report_started)
 
     except Exception as e:  # 계약: 예외를 밖으로 던지지 않는다
         state.status = "error"
@@ -223,10 +246,9 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 # ── probe 1개 평가 (STEP2 → STEP3 → STEP4) ───────────────────────
 
-def _clip(text: str, n: int = 50) -> str:
-    """로그용 한 줄 축약(줄바꿈 제거 + n자 컷)."""
-    t = " ".join((text or "").split())
-    return t if len(t) <= n else t[:n] + "…"
+def _full_log_line(text: str) -> str:
+    """로그용 텍스트를 길이 제한 없이 한 줄로 정규화한다."""
+    return " ".join((text or "").split())
 
 
 def _fmt_metric(v, applicable: bool = True) -> str:
@@ -254,9 +276,9 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
     gold = ", ".join(_short_cid(c) for c in p.gold_chunk_ids)
 
     print(f"[{idx}/{total}] {p.probe_id}  ({meta})")
-    print(f"Q: {_clip(p.question, 80)}")
-    print(f"A: {_clip(p.ground_truth, 80) if p.ground_truth else '-'}")
-    print(f"R: {_clip(rec.generated_answer, 80) if rec.generated_answer else '-'}")
+    print(f"Q: {_full_log_line(p.question)}")
+    print(f"A: {_full_log_line(p.ground_truth) if p.ground_truth else '-'}")
+    print(f"R: {_full_log_line(rec.generated_answer) if rec.generated_answer else '-'}")
     print(f"검색: [{retrieved}]")
     print(f"골드: [{gold}]")
     print(f"메트릭 결과: recall@k={recall}  f1={f1}  oracle_f1={oracle}")

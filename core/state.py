@@ -39,6 +39,14 @@ class AgentDoctorState:
         # Index가 실제 지원하는 모델만 지정할 것 — 미지원 문자열은
         # SentenceTransformer()에 그대로 전달되어 로드가 멈출 수 있음
         "embedding_model": "BAAI/bge-m3",
+        # GPU가 있으면 CUDA, 없으면 CPU를 선택한다. 명시적으로 "cpu"/"cuda"도 지정 가능하다.
+        "embedding_device": "auto",
+        # 대용량 문서의 청크를 한 건씩 추론하지 않고 묶어서 임베딩한다.
+        "embedding_batch_size": 16,
+        # Eval STEP1 지식그래프는 임베딩 유사도를 GPU 블록 행렬곱으로 계산한다.
+        "eval_graph_device": "auto",
+        "eval_graph_top_k": 12,
+        "eval_graph_batch_size": 512,
         "use_hybrid": True,
         # 검색 시 가져올 청크 수. Eval(agents/eval/agent.py)이 검색에, Index가 청크
         # metadata 기록에 소비한다. 둘 다 미지정 시 5를 폴백으로 쓰고 있어 같은 값을

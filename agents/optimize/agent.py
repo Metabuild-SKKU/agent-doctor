@@ -31,6 +31,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from core.state import AgentDoctorState
+from core.timing import StageTimer
 from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate
 from agents.optimize.schemas import (
     OptimizationHistoryItem,
@@ -42,23 +43,35 @@ from agents.optimize.schemas import (
 
 
 def run(state: AgentDoctorState) -> AgentDoctorState:
-    """Optimize 노드 진입점. 성공·스킵·수동·오류 어느 경로든 같은 state 를 반환한다."""
+    """Optimize 노드 진입점과 전체 실행 시간을 함께 기록한다."""
+    timer = StageTimer("Optimize")
+    try:
+        return _run(state, timer)
+    finally:
+        timer.finish()
+
+
+def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
+    """성공·스킵·수동·오류 어느 경로든 같은 state 를 반환한다."""
     state.current_agent = "optimize"
     try:
         # top_k sweep는 후보 하나의 성공/실패를 곧바로 확정하지 않는다.
         # 직전 후보의 Eval 결과를 같은 study에 넣고 다음 후보 또는 best를 고른다.
         active_study = history.find_active_study(state.optimization_history)
         if active_study is not None:
-            return _continue_internal_study(state, active_study)
+            with timer.measure("활성 study 계속"):
+                return _continue_internal_study(state, active_study)
 
         # (1) 지난 처방 판정 + (나빴으면) 롤백/블랙리스트
-        judged_item, verdict = _judge_pending_trial(state)
+        with timer.measure("이전 처방 판정"):
+            judged_item, verdict = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
 
         # (2) 새 처방 선택. 저비용 사전검증에서 baseline이 이기면 현재 처방을
         # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
         while True:
-            request, decision = planner.plan(state, blacklist=state.blacklist)
+            with timer.measure("처방 계획"):
+                request, decision = planner.plan(state, blacklist=state.blacklist)
             if decision.mode != "apply_optimize" or request is None:
                 state.status = "rolled_back" if rolled_back else decision.status
                 # 롤백이 있었으면 그게 headline, 아니면 흐름 결정(수동/유지)을 보고.
@@ -81,7 +94,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     )
                 return state
 
-            result = optimizer.run(request)
+            with timer.measure("최적화 실행"):
+                result = optimizer.run(request)
             # skipped 처방(baseline 무개선·적용 불가 경로·빈 search space)이면 포기하지 않고
             # 그 처방을 블랙리스트에 넣어 다음 우선순위 처방으로 넘어간다. 한 라벨의 처방이
             # 막혀도(예: enable_reranker 는 reranker 미연동으로 적용 불가) 다른 actionable
@@ -119,20 +133,21 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         before_report = state.report
 
         # 검증된 처방을 실제 index_config 에 반영(canonical→flat 변환은 mapper 담당)
-        config_mapper.apply_config_patch(state.index_config, result.config_patch)
-        state.reindex_required = bool(result.needs_reindex)
+        with timer.measure("설정 반영·이력 기록"):
+            config_mapper.apply_config_patch(state.index_config, result.config_patch)
+            state.reindex_required = bool(result.needs_reindex)
 
-        # pending 이력 생성(다음 방문에서 finalize) + iteration 1회 증가
-        prescription_id = (
-            result.selected_candidate.id if result.selected_candidate else None
-        )
-        item = history.create_pending_item(
-            state, request, prescription_id, before_config, before_report
-        )
-        item.metadata["reindex_required"] = bool(result.needs_reindex)
-        state.optimization_history.append(item)
-        if starts_new_label:
-            state.iteration += 1
+            # pending 이력 생성(다음 방문에서 finalize) + iteration 1회 증가
+            prescription_id = (
+                result.selected_candidate.id if result.selected_candidate else None
+            )
+            item = history.create_pending_item(
+                state, request, prescription_id, before_config, before_report
+            )
+            item.metadata["reindex_required"] = bool(result.needs_reindex)
+            state.optimization_history.append(item)
+            if starts_new_label:
+                state.iteration += 1
 
         # 여러 top_k 후보의 첫 적용이면 같은 이력 항목을 active study로 사용한다.
         # 후보별 결과는 다음 방문마다 metadata.trial_results에 누적한다.

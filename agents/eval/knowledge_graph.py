@@ -27,10 +27,13 @@ from __future__ import annotations
 
 import math
 import re
+import time
+import heapq
 from collections import Counter
 from dataclasses import dataclass, field
 
 from core.schema import Chunk
+from agents.index.qdrant_store import resolve_embedding_device
 from agents.eval.types import KG_EMBEDDING_SIM_MIN, KG_ENTITY_OVERLAP_MIN
 
 _TOP_K_KEYWORDS = 8
@@ -57,15 +60,23 @@ class KGraph:
 
 # ── 그래프 구축 ───────────────────────────────────────────────────
 
-def build_graph(chunks: list[Chunk]) -> KGraph:
+def build_graph(chunks: list[Chunk], config: dict | None = None) -> KGraph:
     """
     청크 리스트로 KG를 만든다. 전량 휴리스틱(무료) — LLM 호출 없음.
-    엣지는 키워드 Jaccard 또는 임베딩 코사인 유사도 중 하나라도 임계값을
-    넘으면 연결한다(둘 중 하나만 강해도 관련 있다고 보는 편이, 둘 다 강해야만
-    연결하는 것보다 멀티홉 후보를 지나치게 좁히지 않는다).
+    임베딩 후보는 GPU/CPU 블록 행렬곱으로 청크별 top-k만 고르고, 키워드 후보는
+    역색인으로 좁힌다. 두 후보 중 하나라도 임계값을 넘으면 연결한다.
     """
+    config = config or {}
+    top_k = _positive_int(config.get("eval_graph_top_k", 12), "eval_graph_top_k")
+    batch_size = _positive_int(
+        config.get("eval_graph_batch_size", 512),
+        "eval_graph_batch_size",
+    )
+    requested_device = str(config.get("eval_graph_device", "auto") or "auto")
+    started = time.perf_counter()
+
     nodes: dict[str, KGNode] = {}
-    embeddings: dict[str, list[float] | None] = {}
+    embeddings: list[list[float] | None] = []
     for c in chunks:
         enrich = _heuristic_enrich(c.text)
         nodes[c.chunk_id] = KGNode(
@@ -76,22 +87,209 @@ def build_graph(chunks: list[Chunk]) -> KGraph:
             entities=enrich["keywords"],
             keywords=enrich["keywords"],
         )
-        embeddings[c.chunk_id] = c.embedding
+        embeddings.append(c.embedding)
 
-    edges: dict[str, list[tuple[str, float]]] = {cid: [] for cid in nodes}
     ids = list(nodes.keys())
-    for i in range(len(ids)):
-        for j in range(i + 1, len(ids)):
-            a_id, b_id = ids[i], ids[j]
-            weight = _edge_weight(nodes[a_id], nodes[b_id], embeddings[a_id], embeddings[b_id])
-            if weight is None:
-                continue
-            edges[a_id].append((b_id, weight))
-            edges[b_id].append((a_id, weight))
+    semantic_pairs, actual_device = _embedding_candidate_pairs(
+        embeddings,
+        requested_device,
+        top_k,
+        batch_size,
+    )
+    keyword_pairs = _keyword_candidate_pairs(
+        [nodes[chunk_id] for chunk_id in ids],
+        top_k,
+    )
+
+    edges: dict[str, list[tuple[str, float]]] = {cid: [] for cid in ids}
+    for left_index, right_index in set(semantic_pairs) | keyword_pairs:
+        left_id, right_id = ids[left_index], ids[right_index]
+        cosine = semantic_pairs.get((left_index, right_index))
+        if cosine is None:
+            cosine = _cosine(embeddings[left_index], embeddings[right_index])
+        weight = _edge_weight(
+            nodes[left_id],
+            nodes[right_id],
+            embeddings[left_index],
+            embeddings[right_index],
+            cosine=cosine,
+        )
+        if weight is None:
+            continue
+        edges[left_id].append((right_id, weight))
+        edges[right_id].append((left_id, weight))
 
     for cid in edges:
         edges[cid].sort(key=lambda pair: pair[1], reverse=True)
+    edge_count = sum(len(neighbors) for neighbors in edges.values()) // 2
+    print(
+        f"[Eval] STEP1 KG: 노드 {len(ids)}개, 엣지 {edge_count}개, "
+        f"device={actual_device}, top_k={top_k}, block={batch_size}, "
+        f"{time.perf_counter() - started:.3f}초"
+    )
     return KGraph(nodes=nodes, edges=edges)
+
+
+def _positive_int(value: object, name: str) -> int:
+    """그래프 성능 설정을 양의 정수로 검증한다."""
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{name}은 1 이상의 정수여야 합니다.")
+    return value
+
+
+def _valid_embedding_rows(
+    embeddings: list[list[float] | None],
+) -> tuple[list[int], list[list[float]]]:
+    """같은 차원의 유효 임베딩만 행렬 연산 입력으로 모은다."""
+    dimension = next((len(vector) for vector in embeddings if vector), 0)
+    if dimension <= 0:
+        return [], []
+    indices: list[int] = []
+    vectors: list[list[float]] = []
+    for index, vector in enumerate(embeddings):
+        if vector and len(vector) == dimension:
+            indices.append(index)
+            vectors.append(vector)
+    return indices, vectors
+
+
+def _embedding_candidate_pairs(
+    embeddings: list[list[float] | None],
+    device: str,
+    top_k: int,
+    batch_size: int,
+) -> tuple[dict[tuple[int, int], float], str]:
+    """블록 행렬곱으로 각 청크의 top-k 임베딩 이웃만 반환한다."""
+    indices, vectors = _valid_embedding_rows(embeddings)
+    if len(vectors) < 2:
+        return {}, "none"
+
+    actual_device = resolve_embedding_device(device)
+    try:
+        return (
+            _torch_embedding_candidates(
+                indices,
+                vectors,
+                actual_device,
+                top_k,
+                batch_size,
+            ),
+            actual_device,
+        )
+    except Exception as exc:
+        if actual_device.startswith("cuda"):
+            print(f"[Eval] STEP1 KG GPU 실패, CPU 행렬곱으로 전환: {exc}")
+            try:
+                return (
+                    _torch_embedding_candidates(
+                        indices,
+                        vectors,
+                        "cpu",
+                        top_k,
+                        batch_size,
+                    ),
+                    "cpu",
+                )
+            except Exception as cpu_exc:
+                print(f"[Eval] STEP1 KG PyTorch 실패, Python 폴백 사용: {cpu_exc}")
+        else:
+            print(f"[Eval] STEP1 KG PyTorch 실패, Python 폴백 사용: {exc}")
+        return _python_embedding_candidates(indices, vectors, top_k), "cpu-python"
+
+
+def _torch_embedding_candidates(
+    indices: list[int],
+    vectors: list[list[float]],
+    device: str,
+    top_k: int,
+    batch_size: int,
+) -> dict[tuple[int, int], float]:
+    """PyTorch에서 정규화·블록 행렬곱·top-k를 한 번에 수행한다."""
+    import torch
+    import torch.nn.functional as functional
+
+    matrix = torch.as_tensor(vectors, dtype=torch.float32, device=device)
+    matrix = functional.normalize(matrix, p=2, dim=1)
+    neighbor_count = min(top_k, len(indices) - 1)
+    pairs: dict[tuple[int, int], float] = {}
+
+    for start in range(0, len(indices), batch_size):
+        end = min(start + batch_size, len(indices))
+        similarities = matrix[start:end] @ matrix.T
+        local_rows = torch.arange(end - start, device=device)
+        global_rows = torch.arange(start, end, device=device)
+        similarities[local_rows, global_rows] = float("-inf")
+        values, neighbors = torch.topk(similarities, k=neighbor_count, dim=1)
+        values_cpu = values.detach().cpu().tolist()
+        neighbors_cpu = neighbors.detach().cpu().tolist()
+
+        for local_index, (scores, neighbor_rows) in enumerate(
+            zip(values_cpu, neighbors_cpu)
+        ):
+            left = indices[start + local_index]
+            for score, neighbor_row in zip(scores, neighbor_rows):
+                if score < KG_EMBEDDING_SIM_MIN:
+                    break
+                right = indices[neighbor_row]
+                pair = (left, right) if left < right else (right, left)
+                pairs[pair] = max(pairs.get(pair, -1.0), float(score))
+
+    if device.startswith("cuda"):
+        torch.cuda.synchronize()
+    return pairs
+
+
+def _python_embedding_candidates(
+    indices: list[int],
+    vectors: list[list[float]],
+    top_k: int,
+) -> dict[tuple[int, int], float]:
+    """PyTorch가 없는 최소 환경에서 기존 Python 코사인 방식으로 폴백한다."""
+    pairs: dict[tuple[int, int], float] = {}
+    for left_row, left_vector in enumerate(vectors):
+        candidates = (
+            (_cosine(left_vector, right_vector), right_row)
+            for right_row, right_vector in enumerate(vectors)
+            if right_row != left_row
+        )
+        for score, right_row in heapq.nlargest(top_k, candidates):
+            if score < KG_EMBEDDING_SIM_MIN:
+                continue
+            left, right = indices[left_row], indices[right_row]
+            pair = (left, right) if left < right else (right, left)
+            pairs[pair] = max(pairs.get(pair, -1.0), float(score))
+    return pairs
+
+
+def _keyword_candidate_pairs(
+    nodes: list[KGNode],
+    top_k: int,
+) -> set[tuple[int, int]]:
+    """키워드 역색인에서 청크별 유력 후보만 골라 전수 비교를 피한다."""
+    inverted: dict[str, list[int]] = {}
+    for index, node in enumerate(nodes):
+        for keyword in set(node.keywords):
+            inverted.setdefault(keyword, []).append(index)
+
+    # 대규모 코퍼스에서 거의 모든 청크에 등장하는 단어는 연결 신호가 아니라
+    # 불용어에 가까우므로 후보 확장을 막는다. 작은 테스트 코퍼스는 전량 유지한다.
+    max_posting = len(nodes) if len(nodes) <= 500 else max(50, int(len(nodes) * 0.05))
+    pairs: set[tuple[int, int]] = set()
+    for left, node in enumerate(nodes):
+        overlap_counts: Counter[int] = Counter()
+        for keyword in set(node.keywords):
+            posting = inverted.get(keyword, [])
+            if len(posting) > max_posting:
+                continue
+            for right in posting:
+                if right != left:
+                    overlap_counts[right] += 1
+        for right, _count in overlap_counts.most_common(top_k):
+            if _keyword_jaccard(node.keywords, nodes[right].keywords) < KG_ENTITY_OVERLAP_MIN:
+                continue
+            pair = (left, right) if left < right else (right, left)
+            pairs.add(pair)
+    return pairs
 
 
 def neighbors(graph: KGraph, chunk_id: str, min_weight: float = 0.0) -> list[str]:
@@ -153,7 +351,12 @@ def _tokenize(text: str) -> list[str]:
 # ── 엣지 가중치 ───────────────────────────────────────────────────
 
 def _edge_weight(
-    a: KGNode, b: KGNode, emb_a: list[float] | None, emb_b: list[float] | None
+    a: KGNode,
+    b: KGNode,
+    emb_a: list[float] | None,
+    emb_b: list[float] | None,
+    *,
+    cosine: float | None = None,
 ) -> float | None:
     """
     a, b 를 연결할지와 그 가중치를 함께 결정한다.
@@ -163,7 +366,7 @@ def _edge_weight(
     경우—예: mock 데이터—에도 키워드만으로 동작하도록 키워드 쪽에 더 큰 비중).
     """
     jaccard = _keyword_jaccard(a.keywords, b.keywords)
-    cosine = _cosine(emb_a, emb_b)
+    cosine = _cosine(emb_a, emb_b) if cosine is None else cosine
     if jaccard < KG_ENTITY_OVERLAP_MIN and cosine < KG_EMBEDDING_SIM_MIN:
         return None
     return 0.6 * jaccard + 0.4 * cosine

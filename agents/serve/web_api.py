@@ -225,4 +225,12 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     args = parser.parse_args()
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    # 브라우저의 진행 상태 폴링(/runs/.../status) 접근 로그는 숨기되,
+    # 파이프라인 print 로그와 Uvicorn 경고·오류는 그대로 출력한다.
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="warning",
+        access_log=False,
+    )

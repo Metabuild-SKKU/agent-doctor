@@ -11,8 +11,10 @@ from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
     build_client,
     delete_document_chunks,
+    embed_batch,
     ensure_collection,
     hybrid_search,
+    resolve_embedding_device,
     search,
     upsert_chunks,
 )
@@ -37,6 +39,9 @@ def _index_tools() -> IndexTools:
         count_tokens=lambda _text, **_kwargs: 3,
         build_sparse_vector=lambda _text: {"indices": [], "values": []},
         build_graph_artifacts=lambda _chunks, _config: {},
+        embed_batch=lambda texts, **_kwargs: [
+            [1.0, 0.0, 0.0, 0.0] for _text in texts
+        ],
     )
 
 
@@ -124,9 +129,14 @@ class IndexRunTests(unittest.TestCase):
         return state
 
     @patch("agents.index.agent.get_retriever")
-    @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
+    @patch(
+        "agents.index.agent.embed_batch",
+        side_effect=lambda texts, **_kwargs: [
+            [1.0, 0.0, 0.0, 0.0] for _text in texts
+        ],
+    )
     def test_run_validates_deduplicates_and_writes_metadata(
-        self, mock_embed, mock_get_retriever
+        self, mock_embed_batch, mock_get_retriever
     ):
         state = self._state()
         content = "# 규정\n재택근무는 주 2일까지 가능합니다."
@@ -148,25 +158,36 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(len(result.chunks[0].hash), 16)
         self.assertEqual(result.chunks[0].metadata["embedding_model"], "test-model")
         self.assertIsNotNone(result.chunks[0].sparse_vector)
-        self.assertEqual(mock_embed.call_count, len(result.chunks))
+        mock_embed_batch.assert_called_once()
+        self.assertEqual(
+            len(mock_embed_batch.call_args.args[0]),
+            len(result.chunks),
+        )
+        self.assertEqual(mock_embed_batch.call_args.kwargs["device"], "auto")
+        self.assertEqual(mock_embed_batch.call_args.kwargs["batch_size"], 16)
         mock_get_retriever.assert_called_once()
 
     @patch("agents.index.agent.get_retriever")
-    @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
+    @patch(
+        "agents.index.agent.embed_batch",
+        side_effect=lambda texts, **_kwargs: [
+            [1.0, 0.0, 0.0, 0.0] for _text in texts
+        ],
+    )
     def test_same_signature_reuses_embeddings(
-        self, first_embed, _mock_get_retriever
+        self, first_embed_batch, _mock_get_retriever
     ):
         state = self._state()
         state.documents = [_document("doc-1", "동일한 문서 본문입니다.")]
         first = run(state)
-        self.assertEqual(first_embed.call_count, 1)
+        self.assertEqual(first_embed_batch.call_count, 1)
 
-        with patch("agents.index.agent.embed") as second_embed:
+        with patch("agents.index.agent.embed_batch") as second_embed_batch:
             second = run(first)
 
         self.assertEqual(second.status, "indexed")
         self.assertEqual(second.index_artifacts["reused_embeddings"], 1)
-        second_embed.assert_not_called()
+        second_embed_batch.assert_not_called()
 
     def test_reused_chunks_refresh_retrieval_metadata(self):
         state = self._state()
@@ -195,6 +216,7 @@ class IndexRunTests(unittest.TestCase):
             count_tokens=Mock(),
             build_sparse_vector=Mock(),
             build_graph_artifacts=Mock(),
+            embed_batch=Mock(),
         )
 
         result = run(state, tools=tools)
@@ -204,6 +226,7 @@ class IndexRunTests(unittest.TestCase):
         self.assertTrue(result.reindex_required)
         tools.get_retriever.assert_not_called()
         tools.embed.assert_not_called()
+        tools.embed_batch.assert_not_called()
 
     def test_reused_chunks_still_seed_chunk_deduplication(self):
         state = self._state()
@@ -251,9 +274,14 @@ class IndexRunTests(unittest.TestCase):
         self.assertIn("chunk_strategy", result.error)
 
     @patch("agents.index.agent.get_retriever")
-    @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
+    @patch(
+        "agents.index.agent.embed_batch",
+        side_effect=lambda texts, **_kwargs: [
+            [1.0, 0.0, 0.0, 0.0] for _text in texts
+        ],
+    )
     def test_chunk_stage_config_overrides_default_strategy(
-        self, _mock_embed, _mock_get_retriever
+        self, _mock_embed_batch, _mock_get_retriever
     ):
         state = self._state()
         state.documents = [_document("doc-1", "# 제목\n" + ("본문입니다. " * 8))]
@@ -275,6 +303,9 @@ class IndexRunTests(unittest.TestCase):
             count_tokens=lambda _text, **_kwargs: 7,
             build_sparse_vector=lambda _text: {"indices": [], "values": []},
             build_graph_artifacts=lambda _chunks, _config: {},
+            embed_batch=lambda texts, **_kwargs: [
+                [0.0, 1.0, 0.0, 0.0] for _text in texts
+            ],
         )
 
         result = run(state, tools=tools)
@@ -293,8 +324,15 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertIn("문서 검증 실패", result.error)
 
-    @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
-    def test_same_doc_id_with_different_content_skips_conflicting_document(self, _mock_embed):
+    @patch(
+        "agents.index.agent.embed_batch",
+        side_effect=lambda texts, **_kwargs: [
+            [1.0, 0.0, 0.0, 0.0] for _text in texts
+        ],
+    )
+    def test_same_doc_id_with_different_content_skips_conflicting_document(
+        self, _mock_embed_batch
+    ):
         # 충돌 문서만 건너뛰고 먼저 들어온 문서는 정상 인덱싱되어야 한다.
         state = self._state()
         state.documents = [
@@ -312,8 +350,13 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(failed[0]["doc_id"], "same-id")
         self.assertIn("같은 doc_id", failed[0]["error"])
 
-    @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
-    def test_partial_failure_preserves_valid_documents(self, _mock_embed):
+    @patch(
+        "agents.index.agent.embed_batch",
+        side_effect=lambda texts, **_kwargs: [
+            [1.0, 0.0, 0.0, 0.0] for _text in texts
+        ],
+    )
+    def test_partial_failure_preserves_valid_documents(self, _mock_embed_batch):
         # 불량 문서 1개가 나머지 정상 문서들의 작업을 버리게 만들면 안 된다.
         state = self._state()
         state.documents = [
@@ -342,13 +385,13 @@ class IndexRunTests(unittest.TestCase):
 
         calls = {"n": 0}
 
-        def flaky_embed(text, **kwargs):
+        def flaky_embed_batch(texts, **kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("임베딩 일시 실패")
-            return [1.0, 0.0, 0.0, 0.0]
+            return [[1.0, 0.0, 0.0, 0.0] for _text in texts]
 
-        with patch("agents.index.agent.embed", side_effect=flaky_embed):
+        with patch("agents.index.agent.embed_batch", side_effect=flaky_embed_batch):
             result = run(state)
 
         self.assertEqual(result.status, "indexed")
@@ -356,6 +399,35 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(result.chunks[0].text, shared_text)
         failed = result.index_artifacts["failed_documents"]
         self.assertEqual([f["doc_id"] for f in failed], ["doc-fails"])
+
+
+class EmbeddingBatchTests(unittest.TestCase):
+    def test_explicit_cpu_device_is_preserved(self):
+        self.assertEqual(resolve_embedding_device("cpu"), "cpu")
+
+    @patch("agents.index.qdrant_store._load_embedding_model")
+    def test_batch_embedding_passes_all_texts_in_one_model_call(self, load_model):
+        encoded = Mock()
+        encoded.tolist.return_value = [[1.0, 0.0], [0.0, 1.0]]
+        model = Mock()
+        model.encode.return_value = encoded
+        load_model.return_value = (model, "cuda")
+
+        result = embed_batch(
+            ["첫 번째 청크", "두 번째 청크"],
+            model_name="test-model",
+            vector_dim=2,
+            device="auto",
+            batch_size=8,
+        )
+
+        self.assertEqual(result, [[1.0, 0.0], [0.0, 1.0]])
+        model.encode.assert_called_once_with(
+            ["첫 번째 청크", "두 번째 청크"],
+            batch_size=8,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
 
 
 class SearchAndGraphTests(unittest.TestCase):

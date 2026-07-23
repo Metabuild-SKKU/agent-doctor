@@ -103,7 +103,7 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
         print(f"[Eval] STEP1: user_log Probe {len(probes)}개 생성")
         return _finalize_probes(probes, state)
 
-    graph = knowledge_graph.build_graph(state.chunks)
+    graph = knowledge_graph.build_graph(state.chunks, state.index_config)
     testset_size = _testset_size()
     budget = _allocate_budget(testset_size)
     chunks_by_id = {chunk.chunk_id: chunk for chunk in state.chunks}

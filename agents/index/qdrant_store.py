@@ -25,8 +25,8 @@ DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 VECTOR_DIM = 1024
 
-_models: dict[str, Any] = {}
-_failed_models: set[str] = set()
+_models: dict[tuple[str, str], Any] = {}
+_failed_models: set[tuple[str, str]] = set()
 _rerankers: dict[str, Any] = {}
 _failed_rerankers: set[str] = set()
 
@@ -368,26 +368,140 @@ def _fallback_embedding(text: str, vector_dim: int) -> list[float]:
     return [value / norm for value in vector]
 
 
+def resolve_embedding_device(device: str = "auto") -> str:
+    """요청한 임베딩 장치를 실제 사용 가능한 장치로 정규화한다."""
+    requested = str(device or "auto").strip().lower()
+    if requested == "auto":
+        try:
+            import torch
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+    if requested.startswith("cuda"):
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                return requested
+        except Exception:
+            pass
+        print("[Index] CUDA를 사용할 수 없어 CPU 임베딩으로 전환합니다.")
+        return "cpu"
+    return requested
+
+
+def _load_embedding_model(model_name: str, device: str) -> tuple[Any | None, str]:
+    """장치별 모델을 캐시하고 GPU 로드 실패 시 같은 모델을 CPU에서 다시 시도한다."""
+    actual_device = resolve_embedding_device(device)
+    key = (model_name, actual_device)
+    if key not in _models and key not in _failed_models:
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            _models[key] = SentenceTransformer(model_name, device=actual_device)
+        except Exception as exc:
+            _failed_models.add(key)
+            if actual_device != "cpu":
+                print(f"[Index] GPU 임베딩 모델 로드 실패, CPU로 재시도: {exc}")
+                return _load_embedding_model(model_name, "cpu")
+            print(f"[Index] 임베딩 모델 로드 실패, deterministic fallback 사용: {exc}")
+    if key in _failed_models and actual_device != "cpu":
+        return _load_embedding_model(model_name, "cpu")
+    return _models.get(key), actual_device
+
+
+def _is_cuda_oom(exc: Exception) -> bool:
+    """PyTorch 버전별 CUDA OOM 예외 표현 차이를 흡수한다."""
+    try:
+        import torch
+
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+    except Exception:
+        pass
+    return "cuda" in str(exc).lower() and "out of memory" in str(exc).lower()
+
+
+def _encode_batch(
+    model: Any,
+    texts: list[str],
+    batch_size: int,
+    device: str,
+) -> list[list[float]]:
+    """CUDA OOM이면 배치 크기를 절반씩 줄여 같은 모델로 재시도한다."""
+    current_batch_size = batch_size
+    while True:
+        try:
+            vectors = model.encode(
+                texts,
+                batch_size=current_batch_size,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            return vectors.tolist()
+        except Exception as exc:
+            if not device.startswith("cuda") or not _is_cuda_oom(exc):
+                raise
+            if current_batch_size <= 1:
+                raise
+            current_batch_size = max(1, current_batch_size // 2)
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            print(
+                f"[Index] GPU 메모리 부족, 배치 크기를 "
+                f"{current_batch_size}로 줄여 재시도합니다."
+            )
+
+
+def embed_batch(
+    texts: list[str],
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+    vector_dim: int | None = None,
+    device: str = "auto",
+    batch_size: int = 16,
+) -> list[list[float]]:
+    """문서 청크 여러 개를 같은 모델과 장치에서 배치 임베딩한다."""
+    if not texts:
+        return []
+    if not isinstance(batch_size, int) or batch_size <= 0:
+        raise ValueError("embedding_batch_size는 1 이상의 정수여야 합니다.")
+
+    dimension = int(vector_dim or VECTOR_DIM)
+    model, actual_device = _load_embedding_model(model_name, device)
+    if model is None:
+        return [_fallback_embedding(text, dimension) for text in texts]
+
+    try:
+        return _encode_batch(model, texts, batch_size, actual_device)
+    except Exception as exc:
+        if not actual_device.startswith("cuda") or not _is_cuda_oom(exc):
+            raise
+        print(f"[Index] GPU 메모리 부족이 계속되어 CPU 임베딩으로 전환합니다: {exc}")
+        cpu_model, cpu_device = _load_embedding_model(model_name, "cpu")
+        if cpu_model is None:
+            return [_fallback_embedding(text, dimension) for text in texts]
+        return _encode_batch(cpu_model, texts, batch_size, cpu_device)
+
+
 def embed(
     text: str,
     model_name: str = DEFAULT_EMBEDDING_MODEL,
     vector_dim: int | None = None,
+    device: str = "auto",
 ) -> list[float]:
-    # sentence-transformers가 있으면 실제 모델, 없으면 fallback을 쓴다.
-    dimension = int(vector_dim or VECTOR_DIM)
-    if model_name not in _models and model_name not in _failed_models:
-        try:
-            from sentence_transformers import SentenceTransformer
-
-            _models[model_name] = SentenceTransformer(model_name)
-        except Exception as exc:
-            _failed_models.add(model_name)
-            print(f"[Index] 임베딩 모델 로드 실패, deterministic fallback 사용: {exc}")
-
-    model = _models.get(model_name)
-    if model is None:
-        return _fallback_embedding(text, dimension)
-    return model.encode(text, normalize_embeddings=True).tolist()
+    # 질의 임베딩 등 기존 단건 호출은 배치 인터페이스 한 건으로 호환한다.
+    return embed_batch(
+        [text],
+        model_name=model_name,
+        vector_dim=vector_dim,
+        device=device,
+        batch_size=1,
+    )[0]
 
 
 def count_tokens(
@@ -395,7 +509,10 @@ def count_tokens(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
 ) -> int:
     # tokenizer가 있으면 그걸 쓰고, 없으면 대략적인 토큰 수로 기록한다.
-    model = _models.get(model_name)
+    model = next(
+        (cached for (name, _device), cached in _models.items() if name == model_name),
+        None,
+    )
     tokenizer = getattr(model, "tokenizer", None) if model is not None else None
     if tokenizer is None:
         return max(1, len(_tokens(text)))
