@@ -160,11 +160,15 @@ def _ingest_file(source_url: str) -> list[Document]:
             raise ImportError("pip install pdfplumber")
 
         from agents.ingest.preprocess import preprocess_pages
+        from agents.ingest.tables import extract_page_tables
 
+        # 표는 페이지별로 뽑아 그 페이지 본문 뒤에 붙인다 — 페이지 span 안에 있어야
+        # 청크→페이지 역산(Index 의 _page_of_span)이 표에도 맞는다.
         with pdfplumber.open(path) as pdf:
             raw_pages = [p.extract_text() for p in pdf.pages]
+            page_tables = [extract_page_tables(p) for p in pdf.pages]
 
-        result = preprocess_pages(raw_pages)
+        result = preprocess_pages(raw_pages, page_tables=page_tables)
         content = result.content
         fmt = "pdf"
 
@@ -194,6 +198,8 @@ def _ingest_file(source_url: str) -> list[Document]:
                 f"[Ingest] {path.name}: 머리말/꼬리말 "
                 f"{len(result.removed_headers)}종 제거 ({preview}…)"
             )
+        if result.table_count:
+            print(f"[Ingest] {path.name}: 표 {result.table_count}개 추출")
 
         extra_metadata = {
             "page_count": result.page_count,

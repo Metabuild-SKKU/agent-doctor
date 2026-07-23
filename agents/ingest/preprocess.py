@@ -74,6 +74,7 @@ class PreprocessResult:
     removed_headers: list[str] = field(default_factory=list)
     page_count: int = 0
     empty_page_count: int = 0
+    table_count: int = 0
 
     @property
     def is_empty(self) -> bool:
@@ -186,23 +187,40 @@ def _clean_body(text: str) -> str:
     return text.strip()
 
 
-def preprocess_pages(pages: list[str | None]) -> PreprocessResult:
+def preprocess_pages(
+    pages: list[str | None],
+    *,
+    page_tables: list[list[str]] | None = None,
+) -> PreprocessResult:
     """페이지별 원문 텍스트 리스트 → 정리된 단일 텍스트 + 페이지 span.
 
     pages 항목이 None 이어도 된다 — pdfplumber 의 extract_text() 는 텍스트 레이어가
     없는 페이지에서 None 을 돌려준다. 빈 페이지로 세고 넘어간다.
+
+    page_tables[i] 는 i 페이지에서 뽑은 직렬화된 표 목록(agents/ingest/tables.py).
+    본문 정리가 끝난 뒤에 붙인다 — _clean_body 를 태우면 Markdown 표의 줄 구조와
+    파이프가 망가지기 때문이다.
     """
     raw_pages = [p or "" for p in pages]
+    tables_per_page = page_tables or []
     repeated = _find_repeated_lines(raw_pages)
 
     cleaned_pages: list[str] = []
     removed_all: list[str] = []
     empty_count = 0
+    table_count = 0
 
-    for page in raw_pages:
+    for idx, page in enumerate(raw_pages):
         stripped, removed = _strip_page_furniture(page, repeated)
         removed_all.extend(removed)
         body = _clean_body(stripped)
+
+        tables = tables_per_page[idx] if idx < len(tables_per_page) else []
+        if tables:
+            table_count += len(tables)
+            # 빈 줄로 띄워야 청킹이 표를 본문 문단과 섞지 않는다.
+            body = "\n\n".join([body, *tables]) if body else "\n\n".join(tables)
+
         if not body:
             empty_count += 1
         cleaned_pages.append(body)
@@ -230,4 +248,5 @@ def preprocess_pages(pages: list[str | None]) -> PreprocessResult:
         removed_headers=sorted(set(removed_all)),
         page_count=len(raw_pages),
         empty_page_count=empty_count,
+        table_count=table_count,
     )
