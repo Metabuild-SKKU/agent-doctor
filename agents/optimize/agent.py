@@ -28,7 +28,9 @@ Optimize 노드의 진입점(오케스트레이션 계층).
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
+from typing import Any
 
 from core.state import AgentDoctorState
 from core.schema import DiagnosticReport
@@ -40,6 +42,92 @@ from agents.optimize.schemas import (
     OptimizeDecision,
     Verdict,
 )
+
+
+def _fmt_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _fmt_score(value: float | None) -> str:
+    return "None" if value is None else f"{value:.2f}"
+
+
+def _fmt_findings_summary(report: DiagnosticReport | None) -> str:
+    if report is None or not report.findings:
+        return "없음"
+
+    summary = report.findings_summary or {}
+    labels = summary.get("confirmed_labels")
+    if not isinstance(labels, dict) or not labels:
+        labels = Counter(
+            finding.label
+            for finding in report.findings
+            if finding.confirmed and finding.label
+        )
+
+    if not labels:
+        return "없음"
+
+    return ", ".join(f"{label} {count}건" for label, count in labels.items())
+
+
+def _fmt_config_values(config: dict[str, Any], keys: list[str]) -> str:
+    if not keys:
+        return "변경 없음"
+    return ", ".join(f"{key}={config.get(key)!r}" for key in keys)
+
+
+def _log_optimize_application(
+    state: AgentDoctorState,
+    request: OptimizationRequest,
+    result: OptimizationResult,
+    before_config: dict[str, Any],
+    after_config: dict[str, Any],
+    changed_keys: list[str],
+    prescription_id: str | None,
+) -> None:
+    report = state.report
+    pass_result = gate.passes_report(report) if report is not None else False
+    next_step = (
+        "Index 재색인 후 Eval 재실행"
+        if result.needs_reindex
+        else "Eval 재실행 없이 Serve 이동"
+    )
+
+    print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations}")
+    print(
+        f"[Optimize] Eval 결과: overall={_fmt_score(getattr(report, 'overall_score', None))}, "
+        f"pass={_fmt_bool(pass_result)}"
+    )
+    print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(report)}")
+    print(f"[Optimize] 선택한 라벨: {request.failure_label}")
+    print(f"[Optimize] 선택한 처방: {prescription_id or '-'}")
+    print(f"[Optimize] 변경 전 config: {_fmt_config_values(before_config, changed_keys)}")
+    print(f"[Optimize] 변경 후 config: {_fmt_config_values(after_config, changed_keys)}")
+    print(f"[Optimize] reindex_required={_fmt_bool(bool(result.needs_reindex))}")
+    print(f"[Optimize] 다음 단계: {next_step}")
+
+
+def _log_optimize_decision(
+    state: AgentDoctorState,
+    decision: OptimizeDecision,
+) -> None:
+    report = state.report
+    pass_result = gate.passes_report(report) if report is not None else False
+    next_step = "Serve 이동" if decision.next_route == "serve" else decision.next_route
+
+    print(f"[Optimize] 반복 횟수: {state.iteration + 1}/{state.max_iterations}")
+    print(
+        f"[Optimize] Eval 결과: overall={_fmt_score(getattr(report, 'overall_score', None))}, "
+        f"pass={_fmt_bool(pass_result)}"
+    )
+    print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(report)}")
+    print("[Optimize] 선택한 라벨: -")
+    print("[Optimize] 선택한 처방: -")
+    print("[Optimize] 변경 전 config: 변경 없음")
+    print("[Optimize] 변경 후 config: 변경 없음")
+    print("[Optimize] reindex_required=false")
+    print(f"[Optimize] 다음 단계: {next_step} ({decision.status})")
 
 
 def run(state: AgentDoctorState) -> AgentDoctorState:
@@ -62,6 +150,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             request, decision = planner.plan(state, blacklist=state.blacklist)
             if decision.mode != "apply_optimize" or request is None:
                 state.status = "rolled_back" if rolled_back else decision.status
+                if not rolled_back:
+                    _log_optimize_decision(state, decision)
                 # 롤백이 있었으면 그게 headline, 아니면 흐름 결정(수동/유지)을 보고.
                 state.optimization_report = (
                     reporter.build_trial_report(judged_item, verdict)
@@ -123,7 +213,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         before_report = rollback_baseline_report if rolled_back else state.report
 
         # 검증된 처방을 실제 index_config 에 반영(canonical→flat 변환은 mapper 담당)
-        config_mapper.apply_config_patch(state.index_config, result.config_patch)
+        config_diff = config_mapper.apply_config_patch(state.index_config, result.config_patch)
         state.reindex_required = bool(result.needs_reindex)
 
         # pending 이력 생성(다음 방문에서 finalize) + iteration 1회 증가
@@ -137,6 +227,16 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.optimization_history.append(item)
         if starts_new_label:
             state.iteration += 1
+
+        _log_optimize_application(
+            state,
+            request,
+            result,
+            before_config,
+            dict(state.index_config),
+            config_diff.changed_keys,
+            prescription_id,
+        )
 
         # 여러 top_k 후보의 첫 적용이면 같은 이력 항목을 active study로 사용한다.
         # 후보별 결과는 다음 방문마다 metadata.trial_results에 누적한다.
