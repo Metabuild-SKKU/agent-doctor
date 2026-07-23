@@ -450,7 +450,7 @@ def _judge_pending_trial(
         # '유지'로 두면 성능을 떨어뜨린 처방도 검증 없이 굳어질 수 있다(방향이 위험).
         verdict = Verdict(
             keep=False, before_score=0.0, after_score=0.0,
-            reason="판정 불가(리포트 없음) — 롤백",
+            reason="판정 불가(리포트 없음) — 롤백", unjudgeable=True,
         )
     else:
         verdict = history.judge(before_report, after_report)
@@ -467,8 +467,11 @@ def _judge_pending_trial(
             restored["recreate_collection_on_dimension_mismatch"] = True
         state.index_config = restored
         state.reindex_required = bool(pending.metadata.get("reindex_required", True))
+        # 측정이 없어(unjudgeable) 롤백한 경우는 '나빴다는 증거'가 아니므로 블랙리스트
+        # 등록을 건너뛴다. 영구 차단하면 리포트 부재만으로 처방이 소진되고, before_report
+        # None 이 다음 방문으로 전파돼 판정 불가→롤백→차단이 연쇄될 수 있다(리뷰 #36).
         label = pending.failure_labels[0] if pending.failure_labels else ""
-        if label and pending.selected_prescription_id:
+        if label and pending.selected_prescription_id and not verdict.unjudgeable:
             state.blacklist.add((label, pending.selected_prescription_id))
 
     history.finalize_item(pending, verdict, after_config, after_report)

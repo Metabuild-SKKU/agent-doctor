@@ -424,6 +424,9 @@ class Verdict:
             함께 실어 리포트가 사용자에게 정직한 종합점수를 보여줄 수 있게 한다.
         floor_violations: 하한선을 위반한 지표명 목록. 있으면 무조건 롤백.
         reason: 이 판정을 내린 이유(사람이 읽는 설명).
+        unjudgeable: 리포트 부재로 '측정 자체가 없어' 롤백한 경우 True.
+            처방이 나빴다는 증거가 아니라 판정이 불가했다는 뜻이므로, config 복원은
+            하되 블랙리스트 등록은 건너뛴다(무죄추정). 정상 판정(유지/롤백)은 False.
     """
 
     keep: bool
@@ -433,6 +436,7 @@ class Verdict:
     after_composite: Optional[float] = None
     floor_violations: list[str] = field(default_factory=list)
     reason: str = ""
+    unjudgeable: bool = False
 
 
 @dataclass
