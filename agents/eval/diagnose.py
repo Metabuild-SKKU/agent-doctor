@@ -181,10 +181,16 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
 def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     """정답 근거가 현재 청크 경계에 나뉘어 한 청크에 온전히 없음을 판정한다.
 
-    gold span과 현재 청크의 원문 좌표만 비교해 경계 분할 후보를 찾는다(저비용).
-    검색 실패든 답변 실패든, 경계 분할은 '후보 원인'일 뿐 좌표의 동시 발생만으로
-    인과를 확정하지 않는다. 실제 원인인지는 optimize 가 청킹 파라미터를 바꿔
-    재실행하며 검증하므로, 여기서는 항상 예비 Finding 으로만 남긴다.
+    gold span과 현재 청크의 원문 좌표만 비교해 경계 분할을 잡는다(저비용·결정적, LLM 없음).
+
+    확정(tier1): 경계 분할이 실측되면 confirmed. 이 코드베이스의 confirmed 는 '처방이 통한다'가
+    아니라 '그 원인의 판별 신호가 실제로 측정됐다'는 뜻이다 — retrieval_low_rank(gold 가 wide
+    후보에 있음)·retrieval_missing_gold(코퍼스에 있음)와 같은 기준이며, 그 라벨들도 처방 효과를
+    증명하진 않는다. planner 가 처방 후보를 만들 때 쓰는 근거도 같은 기하 정보다
+    (candidate_grounding.source = gold_span_boundary_geometry).
+
+    단 _RETRIEVAL_CAUSE 안에서는 맨 뒤에 둔다 — 실측된 다른 검색 원인(enumeration/low_rank 등)이
+    있으면 그쪽이 먼저 채택되고, 경계 분할은 달리 설명이 없을 때 채택된다.
     """
 
     analysis = _gold_span_boundary_analysis(record)
@@ -193,7 +199,7 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     if _recall_ok(record) and not _context_failed(record):
         return None
     finding = _finding(
-        record, "chunking_context_mismatch", "retrieval_failure", confirmed=False,
+        record, "chunking_context_mismatch", "retrieval_failure", confirmed=True,
         reason=f"boundary_split={analysis.get('boundary_split_count')}, "
                f"recall@k={_v(record.recall_at_k)}, f1={_v(record.f1_score)}",
     )
@@ -439,8 +445,10 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 _RETRIEVAL_CAUSE = (
-    chunking_context_mismatch, retrieval_incomplete_enumeration, retrieval_missing_bridge_dependency,
+    retrieval_incomplete_enumeration, retrieval_missing_bridge_dependency,
     retrieval_low_rank, retrieval_lexical_mismatch, retrieval_semantic_mismatch, retrieval_missing_gold,
+    # chunking 은 확정이지만 맨 뒤 — 실측된 다른 검색 원인이 있으면 그쪽을 먼저 채택한다.
+    chunking_context_mismatch,
     retrieval_failure
 )
 _GENERATION_CAUSE = (

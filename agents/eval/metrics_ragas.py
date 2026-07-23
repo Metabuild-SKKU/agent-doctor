@@ -315,7 +315,7 @@ def evaluate_real_track(record: EvalRecord, judge) -> dict:
         tasks.append(("context_recall", lambda: _context_recall(judge, q, ref, ctx)))
         tasks.append(("answer_correctness", lambda: _answer_correctness(judge, q, ans, ref)))
     values = parallel_map(lambda t: t[1](), tasks, _inner_concurrency())
-    return _drop_none({key: value for (key, _), value in zip(tasks, values)})
+    return _drop_none(_merge_task_values(tasks, values))
 
 
 def evaluate_oracle_track(record: EvalRecord, judge) -> dict:
@@ -329,7 +329,7 @@ def evaluate_oracle_track(record: EvalRecord, judge) -> dict:
         "response_relevancy": _response_relevancy(judge, q, ans),
     }
     if ref:
-        out["answer_correctness"] = _answer_correctness(judge, q, ans, ref)
+        out.update(_answer_correctness(judge, q, ans, ref))
     return _drop_none(out)
 
 
@@ -401,12 +401,17 @@ def _faithfulness(judge, question: str, answer: str, contexts: list[str]):
 def _answer_correctness(judge, question: str, answer: str, reference: str):
     """RAGAS AnswerCorrectness: 답변↔정답(gold) 비교 점수(0~1).
     factual F1(답변 문장을 정답 기준 TP/FP/FN 분류) 와 의미유사도(임베딩 코사인)의 가중합.
-    답변/정답이 없으면 None. lexical answer_match 오통과를 강등하는 gold-비교 신호."""
+    lexical answer_match 오통과를 강등하는 gold-비교 신호다.
+
+    반환은 트랙 dict 에 합쳐질 조각: {"answer_correctness": float}
+    (+ factual 성분을 못 재면 {"answer_correctness_degraded": True}). 재료가 없거나 두 성분
+    모두 실패하면 빈 dict — 즉 '미측정'이라 diagnose 가 lexical 판정을 그대로 확정한다."""
     if not (answer or "").strip() or not (reference or "").strip():
-        return None
+        return {}
 
     w_f, w_s = _ANSWER_CORRECTNESS_WEIGHTS
     components: list[tuple[float, float]] = []   # (가중치, 값) — 측정에 성공한 성분만 담는다
+    factual_measured = False
 
     # ① factual F1 — 답변 문장을 정답 기준 TP/FP/FN 으로 분류
     ans_stmts = _decompose_statements(judge, question, answer)
@@ -422,6 +427,7 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
         #  스킵되고 lexical 오통과가 그대로 성공 처리됐다.)
         if denom > 0:
             components.append((w_f, tp / denom))
+            factual_measured = True
 
     # ② 의미 유사도 — 답변↔정답 임베딩 코사인
     try:
@@ -432,11 +438,19 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
         components.append((w_s, max(_cosine(vecs[0], vecs[1]), 0.0)))
 
     if not components:
-        return None                              # 두 성분 다 실패 → 진짜 미측정
-    # 성분이 하나만 측정돼도 가중 재정규화해 0~1 스케일을 유지한다. 예전엔 임베딩 실패 시
-    # 가중 없이 factual 을 그대로 돌려주고 factual 실패는 None 이라, 어느 성분이 측정됐냐에 따라
-    # 스케일과 폴백 방향이 제각각이었다.
-    return sum(w * v for w, v in components) / sum(w for w, _ in components)
+        return {}                                # 두 성분 다 실패 → 진짜 미측정
+    # 성분이 하나만 측정돼도 가중 재정규화해 0~1 스케일을 유지한다.
+    score = sum(w * v for w, v in components) / sum(w for w, _ in components)
+    out = {"answer_correctness": score}
+
+    # factual(TP/FP/FN 분류)이 빠지면 유사도 단독 점수다. 이 폴백은 판정을 느슨하게 만들지
+    # 않는다 — 이 지표를 보는 diagnose._f1_ok 은 이미 lexical 을 통과한 답에만 도달하므로,
+    # 유사도가 할 수 있는 일은 '강등'뿐이고 통과시키는 답은 지표가 없었어도 통과했을 답이다.
+    # 다만 부정문·근접 오답은 유사도도 높게 나와 못 거르므로, 그 실행의 정답 판정이
+    # degrade 됐다는 사실 자체를 리포트로 드러낸다(집계: report._degraded_correctness_count).
+    if not factual_measured:
+        out["answer_correctness_degraded"] = True
+    return out
 
 
 def _response_relevancy(judge, question: str, answer: str):
@@ -586,6 +600,19 @@ def _truthy(v) -> bool:
     if isinstance(v, str):
         return v.strip().lower() in ("1", "true", "yes", "y", "t")
     return False
+
+
+def _merge_task_values(tasks: list, values: list) -> dict:
+    """병렬 태스크 결과를 트랙 dict 으로 합친다.
+    대부분의 지표는 스칼라를 돌려주지만, answer_correctness 는 부가 플래그를 함께 실어야 해서
+    dict 조각을 돌려준다 — dict 이면 펼쳐 넣고 아니면 태스크 키에 매핑한다."""
+    out: dict = {}
+    for (key, _), value in zip(tasks, values):
+        if isinstance(value, dict):
+            out.update(value)
+        else:
+            out[key] = value
+    return out
 
 
 def _drop_none(d: dict) -> dict:

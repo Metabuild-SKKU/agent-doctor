@@ -94,7 +94,7 @@ class ChunkBoundaryDiagnosisTest(unittest.TestCase):
             finding.label == "chunking_context_mismatch" for finding in findings
         ))
 
-    def test_recall_success_but_split_context_is_preliminary_in_fast_mode(self):
+    def test_recall_success_but_split_context_is_confirmed_in_fast_mode(self):
         chunks = _fixed_chunks("d1", 1000, 400, 0)
         metrics_common.set_context(chunks=chunks)
         probe = Probe(
@@ -131,7 +131,9 @@ class ChunkBoundaryDiagnosisTest(unittest.TestCase):
         )
 
         self.assertEqual(record.recall_at_k, 1.0)
-        self.assertFalse(finding.confirmed)
+        # 경계 분할은 좌표로 실측되는 결정적 신호라 tier1 에서 확정된다(LLM·재검색 불필요).
+        # 확정이어야 Optimize 의 자동 처방(planner._split_findings)까지 흘러간다.
+        self.assertTrue(finding.confirmed)
 
     # tier4(파이프라인 재실행) 제거로 boundary-merge ablation 확정 경로는 없어졌다.
     # recall 성공 + 경계 분할 케이스는 항상 예비이며, optimize 가 청킹 파라미터를
