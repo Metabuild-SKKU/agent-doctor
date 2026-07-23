@@ -27,6 +27,7 @@ from agents.eval.types import (
     resolve_mode,
 )
 from agents.eval.scoring import compute_composite, format_composite
+from agents.eval.diagnose import _oracle_ok   # oracle 통과 판정은 진단과 같은 함수를 쓴다
 
 _RAGAS_KEYS = ("faithfulness", "context_precision", "context_recall", "response_relevancy")
 
@@ -179,11 +180,15 @@ def _overall_score(ragas_means: dict, rule_means: dict) -> float | None:
 
 
 def _oracle_accuracy(records: list[EvalRecord]) -> float | None:
-    """Oracle 트랙 통과율 (ground_truth 보유 record 중 oracle_f1 >= 임계값 비율)."""
+    """Oracle 트랙 통과율 (ground_truth 보유 record 중 oracle 통과 비율).
+
+    판정은 diagnose._oracle_ok 을 그대로 쓴다 — lexical(oracle_f1)뿐 아니라 DEEP 에서
+    측정된 RAGAS answer_correctness 강등까지 반영해야, '진단은 oracle 실패인데 리포트엔
+    성공으로 집계'되는 어긋남이 생기지 않는다."""
     gt = [r for r in records if r.probe.ground_truth]
     if not gt:
         return None
-    passed = sum(1 for r in gt if r.oracle_f1 >= F1_PASS_THRESHOLD)
+    passed = sum(1 for r in gt if _oracle_ok(r))
     return passed / len(gt)
 
 

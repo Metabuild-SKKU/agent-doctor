@@ -111,7 +111,17 @@ class ChunkBoundaryDiagnosisTest(unittest.TestCase):
             probe=probe,
             retrieved_chunk_ids=[chunks[0].chunk_id, chunks[1].chunk_id],
             retrieved_context=[chunks[0].text, chunks[1].text],
-            generated_answer="오답",
+            # 오답은 F1_PASS_THRESHOLD 아래로 확실히 떨어지는 문자열을 써야 한다.
+            # 예전 fixture 였던 "오답"은 gold "정답"과 '답' 한 글자를 공유해 char-F1 이
+            # 정확히 0.5 = 문턱과 동률이 되고, `>=` 비교라 '정답'으로 통과해 버린다
+            # (probe 가 성공 판정 → diagnose 가 게이트에서 [] 반환 → 이 테스트가 잡으려는
+            #  경계 분할 진단까지 못 감).
+            # FAST 에는 이 근접 오답을 걸러낼 수단이 없다 — 의미 판정은 tier3(RAGAS
+            # answer_correctness) 몫이다. 문턱을 올려 막지 않는 이유는 _f1_ok 이
+            # 'lexical 미달이면 RAGAS 를 보지도 않고 즉시 실패' 구조라, 문턱을 올리면
+            # 생기는 오탈락(긴 gold 재진술 등)은 DEEP 에서도 복구가 불가능하기 때문이다.
+            # (관대한 문턱의 오통과는 DEEP 강등으로 회복되지만, 그 반대는 회복되지 않는다.)
+            generated_answer="전혀 다른 소리",
             oracle_answer="정답",
         )
 

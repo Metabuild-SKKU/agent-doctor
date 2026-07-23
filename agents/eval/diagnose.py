@@ -448,8 +448,12 @@ _GENERATION_CAUSE = (
     generation_hallucination, generation_partial_answer,
     generation_failure,
 )
+# chunking_context_mismatch 는 A·C 양쪽에 등록한다 — 경계 분할은 '검색이 gold 를 통째로
+# 못 가져옴'(A)으로도, '검색은 됐는데 잘린 근거로 답이 틀림'(C)으로도 나타난다.
+# A 슬롯에만 두면 recall=1 인 경계 분할 실패에서 도달 자체가 불가능하다(_dedup 이 중복 제거).
 _CONTEXT_CAUSE = (
-    bad_gold_answer, too_long_context, lost_in_the_middle, context_noise_interference,
+    bad_gold_answer, chunking_context_mismatch,
+    too_long_context, lost_in_the_middle, context_noise_interference,
     context_failure
 )
 
