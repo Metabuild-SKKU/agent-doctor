@@ -132,6 +132,7 @@ def _ingest_file(source_url: str) -> list[Document]:
         raise FileNotFoundError(f"파일 없음: {source_url}")
 
     suffix = path.suffix.lower()
+    extra_metadata: dict = {}   # pdf 만 채운다(page_count/page_spans)
 
     if suffix in (".txt", ".md"):
         # utf-8-sig: BOM 유무 모두 처리. 실패 시 한국어 레거시 인코딩(cp949,
@@ -157,9 +158,49 @@ def _ingest_file(source_url: str) -> list[Document]:
             import pdfplumber
         except ImportError:
             raise ImportError("pip install pdfplumber")
+
+        from agents.ingest.preprocess import preprocess_pages
+
         with pdfplumber.open(path) as pdf:
-            content = "\n\n".join(p.extract_text() or "" for p in pdf.pages)
+            raw_pages = [p.extract_text() for p in pdf.pages]
+
+        result = preprocess_pages(raw_pages)
+        content = result.content
         fmt = "pdf"
+
+        # 스캔본(텍스트 레이어 없음)은 조용히 빈 문서로 흘려보내면 안 된다.
+        # 청크 0개로 끝나 Eval 이 원인 모를 실패를 내므로 여기서 끊는다.
+        # OCR 은 아직 미지원 — 붙이면 여기서 분기하면 된다.
+        if result.is_empty:
+            raise ValueError(
+                f"{path.name}: 텍스트를 추출하지 못했습니다 "
+                f"({result.page_count}페이지 전부 비어 있음). "
+                f"스캔 이미지 PDF 로 보입니다 — 현재 OCR 은 지원하지 않습니다."
+            )
+        if result.is_probably_scanned:
+            print(
+                f"[Ingest] {path.name}: 추출된 텍스트가 매우 적습니다 "
+                f"({len(content)}자 / {result.page_count}페이지). "
+                f"부분 스캔본일 수 있어 진단 품질이 낮게 나올 수 있습니다."
+            )
+        if result.empty_page_count:
+            print(
+                f"[Ingest] {path.name}: {result.page_count}페이지 중 "
+                f"{result.empty_page_count}페이지가 비어 있어 건너뜁니다."
+            )
+        if result.removed_headers:
+            preview = ", ".join(result.removed_headers[:3])
+            print(
+                f"[Ingest] {path.name}: 머리말/꼬리말 "
+                f"{len(result.removed_headers)}종 제거 ({preview}…)"
+            )
+
+        extra_metadata = {
+            "page_count": result.page_count,
+            # Index 가 만드는 Chunk.char_span 과 같은 좌표계 — 청크가 몇 페이지에서
+            # 왔는지 역산할 수 있다(preprocess.PreprocessResult.page_of 참고).
+            "page_spans": [list(span) for span in result.page_spans],
+        }
 
     else:
         raise ValueError(f"지원 안 하는 형식: {suffix}  (지원: .txt .md .pdf)")
@@ -169,7 +210,7 @@ def _ingest_file(source_url: str) -> list[Document]:
         source=str(path.resolve()),
         format=fmt,
         content=content,
-        metadata={"filename": path.name},
+        metadata={"filename": path.name, **extra_metadata},
     )]
 
 
