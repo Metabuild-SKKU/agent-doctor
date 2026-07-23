@@ -23,6 +23,10 @@ MCP_SERVER  = Path(__file__).parent / "mcp_server.py"
 API_SERVER  = Path(__file__).parent / "api.py"
 CHUNKS_FILE = Path(__file__).parent.parent.parent / "chunks.json"
 API_PORT    = int(os.getenv("AGENT_DOCTOR_API_PORT", "8766"))
+# api.py 는 uvicorn 리스닝 전에 청크 로드 + retriever 구축(임베딩 업서트)을 하므로
+# 코퍼스가 크면 기동에 수십 초가 걸릴 수 있다 → 시간 기반 대기.
+API_START_TIMEOUT = float(os.getenv("AGENT_DOCTOR_API_START_TIMEOUT", "30"))
+API_LOG_FILE = CHUNKS_FILE.parent / "api_server.log"
 
 
 def _find_claude_config() -> Path:
@@ -54,33 +58,49 @@ def _serialize_chunks(state: AgentDoctorState) -> str:
     return json.dumps(data, ensure_ascii=False, default=str, indent=2)
 
 
-def _start_api_server() -> None:
-    """FastAPI 서버를 백그라운드 프로세스로 시작."""
+def _start_api_server() -> bool:
+    """FastAPI 서버를 백그라운드 프로세스로 시작. 기동 확인 성공 여부를 반환."""
     health_url = f"http://localhost:{API_PORT}/health"
 
     # 이미 실행 중이면 스킵
     try:
         requests.get(health_url, timeout=2)
         print(f"[Serve] API 서버 이미 실행 중 (port {API_PORT})")
-        return
+        return True
     except Exception:
         pass
 
-    subprocess.Popen(
-        [sys.executable, str(API_SERVER), "--chunks-file", str(CHUNKS_FILE), "--port", str(API_PORT)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    # 자식 출력을 로그 파일로 남겨 기동 실패 원인을 확인할 수 있게 한다.
+    log_file = open(API_LOG_FILE, "w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(API_SERVER), "--chunks-file", str(CHUNKS_FILE), "--port", str(API_PORT)],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+    finally:
+        log_file.close()  # 자식이 핸들을 상속하므로 부모 쪽은 닫아도 된다
 
-    for _ in range(10):
-        time.sleep(0.5)
+    deadline = time.monotonic() + API_START_TIMEOUT
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            print(
+                f"[Serve] API 서버 프로세스 조기 종료 (exit {proc.returncode}) "
+                f"— {API_LOG_FILE} 확인"
+            )
+            return False
         try:
             requests.get(health_url, timeout=1)
             print(f"[Serve] API 서버 시작 완료 (port {API_PORT})")
-            return
+            return True
         except Exception:
-            pass
-    print(f"[Serve] API 서버 시작 대기 중... (port {API_PORT})")
+            time.sleep(0.5)
+
+    print(
+        f"[Serve] API 서버가 {API_START_TIMEOUT:.0f}초 안에 응답하지 않음 "
+        f"— {API_LOG_FILE} 확인"
+    )
+    return False
 
 
 def _register_to_claude_desktop() -> None:
@@ -133,8 +153,14 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         CHUNKS_FILE.write_text(_serialize_chunks(state), encoding="utf-8")
         print(f"[Serve] 청크 저장 → {CHUNKS_FILE}")
 
-        # 2. FastAPI 서버 백그라운드 시작
-        _start_api_server()
+        # 2. FastAPI 서버 백그라운드 시작 — 실패 시 죽은 엔드포인트 등록을 막는다
+        if not _start_api_server():
+            state.status = "error"
+            state.error = (
+                f"Serve 실패: API 서버가 시작되지 않았습니다 (port {API_PORT}) "
+                f"— {API_LOG_FILE} 확인"
+            )
+            return state
 
         # 3. Claude Desktop 설정 자동 등록
         _register_to_claude_desktop()

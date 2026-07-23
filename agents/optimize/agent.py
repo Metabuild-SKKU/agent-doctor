@@ -288,6 +288,11 @@ def _finish_internal_study(
                 after_score=after_score,
                 reason="모든 top_k 후보 평가 후 가장 좋은 후보를 선택",
             )
+            # 비교 기준은 before_config(study baseline)가 아니라 after_config 가 맞다.
+            # after_config 는 '마지막으로 적용·재색인된 후보'(=현재 물리 인덱스가 반영
+            # 중인 config)의 스냅샷이므로, best 가 마지막 후보와 같으면 이미 색인돼 있어
+            # 재색인 불필요("verified"), 다르면 "applied" 로 Index 재색인을 태운다.
+            # (첫 후보 단계의 after_config={} 는 비교가 항상 True 라 "applied" 로 안전.)
             state.status = (
                 "applied"
                 if state.index_config != item.after_config
