@@ -258,14 +258,15 @@ def _generation_failed(record: EvalRecord) -> bool:
     return False
 
 
-def generation_no_abstention(record: EvalRecord) -> Optional[Finding]:
+def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
     """
     무응답 기대(answer_exists=False) probe인데 기권하지 않고 답을 지어냄.
     확정: answer_exists=False + is_abstention 아님.
+    (라벨은 optimize/rules.py 의 처방 키와 일치시킨다 — generation_abstention_failure)
     """
     if record.probe.answer_exists is False and not is_abstention(record.generated_answer):
         return _finding(
-            record, "generation_no_abstention", "generation_failure", confirmed=True,
+            record, "generation_abstention_failure", "generation_failure", confirmed=True,
             reason=f"answer_exists=False, 기권 아님(f1={_v(record.f1_score)})",
         )
     return None
@@ -452,7 +453,7 @@ _RETRIEVAL_CAUSE = (
     retrieval_failure
 )
 _GENERATION_CAUSE = (
-    generation_no_abstention, bad_gold_answer_oracle, generation_hop_binding_error,
+    generation_abstention_failure, bad_gold_answer_oracle, generation_hop_binding_error,
     generation_hallucination, generation_partial_answer,
     generation_failure,
 )
