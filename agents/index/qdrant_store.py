@@ -40,9 +40,12 @@ def build_client(url: str = ":memory:", api_key: str | None = None) -> QdrantCli
 
 
 # Qdrant client 버전별 응답 차이를 여기서만 흡수한다.
-def _collection_vector_size(client: QdrantClient) -> int | None:
+def _collection_vector_size(
+    client: QdrantClient,
+    collection_name: str = COLLECTION,
+) -> int | None:
     try:
-        vectors = client.get_collection(COLLECTION).config.params.vectors
+        vectors = client.get_collection(collection_name).config.params.vectors
         if hasattr(vectors, "size"):
             return int(vectors.size)
     except Exception:
@@ -54,11 +57,12 @@ def ensure_collection(
     client: QdrantClient,
     vector_dim: int = VECTOR_DIM,
     recreate_on_mismatch: bool = False,
+    collection_name: str = COLLECTION,
 ) -> None:
     # 차원이 다른 컬렉션에 그대로 덮어쓰면 검색이 깨져서, 명시 옵션 없이는 막는다.
     existing = [collection.name for collection in client.get_collections().collections]
-    if COLLECTION in existing:
-        current_dim = _collection_vector_size(client)
+    if collection_name in existing:
+        current_dim = _collection_vector_size(client, collection_name)
         if current_dim is None or current_dim == vector_dim:
             return
         if not recreate_on_mismatch:
@@ -66,13 +70,13 @@ def ensure_collection(
                 f"Qdrant 벡터 차원이 다릅니다: 기존={current_dim}, 요청={vector_dim}. "
                 "recreate_collection_on_dimension_mismatch를 켜거나 새 컬렉션을 사용하세요."
             )
-        client.delete_collection(collection_name=COLLECTION)
+        client.delete_collection(collection_name=collection_name)
 
     client.create_collection(
-        collection_name=COLLECTION,
+        collection_name=collection_name,
         vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE),
     )
-    print(f"[Qdrant] 컬렉션 준비: {COLLECTION} (dim={vector_dim})")
+    print(f"[Qdrant] 컬렉션 준비: {collection_name} (dim={vector_dim})")
 
 
 # 같은 chunk_id는 같은 point id를 쓰게 해서 재색인을 안전하게 만든다.
@@ -81,7 +85,11 @@ def _point_id(chunk_id: str) -> str:
 
 
 # Serve가 payload를 그대로 읽으므로 provenance 필드는 빼지 않는다.
-def upsert_chunks(client: QdrantClient, chunks: list) -> None:
+def upsert_chunks(
+    client: QdrantClient,
+    chunks: list,
+    collection_name: str = COLLECTION,
+) -> None:
     points = []
     for chunk in chunks:
         if not chunk.embedding:
@@ -103,22 +111,50 @@ def upsert_chunks(client: QdrantClient, chunks: list) -> None:
                     "metadata": metadata,
                     "sparse_vector": chunk.sparse_vector,
                     "retrieval_scope_id": metadata.get("retrieval_scope_id"),
+                    "index_cache_key": metadata.get("index_cache_key"),
                 },
             )
         )
     if points:
-        client.upsert(collection_name=COLLECTION, points=points)
+        client.upsert(collection_name=collection_name, points=points)
         print(f"[Qdrant] {len(points)}개 청크 저장 완료")
 
 
+def collection_index_cache_key(
+    client: QdrantClient,
+    collection_name: str = COLLECTION,
+) -> str | None:
+    """컬렉션 payload에 기록한 논리 인덱스 키를 한 건 읽는다."""
+    try:
+        points, _ = client.scroll(
+            collection_name=collection_name,
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points:
+            return None
+        payload = points[0].payload or {}
+        key = payload.get("index_cache_key")
+        if not key:
+            key = (payload.get("metadata") or {}).get("index_cache_key")
+        return str(key) if key else None
+    except Exception:
+        return None
+
+
 # 재색인 대상 문서의 옛 chunk가 검색에 섞이지 않도록 먼저 지운다.
-def delete_document_chunks(client: QdrantClient, doc_ids: list[str]) -> None:
+def delete_document_chunks(
+    client: QdrantClient,
+    doc_ids: list[str],
+    collection_name: str = COLLECTION,
+) -> None:
     unique_ids = sorted({doc_id for doc_id in doc_ids if doc_id})
     if not unique_ids:
         return
     try:
         client.delete(
-            collection_name=COLLECTION,
+            collection_name=collection_name,
             points_selector=Filter(
                 must=[
                     FieldCondition(
@@ -132,7 +168,7 @@ def delete_document_chunks(client: QdrantClient, doc_ids: list[str]) -> None:
         # MatchAny를 지원하지 않는 구버전에서는 문서별로 삭제한다.
         for doc_id in unique_ids:
             client.delete(
-                collection_name=COLLECTION,
+                collection_name=collection_name,
                 points_selector=Filter(
                     must=[
                         FieldCondition(
@@ -149,6 +185,7 @@ def search(
     query_vector: list[float],
     top_k: int = 5,
     retrieval_scope_id: str | None = None,
+    collection_name: str = COLLECTION,
 ) -> list[dict]:
     query_filter = None
     if retrieval_scope_id:
@@ -163,7 +200,7 @@ def search(
     # dense 검색 결과를 Serve가 쓰는 공통 dict 모양으로 맞춘다.
     try:
         kwargs = {
-            "collection_name": COLLECTION,
+            "collection_name": collection_name,
             "query": query_vector,
             "limit": top_k,
         }
@@ -172,7 +209,7 @@ def search(
         hits = client.query_points(**kwargs).points
     except AttributeError:
         kwargs = {
-            "collection_name": COLLECTION,
+            "collection_name": collection_name,
             "query_vector": query_vector,
             "limit": top_k,
         }
@@ -285,6 +322,7 @@ def hybrid_search(
     top_k: int = 5,
     dense_weight: float = 0.7,
     retrieval_scope_id: str | None = None,
+    collection_name: str = COLLECTION,
 ) -> list[dict]:
     # dense 점수와 lexical 점수를 chunk_id 기준으로 합친다.
     dense_weight = min(1.0, max(0.0, float(dense_weight)))
@@ -293,6 +331,7 @@ def hybrid_search(
         query_vector,
         top_k=max(top_k * 4, 20),
         retrieval_scope_id=retrieval_scope_id,
+        collection_name=collection_name,
     )
     dense_by_id = {item["chunk_id"]: item for item in dense_results}
 

@@ -11,10 +11,11 @@ Optimize 노드의 진입점(오케스트레이션 계층).
   모든 경로에서 같은 state 를 반환한다(AGENTS.md 2절 계약).
 
 [읽는 것]  state.report, state.index_config, state.iteration, state.max_iterations,
-           state.blacklist, state.optimization_history
+           state.blacklist, state.optimization_history,
+           state.active_index_key, state.active_eval_key
 [쓰는 것]  state.index_config, state.iteration, state.status, state.error,
            state.current_agent, state.blacklist, state.optimization_history,
-           state.optimization_report
+           state.optimization_report, state.reindex_required
 
 [state.status 신호]  (graph 라우팅이 참고)
   - "applied"      : 새 처방을 적용함 → 재색인 필요(Index)
@@ -55,6 +56,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # (1) 지난 처방 판정 + (나빴으면) 롤백/블랙리스트
         judged_item, verdict, rollback_baseline_report = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
+        rollback_reindex_required = bool(state.reindex_required) if rolled_back else False
 
         # (2) 새 처방 선택. 저비용 사전검증에서 baseline이 이기면 현재 처방을
         # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
@@ -124,7 +126,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
         # 검증된 처방을 실제 index_config 에 반영(canonical→flat 변환은 mapper 담당)
         config_mapper.apply_config_patch(state.index_config, result.config_patch)
-        state.reindex_required = bool(result.needs_reindex)
+        # 재색인형 처방을 롤백한 직후 런타임형 처방을 적용하면, 새 처방의 False가
+        # 롤백 복원에 필요한 True를 지우면 안 된다. Index도 fingerprint를 검증하지만
+        # 상태 신호 자체도 실제 필요한 작업을 보존한다.
+        state.reindex_required = (
+            rollback_reindex_required
+            or bool(result.needs_reindex)
+        )
 
         # pending 이력 생성(다음 방문에서 finalize) + iteration 1회 증가
         prescription_id = (
@@ -134,6 +142,16 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             state, request, prescription_id, before_config, before_report
         )
         item.metadata["reindex_required"] = bool(result.needs_reindex)
+        if rolled_back and judged_item is not None:
+            item.metadata["before_index_key"] = judged_item.metadata.get(
+                "before_index_key", ""
+            )
+            item.metadata["before_eval_key"] = judged_item.metadata.get(
+                "before_eval_key", ""
+            )
+        else:
+            item.metadata["before_index_key"] = state.active_index_key
+            item.metadata["before_eval_key"] = state.active_eval_key
         state.optimization_history.append(item)
         if starts_new_label:
             state.iteration += 1

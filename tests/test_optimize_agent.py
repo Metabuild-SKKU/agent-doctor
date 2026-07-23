@@ -37,7 +37,11 @@ import graph
 from core.schema import DiagnosticReport, Finding
 from core.state import AgentDoctorState
 from agents.optimize import agent, history
-from agents.optimize.schemas import OptimizationHistoryItem, OptimizationResult
+from agents.optimize.schemas import (
+    OptimizationHistoryItem,
+    OptimizationResult,
+    Verdict,
+)
 
 
 def make_report(overall, pass_threshold=False, label="too_long_context"):
@@ -216,6 +220,69 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(state.status, "rolled_back")
         self.assertEqual(state.index_config["top_k"], 4)
         self.assertEqual(state.optimization_report.status, "failed")
+
+    def test_reindex_rollback_requirement_survives_runtime_followup(self):
+        """재색인형 B 롤백 직후 런타임형 C가 복원 작업을 지우지 않는다."""
+        state = make_state(overall=50.0)
+        state.active_index_key = "index-b"
+        state.active_eval_key = "eval-b"
+        request, decision = agent.planner.plan(state)
+        runtime_result = agent.optimizer.run(request)
+        self.assertFalse(runtime_result.needs_reindex)
+
+        judged = OptimizationHistoryItem(
+            trial_id="trial-b",
+            request_id="request-b",
+            iteration=1,
+            failure_labels=["too_long_context"],
+            optimizer="rules",
+            status="failed",
+            before_config={
+                "top_k": 4,
+                "chunk_size": 512,
+                "chunk_overlap": 50,
+            },
+        )
+        judged.metadata.update(
+            {
+                "before_index_key": "index-a",
+                "before_eval_key": "eval-a",
+                "reindex_required": True,
+            }
+        )
+        verdict = Verdict(
+            keep=False,
+            before_score=60.0,
+            after_score=50.0,
+            reason="성능 하락",
+        )
+        baseline_report = make_report(60.0)
+
+        def rollback_first(current):
+            current.index_config = dict(judged.before_config)
+            current.reindex_required = True
+            return judged, verdict, baseline_report
+
+        with (
+            patch(
+                "agents.optimize.agent._judge_pending_trial",
+                side_effect=rollback_first,
+            ),
+            patch(
+                "agents.optimize.agent.planner.plan",
+                return_value=(request, decision),
+            ),
+            patch(
+                "agents.optimize.agent.optimizer.run",
+                return_value=runtime_result,
+            ),
+        ):
+            out = agent.run(state)
+
+        pending = history.find_pending(out.optimization_history)
+        self.assertTrue(out.reindex_required)
+        self.assertEqual(pending.metadata["before_index_key"], "index-a")
+        self.assertEqual(pending.metadata["before_eval_key"], "eval-a")
 
 
 class OptimizeTopKSweepTest(unittest.TestCase):

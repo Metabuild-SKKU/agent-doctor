@@ -31,6 +31,32 @@ state.documents
 
 Hybrid와 reranker는 baseline 결과를 먼저 측정한 뒤 Optimize가 켜는 기능이다.
 
+## 롤백 2-slot 캐시
+
+Index는 원문과 청킹·임베딩 설정의 fingerprint를 만들고, 현재 버전과 롤백
+기준 버전을 최대 두 개까지 보관한다. Qdrant 컬렉션도 코퍼스 namespace마다
+`agent_doctor_<namespace>_slot_0`, `agent_doctor_<namespace>_slot_1`
+두 개만 사용한다.
+
+- 새로운 후보는 롤백 기준본이 아닌 반대 슬롯을 교체한다.
+- 이전 fingerprint로 돌아오면 저장된 `chunks`, 임베딩, 그래프 산출물을 복원한다.
+- 같은 프로세스의 retriever 적재 캐시까지 남아 있으면 Qdrant upsert도 생략한다.
+- 적재 캐시가 유실돼도 원격 Qdrant 슬롯이 남아 있으면 upsert 없이 다시 연결한다.
+- 슬롯도 사라졌다면 저장된 임베딩으로 복구하므로 재임베딩은 하지 않는다.
+- 캐시 사용 여부와 최대 개수는 `rollback_cache_enabled`,
+  `rollback_cache_max_versions`로 전달하며 현재 상한은 2다.
+
+캐시는 프로세스 메모리의 `state.index_cache`에 있다. 따라서 프로세스 재시작을
+가로지르는 영속 롤백은 보장하지 않지만, 고정 Qdrant 슬롯 덕분에 컬렉션이
+버전 수만큼 계속 늘어나지는 않는다.
+
+같은 Qdrant에서 동일 코퍼스를 여러 프로세스가 동시에 튜닝한다면 서로 다른
+`qdrant_collection_namespace`를 지정해야 한다. 비어 있으면 입력 source URL/type
+(없으면 문서 source 목록)에서 namespace를 파생한다. 업그레이드 전에 쓰던 단일
+`agent_doctor` 컬렉션은 데이터
+안전을 위해 자동 삭제하지 않으므로, 새 슬롯 검증 후 운영 정책에 맞게 별도로
+정리한다.
+
 ## 청킹 전략 교체
 
 모든 전략은 동일한 `ChunkDraft(text, section, start, end)` 형태를 반환하므로
@@ -118,6 +144,9 @@ state.index_artifacts = {
     "documents": 2,
     "chunks": 14,
     "reused_embeddings": 0,
+    "index_cache_hit": False,
+    "active_index_key": "...",
+    "qdrant_collection_name": "agent_doctor_<namespace>_slot_0",
 }
 ```
 
