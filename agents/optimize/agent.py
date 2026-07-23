@@ -313,6 +313,13 @@ def _finish_internal_study(
     # 복원 시 before 와 동일(설정을 되돌렸으므로), 아니면 sweep 이 full report 를 남기지
     # 않아 미상(None) — 표시부가 fallback 한다.
     before_composite = history._read_composite(item.metadata.get("before_report"))
+    # baseline 복원이면 설정을 되돌렸으니 after=before. 새 후보가 이겼으면 그 후보의
+    # 관측값에 실린 composite_total 을 쓴다(_report_metrics 가 실어둠). 없으면 None →
+    # 표시부가 overall×100 으로 폴백.
+    after_composite = (
+        before_composite if baseline_selected
+        else best_metrics.get("composite_total")
+    )
     item.metadata.update(
         {
             "pending": False,
@@ -320,7 +327,7 @@ def _finish_internal_study(
             "before_score": verdict.before_score,
             "after_score": verdict.after_score,
             "before_composite": before_composite,
-            "after_composite": before_composite if baseline_selected else None,
+            "after_composite": after_composite,
             "best_config": dict(result.best_config or {}),
         }
     )
@@ -378,6 +385,11 @@ def _report_metrics(state: AgentDoctorState) -> dict:
     metrics = dict(state.report.ragas_scores)
     if state.report.overall_score is not None:
         metrics["overall_score"] = state.report.overall_score
+    # 표시·게이트용 종합점수(0~100)도 관측값에 실어, sweep 승자의 after_composite 를
+    # 표시부가 복원하게 한다(없으면 overall×100 폴백 → before/after 스케일 뒤섞임).
+    composite_total = (state.report.composite_score or {}).get("total")
+    if composite_total is not None:
+        metrics["composite_total"] = float(composite_total)
     metrics["pass_threshold"] = gate.passes_report(state.report)
     return metrics
 
@@ -433,10 +445,12 @@ def _judge_pending_trial(
     after_report = state.report
 
     if before_report is None or after_report is None:
-        # 비교할 점수가 없어 판정 불가 → 보수적으로 유지 처리하고 확정만.
+        # 비교할 점수가 없어 판정 불가 → 안전망 취지대로 롤백(원래 설정 복원)한다.
+        # before_config 스냅샷은 리포트와 무관하게 항상 있으므로 복원은 안전하며,
+        # '유지'로 두면 성능을 떨어뜨린 처방도 검증 없이 굳어질 수 있다(방향이 위험).
         verdict = Verdict(
-            keep=True, before_score=0.0, after_score=0.0,
-            reason="판정 불가(리포트 없음) — 유지",
+            keep=False, before_score=0.0, after_score=0.0,
+            reason="판정 불가(리포트 없음) — 롤백", unjudgeable=True,
         )
     else:
         verdict = history.judge(before_report, after_report)
@@ -453,8 +467,11 @@ def _judge_pending_trial(
             restored["recreate_collection_on_dimension_mismatch"] = True
         state.index_config = restored
         state.reindex_required = bool(pending.metadata.get("reindex_required", True))
+        # 측정이 없어(unjudgeable) 롤백한 경우는 '나빴다는 증거'가 아니므로 블랙리스트
+        # 등록을 건너뛴다. 영구 차단하면 리포트 부재만으로 처방이 소진되고, before_report
+        # None 이 다음 방문으로 전파돼 판정 불가→롤백→차단이 연쇄될 수 있다(리뷰 #36).
         label = pending.failure_labels[0] if pending.failure_labels else ""
-        if label and pending.selected_prescription_id:
+        if label and pending.selected_prescription_id and not verdict.unjudgeable:
             state.blacklist.add((label, pending.selected_prescription_id))
 
     history.finalize_item(pending, verdict, after_config, after_report)

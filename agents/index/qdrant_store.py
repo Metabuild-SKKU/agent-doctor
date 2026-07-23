@@ -434,6 +434,10 @@ def count_tokens(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
 ) -> int:
     # tokenizer가 있으면 그걸 쓰고, 없으면 대략적인 토큰 수로 기록한다.
+    # 순수 dict 조회로만 캐시된 모델을 본다(부작용 없음). 프로덕션 유일 호출부
+    # (index/agent.py)는 항상 embed 뒤에 불려 모델이 이미 캐시에 있으므로 실제
+    # tokenizer를 쓴다. 여기서 _get_embedding_model 로 지연 로드하면 모델 없는
+    # 환경에서 HF 다운로드를 유발해 토큰 세기 한 번이 수 초 블로킹된다(리뷰 #36).
     model = _models.get(model_name)
     tokenizer = getattr(model, "tokenizer", None) if model is not None else None
     if tokenizer is None:
