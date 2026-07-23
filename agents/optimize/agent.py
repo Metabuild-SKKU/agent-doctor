@@ -313,6 +313,13 @@ def _finish_internal_study(
     # 복원 시 before 와 동일(설정을 되돌렸으므로), 아니면 sweep 이 full report 를 남기지
     # 않아 미상(None) — 표시부가 fallback 한다.
     before_composite = history._read_composite(item.metadata.get("before_report"))
+    # baseline 복원이면 설정을 되돌렸으니 after=before. 새 후보가 이겼으면 그 후보의
+    # 관측값에 실린 composite_total 을 쓴다(_report_metrics 가 실어둠). 없으면 None →
+    # 표시부가 overall×100 으로 폴백.
+    after_composite = (
+        before_composite if baseline_selected
+        else best_metrics.get("composite_total")
+    )
     item.metadata.update(
         {
             "pending": False,
@@ -320,7 +327,7 @@ def _finish_internal_study(
             "before_score": verdict.before_score,
             "after_score": verdict.after_score,
             "before_composite": before_composite,
-            "after_composite": before_composite if baseline_selected else None,
+            "after_composite": after_composite,
             "best_config": dict(result.best_config or {}),
         }
     )
@@ -378,6 +385,11 @@ def _report_metrics(state: AgentDoctorState) -> dict:
     metrics = dict(state.report.ragas_scores)
     if state.report.overall_score is not None:
         metrics["overall_score"] = state.report.overall_score
+    # 표시·게이트용 종합점수(0~100)도 관측값에 실어, sweep 승자의 after_composite 를
+    # 표시부가 복원하게 한다(없으면 overall×100 폴백 → before/after 스케일 뒤섞임).
+    composite_total = (state.report.composite_score or {}).get("total")
+    if composite_total is not None:
+        metrics["composite_total"] = float(composite_total)
     metrics["pass_threshold"] = gate.passes_report(state.report)
     return metrics
 
