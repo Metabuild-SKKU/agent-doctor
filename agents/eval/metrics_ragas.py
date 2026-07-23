@@ -404,28 +404,39 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
     답변/정답이 없으면 None. lexical answer_match 오통과를 강등하는 gold-비교 신호."""
     if not (answer or "").strip() or not (reference or "").strip():
         return None
+
+    w_f, w_s = _ANSWER_CORRECTNESS_WEIGHTS
+    components: list[tuple[float, float]] = []   # (가중치, 값) — 측정에 성공한 성분만 담는다
+
+    # ① factual F1 — 답변 문장을 정답 기준 TP/FP/FN 으로 분류
     ans_stmts = _decompose_statements(judge, question, answer)
     ref_stmts = _decompose_statements(judge, question, reference)
-    if not ans_stmts or not ref_stmts:
-        return None
-    # 답변 문장을 정답 기준 TP/FP/FN 으로 분류 → factual F1
-    d = _chat(judge, _ragas_prompt(_CORRECTNESS_INSTRUCTION, _SCHEMA_CORRECTNESS, _CORRECTNESS_EXAMPLES,
-                                   {"question": question, "answer": ans_stmts, "ground_truth": ref_stmts}))
-    tp, fp, fn = len(_as_list(d, "TP")), len(_as_list(d, "FP")), len(_as_list(d, "FN"))
-    denom = tp + 0.5 * (fp + fn)
-    if denom <= 0:
-        return None
-    factual_f1 = tp / denom
-    # 의미 유사도(답변↔정답 임베딩 코사인). 임베딩 실패 시 factual 만 사용.
-    w_f, w_s = _ANSWER_CORRECTNESS_WEIGHTS
+    if ans_stmts and ref_stmts:
+        d = _chat(judge, _ragas_prompt(_CORRECTNESS_INSTRUCTION, _SCHEMA_CORRECTNESS, _CORRECTNESS_EXAMPLES,
+                                       {"question": question, "answer": ans_stmts, "ground_truth": ref_stmts}))
+        tp, fp, fn = len(_as_list(d, "TP")), len(_as_list(d, "FP")), len(_as_list(d, "FN"))
+        denom = tp + 0.5 * (fp + fn)
+        # denom==0 = 분류가 한 건도 안 나옴. 분해된 문장이 있으면 정상 분류는 최소 1건이 나오므로
+        # 이건 판정기 무응답/파싱 실패다 — 이 성분만 버리고 남은 성분으로 계속 간다.
+        # (예전엔 여기서 함수 전체가 None 이라 '미측정'이 되어, 판정기가 죽으면 강등이 통째로
+        #  스킵되고 lexical 오통과가 그대로 성공 처리됐다.)
+        if denom > 0:
+            components.append((w_f, tp / denom))
+
+    # ② 의미 유사도 — 답변↔정답 임베딩 코사인
     try:
         vecs = _embed(judge, [reference, answer])
     except Exception:
         vecs = None
-    if not vecs or len(vecs) < 2:
-        return factual_f1
-    sim = max(_cosine(vecs[0], vecs[1]), 0.0)
-    return w_f * factual_f1 + w_s * sim
+    if vecs and len(vecs) >= 2:
+        components.append((w_s, max(_cosine(vecs[0], vecs[1]), 0.0)))
+
+    if not components:
+        return None                              # 두 성분 다 실패 → 진짜 미측정
+    # 성분이 하나만 측정돼도 가중 재정규화해 0~1 스케일을 유지한다. 예전엔 임베딩 실패 시
+    # 가중 없이 factual 을 그대로 돌려주고 factual 실패는 None 이라, 어느 성분이 측정됐냐에 따라
+    # 스케일과 폴백 방향이 제각각이었다.
+    return sum(w * v for w, v in components) / sum(w for w, _ in components)
 
 
 def _response_relevancy(judge, question: str, answer: str):
