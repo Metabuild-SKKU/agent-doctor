@@ -445,10 +445,12 @@ def _judge_pending_trial(
     after_report = state.report
 
     if before_report is None or after_report is None:
-        # 비교할 점수가 없어 판정 불가 → 보수적으로 유지 처리하고 확정만.
+        # 비교할 점수가 없어 판정 불가 → 안전망 취지대로 롤백(원래 설정 복원)한다.
+        # before_config 스냅샷은 리포트와 무관하게 항상 있으므로 복원은 안전하며,
+        # '유지'로 두면 성능을 떨어뜨린 처방도 검증 없이 굳어질 수 있다(방향이 위험).
         verdict = Verdict(
-            keep=True, before_score=0.0, after_score=0.0,
-            reason="판정 불가(리포트 없음) — 유지",
+            keep=False, before_score=0.0, after_score=0.0,
+            reason="판정 불가(리포트 없음) — 롤백",
         )
     else:
         verdict = history.judge(before_report, after_report)

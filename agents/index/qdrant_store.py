@@ -434,7 +434,9 @@ def count_tokens(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
 ) -> int:
     # tokenizer가 있으면 그걸 쓰고, 없으면 대략적인 토큰 수로 기록한다.
-    model = _models.get(model_name)
+    # embed()와 같은 지연 로드 경로를 써야, count_tokens가 embed보다 먼저 불려도
+    # 근사치가 아닌 실제 tokenizer로 센다(비용 추정 정확도).
+    model = _get_embedding_model(model_name)
     tokenizer = getattr(model, "tokenizer", None) if model is not None else None
     if tokenizer is None:
         return max(1, len(_tokens(text)))
