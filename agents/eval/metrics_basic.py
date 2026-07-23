@@ -1,11 +1,17 @@
 """
-agents/eval/metrics.py
-STEP3-1: 규칙 기반(LLM 불필요) 지표 계산
+agents/eval/metrics_basic.py
+[tier1] 추가 자원 없이 계산되는 측정을 모은 파일. (STEP3-1: 규칙 기반 지표)
 
-설계 문서 'STEP3-1: Metric 진단' 구현.
-세 지표(Recall@k, token F1, Oracle F1)와 무응답 판별을 제공한다. 이 지표들의 조합으로
-원인을 판정하는 로직은 signals/diagnose 로 이관됐다(브랜치리스). 전량 순수 파이썬이라
-외부 API·모델 없이 항상 동작한다.
+LLM 호출도, 추가 검색 쿼리도 쓰지 않는다 — 이미 가진 답변·정답·청크 좌표만으로 계산하므로
+모드 게이트 없이 FAST 부터 항상 동작한다. 담는 것:
+  · 정답 매칭 지표 : char_f1 / answer_match / exact_match
+  · 검색 지표      : recall_at_k / span_recall_at_k
+  · 무응답 판별    : is_abstention
+  · 진입 시 계산   : _compute_metrics (record 에 recall/f1/oracle_f1/EM 저장)
+  · 청크 경계 측정 : _gold_span_boundary_analysis (원문 절대좌표 비교)
+
+여기는 '측정'만 한다 — 임계값 판정과 라벨 부여는 diagnose 소관이다.
+추가 검색이 필요한 측정은 metrics_search(tier2), LLM 이 필요한 측정은 metrics_ragas(tier3).
 
 [구현 포인트]
   - 정답 매칭은 KorQuAD 공식 지표를 따른다: normalize_answer(구두점 제거·소문자화·공백정리)
@@ -22,26 +28,24 @@ from __future__ import annotations
 import string
 from collections import Counter
 
+from agents.eval.types import EvalRecord
+from agents.eval.metrics_common import _ctx, _cache
+
 
 # ── 정규화 (KorQuAD 공식 normalize_answer) ────────────────────────
 # KorQuAD 1.0 evaluate-v1.0.py 와 동일: 따옴표·괄호류 → 공백, 소문자화, ASCII 구두점 제거, 공백 정리.
-# 숫자·날짜 특수 규칙은 두지 않는다 — 콤마·콜론·하이픈은 구두점 제거로 흡수되고(1,450→1450,
-# 14:33→1433), 조사·어미·포맷 차이는 아래 '문자 단위' 채점이 흡수한다.
 
 _REMOVE_CHARS = "'\"《》<>〈〉()" + "‘’“”"   # remove_: 따옴표·괄호류
 _REMOVE_TABLE = {ord(c): " " for c in _REMOVE_CHARS}
 _PUNCT_SET = set(string.punctuation)
 
-
 def _normalize(text: str) -> str:
-    """KorQuAD normalize_answer: 따옴표·괄호류 → 공백 → 소문자화 → ASCII 구두점 제거 → 공백 정리."""
     if not text:
         return ""
     text = text.translate(_REMOVE_TABLE)                     # remove_
     text = text.lower()                                      # lower
     text = "".join(c for c in text if c not in _PUNCT_SET)   # remove_punc
     return " ".join(text.split())                            # white_space_fix
-
 
 def _chars(text: str) -> list[str]:
     """정규화 후 '문자 리스트'(공백 제외) — KorQuAD F1 의 채점 단위(bag of characters)."""
@@ -51,10 +55,13 @@ def _chars(text: str) -> list[str]:
 # ── 생성 지표 (KorQuAD 문자 단위) ─────────────────────────────────
 
 def char_f1(prediction: str, reference: str) -> float:
-    """KorQuAD 공식 문자 단위 F1 (bag-of-characters).
-        Precision = 겹친 문자 수 / 답변 문자 수,  Recall = 겹친 문자 수 / 정답 문자 수,  F1 = 2PR/(P+R)
+    """
+    KorQuAD 공식 문자 단위 F1
+    - Precision = 겹친 문자 수 / 답변 문자 수
+    - Recall = 겹친 문자 수 / 정답 문자 수
+    - F1 = 2PR/(P+R)
     한국어는 완벽한 형태소 분석기가 없어 어절 단위 F1이 부적절 → KorQuAD가 문자 단위를 표준으로 쓴다.
-    reference 없으면(정답 미보유) 0.0."""
+    """
     pred = _chars(prediction)
     ref = _chars(reference)
     if not pred or not ref:
@@ -67,7 +74,7 @@ def char_f1(prediction: str, reference: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-# 하위호환 별칭 — 기존 호출부(signals._ablation_helps, tests)가 token_f1 이름을 쓴다.
+# 하위호환 별칭 — 기존 호출부(tests)가 token_f1 이름을 쓴다.
 # 이제 어절이 아니라 KorQuAD 문자 단위 F1이다.
 token_f1 = char_f1
 
@@ -78,9 +85,8 @@ def exact_match(prediction: str, reference: str) -> bool:
 
 
 # ── 정답 매칭 (KorQuAD 문자 F1 + 짧은 정답 문자-recall) ───────────
-# char_f1 도 결국 F1(P·R 조화평균)이라, gold 가 짧은 추출형 span 인데 답변이 완결 문장이면
-# 프레이밍 문자에 precision 이 깎인다. 짧은 정답은 recall(정답 문자가 답변에 담겼나)만 보는 게
-# 추출형 QA 의 정석 — 표준 char-F1 위에 얹는 확장이다.
+# 정답이 짧고, 답변이 문장이면 precision이 감소함
+# 짧은 정답은 recall(정답 문자가 답변에 담겼나)만 보는 게 표준이다.
 
 _SHORT_REF_MAX_CHARS = 10   # 정규화 후 정답 문자 수 이하면 '짧은 정답'으로 보고 recall 경로 허용
 _CONTAINMENT_MIN = 0.9      # 짧은 정답은 recall 이 이 이상(정답이 거의 다 담김)일 때만 recall 로 통과
@@ -238,9 +244,163 @@ _ABSTENTION_MARKERS = (
 def is_abstention(answer: str) -> bool:
     """
     답변이 '모른다/답할 수 없다'류의 기권인지 휴리스틱 판별.
-    [구현 포인트] 설계의 Non-Answer Critic(RAGAS AspectCritic)으로 정밀화 가능.
+    [추후 구현 포인트] 설계의 Non-Answer Critic(RAGAS AspectCritic)으로 정밀화 가능.
     """
     if not answer or not answer.strip():
         return True
     low = answer.lower()
     return any(m in low for m in _ABSTENTION_MARKERS)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  진입 시 지표 계산 (diagnose 진입 시 1회 — 판정 전, 스킵 없음)
+# ══════════════════════════════════════════════════════════════════
+
+def _compute_metrics(record: EvalRecord) -> None:
+    """
+    STEP3-1: 규칙 지표(recall/f1/oracle_f1/EM)를 record 에 계산·저장.
+    """
+    gt = record.probe.ground_truth
+    span_recall = span_recall_at_k(
+        record.probe.gold_spans,
+        record.retrieved_chunk_ids,
+        _ctx.chunks,
+    )
+    record.recall_at_k = (
+        span_recall
+        if span_recall is not None
+        else recall_at_k(record.probe.gold_chunk_ids, record.retrieved_chunk_ids)
+    )
+    # answer_match: KorQuAD char-F1 (+짧은 정답 recall).
+    record.f1_score = answer_match(record.generated_answer, gt) if gt else 0.0
+    record.oracle_f1 = answer_match(record.oracle_answer, gt) if (gt and record.oracle_answer) else 0.0
+    # KorQuAD 공식 EM — 관측용으로만 남김.
+    record.exact_match = exact_match(record.generated_answer, gt) if gt else False
+
+
+# ══════════════════════════════════════════════════════════════════
+#  청크 경계 측정 — gold span 이 현재 청크 경계에 나뉘었나
+#    LLM·추가 검색 없이 이미 가진 원문 절대좌표만 비교한다(그래서 tier1).
+#    diagnose.chunking_context_mismatch 가 _gold_span_boundary_analysis 를 소비한다.
+# ══════════════════════════════════════════════════════════════════
+
+def _chunk_char_span(chunk) -> tuple[int, int] | None:
+    """청크가 원문에서 차지하는 절대좌표 [start, end) 를 안전하게 읽는다. 없거나 형식 불량이면 None."""
+    raw = getattr(chunk, "char_span", None)
+    if raw is None and isinstance(getattr(chunk, "metadata", None), dict):
+        raw = chunk.metadata.get("char_span")
+    if (
+        not isinstance(raw, (list, tuple))
+        or len(raw) != 2
+        or isinstance(raw[0], bool)
+        or isinstance(raw[1], bool)
+        or not isinstance(raw[0], int)
+        or not isinstance(raw[1], int)
+        or raw[0] < 0
+        or raw[1] <= raw[0]
+    ):
+        return None
+    return raw[0], raw[1]
+
+
+def _exact_probe_gold_spans(record: EvalRecord) -> list[dict]:
+    """경계 진단에 쓸 수 있는 'exact' gold span 만 고른다.
+
+    chunk_fallback 은 정확한 정답 위치를 못 찾아 청크 전체를 대신 기록한 값이라,
+    그대로 쓰면 항상 '한 청크에 담김'으로 나와 경계 판정 근거가 되지 못한다.
+    품질 메타데이터가 없는 기존 Probe 는 하위 호환으로 exact 취급한다.
+    """
+    grounding = record.probe.metadata.get("span_grounding", {})
+    if not isinstance(grounding, dict):
+        grounding = {}
+    raw_qualities = grounding.get("span_qualities")
+    qualities = raw_qualities if isinstance(raw_qualities, list) else []
+    status = grounding.get("status")
+    spans: list[dict] = []
+    for index, span in enumerate(record.probe.gold_spans):
+        if not isinstance(span, dict):
+            continue
+        doc_id = span.get("doc_id")
+        start = span.get("start")
+        end = span.get("end")
+        if (
+            not isinstance(doc_id, str)
+            or isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, int)
+            or not isinstance(end, int)
+            or start < 0
+            or end <= start
+        ):
+            continue
+        quality = qualities[index] if index < len(qualities) else None
+        if quality == "chunk_fallback" or (
+            quality is None and status in {"chunk_fallback", "partial"}
+        ):
+            continue
+        spans.append({"doc_id": doc_id, "start": start, "end": end})
+    return spans
+
+
+def _gold_span_boundary_analysis(record: EvalRecord):
+    """gold span 이 현재 인접 청크 경계에 나뉘었는지 분석한다(코퍼스 전체 좌표 기준).
+
+    span 마다 셋 중 하나로 센다:
+      contained      한 청크가 span 을 통째로 포함 → 정상
+      boundary_split 단일 청크엔 안 들어가지만 인접 청크들의 합집합이 빈틈없이 덮음 → 경계에 잘림
+      uncovered      합쳐도 못 덮음(틈 있음/겹치는 청크 없음) → 누락
+    청크 좌표가 없는 환경은 미확정(None).
+    """
+    if not _ctx.chunks:
+        return None
+
+    def compute():
+        spans = _exact_probe_gold_spans(record)
+        if not spans:
+            return None
+        chunks_by_doc: dict[str, list[tuple[int, int]]] = {}
+        for chunk in _ctx.chunks:
+            position = _chunk_char_span(chunk)
+            doc_id = getattr(chunk, "doc_id", None)
+            if position is None or not isinstance(doc_id, str):
+                continue
+            chunks_by_doc.setdefault(doc_id, []).append(position)
+        for positions in chunks_by_doc.values():
+            positions.sort()
+
+        contained_count = 0
+        split_count = 0
+        uncovered_count = 0
+        for span in spans:
+            start, end = span["start"], span["end"]
+            positions = chunks_by_doc.get(span["doc_id"], [])
+            if any(c_start <= start and c_end >= end for c_start, c_end in positions):
+                contained_count += 1
+                continue
+
+            # span 과 겹치는 조각만 모아 좌표순으로 훑으며 빈틈 없이 이어지는지 본다.
+            intersections = sorted(
+                (max(start, c_start), min(end, c_end))
+                for c_start, c_end in positions
+                if c_start < end and c_end > start
+            )
+            cursor = start
+            for covered_start, covered_end in intersections:
+                if covered_start > cursor:   # 틈 발견 → 덮지 못함
+                    break
+                cursor = max(cursor, covered_end)
+                if cursor >= end:
+                    break
+            if intersections and cursor >= end:
+                split_count += 1
+            else:
+                uncovered_count += 1
+
+        return {
+            "span_count": len(spans),
+            "contained_count": contained_count,
+            "boundary_split_count": split_count,
+            "uncovered_count": uncovered_count,
+        }
+
+    return _cache(record, "gold_span_boundary_analysis", compute)

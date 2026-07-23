@@ -27,6 +27,7 @@ from agents.eval.types import (
     resolve_mode,
 )
 from agents.eval.scoring import compute_composite, format_composite
+from agents.eval.diagnose import _oracle_ok   # oracle 통과 판정은 진단과 같은 함수를 쓴다
 
 _RAGAS_KEYS = ("faithfulness", "context_precision", "context_recall", "response_relevancy")
 
@@ -54,6 +55,13 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     # 브랜치 제거 → findings 유무로 결과 분포(진단됨/정상)
     n_diag = sum(1 for r in records if r.findings)
     scores["outcome_distribution"] = {"diagnosed": n_diag, "ok": len(records) - n_diag}
+
+    # 정답 판정 degrade 건수 — answer_correctness 의 factual(TP/FP/FN 분류) 성분을 못 재서
+    # 의미유사도 단독으로 계산된 probe 수. 유사도는 부정문·근접 오답에서도 높게 나오므로,
+    # 이 값이 크면 '이번 실행의 정답 판정이 근접 오답을 못 걸렀을 수 있다'는 뜻이다.
+    degraded = _degraded_correctness_count(records)
+    if degraded:
+        scores["answer_correctness_degraded"] = degraded
 
     # 평가 신호(GT 규칙지표/RAGAS)가 전혀 없으면 진단 불가 →
     # eval 한계로 파이프라인을 막지 않도록 통과 처리(overall_score=None).
@@ -125,6 +133,16 @@ def _findings_summary(records: list[EvalRecord], mode: int) -> dict:
     }
 
 
+def _degraded_correctness_count(records: list[EvalRecord]) -> int:
+    """answer_correctness 가 factual 성분 없이(=의미유사도 단독) 계산된 probe 수.
+    두 트랙 중 하나라도 degrade 됐으면 1건으로 센다."""
+    return sum(
+        1 for r in records
+        if r.ragas.get("answer_correctness_degraded")
+        or r.oracle_ragas.get("answer_correctness_degraded")
+    )
+
+
 def _ragas_means(records: list[EvalRecord]) -> dict:
     """실제 트랙 RAGAS 지표별 평균 (측정된 것만)."""
     means = {}
@@ -179,11 +197,15 @@ def _overall_score(ragas_means: dict, rule_means: dict) -> float | None:
 
 
 def _oracle_accuracy(records: list[EvalRecord]) -> float | None:
-    """Oracle 트랙 통과율 (ground_truth 보유 record 중 oracle_f1 >= 임계값 비율)."""
+    """Oracle 트랙 통과율 (ground_truth 보유 record 중 oracle 통과 비율).
+
+    판정은 diagnose._oracle_ok 을 그대로 쓴다 — lexical(oracle_f1)뿐 아니라 DEEP 에서
+    측정된 RAGAS answer_correctness 강등까지 반영해야, '진단은 oracle 실패인데 리포트엔
+    성공으로 집계'되는 어긋남이 생기지 않는다."""
     gt = [r for r in records if r.probe.ground_truth]
     if not gt:
         return None
-    passed = sum(1 for r in gt if r.oracle_f1 >= F1_PASS_THRESHOLD)
+    passed = sum(1 for r in gt if _oracle_ok(r))
     return passed / len(gt)
 
 
@@ -199,6 +221,9 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     rs = report.ragas_scores
     if "mean_f1" in rs:   # KorQuAD식 관측 지표: F1 과 EM 을 나란히
         print(f"[Eval]        정답매칭(관측): F1={rs['mean_f1']:.3f}  EM={rs.get('mean_exact_match', 0.0):.3f}")
+    if rs.get("answer_correctness_degraded"):
+        print(f"[Eval]        ⚠ 정답 판정 degrade {rs['answer_correctness_degraded']}건 — "
+              f"판정기(TP/FP/FN 분류) 실패로 의미유사도 단독 계산. 근접 오답을 못 걸렀을 수 있음")
     if report.findings:
         # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
         # (타입=처방 그룹 4종, 라벨=세분화 진단명. 타입만 보면 gap 처럼 뭉뚱그려져 원인이 안 보인다.)
