@@ -134,7 +134,13 @@ def _ingest_file(source_url: str) -> list[Document]:
     suffix = path.suffix.lower()
 
     if suffix in (".txt", ".md"):
-        content = path.read_text(encoding="utf-8")
+        # utf-8-sig: BOM 유무 모두 처리. 실패 시 한국어 레거시 인코딩(cp949,
+        # euc-kr 상위집합)으로 재시도 — 국내 도구로 저장된 한글 파일 대응.
+        try:
+            content = path.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            content = path.read_text(encoding="cp949")
+            print(f"[Ingest] {path.name}: UTF-8 디코딩 실패 → cp949 로 읽음")
         fmt = "md" if suffix == ".md" else "txt"
 
     elif suffix == ".pdf":

@@ -231,6 +231,12 @@ def _llm_generate(
     max_context_chars: int = 12000,
 ) -> str | None:
     selected = _selected_provider(provider, config)
+    if selected != "auto" and selected not in {"openai", "gemini", "github", "github_models"}:
+        # 오타 등 미지원 값이면 아래 루프의 어떤 분기에도 안 걸려 로그 없이
+        # extractive 로 저하되므로, 원인을 명시하고 바로 폴백한다.
+        print(f"[RAG] 알 수 없는 provider '{selected}' — extractive 답변으로 폴백 "
+              f"(RAG_LLM_PROVIDER: openai|gemini|github|auto)")
+        return None
     providers = ["openai", "gemini", "github"] if selected == "auto" else [selected]
     system, user = _build_prompt(question, contexts, max_context_chars=max_context_chars)
 

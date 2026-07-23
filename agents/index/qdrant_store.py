@@ -6,6 +6,7 @@ import hashlib
 import math
 import os
 import re
+import time
 import uuid
 from collections import Counter
 from typing import Any
@@ -27,7 +28,11 @@ DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 VECTOR_DIM = 1024
 
 _models: dict[str, Any] = {}
-_failed_models: set[str] = set()
+# model_name → 마지막 로드 실패 시각(monotonic). 실패를 영구 캐시하면 일시적
+# 원인(네트워크 등) 후에도 프로세스 내내 fallback 임베딩만 조용히 쓰게 되므로,
+# 쿨다운이 지나면 재시도한다.
+_failed_models: dict[str, float] = {}
+_FAILED_MODEL_RETRY_SEC = float(os.getenv("INDEX_EMBED_MODEL_RETRY_SEC", "300"))
 _rerankers: dict[str, Any] = {}
 _failed_rerankers: set[str] = set()
 
@@ -371,14 +376,27 @@ def _fallback_embedding(text: str, vector_dim: int) -> list[float]:
 
 def _get_embedding_model(model_name: str) -> Any | None:
     # 프로세스 내 1회 로드(전역 캐시). 실패 시 None → 호출부가 fallback 사용.
-    if model_name not in _models and model_name not in _failed_models:
-        try:
-            from sentence_transformers import SentenceTransformer
+    # 실패는 쿨다운(_FAILED_MODEL_RETRY_SEC) 후 재시도한다 — fallback 임베딩은
+    # 의미 검색이 안 되는 해시 벡터라, 이 상태로 Eval/Optimize가 돌면 점수 전체가
+    # 무효가 되므로 일시적 실패에서 반드시 복구 기회를 줘야 한다.
+    if model_name not in _models:
+        failed_at = _failed_models.get(model_name)
+        in_cooldown = (
+            failed_at is not None
+            and time.monotonic() - failed_at < _FAILED_MODEL_RETRY_SEC
+        )
+        if not in_cooldown:
+            try:
+                from sentence_transformers import SentenceTransformer
 
-            _models[model_name] = SentenceTransformer(model_name)
-        except Exception as exc:
-            _failed_models.add(model_name)
-            print(f"[Index] 임베딩 모델 로드 실패, deterministic fallback 사용: {exc}")
+                _models[model_name] = SentenceTransformer(model_name)
+                _failed_models.pop(model_name, None)
+            except Exception as exc:
+                _failed_models[model_name] = time.monotonic()
+                print(
+                    f"[Index] 임베딩 모델 '{model_name}' 로드 실패 — deterministic "
+                    f"fallback 사용, {_FAILED_MODEL_RETRY_SEC:.0f}초 후 재시도: {exc}"
+                )
     return _models.get(model_name)
 
 
