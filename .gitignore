@@ -41,3 +41,6 @@ CLAUDE.md
 
 # 벡터 DB
 qdrant_storage/
+
+# 로그 (Serve API 기동 로그 등)
+*.log

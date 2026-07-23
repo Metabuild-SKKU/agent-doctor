@@ -89,14 +89,18 @@ class StartApiServerTest(unittest.TestCase):
             mock_requests.get.side_effect = ConnectionError("no server")
             self.assertFalse(serve_agent._start_api_server())
 
-    def test_health_timeout_returns_false(self):
+    def test_health_timeout_terminates_process_and_returns_false(self):
+        # API_START_TIMEOUT 은 양수여야 while 루프가 실제로 돌아 타임아웃 경로를 탄다
+        # (0 이면 루프가 한 번도 실행되지 않음). 타임아웃 시 좀비 프로세스가 남지 않도록
+        # terminate 되는지도 확인한다(뒤늦게 포트를 잡아 다음 실행을 오판시키는 것 방지).
         proc = MagicMock()
         proc.poll.return_value = None  # 살아 있지만 응답 없음
         with patch.object(serve_agent, "requests") as mock_requests, \
              patch.object(serve_agent.subprocess, "Popen", return_value=proc), \
-             patch.object(serve_agent, "API_START_TIMEOUT", 0):
+             patch.object(serve_agent, "API_START_TIMEOUT", 0.1):
             mock_requests.get.side_effect = ConnectionError("no server")
             self.assertFalse(serve_agent._start_api_server())
+        proc.terminate.assert_called_once()
 
 
 class RunTest(unittest.TestCase):

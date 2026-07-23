@@ -68,9 +68,12 @@ def _start_api_server(expected_fingerprint: str | None = None) -> bool:
     health_url = f"http://localhost:{API_PORT}/health"
 
     # 이미 실행 중이면 코퍼스 지문을 대조하고, 낡았으면 reload.
+    # raise_for_status: 404/500 등 비정상 응답은 "실행 중"으로 보지 않고 아래로 떨궈
+    # 새로 spawn 한다(HTTP 응답만 오면 성공 판정하던 문제 방지).
     try:
         resp = requests.get(health_url, timeout=2)
-        current = resp.json().get("fingerprint") if resp.ok else None
+        resp.raise_for_status()
+        current = resp.json().get("fingerprint")
         if expected_fingerprint and current != expected_fingerprint:
             print(
                 f"[Serve] 실행 중인 API 의 코퍼스가 낡음 "
@@ -102,17 +105,33 @@ def _start_api_server(expected_fingerprint: str | None = None) -> bool:
             )
             return False
         try:
-            requests.get(health_url, timeout=1)
+            resp = requests.get(health_url, timeout=1)
+            resp.raise_for_status()   # 404/500 은 아직 준비 안 됨 → 계속 대기
             print(f"[Serve] API 서버 시작 완료 (port {API_PORT})")
             return True
         except Exception:
             time.sleep(0.5)
 
+    # 타임아웃: 아직 살아 있는 자식을 반드시 종료한다. 남겨 두면 뒤늦게 포트를
+    # 잡아, 다음 실행의 "이미 실행 중" 체크를 통과시켜(낡은 코퍼스·죽은 엔드포인트)
+    # 이 함수가 막으려던 상황이 한 실행 늦게 재현된다.
+    _terminate(proc)
     print(
         f"[Serve] API 서버가 {API_START_TIMEOUT:.0f}초 안에 응답하지 않음 "
         f"— {API_LOG_FILE} 확인"
     )
     return False
+
+
+def _terminate(proc) -> None:
+    """기동 실패로 버려질 자식 프로세스를 정리한다(terminate → 안 죽으면 kill)."""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        proc.kill()
 
 
 def _reload_api_server(expected_fingerprint: str) -> bool:
