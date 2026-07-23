@@ -58,13 +58,25 @@ def _serialize_chunks(state: AgentDoctorState) -> str:
     return json.dumps(data, ensure_ascii=False, default=str, indent=2)
 
 
-def _start_api_server() -> bool:
-    """FastAPI 서버를 백그라운드 프로세스로 시작. 기동 확인 성공 여부를 반환."""
+def _start_api_server(expected_fingerprint: str | None = None) -> bool:
+    """FastAPI 서버를 백그라운드 프로세스로 시작. 기동 확인 성공 여부를 반환.
+
+    이미 실행 중인 서버가 있으면 그 서버가 로드한 코퍼스 지문을 이번에 쓴
+    chunks.json 의 지문(expected_fingerprint)과 대조한다. api.py 는 시작할 때만
+    chunks.json 을 읽으므로, 지문이 다르면 이전 파이프라인의 서버가 낡은 코퍼스를
+    서빙 중이라는 뜻이다 → /reload 로 최신 파일을 다시 읽게 한다."""
     health_url = f"http://localhost:{API_PORT}/health"
 
-    # 이미 실행 중이면 스킵
+    # 이미 실행 중이면 코퍼스 지문을 대조하고, 낡았으면 reload.
     try:
-        requests.get(health_url, timeout=2)
+        resp = requests.get(health_url, timeout=2)
+        current = resp.json().get("fingerprint") if resp.ok else None
+        if expected_fingerprint and current != expected_fingerprint:
+            print(
+                f"[Serve] 실행 중인 API 의 코퍼스가 낡음 "
+                f"(로드됨={current}, 기대={expected_fingerprint}) → /reload"
+            )
+            return _reload_api_server(expected_fingerprint)
         print(f"[Serve] API 서버 이미 실행 중 (port {API_PORT})")
         return True
     except Exception:
@@ -101,6 +113,39 @@ def _start_api_server() -> bool:
         f"— {API_LOG_FILE} 확인"
     )
     return False
+
+
+def _reload_api_server(expected_fingerprint: str) -> bool:
+    """실행 중인 API 에 /reload 를 요청해 최신 chunks.json 을 다시 읽게 한다.
+
+    reload 후 지문이 기대값과 일치하는지 확인한다 — 불일치면 파일 경로 불일치 등으로
+    서버가 다른 chunks.json 을 읽고 있다는 뜻이므로 실패로 본다(낡은 코퍼스 서빙 방지)."""
+    reload_url = f"http://localhost:{API_PORT}/reload"
+    try:
+        resp = requests.post(reload_url, timeout=API_START_TIMEOUT)
+    except Exception as exc:
+        print(f"[Serve] API /reload 요청 실패: {exc}")
+        return False
+    if not resp.ok:
+        print(f"[Serve] API /reload 실패 (status {resp.status_code})")
+        return False
+    reloaded = resp.json().get("fingerprint")
+    if reloaded != expected_fingerprint:
+        print(
+            f"[Serve] /reload 후에도 코퍼스 지문 불일치 "
+            f"(로드됨={reloaded}, 기대={expected_fingerprint})"
+        )
+        return False
+    print(f"[Serve] API 서버 코퍼스 reload 완료 (fingerprint {reloaded})")
+    return True
+
+
+def _corpus_fingerprint(state: AgentDoctorState) -> str:
+    """state.chunks 의 코퍼스 지문. api.corpus_fingerprint 와 같은 알고리즘을 쓰도록
+    그 함수를 그대로 재사용한다(청크를 dict 로 변환해 전달) — 양쪽 지문이 드리프트하지 않게."""
+    from agents.serve.api import corpus_fingerprint
+
+    return corpus_fingerprint([dataclasses.asdict(c) for c in state.chunks])
 
 
 def _register_to_claude_desktop() -> None:
@@ -153,8 +198,9 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         CHUNKS_FILE.write_text(_serialize_chunks(state), encoding="utf-8")
         print(f"[Serve] 청크 저장 → {CHUNKS_FILE}")
 
-        # 2. FastAPI 서버 백그라운드 시작 — 실패 시 죽은 엔드포인트 등록을 막는다
-        if not _start_api_server():
+        # 2. FastAPI 서버 백그라운드 시작 — 실패 시 죽은 엔드포인트 등록을 막는다.
+        #    지문을 넘겨, 이미 실행 중인 서버가 낡은 코퍼스면 /reload 로 갱신한다.
+        if not _start_api_server(_corpus_fingerprint(state)):
             state.status = "error"
             state.error = (
                 f"Serve 실패: API 서버가 시작되지 않았습니다 (port {API_PORT}) "

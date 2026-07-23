@@ -6,6 +6,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -20,6 +21,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from agents.rag.generator import answer_question
 from agents.rag.retriever import Retriever, get_retriever
 
+
+def corpus_fingerprint(chunks: list[dict]) -> str:
+    """로드된 코퍼스의 지문(정렬된 chunk_id:hash sha1 앞 12자).
+
+    Serve(agent.py)가 chunks.json 에 쓴 코퍼스와 이미 실행 중인 API 가 들고 있는
+    코퍼스가 같은지 대조하는 데 쓴다 — 지문이 다르면 이전 파이프라인의 API 가 낡은
+    코퍼스를 서빙 중이라는 뜻이다. hash 가 없는(레거시) 청크는 text 로 폴백한다."""
+    parts = []
+    for chunk in chunks:
+        cid = chunk.get("chunk_id", "")
+        digest = chunk.get("hash") or hashlib.sha1(
+            (chunk.get("text") or "").encode("utf-8")
+        ).hexdigest()
+        parts.append(f"{cid}:{digest}")
+    joined = "|".join(sorted(parts))
+    return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
+
 app = FastAPI(title="Agent Doctor API", version="0.1.0")
 
 app.add_middleware(
@@ -31,13 +49,17 @@ app.add_middleware(
 
 _retriever: Retriever | None = None
 _chunks_raw: list[dict] = []
+_chunks_file: str | None = None
+_fingerprint: str = ""
 
 
 def init_qdrant(chunks_file: str) -> None:
-    global _retriever, _chunks_raw
+    global _retriever, _chunks_raw, _chunks_file, _fingerprint
 
+    _chunks_file = chunks_file
     _chunks_raw = json.loads(Path(chunks_file).read_text(encoding="utf-8"))
-    print(f"[API] loaded {len(_chunks_raw)} chunks")
+    _fingerprint = corpus_fingerprint(_chunks_raw)
+    print(f"[API] loaded {len(_chunks_raw)} chunks (fingerprint {_fingerprint})")
 
     _retriever = get_retriever(
         _chunks_raw,
@@ -64,7 +86,21 @@ def health():
         "status": "ok",
         "chunks": len(_chunks_raw),
         "qdrant": _retriever is not None and _retriever.client is not None,
+        "fingerprint": _fingerprint,
     }
+
+
+@app.post("/reload")
+def reload():
+    """chunks.json 을 다시 읽어 retriever 를 재구축한다.
+
+    Serve(agent.py)가 새 코퍼스를 chunks.json 에 쓴 뒤, 이미 실행 중인 이 서버가
+    낡은 코퍼스를 서빙하고 있을 때 호출한다. init_qdrant 를 그대로 재실행해
+    _chunks_raw·_retriever·_fingerprint 를 최신 파일 내용으로 교체한다."""
+    if not _chunks_file:
+        raise HTTPException(status_code=503, detail="No chunks file to reload from.")
+    init_qdrant(_chunks_file)
+    return {"status": "reloaded", "chunks": len(_chunks_raw), "fingerprint": _fingerprint}
 
 
 @app.get("/search")

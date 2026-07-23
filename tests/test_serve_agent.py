@@ -43,6 +43,42 @@ class StartApiServerTest(unittest.TestCase):
             self.assertTrue(serve_agent._start_api_server())
             mock_popen.assert_not_called()
 
+    def test_running_server_with_matching_fingerprint_skips_reload(self):
+        # 실행 중인 서버의 코퍼스 지문이 기대값과 같으면 spawn·reload 없이 통과.
+        health = MagicMock(ok=True)
+        health.json.return_value = {"fingerprint": "abc123"}
+        with patch.object(serve_agent, "requests") as mock_requests, \
+             patch.object(serve_agent.subprocess, "Popen") as mock_popen, \
+             patch.object(serve_agent, "_reload_api_server") as mock_reload:
+            mock_requests.get.return_value = health
+            self.assertTrue(serve_agent._start_api_server("abc123"))
+            mock_popen.assert_not_called()
+            mock_reload.assert_not_called()
+
+    def test_running_server_with_stale_fingerprint_triggers_reload(self):
+        # 지문이 다르면(이전 파이프라인의 낡은 코퍼스) /reload 로 갱신한다.
+        health = MagicMock(ok=True)
+        health.json.return_value = {"fingerprint": "OLD"}
+        with patch.object(serve_agent, "requests") as mock_requests, \
+             patch.object(serve_agent.subprocess, "Popen") as mock_popen, \
+             patch.object(serve_agent, "_reload_api_server", return_value=True) as mock_reload:
+            mock_requests.get.return_value = health
+            self.assertTrue(serve_agent._start_api_server("NEW"))
+            mock_popen.assert_not_called()
+            mock_reload.assert_called_once_with("NEW")
+
+    def test_reload_verifies_fingerprint_after_reload(self):
+        # /reload 응답 지문이 기대값과 일치해야 성공. 불일치면 실패로 본다.
+        ok_resp = MagicMock(ok=True)
+        ok_resp.json.return_value = {"fingerprint": "NEW"}
+        bad_resp = MagicMock(ok=True)
+        bad_resp.json.return_value = {"fingerprint": "STILL_OLD"}
+        with patch.object(serve_agent, "requests") as mock_requests:
+            mock_requests.post.return_value = ok_resp
+            self.assertTrue(serve_agent._reload_api_server("NEW"))
+            mock_requests.post.return_value = bad_resp
+            self.assertFalse(serve_agent._reload_api_server("NEW"))
+
     def test_process_early_exit_returns_false(self):
         proc = MagicMock()
         proc.poll.return_value = 1  # 프로세스가 바로 죽음 (예: 포트 바인드 실패)
