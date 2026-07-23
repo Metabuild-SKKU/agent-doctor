@@ -121,10 +121,17 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # 롤백 전의 열화된 Eval 이라, 그걸 baseline 으로 쓰면 이 처방이 원래보다
         # 나빠도 '개선'으로 오판해 유지된다(#2). 롤백이 없었으면 현재 report 가 기준.
         before_report = rollback_baseline_report if rolled_back else state.report
+        # 롤백이 요구한 재색인(_judge_pending_trial 이 state.reindex_required 에 세팅)을
+        # 기억해둔다. index-time 처방을 롤백하면 config 는 되돌아가지만 실제 Qdrant
+        # 인덱스는 아직 열화 상태라 이 재색인이 반드시 일어나야 한다.
+        rollback_reindex_required = state.reindex_required if rolled_back else False
 
         # 검증된 처방을 실제 index_config 에 반영(canonical→flat 변환은 mapper 담당)
         config_mapper.apply_config_patch(state.index_config, result.config_patch)
-        state.reindex_required = bool(result.needs_reindex)
+        # 새 처방의 재색인 필요 여부와 '롤백이 요구한 재색인'을 OR 로 합친다. 검색시점
+        # 처방(needs_reindex=False)이 롤백의 재색인 요구를 덮어써, baseline 청킹이 인덱스에
+        # 복원되지 않고 열화된 인덱스가 그대로 재사용되던 버그(config/인덱스 불일치)를 막는다.
+        state.reindex_required = bool(result.needs_reindex) or rollback_reindex_required
 
         # pending 이력 생성(다음 방문에서 finalize) + iteration 1회 증가
         prescription_id = (
