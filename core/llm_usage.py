@@ -22,7 +22,8 @@ _PRICES_USD_PER_1M = {
     "gemini-3.1-pro": (2.00, 12.00),
     "gemini-3-flash": (0.50, 3.00),
     "gemini-2.5-flash": (0.30, 2.50),
-    "gemini-flash-latest": (0.30, 2.50),
+    # alias — 2026-07 현재 gemini-3.5-flash를 가리킴. Google이 alias를 옮기면 같이 갱신할 것.
+    "gemini-flash-latest": (1.50, 9.00),
     "gemini-embedding-001": (0.15, 0.0),
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4o": (2.50, 10.00),

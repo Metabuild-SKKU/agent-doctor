@@ -358,6 +358,26 @@ class OptimizeReportWiringTest(unittest.TestCase):
         self.assertGreater(len(report.metadata.get("floor_violations", [])) +
                            int("점수" in report.summary), 0)  # 롤백 사유가 실림
 
+    def test_rollback_baseline_carries_restored_score_not_degraded(self):
+        """#2 회귀: 롤백 후 같은 방문에서 이어 제안되는 처방의 비교 기준(before_report)은
+        복원된 baseline 점수여야 한다. 롤백 직전의 열화된 Eval 을 baseline 으로 쓰면
+        원래보다 나쁜 처방도 '개선'으로 오판해 유지된다."""
+        # 방문1: Rx1 적용 (baseline=60)
+        state = agent.run(make_state(overall=60.0, label="too_long_context"))
+        self.assertEqual(state.status, "applied")
+        rx1 = history.find_pending(state.optimization_history)
+        self.assertEqual(rx1.metadata["before_report"].overall_score, 60.0)
+
+        # 방문2 진입 전 Eval 이 Rx1 을 열화(40)로 측정 + 새 라벨의 finding 제시.
+        # → Rx1 롤백(40<60) 후, 새 라벨 처방(Rx2)이 같은 방문에서 제안된다.
+        state.report = make_report(40.0, label="retrieval_semantic_mismatch")
+        state = agent.run(state)
+
+        pending = history.find_pending(state.optimization_history)
+        self.assertIsNotNone(pending, "롤백 후 다음 처방이 제안돼야 이 회귀를 검증할 수 있다")
+        # 핵심: Rx2 의 baseline 은 복원된 60 이어야 한다 (열화값 40 이면 버그).
+        self.assertEqual(pending.metadata["before_report"].overall_score, 60.0)
+
     def test_manual_stores_decision_report(self):
         state = agent.run(make_state(label="corpus_gap"))    # 수동 라벨
         report = state.optimization_report

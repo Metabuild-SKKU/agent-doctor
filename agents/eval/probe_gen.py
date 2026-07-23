@@ -381,8 +381,8 @@ def _topic_of(text: str) -> str:
 # 청크 전체 좌표로 폴백한다.
 #
 # 전제: Chunk.text 는 Document.content 의 앞에서부터 순서대로 나온 부분 문자열이다
-# (agents/index/agent.py::_chunk_text 가 고정 크기로 슬라이스하는 방식과, 향후
-# 문장/의미 단위 청킹으로 바뀌어도 유지되는 유일한 불변식).
+# (agents/index/agent.py::_chunk_document 의 모든 전략이 원문 좌표 슬라이스를 지키며,
+# 향후 문장/의미 단위 청킹으로 바뀌어도 유지되는 유일한 불변식).
 
 def _chunk_index_of(chunk: Chunk) -> int:
     """청크의 문서 내 순번. metadata['chunk_index'] 우선, 없으면 chunk_id 끝 숫자로 폴백."""

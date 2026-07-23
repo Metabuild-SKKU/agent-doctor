@@ -36,10 +36,12 @@ from __future__ import annotations
 import json
 import math
 import os
+from typing import Any, Callable
 
 from agents.eval import llm_provider
 from agents.eval.types import Mode, EvalRecord
 from agents.eval.metrics_common import _ctx, active_mode
+from core.parallel import parallel_map
 
 
 def _env_int(name: str, default: int) -> int:
@@ -52,6 +54,13 @@ def _env_int(name: str, default: int) -> int:
 
 # RAGAS AnswerRelevancy 기본 strictness (생성 질문 개수)
 RELEVANCY_STRICTNESS = _env_int("EVAL_RELEVANCY_STRICTNESS", 3)
+
+
+def _inner_concurrency() -> int:
+    """트랙 1개 내부(지표/청크/strictness) 동시성. 기본 1(=off) — 바깥 probe×track
+    병렬(EVAL_LLM_CONCURRENCY)과 곱해지면 429 폭풍이 나므로, probe 가 적어 바깥
+    병렬이 놀 때만 명시적으로 켠다. 1이면 parallel_map 이 기존 순차와 동일."""
+    return _env_int("EVAL_RAGAS_INNER_CONCURRENCY", 1)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -287,22 +296,26 @@ def _judge():
 def evaluate_real_track(record: EvalRecord, judge) -> dict:
     """실제 결과 지표. faithfulness, response_relevancy, (+정답 있으면) context_precision, context_recall.
 
-    [TODO 비용] DEEP 트랙 1개당 LLM 호출 ~11회(faithfulness 2 + precision top_k개 + recall 1 +
-    relevancy strictness). precision 청크별 호출을 배치/병렬화하거나 strictness↓로 절감 여지."""
+    [비용] DEEP 트랙 1개당 LLM 호출 ~11회(faithfulness 2 + precision top_k개 + recall 1 +
+    relevancy strictness). EVAL_RAGAS_INNER_CONCURRENCY>1 이면 지표 4개를 동시 실행
+    (지표 내부의 청크별/strictness 호출도 각자 같은 동시성으로 돈다).
+    순차 대비 차이: 순차에선 첫 지표의 예외가 나머지 호출을 생략시키지만, 어차피
+    호출부(_ragas_track)가 트랙 전체를 {} 로 폴백하므로 최종 결과는 동일하다."""
     q = record.probe.question
     ans = record.generated_answer
     ctx = record.retrieved_context
     ref = record.probe.ground_truth
 
-    out: dict = {
-        "faithfulness": _faithfulness(judge, q, ans, ctx),
-        "response_relevancy": _response_relevancy(judge, q, ans),
-    }
+    tasks: list[tuple[str, Callable[[], Any]]] = [
+        ("faithfulness", lambda: _faithfulness(judge, q, ans, ctx)),
+        ("response_relevancy", lambda: _response_relevancy(judge, q, ans)),
+    ]
     if ref:  # reference 있어야 Context Precision/Recall(WithReference)·AnswerCorrectness 계산 가능
-        out["context_precision"] = _context_precision(judge, q, ref, ctx)
-        out["context_recall"] = _context_recall(judge, q, ref, ctx)
-        out["answer_correctness"] = _answer_correctness(judge, q, ans, ref)
-    return _drop_none(out)
+        tasks.append(("context_precision", lambda: _context_precision(judge, q, ref, ctx)))
+        tasks.append(("context_recall", lambda: _context_recall(judge, q, ref, ctx)))
+        tasks.append(("answer_correctness", lambda: _answer_correctness(judge, q, ans, ref)))
+    values = parallel_map(lambda t: t[1](), tasks, _inner_concurrency())
+    return _drop_none({key: value for (key, _), value in zip(tasks, values)})
 
 
 def evaluate_oracle_track(record: EvalRecord, judge) -> dict:
@@ -419,11 +432,15 @@ def _response_relevancy(judge, question: str, answer: str):
     """RAGAS AnswerRelevancy: 답변→질문 strictness(3)회 생성 → 원 질문과 코사인 평균. 모두 회피성이면 0."""
     if not (answer or "").strip():
         return 0.0
+    # 답변으로부터 질문 n회 생성 (inner 동시성 1이면 기존 순차와 동일, 결과는 순서 보존)
+    drafts = parallel_map(
+        lambda _i: _chat(judge, _ragas_prompt(_RELEVANCY_INSTRUCTION, _SCHEMA_RELEVANCY,
+                                              _RELEVANCY_EXAMPLES, {"response": answer})),
+        list(range(RELEVANCY_STRICTNESS)),
+        _inner_concurrency(),
+    )
     gen_qs, noncommittal = [], []
-    # 답변으로부터 질문 n회 생성
-    for _ in range(RELEVANCY_STRICTNESS):
-        d = _chat(judge, _ragas_prompt(_RELEVANCY_INSTRUCTION, _SCHEMA_RELEVANCY,
-                                       _RELEVANCY_EXAMPLES, {"response": answer}))
+    for d in drafts:
         q = d.get("question")
         # LLM으로부터 생성된 str이 잘 존재하는지 판별 후 -> 판별에 필요한것 저장
         if isinstance(q, str) and q.strip():
@@ -443,11 +460,16 @@ def _context_precision(judge, question: str, reference: str, contexts: list[str]
     """RAGAS ContextPrecision: 청크마다 유용성 판정 → 순위 가중 average precision."""
     if not contexts or not (reference or "").strip():
         return None
-    verdicts = []
-    for c in contexts:  # RAGAS: 청크 하나씩 판정
-        d = _chat(judge, _ragas_prompt(_CTX_PREC_INSTRUCTION, _SCHEMA_VERDICT,
-                                       _CTX_PREC_EXAMPLES, {"question": question, "context": c, "answer": reference}))
-        verdicts.append(1 if _truthy(d.get("verdict")) else 0)
+    # RAGAS: 청크 하나씩 판정 — parallel_map 은 순서를 보존하므로
+    # _average_precision(순위 가중)의 입력이 순차 실행과 동일하다.
+    decisions = parallel_map(
+        lambda c: _chat(judge, _ragas_prompt(_CTX_PREC_INSTRUCTION, _SCHEMA_VERDICT,
+                                             _CTX_PREC_EXAMPLES,
+                                             {"question": question, "context": c, "answer": reference})),
+        list(contexts),
+        _inner_concurrency(),
+    )
+    verdicts = [1 if _truthy(d.get("verdict")) else 0 for d in decisions]
     return _average_precision(verdicts)
 
 def _context_recall(judge, question: str, reference: str, contexts: list[str]):
