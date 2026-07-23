@@ -187,6 +187,23 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(len(state.blacklist), 0)             # 처방이 소진/차단되지 않음
         self.assertEqual(state.optimization_history[0].status, "failed")
 
+    def test_rollback_reindex_survives_followup_search_time_rx(self):
+        # index-time 처방(shrink_chunk_size, reindex=True)이 롤백된 뒤 같은 방문에서
+        # 검색시점 처방(dynamic_top_k, needs_reindex=False)이 적용될 때, 롤백이 요구한
+        # 재색인이 검색시점 needs_reindex=False 에 덮여 사라지면 안 된다. reindex_required
+        # 가 True 로 유지돼야 실제 인덱스가 baseline 청킹으로 복원된다(config/인덱스
+        # 불일치 방지, 버그 A). 버그가 있으면 이 값이 False 가 된다.
+        state = agent.run(make_state(overall=60.0, label="retrieval_semantic_mismatch"))
+        pending = history.find_pending(state.optimization_history)
+        self.assertEqual(pending.selected_prescription_id, "shrink_chunk_size")
+        self.assertTrue(pending.metadata["reindex_required"])   # 방문1 = index-time
+
+        # 방문2: 악화 + 검색시점 라벨 → 롤백(재색인 요구) 후 dynamic_top_k(재색인 불필요) 적용
+        state.report = make_report(50.0, label="retrieval_incomplete_enumeration")
+        state = agent.run(state)
+        self.assertEqual(state.status, "applied")
+        self.assertTrue(state.reindex_required)   # 롤백 재색인 요구가 보존됨
+
     def test_budget_exhausted_allows_same_label_without_increment(self):
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
         self.assertEqual(state.iteration, 3)                # 방문1: 2 -> 3
