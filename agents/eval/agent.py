@@ -244,12 +244,6 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 # ── probe 1개 평가 (STEP2 → STEP3 → STEP4) ───────────────────────
 
-def _clip(text: str, n: int = 50) -> str:
-    """로그용 한 줄 축약(줄바꿈 제거 + n자 컷)."""
-    t = " ".join((text or "").split())
-    return t if len(t) <= n else t[:n] + "…"
-
-
 def _full_log_text(text: str | None) -> str:
     """QAR 로그용 전체 텍스트. 줄바꿈만 접고 길이는 자르지 않는다."""
     return " ".join((text or "").split()) or "-"
