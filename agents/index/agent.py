@@ -1,13 +1,20 @@
 # Index 단계에서 만지는 상태:
-# - read: state.documents, state.index_config, state.reindex_required
-# - write: state.chunks, state.index_artifacts, state.reindex_required, state.status, state.error
+# - read: state.source_url, state.source_type, state.documents,
+#         state.index_config, state.reindex_required,
+#         state.optimization_history, state.active_index_key, state.index_cache
+# - write: state.chunks, state.index_artifacts, state.reindex_required,
+#          state.index_cache, state.active_index_key, state.index_cache_hit,
+#          state.status, state.error, state.current_agent
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import unicodedata
+from copy import deepcopy
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -21,7 +28,7 @@ from agents.index.qdrant_store import (
     resolve_embedding_device,
 )
 from agents.rag.retriever import get_retriever
-from core.schema import Chunk, Document
+from core.schema import Chunk, Document, IndexSnapshot
 from core.state import AgentDoctorState
 from core.timing import StageTimer
 
@@ -50,6 +57,8 @@ class IndexTools:
     count_tokens: Callable[..., int]
     build_sparse_vector: Callable[..., dict]
     build_graph_artifacts: Callable[..., dict]
+    # 배치 임베딩(없으면 단건 embed 루프 폴백) — 필드 끝에 default 로 두어
+    # embed 만 주입하는 기존 테스트/실험 코드가 그대로 동작한다.
     embed_batch: Callable[..., list[list[float]]] | None = None
 
 
@@ -360,24 +369,6 @@ def _default_tools() -> IndexTools:
     )
 
 
-# 예전 fixed-size 호출부는 깨지지 않게 그대로 둔다.
-def _chunk_text(
-    text: str,
-    chunk_size: int,
-    chunk_overlap: int,
-) -> list[tuple[str, int, int]]:
-    trimmed, start, _ = _trimmed_slice(text, 0, len(text))
-    return [
-        (draft.text, draft.start, draft.end)
-        for draft in _fixed_chunks(
-            trimmed,
-            chunk_size,
-            chunk_overlap,
-            base_offset=start,
-        )
-    ]
-
-
 # Index 본문에서는 여기만 호출해서 chunking 전략을 교체한다.
 def _chunk_document(
     document: Document,
@@ -399,8 +390,220 @@ def _index_signature(config: dict) -> str:
         "embedding_model": config["embedding_model"],
         "embedding_dimension": config.get("embedding_dimension", 1024),
         "use_hybrid": config.get("use_hybrid", False),
+        "deduplicate": config.get("deduplicate", True),
     }
     return _sha256(json.dumps(relevant, sort_keys=True, ensure_ascii=False))
+
+
+def _graph_cache_signature(config: dict) -> dict:
+    """그래프 결과만 바꾸는 설정은 임베딩 재사용 signature와 분리한다."""
+    graph_config = {
+        key: value
+        for key, value in config.items()
+        if key.startswith("graph_")
+    }
+    extraction = str(config.get("graph_extraction", "auto"))
+    graph_config["llm_available"] = bool(
+        extraction in {"auto", "llm"} and os.getenv("OPENAI_API_KEY")
+    )
+    return graph_config
+
+
+def _index_cache_key(documents: list[Document], config: dict) -> str:
+    """원문과 인덱스 산출 설정으로 결정되는 롤백 캐시 키를 만든다."""
+    corpus = [
+        {
+            "doc_id": document.doc_id,
+            "source": document.source,
+            "format": document.format,
+            "content_hash": _sha256(_normalize_text(document.content)),
+            "metadata": document.metadata,
+        }
+        for document in documents
+    ]
+    payload = {
+        "schema_version": 2,
+        "index_signature": _index_signature(config),
+        "graph_signature": _graph_cache_signature(config),
+        "collection_namespace": config.get(
+            "qdrant_collection_namespace_resolved",
+            "",
+        ),
+        # deduplicate=True일 때 동일 본문 중 먼저 나온 문서가 승자가 되므로
+        # 입력 순서까지 fingerprint에 보존해야 provenance가 뒤바뀌지 않는다.
+        "documents": corpus,
+    }
+    return _sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    )
+
+
+def _collection_slots(
+    state: AgentDoctorState,
+    config: dict,
+) -> tuple[str, str]:
+    """코퍼스/사용자 namespace별 고정 Qdrant 슬롯 두 개를 만든다."""
+    explicit = str(
+        config.get("qdrant_collection_namespace", "")
+    ).strip()
+    previous = str(
+        state.index_artifacts.get("qdrant_collection_namespace", "")
+    ).strip()
+    source_identity = (
+        {
+            "source_type": state.source_type,
+            "source_url": state.source_url,
+        }
+        if state.source_type or state.source_url
+        else {
+            "document_sources": sorted(
+                {
+                    document.source
+                    for document in state.documents
+                }
+            )
+        }
+    )
+    if explicit:
+        prefix = f"agent_doctor_{_sha256(explicit)[:12]}"
+    elif previous.startswith("agent_doctor_"):
+        prefix = previous
+    else:
+        namespace_source = json.dumps(
+            source_identity,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        prefix = f"agent_doctor_{_sha256(namespace_source)[:12]}"
+    config["qdrant_collection_namespace_resolved"] = prefix
+    return f"{prefix}_slot_0", f"{prefix}_slot_1"
+
+
+def _pending_baseline_index_key(state: AgentDoctorState) -> str:
+    """현재 처방이 실패했을 때 돌아가야 할 baseline 인덱스 키를 찾는다."""
+    for item in reversed(state.optimization_history):
+        metadata = getattr(item, "metadata", {}) or {}
+        if not metadata.get("pending"):
+            continue
+        key = metadata.get("before_index_key")
+        if key:
+            return str(key)
+    return ""
+
+
+def _next_collection_name(
+    state: AgentDoctorState,
+    slots: tuple[str, str],
+    protected_key: str = "",
+) -> str:
+    """보호할 baseline 반대편의 고정 슬롯을 새 인덱스 생성 공간으로 고른다."""
+    active_collection = str(
+        state.index_artifacts.get("qdrant_collection_name", "")
+    )
+    lookup_key = protected_key or state.active_index_key
+    if lookup_key:
+        for snapshot in state.index_cache:
+            if snapshot.cache_key == lookup_key:
+                active_collection = snapshot.collection_name
+                break
+    slot_0, slot_1 = slots
+    return slot_1 if active_collection == slot_0 else slot_0
+
+
+def _cache_limit(config: dict) -> int:
+    if not config.get("rollback_cache_enabled", True):
+        return 0
+    try:
+        requested = int(config.get("rollback_cache_max_versions", 2))
+    except (TypeError, ValueError):
+        requested = 2
+    return max(1, min(2, requested))
+
+
+def _find_index_snapshot(
+    state: AgentDoctorState,
+    cache_key: str,
+) -> IndexSnapshot | None:
+    """캐시 hit를 LRU 최신 위치로 옮겨 다음 축출에서 보호한다."""
+    if _cache_limit(state.index_config) == 0:
+        state.index_cache = []
+        return None
+    for index, snapshot in enumerate(state.index_cache):
+        if snapshot.cache_key != cache_key:
+            continue
+        state.index_cache.append(state.index_cache.pop(index))
+        return state.index_cache[-1]
+    return None
+
+
+def _store_index_snapshot(
+    state: AgentDoctorState,
+    cache_key: str,
+    collection_name: str,
+    config: dict,
+) -> None:
+    """현재 인덱스를 저장하고 현재/직전 두 버전만 남긴다."""
+    limit = _cache_limit(config)
+    if limit == 0:
+        state.index_cache = []
+        return
+    state.index_cache = [
+        snapshot
+        for snapshot in state.index_cache
+        if snapshot.cache_key != cache_key
+    ]
+    state.index_cache.append(
+        IndexSnapshot(
+            cache_key=cache_key,
+            # Chunk는 이후 경로에서 제자리 수정하지 않고 dataclasses.replace로 교체한다.
+            # 활성 state와 객체를 공유해 동일 임베딩을 메모리에 한 벌 더 복제하지 않는다.
+            chunks=list(state.chunks),
+            index_artifacts=deepcopy(state.index_artifacts),
+            collection_name=collection_name,
+        )
+    )
+    pinned_key = _pending_baseline_index_key(state)
+    pinned = next(
+        (
+            snapshot
+            for snapshot in state.index_cache
+            if snapshot.cache_key == pinned_key
+        ),
+        None,
+    )
+    current = state.index_cache[-1]
+    if (
+        limit == 2
+        and pinned is not None
+        and pinned.cache_key != current.cache_key
+    ):
+        state.index_cache = [pinned, current]
+    else:
+        state.index_cache = state.index_cache[-limit:]
+
+
+def _refresh_runtime_metadata(
+    chunks: list[Chunk],
+    config: dict,
+) -> list[Chunk]:
+    """재인덱싱 없이 바뀌는 검색 설정을 청크 provenance에도 반영한다."""
+    refreshed = []
+    for chunk in chunks:
+        metadata = {
+            **(chunk.metadata or {}),
+            "hybrid_dense_weight": float(
+                config.get("hybrid_dense_weight", 0.7)
+            ),
+            "use_reranker": bool(config.get("use_reranker", False)),
+            "reranker_model": config.get("reranker_model"),
+            "top_k": int(config.get("top_k", 5)),
+            "qdrant_collection_name": config.get(
+                "qdrant_collection_name"
+            ),
+            "index_cache_key": config.get("index_cache_key"),
+        }
+        refreshed.append(replace(chunk, metadata=metadata))
+    return refreshed
 
 
 def _validate_config(config: dict) -> None:
@@ -455,6 +658,8 @@ def _chunk_metadata(
         "use_reranker": bool(config.get("use_reranker", False)),
         "reranker_model": config.get("reranker_model"),
         "top_k": int(config.get("top_k", 5)),
+        "qdrant_collection_name": config.get("qdrant_collection_name"),
+        "index_cache_key": config.get("index_cache_key"),
     }
 
 
@@ -599,6 +804,7 @@ def _process_document(
     )
 
     unique_drafts: list[tuple[_ChunkDraft, str]] = []
+    # pass 1: dedup 판정(해시 기반 — 임베딩과 무관하므로 판정 결과는 기존과 동일)
     for draft in drafts:
         chunk_hash = _sha256(draft.text)
         if _is_duplicate(chunk_hash):
@@ -606,6 +812,7 @@ def _process_document(
         new_hashes.add(chunk_hash)
         unique_drafts.append((draft, chunk_hash))
 
+    # pass 2: 살아남은 draft를 설정된 장치에서 한 번에 배치 임베딩한다.
     texts = [draft.text for draft, _chunk_hash in unique_drafts]
     embedding_device = resolve_embedding_device(config.get("embedding_device", "auto"))
     embedding_batch_size = int(config.get("embedding_batch_size", 16))
@@ -701,19 +908,6 @@ def _run(
         state.error = "문서가 없습니다. Ingest Agent 완료 여부를 확인하세요."
         return state
 
-    # top_k처럼 검색 시점에만 쓰는 설정은 기존 청크와 벡터를 그대로 사용할 수 있다.
-    # 그래프의 Index→Eval 흐름은 유지하되 실제 재청킹·재임베딩·upsert는 생략한다.
-    if not state.reindex_required and state.chunks:
-        state.reindex_required = True
-        state.status = "indexed"
-        state.index_artifacts = {
-            **state.index_artifacts,
-            "reindex_skipped": True,
-            "skip_reason": "검색 시점 설정만 변경됨",
-        }
-        print("[Index] 검색 시점 설정만 변경됨 — 기존 인덱스 재사용")
-        return state
-
     config = {
         "chunk_size": state.index_config.get("chunk_size", 600),
         "chunk_overlap": state.index_config.get("chunk_overlap", 80),
@@ -721,8 +915,132 @@ def _run(
         "embedding_dimension": state.index_config.get("embedding_dimension", 1024),
         **state.index_config,
     }
+    try:
+        _validate_config(config)
+        collection_slots = _collection_slots(state, config)
+        target_key = _index_cache_key(state.documents, config)
+        config["index_cache_key"] = target_key
+    except Exception as exc:
+        state.status = "error"
+        state.error = f"Index 실패: {exc}"
+        print(f"[Index] 오류: {exc}")
+        return state
+    force_rebuild = bool(
+        state.reindex_required
+        and state.active_index_key == target_key
+    )
+    snapshot = (
+        None
+        if force_rebuild
+        else _find_index_snapshot(state, target_key)
+    )
+    protected_key = _pending_baseline_index_key(state)
+    if snapshot is not None:
+        collection_name = snapshot.collection_name
+    elif state.active_index_key == target_key and not force_rebuild:
+        collection_name = str(
+            state.index_artifacts.get(
+                "qdrant_collection_name",
+                _next_collection_name(
+                    state,
+                    collection_slots,
+                    protected_key,
+                ),
+            )
+        )
+    else:
+        collection_name = _next_collection_name(
+            state,
+            collection_slots,
+            protected_key,
+        )
+    config["qdrant_collection_name"] = collection_name
+    graph_output_root = Path(
+        str(config.get("graph_output_dir", "output/index_graph"))
+    )
+    config["graph_output_dir"] = str(
+        graph_output_root / collection_name
+    )
+    state.index_cache_hit = False
+
+    # 런타임 설정 변경(False)이고 논리 인덱스도 같을 때만 재색인을 건너뛴다.
+    # True이면 같은 fingerprint라도 손상 복구/명시적 재생성 요청으로 보고
+    # 비활성 슬롯에 다시 만든다.
+    if (
+        state.chunks
+        and not state.reindex_required
+        and (
+            state.active_index_key == target_key
+            or not state.active_index_key
+        )
+    ):
+        state.chunks = _refresh_runtime_metadata(state.chunks, config)
+        state.active_index_key = target_key
+        state.reindex_required = True
+        state.status = "indexed"
+        state.index_artifacts = {
+            **state.index_artifacts,
+            "reindex_skipped": True,
+            "index_cache_hit": False,
+            "active_index_key": target_key,
+            "qdrant_collection_name": collection_name,
+            "qdrant_collection_namespace": config[
+                "qdrant_collection_namespace_resolved"
+            ],
+            "reused_embeddings": len(state.chunks),
+            "skip_reason": "검색 시점 설정만 변경됨",
+        }
+        _store_index_snapshot(
+            state,
+            target_key,
+            collection_name,
+            config,
+        )
+        print("[Index] 검색 시점 설정만 변경됨 - 기존 인덱스 재사용")
+        return state
+
+    if snapshot is not None:
+        restored_chunks = _refresh_runtime_metadata(
+            list(snapshot.chunks),
+            config,
+        )
+        restored_artifacts = {
+            **deepcopy(snapshot.index_artifacts),
+            "index_cache_hit": True,
+            "active_index_key": target_key,
+            "qdrant_collection_name": snapshot.collection_name,
+            "qdrant_collection_namespace": config[
+                "qdrant_collection_namespace_resolved"
+            ],
+        }
+        # 같은 프로세스에서는 retriever의 2-slot 캐시가 그대로 반환된다. 캐시가
+        # 유실됐어도 원격 Qdrant 슬롯이 남아 있으면 upsert 없이 다시 연결한다.
+        # 슬롯까지 없어진 경우에만 저장된 임베딩으로 복구하며 재임베딩은 하지 않는다.
+        config["reuse_existing_collection"] = True
+        try:
+            tools.get_retriever(restored_chunks, config)
+        except Exception as exc:
+            state.status = "error"
+            state.error = f"Index 캐시 복원 실패: {exc}"
+            print(f"[Index] 오류: {state.error}")
+            return state
+
+        # 외부 저장소 재연결까지 성공한 뒤 공유 상태를 한 번에 바꾼다.
+        state.chunks = restored_chunks
+        state.index_artifacts = restored_artifacts
+        state.active_index_key = target_key
+        state.index_cache_hit = True
+        state.reindex_required = True
+        state.status = "indexed"
+        if state.index_config.get("recreate_collection_on_dimension_mismatch"):
+            state.index_config["recreate_collection_on_dimension_mismatch"] = False
+        print(f"[Index] 롤백 인덱스 캐시 복원: {target_key[:12]}")
+        return state
 
     try:
+        # 새 버전은 비활성 슬롯을 완전히 교체한다. 고정 슬롯 두 개만 사용하므로
+        # 프로세스가 재시작돼도 Qdrant 컬렉션이 버전 수만큼 누적되지 않는다.
+        config["replace_qdrant_collection"] = True
         _validate_config(config)
         chunk_strategy = _configured_chunk_strategy(config)
         signature = _index_signature(config)
@@ -811,7 +1129,21 @@ def _run(
                 ),
                 "embedding_batch_size": int(config.get("embedding_batch_size", 16)),
                 "failed_documents": failed_documents,
+                "index_cache_hit": False,
+                "active_index_key": target_key,
+                "qdrant_collection_name": collection_name,
+                "qdrant_collection_namespace": config[
+                    "qdrant_collection_namespace_resolved"
+                ],
             }
+        )
+        state.active_index_key = target_key
+        state.reindex_required = True
+        _store_index_snapshot(
+            state,
+            target_key,
+            collection_name,
+            config,
         )
         state.status = "indexed"
         print(f"[Index] 완료 - 총 {len(all_chunks)}개 청크 (dim={vector_dim})")

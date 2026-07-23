@@ -38,8 +38,9 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
     rolled = sum(1 for h in history if h.status == "failed")
     pending = sum(1 for h in history if h.metadata.get("pending"))
 
-    overall_after = report.overall_score if report and report.overall_score is not None else 0.0
-    overall_before = _first_score(history, overall_after)
+    # 헤드라인 '종합 점수' = 설계 종합점수(composite, 0~100). 없으면 overall×100 폴백.
+    headline_after = _headline_score(report)
+    headline_before = _first_headline(history, headline_after)
 
     depth_key = (depth or os.getenv("EVAL_MODE", "")).strip().lower()
     return {
@@ -50,9 +51,9 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
             "created_at": report.created_at.isoformat() if report else "",
         },
         "score": {
-            "before": _to_100(overall_before),
-            "after": _to_100(overall_after),
-            "delta": round(_to_100(overall_after) - _to_100(overall_before), 1),
+            "before": headline_before,
+            "after": headline_after,
+            "delta": round(headline_after - headline_before, 1),
             "pass_threshold": bool(report and report.pass_threshold),
             "findings_count": len(findings),
             "kept": kept,
@@ -61,7 +62,7 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
         },
         "priority": _build_priority(confirmed),
         "metrics": _build_metrics(report, history),
-        "course": _build_course(history, overall_before),
+        "course": _build_course(history, headline_before),
         "rxs": _build_rxs(history),
         "dxs": _build_dxs(findings),
         "qas": _build_qas(state, findings),
@@ -89,11 +90,36 @@ def _to_100(score_0_to_1: float) -> float:
     return round(score_0_to_1 * 100, 1)
 
 
-def _first_score(history: list, fallback: float) -> float:
+def _composite_total(report) -> Optional[float]:
+    """설계 종합점수(composite_score.total, 이미 0~100). 없으면 None."""
+    if report is None:
+        return None
+    total = (report.composite_score or {}).get("total")
+    return round(float(total), 1) if total is not None else None
+
+
+def _headline_score(report) -> float:
+    """리포트 헤드라인 '종합 점수'(0~100). 설계 종합점수(composite=품질×신뢰도)를
+    우선 쓰고, 아직 없으면(측정 불가·구버전 리포트) overall_score×100 로 폴백한다.
+    overall 은 품질 단일축이라 통과율이 낮아도 높게 나와 시스템 실제 성능을 과대평가하므로,
+    사용자에게 보여주는 헤드라인은 composite 를 정본으로 삼는다."""
+    total = _composite_total(report)
+    if total is not None:
+        return total
+    overall = report.overall_score if report and report.overall_score is not None else 0.0
+    return _to_100(overall)
+
+
+def _first_headline(history: list, fallback: float) -> float:
+    """최적화 이전(baseline) 헤드라인 종합점수. history 에 저장된 baseline composite 를
+    우선 쓰고, 없으면 구버전 overall 기반 before_score 로 폴백한다."""
     for item in history:
-        before = item.metadata.get("before_score")
-        if before is not None:
-            return before
+        bc = item.metadata.get("before_composite")
+        if bc is not None:
+            return round(float(bc), 1)
+        bs = item.metadata.get("before_score")
+        if bs is not None:
+            return _to_100(bs)
     return fallback
 
 
@@ -141,19 +167,30 @@ def _build_metrics(report, history: list) -> list[dict[str, Any]]:
     return out
 
 
+def _course_point_score(item, key: str, fallback: float) -> float:
+    """치료경과 한 점의 헤드라인 점수(0~100). 설계 종합점수(composite, 이미 0~100)를
+    우선 쓰고, 없으면 구버전 overall(0~1)×100 로 폴백. key 는 'before'|'after'."""
+    comp = item.metadata.get(f"{key}_composite")
+    if comp is not None:
+        return round(float(comp), 1)
+    raw = item.metadata.get(f"{key}_score")
+    return _to_100(raw) if raw is not None else fallback
+
+
 def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
-    points = [{"label": "기준선", "score": _to_100(baseline_score), "kept": True}]
+    # baseline_score 는 이미 헤드라인 스케일(0~100) — 여기서 다시 _to_100 하지 않는다.
+    points = [{"label": "기준선", "score": baseline_score, "kept": True}]
     for idx, item in enumerate(history, start=1):
-        before = item.metadata.get("before_score", baseline_score)
-        after = item.metadata.get("after_score", before)
         kept = item.status == "applied" and not item.metadata.get("pending")
+        before = _course_point_score(item, "before", baseline_score)
+        after = _course_point_score(item, "after", before)
         point = {
             "label": f"Rx{idx} · {item.selected_prescription_id or ''}",
-            "score": _to_100(after if kept else before),
+            "score": after if kept else before,
             "kept": kept,
         }
         if not kept:
-            point["roll"] = _to_100(after)
+            point["roll"] = after
         points.append(point)
     return points
 
@@ -177,9 +214,12 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
         else:
             change = [item.selected_prescription_id or "설정 변경", "", ""]
 
-        before_score = item.metadata.get("before_score", 0.0)
-        after_score = item.metadata.get("after_score", before_score)
-        direction = "up" if after_score >= before_score else "down"
+        # 헤드라인(composite)과 일관되게 처방 카드 점수도 종합점수로 표시.
+        # (유지/롤백 판정 자체는 overall 탐색 신호 기준이므로 direction 과 verdict 이
+        #  드물게 어긋날 수 있으나, 표시 점수는 사용자가 보는 종합점수로 통일한다.)
+        before_head = _course_point_score(item, "before", 0.0)
+        after_head = _course_point_score(item, "after", before_head)
+        direction = "up" if after_head >= before_head else "down"
 
         out.append({
             "state": state_key,
@@ -188,8 +228,8 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             "target": ", ".join(item.failure_labels),
             "reason": ["처방 근거", item.reason or ""],
             "score": [
-                str(_to_100(before_score)),
-                str(_to_100(after_score)),
+                str(before_head),
+                str(after_head),
                 direction,
             ],
             "verdict": (

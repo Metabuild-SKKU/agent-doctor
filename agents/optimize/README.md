@@ -48,6 +48,11 @@ applied / rolled_back -> index (재색인 필요)
 안 됐으면, `route_after_eval`이 마지막으로 한 번 더 optimize로 보내 판정 기회를 준다
 (그렇지 않으면 나빠진 처방이 판정 없이 그대로 서빙될 수 있었다).
 
+pending 이력에는 적용 직전의 `before_index_key`와 `before_eval_key`도 저장한다.
+Index/Eval 캐시는 이 두 키를 롤백 기준본으로 고정해, 후보를 여러 번 시험하더라도
+최대 두 슬롯 안에서 기준본과 현재 후보만 유지한다. 처방이 실패하면 config뿐 아니라
+해당 인덱스와 진단 결과를 캐시에서 바로 복원할 수 있다.
+
 ## 문제 그룹
 
 Eval에서 넘어온 finding label은 우선 다음 그룹으로 분류한다.

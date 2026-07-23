@@ -61,8 +61,9 @@ agent_doctor_v2/
 │   ├── eval/              # RAG 품질 진단 (STEP1~5, 16개 원인 라벨)
 │   │   ├── agent.py       # STEP1~5 오케스트레이션
 │   │   ├── probe_gen.py / probe_store.py / knowledge_graph.py   # STEP1 Probe 생성·캐시
-│   │   ├── metrics.py / metrics_ragas.py                        # STEP3 규칙 지표·RAGAS
-│   │   ├── diagnose.py / signals.py / report.py                 # STEP4~5 진단·리포트
+│   │   ├── metrics_common.py                                    # 측정 공통 자원(모드·_ctx·memoize)
+│   │   ├── metrics_basic.py / metrics_search.py / metrics_ragas.py  # STEP3 측정 (tier1/2/3)
+│   │   ├── diagnose.py / report.py                              # STEP4~5 판정·리포트
 │   │   ├── llm_provider.py  # LLM 추상화 (OpenAI/Gemini/GitHub Models)
 │   │   └── README.md
 │   ├── optimize/          # 진단 라벨 기반 처방 (한 번에 하나씩 적용→검증→유지/롤백)

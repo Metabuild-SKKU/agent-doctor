@@ -11,10 +11,11 @@ Optimize 노드의 진입점(오케스트레이션 계층).
   모든 경로에서 같은 state 를 반환한다(AGENTS.md 2절 계약).
 
 [읽는 것]  state.report, state.index_config, state.iteration, state.max_iterations,
-           state.blacklist, state.optimization_history
+           state.blacklist, state.optimization_history,
+           state.active_index_key, state.active_eval_key
 [쓰는 것]  state.index_config, state.iteration, state.status, state.error,
            state.current_agent, state.blacklist, state.optimization_history,
-           state.optimization_report
+           state.optimization_report, state.reindex_required
 
 [state.status 신호]  (graph 라우팅이 참고)
   - "applied"      : 새 처방을 적용함 → 재색인 필요(Index)
@@ -32,6 +33,7 @@ from dataclasses import replace
 
 from core.state import AgentDoctorState
 from core.timing import StageTimer
+from core.schema import DiagnosticReport
 from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate
 from agents.optimize.schemas import (
     OptimizationHistoryItem,
@@ -64,8 +66,9 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
 
         # (1) 지난 처방 판정 + (나빴으면) 롤백/블랙리스트
         with timer.measure("이전 처방 판정"):
-            judged_item, verdict = _judge_pending_trial(state)
+            judged_item, verdict, rollback_baseline_report = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
+        rollback_reindex_required = bool(state.reindex_required) if rolled_back else False
 
         # (2) 새 처방 선택. 저비용 사전검증에서 baseline이 이기면 현재 처방을
         # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
@@ -130,12 +133,21 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
 
         # 적용 직전 스냅샷(롤백이 있었다면 이미 되돌려진 config 가 before 가 된다)
         before_config = dict(state.index_config)
-        before_report = state.report
+        # 롤백 직후라면 비교 기준을 복원된 baseline 리포트로 잡는다. state.report 는
+        # 롤백 전의 열화된 Eval 이라, 그걸 baseline 으로 쓰면 이 처방이 원래보다
+        # 나빠도 '개선'으로 오판해 유지된다(#2). 롤백이 없었으면 현재 report 가 기준.
+        before_report = rollback_baseline_report if rolled_back else state.report
 
         # 검증된 처방을 실제 index_config 에 반영(canonical→flat 변환은 mapper 담당)
         with timer.measure("설정 반영·이력 기록"):
             config_mapper.apply_config_patch(state.index_config, result.config_patch)
-            state.reindex_required = bool(result.needs_reindex)
+            # 재색인형 처방을 롤백한 직후 런타임형 처방을 적용하면, 새 처방의 False가
+            # 롤백 복원에 필요한 True를 지우면 안 된다. Index도 fingerprint를 검증하지만
+            # 상태 신호 자체도 실제 필요한 작업을 보존한다.
+            state.reindex_required = (
+                rollback_reindex_required
+                or bool(result.needs_reindex)
+            )
 
             # pending 이력 생성(다음 방문에서 finalize) + iteration 1회 증가
             prescription_id = (
@@ -145,6 +157,16 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                 state, request, prescription_id, before_config, before_report
             )
             item.metadata["reindex_required"] = bool(result.needs_reindex)
+            if rolled_back and judged_item is not None:
+                item.metadata["before_index_key"] = judged_item.metadata.get(
+                    "before_index_key", ""
+                )
+                item.metadata["before_eval_key"] = judged_item.metadata.get(
+                    "before_eval_key", ""
+                )
+            else:
+                item.metadata["before_index_key"] = state.active_index_key
+                item.metadata["before_eval_key"] = state.active_eval_key
             state.optimization_history.append(item)
             if starts_new_label:
                 state.iteration += 1
@@ -320,12 +342,25 @@ def _finish_internal_study(
         item.after_metrics = best_metrics
     item.status = "applied" if verdict.keep else "failed"
     item.rollback_reason = None if verdict.keep else verdict.reason
+    # 표시·게이트용 종합점수(0~100). before 는 baseline 리포트에서, after 는 baseline
+    # 복원 시 before 와 동일(설정을 되돌렸으므로), 아니면 sweep 이 full report 를 남기지
+    # 않아 미상(None) — 표시부가 fallback 한다.
+    before_composite = history._read_composite(item.metadata.get("before_report"))
+    # baseline 복원이면 설정을 되돌렸으니 after=before. 새 후보가 이겼으면 그 후보의
+    # 관측값에 실린 composite_total 을 쓴다(_report_metrics 가 실어둠). 없으면 None →
+    # 표시부가 overall×100 으로 폴백.
+    after_composite = (
+        before_composite if baseline_selected
+        else best_metrics.get("composite_total")
+    )
     item.metadata.update(
         {
             "pending": False,
             "active_study": False,
             "before_score": verdict.before_score,
             "after_score": verdict.after_score,
+            "before_composite": before_composite,
+            "after_composite": after_composite,
             "best_config": dict(result.best_config or {}),
         }
     )
@@ -383,6 +418,11 @@ def _report_metrics(state: AgentDoctorState) -> dict:
     metrics = dict(state.report.ragas_scores)
     if state.report.overall_score is not None:
         metrics["overall_score"] = state.report.overall_score
+    # 표시·게이트용 종합점수(0~100)도 관측값에 실어, sweep 승자의 after_composite 를
+    # 표시부가 복원하게 한다(없으면 overall×100 폴백 → before/after 스케일 뒤섞임).
+    composite_total = (state.report.composite_score or {}).get("total")
+    if composite_total is not None:
+        metrics["composite_total"] = float(composite_total)
     metrics["pass_threshold"] = gate.passes_report(state.report)
     return metrics
 
@@ -420,22 +460,30 @@ def _study_floor_violations(metrics: dict) -> list[str]:
 
 def _judge_pending_trial(
     state: AgentDoctorState,
-) -> tuple[OptimizationHistoryItem | None, Verdict | None]:
+) -> tuple[OptimizationHistoryItem | None, Verdict | None, DiagnosticReport | None]:
     """직전에 적용한 처방(pending)을 판정한다. 나빴으면 config 롤백 + blacklist.
-    판정한 이력 항목과 Verdict 를 반환한다(판정할 게 없으면 (None, None)).
-    호출부가 이 둘로 롤백 여부(not verdict.keep) 판단 + 사용자 리포트를 만든다."""
+    판정한 이력 항목과 Verdict 를 반환한다(판정할 게 없으면 (None, None, None)).
+    호출부가 이 둘로 롤백 여부(not verdict.keep) 판단 + 사용자 리포트를 만든다.
+
+    3번째 반환값(rollback_baseline_report): 롤백했을 때 '복원된 config 가 실제로
+    받았던 점수'를 담은 리포트(=이 처방의 before_report). 롤백 후 같은 방문에서
+    이어서 제안되는 다음 처방의 비교 기준(before_report)으로 써야 한다. state.report
+    는 롤백 직전의 열화된 Eval 이라 baseline 으로 쓰면 원래보다 나빠도 '개선'으로
+    오판해 유지해버린다(#2). 유지/판정없음이면 None."""
     pending = history.find_pending(state.optimization_history)
     if pending is None:
-        return None, None
+        return None, None, None
 
     before_report = pending.metadata.get("before_report")
     after_report = state.report
 
     if before_report is None or after_report is None:
-        # 비교할 점수가 없어 판정 불가 → 보수적으로 유지 처리하고 확정만.
+        # 비교할 점수가 없어 판정 불가 → 안전망 취지대로 롤백(원래 설정 복원)한다.
+        # before_config 스냅샷은 리포트와 무관하게 항상 있으므로 복원은 안전하며,
+        # '유지'로 두면 성능을 떨어뜨린 처방도 검증 없이 굳어질 수 있다(방향이 위험).
         verdict = Verdict(
-            keep=True, before_score=0.0, after_score=0.0,
-            reason="판정 불가(리포트 없음) — 유지",
+            keep=False, before_score=0.0, after_score=0.0,
+            reason="판정 불가(리포트 없음) — 롤백", unjudgeable=True,
         )
     else:
         verdict = history.judge(before_report, after_report)
@@ -452,9 +500,13 @@ def _judge_pending_trial(
             restored["recreate_collection_on_dimension_mismatch"] = True
         state.index_config = restored
         state.reindex_required = bool(pending.metadata.get("reindex_required", True))
+        # 측정이 없어(unjudgeable) 롤백한 경우는 '나빴다는 증거'가 아니므로 블랙리스트
+        # 등록을 건너뛴다. 영구 차단하면 리포트 부재만으로 처방이 소진되고, before_report
+        # None 이 다음 방문으로 전파돼 판정 불가→롤백→차단이 연쇄될 수 있다(리뷰 #36).
         label = pending.failure_labels[0] if pending.failure_labels else ""
-        if label and pending.selected_prescription_id:
+        if label and pending.selected_prescription_id and not verdict.unjudgeable:
             state.blacklist.add((label, pending.selected_prescription_id))
 
     history.finalize_item(pending, verdict, after_config, after_report)
-    return pending, verdict
+    rollback_baseline_report = before_report if not verdict.keep else None
+    return pending, verdict, rollback_baseline_report

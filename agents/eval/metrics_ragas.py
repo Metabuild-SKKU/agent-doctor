@@ -1,10 +1,14 @@
 """
 agents/eval/metrics_ragas.py
-STEP3-2: LLM 진단 (RAGAS 지표 측정)
+[tier3] LLM(RAGAS) 호출이 필요한 측정을 모은 파일. (STEP3-2: LLM 진단)
+
+`active_mode() < DEEP` 이면 한 번도 LLM 을 부르지 않고 None 을 돌려준다(비용 게이트).
+트랙별 결과는 record.ragas / record.oracle_ragas 에 1회만 채운다(*_done 플래그).
+여기는 '측정'만 한다 — 임계값 판정과 라벨 부여는 diagnose 소관이다.
 
 RAGAS 4개 지표 + AspectCritic 을 **LLM-as-Judge** 로 측정한다.
-    - 실제 트랙  : Faithfulness, Context Precision/Recall, Response Relevancy
-    - 오라클 트랙 : Faithfulness, Response Relevancy (gold context 투입 결과)
+    - 실제 트랙  : Faithfulness, Context Precision/Recall, Response Relevancy, Answer Correctness
+    - 오라클 트랙 : Faithfulness, Response Relevancy, Answer Correctness (gold context 투입 결과)
     - AspectCritic: contradiction 이진 판정
 
 프롬프트 출처:
@@ -32,9 +36,12 @@ from __future__ import annotations
 import json
 import math
 import os
+from typing import Any, Callable
 
 from agents.eval import llm_provider
-from agents.eval.types import EvalRecord
+from agents.eval.types import Mode, EvalRecord
+from agents.eval.metrics_common import _ctx, active_mode
+from core.parallel import parallel_map
 
 
 def _env_int(name: str, default: int) -> int:
@@ -47,6 +54,13 @@ def _env_int(name: str, default: int) -> int:
 
 # RAGAS AnswerRelevancy 기본 strictness (생성 질문 개수)
 RELEVANCY_STRICTNESS = _env_int("EVAL_RELEVANCY_STRICTNESS", 3)
+
+
+def _inner_concurrency() -> int:
+    """트랙 1개 내부(지표/청크/strictness) 동시성. 기본 1(=off) — 바깥 probe×track
+    병렬(EVAL_LLM_CONCURRENCY)과 곱해지면 429 폭풍이 나므로, probe 가 적어 바깥
+    병렬이 놀 때만 명시적으로 켠다. 1이면 parallel_map 이 기존 순차와 동일."""
+    return _env_int("EVAL_RAGAS_INNER_CONCURRENCY", 1)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -181,12 +195,84 @@ _ASPECT_INSTRUCTION_TMPL = (
 _ASPECT_CONTRADICTION = ("Does the response contain information that contradicts the "
                          "retrieved context?")
 
+# ── Answer Correctness: TP/FP/FN 분류 (CorrectnessClassifierPrompt) ──
+#   ragas/metrics/collections/answer_correctness (0.4.3) 소스와 일치.
+#   답변·정답을 각각 문장으로 분해(위 StatementGenerator 재사용) 후, 답변 문장을 정답 기준
+#   TP/FP/FN 으로 분류 → factual F1. 최종 answer_correctness = w·factual_F1 + (1-w)·의미유사도.
+_CORRECTNESS_INSTRUCTION = (
+    "Given a ground truth and an answer statements, analyze each statement and classify them "
+    "in one of the following categories: TP (true positive): statements that are present in "
+    "answer that are also directly supported by the one or more statements in ground truth, "
+    "FP (false positive): statements present in the answer but not directly supported by any "
+    "statement in ground truth, FN (false negative): statements found in the ground truth but "
+    "not present in answer. Each statement can only belong to one of the categories. Provide a "
+    "reason for each classification."
+)
+_CORRECTNESS_EXAMPLES = [
+    (
+        {"question": "What powers the sun and what is its primary function?",
+         "answer": [
+             "The sun is powered by nuclear fission, similar to nuclear reactors on Earth.",
+             "The primary function of the sun is to provide light to the solar system.",
+         ],
+         "ground_truth": [
+             "The sun is powered by nuclear fusion, where hydrogen atoms fuse to form helium.",
+             "This fusion process in the sun's core releases a tremendous amount of energy.",
+             "The energy from the sun provides heat and light, which are essential for life on Earth.",
+             "The sun's light plays a critical role in Earth's climate system.",
+             "Sunlight helps to drive the weather and ocean currents.",
+         ]},
+        {"TP": [
+            {"statement": "The primary function of the sun is to provide light to the solar system.",
+             "reason": "This statement is somewhat supported by the ground truth mentioning the sun providing light and its roles, though it focuses more broadly on the sun's energy."},
+         ],
+         "FP": [
+            {"statement": "The sun is powered by nuclear fission, similar to nuclear reactors on Earth.",
+             "reason": "This statement is incorrect and contradicts the ground truth which states that the sun is powered by nuclear fusion."},
+         ],
+         "FN": [
+            {"statement": "The sun is powered by nuclear fusion, where hydrogen atoms fuse to form helium.",
+             "reason": "This accurate statement about the sun's power source is not included in the answer."},
+            {"statement": "This fusion process in the sun's core releases a tremendous amount of energy.",
+             "reason": "This process and its significance are not mentioned in the answer."},
+            {"statement": "The energy from the sun provides heat and light, which are essential for life on Earth.",
+             "reason": "The answer only mentions light, omitting the essential aspects of heat and its necessity for life, which the ground truth covers."},
+            {"statement": "The sun's light plays a critical role in Earth's climate system.",
+             "reason": "This broader impact of the sun's light on Earth's climate system is not addressed in the answer."},
+            {"statement": "Sunlight helps to drive the weather and ocean currents.",
+             "reason": "The effect of sunlight on weather patterns and ocean currents is omitted in the answer."},
+         ]},
+    ),
+    (
+        {"question": "What is the boiling point of water?",
+         "answer": ["The boiling point of water is 100 degrees Celsius at sea level"],
+         "ground_truth": [
+             "The boiling point of water is 100 degrees Celsius (212 degrees Fahrenheit) at sea level.",
+             "The boiling point of water can change with altitude.",
+         ]},
+        {"TP": [
+            {"statement": "The boiling point of water is 100 degrees Celsius at sea level",
+             "reason": "This statement is directly supported by the ground truth which specifies the boiling point of water as 100 degrees Celsius at sea level."},
+         ],
+         "FP": [],
+         "FN": [
+            {"statement": "The boiling point of water can change with altitude.",
+             "reason": "This additional information about how the boiling point of water changes with altitude is not mentioned in the answer."},
+         ]},
+    ),
+]
+# answer_correctness = weights[0]·factual_F1 + weights[1]·의미유사도 (ragas 기본 [0.75, 0.25])
+_ANSWER_CORRECTNESS_WEIGHTS = (0.75, 0.25)
+
+
 # 출력 JSON 스키마 힌트 (BasePrompt.to_string 의 output_schema 자리)
 _SCHEMA_STATEMENTS = '{"properties": {"statements": {"items": {"type": "string"}, "type": "array"}}, "required": ["statements"]}'
 _SCHEMA_NLI = '{"properties": {"statements": {"items": {"properties": {"statement": {"type": "string"}, "reason": {"type": "string"}, "verdict": {"type": "integer"}}, "required": ["statement", "reason", "verdict"], "type": "object"}, "type": "array"}}, "required": ["statements"]}'
 _SCHEMA_RELEVANCY = '{"properties": {"question": {"type": "string"}, "noncommittal": {"type": "integer"}}, "required": ["question", "noncommittal"]}'
 _SCHEMA_VERDICT = '{"properties": {"reason": {"type": "string"}, "verdict": {"type": "integer"}}, "required": ["reason", "verdict"]}'
 _SCHEMA_RECALL = '{"properties": {"classifications": {"items": {"properties": {"statement": {"type": "string"}, "reason": {"type": "string"}, "attributed": {"type": "integer"}}, "required": ["statement", "reason", "attributed"], "type": "object"}, "type": "array"}}, "required": ["classifications"]}'
+_TPFPFN_ITEM = '{"items": {"properties": {"statement": {"type": "string"}, "reason": {"type": "string"}}, "required": ["statement", "reason"], "type": "object"}, "type": "array"}'
+_SCHEMA_CORRECTNESS = '{"properties": {"TP": ' + _TPFPFN_ITEM + ', "FP": ' + _TPFPFN_ITEM + ', "FN": ' + _TPFPFN_ITEM + '}, "required": ["TP", "FP", "FN"]}'
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -210,32 +296,41 @@ def _judge():
 def evaluate_real_track(record: EvalRecord, judge) -> dict:
     """실제 결과 지표. faithfulness, response_relevancy, (+정답 있으면) context_precision, context_recall.
 
-    [TODO 비용] DEEP 트랙 1개당 LLM 호출 ~11회(faithfulness 2 + precision top_k개 + recall 1 +
-    relevancy strictness). precision 청크별 호출을 배치/병렬화하거나 strictness↓로 절감 여지."""
+    [비용] DEEP 트랙 1개당 LLM 호출 ~11회(faithfulness 2 + precision top_k개 + recall 1 +
+    relevancy strictness). EVAL_RAGAS_INNER_CONCURRENCY>1 이면 지표 4개를 동시 실행
+    (지표 내부의 청크별/strictness 호출도 각자 같은 동시성으로 돈다).
+    순차 대비 차이: 순차에선 첫 지표의 예외가 나머지 호출을 생략시키지만, 어차피
+    호출부(_ragas_track)가 트랙 전체를 {} 로 폴백하므로 최종 결과는 동일하다."""
     q = record.probe.question
     ans = record.generated_answer
     ctx = record.retrieved_context
     ref = record.probe.ground_truth
 
-    out: dict = {
-        "faithfulness": _faithfulness(judge, q, ans, ctx),
-        "response_relevancy": _response_relevancy(judge, q, ans),
-    }
-    if ref:  # reference 있어야 Context Precision/Recall(WithReference) 계산 가능
-        out["context_precision"] = _context_precision(judge, q, ref, ctx)
-        out["context_recall"] = _context_recall(judge, q, ref, ctx)
-    return _drop_none(out)
+    tasks: list[tuple[str, Callable[[], Any]]] = [
+        ("faithfulness", lambda: _faithfulness(judge, q, ans, ctx)),
+        ("response_relevancy", lambda: _response_relevancy(judge, q, ans)),
+    ]
+    if ref:  # reference 있어야 Context Precision/Recall(WithReference)·AnswerCorrectness 계산 가능
+        tasks.append(("context_precision", lambda: _context_precision(judge, q, ref, ctx)))
+        tasks.append(("context_recall", lambda: _context_recall(judge, q, ref, ctx)))
+        tasks.append(("answer_correctness", lambda: _answer_correctness(judge, q, ans, ref)))
+    values = parallel_map(lambda t: t[1](), tasks, _inner_concurrency())
+    return _drop_none(_merge_task_values(tasks, values))
 
 
 def evaluate_oracle_track(record: EvalRecord, judge) -> dict:
-    """gold context 로 생성한 답에 대한 지표. faithfulness, response_relevancy."""
+    """gold context 로 생성한 답에 대한 지표. faithfulness, response_relevancy, (+정답 있으면) answer_correctness."""
     q = record.probe.question
     ans = record.oracle_answer or ""
     ctx = record.oracle_context or record.retrieved_context
-    return _drop_none({
+    ref = record.probe.ground_truth
+    out = {
         "faithfulness": _faithfulness(judge, q, ans, ctx),
         "response_relevancy": _response_relevancy(judge, q, ans),
-    })
+    }
+    if ref:
+        out.update(_answer_correctness(judge, q, ans, ref))
+    return _drop_none(out)
 
 
 def answer_similarity(record: EvalRecord, track: str):
@@ -274,14 +369,22 @@ def evaluate_aspect_critics(record: EvalRecord, judge) -> dict:
 #  RAGAS 지표 알고리즘 (소스와 동일)
 # ══════════════════════════════════════════════════════════════════
 
+def _decompose_statements(judge, question: str, text: str) -> list[str]:
+    """RAGAS StatementGenerator: 텍스트를 대명사 없는 독립 주장 문장들로 분해.
+    faithfulness·answer_correctness 가 공유(답변/정답 모두 이 형식으로 분해)."""
+    if not (text or "").strip():
+        return []
+    d = _chat(judge, _ragas_prompt(_FAITH_STMT_INSTRUCTION, _SCHEMA_STATEMENTS,
+                                   _FAITH_STMT_EXAMPLES, {"question": question, "answer": text}))
+    return [s for s in _as_list(d, "statements") if isinstance(s, str) and s.strip()]
+
+
 def _faithfulness(judge, question: str, answer: str, contexts: list[str]):
     """RAGAS Faithfulness (2단계): 답변→문장 분해 → 각 문장 NLI 판정 → 지지 비율."""
     if not (answer or "").strip() or not contexts:
         return None
     # 1. 문장 분해: 검증가능한 주장들로 분해
-    d1 = _chat(judge, _ragas_prompt(_FAITH_STMT_INSTRUCTION, _SCHEMA_STATEMENTS,
-                                    _FAITH_STMT_EXAMPLES, {"question": question, "answer": answer}))
-    statements = [s for s in _as_list(d1, "statements") if isinstance(s, str) and s.strip()]
+    statements = _decompose_statements(judge, question, answer)
     if not statements:
         return None
     # 2. NLI 판정: 각 주장이 컨텍스트만으로 추론 가능한지 판단
@@ -295,15 +398,74 @@ def _faithfulness(judge, question: str, answer: str, contexts: list[str]):
     return supported / len(verdicts)
 
 
+def _answer_correctness(judge, question: str, answer: str, reference: str):
+    """RAGAS AnswerCorrectness: 답변↔정답(gold) 비교 점수(0~1).
+    factual F1(답변 문장을 정답 기준 TP/FP/FN 분류) 와 의미유사도(임베딩 코사인)의 가중합.
+    lexical answer_match 오통과를 강등하는 gold-비교 신호다.
+
+    반환은 트랙 dict 에 합쳐질 조각: {"answer_correctness": float}
+    (+ factual 성분을 못 재면 {"answer_correctness_degraded": True}). 재료가 없거나 두 성분
+    모두 실패하면 빈 dict — 즉 '미측정'이라 diagnose 가 lexical 판정을 그대로 확정한다."""
+    if not (answer or "").strip() or not (reference or "").strip():
+        return {}
+
+    w_f, w_s = _ANSWER_CORRECTNESS_WEIGHTS
+    components: list[tuple[float, float]] = []   # (가중치, 값) — 측정에 성공한 성분만 담는다
+    factual_measured = False
+
+    # ① factual F1 — 답변 문장을 정답 기준 TP/FP/FN 으로 분류
+    ans_stmts = _decompose_statements(judge, question, answer)
+    ref_stmts = _decompose_statements(judge, question, reference)
+    if ans_stmts and ref_stmts:
+        d = _chat(judge, _ragas_prompt(_CORRECTNESS_INSTRUCTION, _SCHEMA_CORRECTNESS, _CORRECTNESS_EXAMPLES,
+                                       {"question": question, "answer": ans_stmts, "ground_truth": ref_stmts}))
+        tp, fp, fn = len(_as_list(d, "TP")), len(_as_list(d, "FP")), len(_as_list(d, "FN"))
+        denom = tp + 0.5 * (fp + fn)
+        # denom==0 = 분류가 한 건도 안 나옴. 분해된 문장이 있으면 정상 분류는 최소 1건이 나오므로
+        # 이건 판정기 무응답/파싱 실패다 — 이 성분만 버리고 남은 성분으로 계속 간다.
+        # (예전엔 여기서 함수 전체가 None 이라 '미측정'이 되어, 판정기가 죽으면 강등이 통째로
+        #  스킵되고 lexical 오통과가 그대로 성공 처리됐다.)
+        if denom > 0:
+            components.append((w_f, tp / denom))
+            factual_measured = True
+
+    # ② 의미 유사도 — 답변↔정답 임베딩 코사인
+    try:
+        vecs = _embed(judge, [reference, answer])
+    except Exception:
+        vecs = None
+    if vecs and len(vecs) >= 2:
+        components.append((w_s, max(_cosine(vecs[0], vecs[1]), 0.0)))
+
+    if not components:
+        return {}                                # 두 성분 다 실패 → 진짜 미측정
+    # 성분이 하나만 측정돼도 가중 재정규화해 0~1 스케일을 유지한다.
+    score = sum(w * v for w, v in components) / sum(w for w, _ in components)
+    out = {"answer_correctness": score}
+
+    # factual(TP/FP/FN 분류)이 빠지면 유사도 단독 점수다. 이 폴백은 판정을 느슨하게 만들지
+    # 않는다 — 이 지표를 보는 diagnose._f1_ok 은 이미 lexical 을 통과한 답에만 도달하므로,
+    # 유사도가 할 수 있는 일은 '강등'뿐이고 통과시키는 답은 지표가 없었어도 통과했을 답이다.
+    # 다만 부정문·근접 오답은 유사도도 높게 나와 못 거르므로, 그 실행의 정답 판정이
+    # degrade 됐다는 사실 자체를 리포트로 드러낸다(집계: report._degraded_correctness_count).
+    if not factual_measured:
+        out["answer_correctness_degraded"] = True
+    return out
+
+
 def _response_relevancy(judge, question: str, answer: str):
     """RAGAS AnswerRelevancy: 답변→질문 strictness(3)회 생성 → 원 질문과 코사인 평균. 모두 회피성이면 0."""
     if not (answer or "").strip():
         return 0.0
+    # 답변으로부터 질문 n회 생성 (inner 동시성 1이면 기존 순차와 동일, 결과는 순서 보존)
+    drafts = parallel_map(
+        lambda _i: _chat(judge, _ragas_prompt(_RELEVANCY_INSTRUCTION, _SCHEMA_RELEVANCY,
+                                              _RELEVANCY_EXAMPLES, {"response": answer})),
+        list(range(RELEVANCY_STRICTNESS)),
+        _inner_concurrency(),
+    )
     gen_qs, noncommittal = [], []
-    # 답변으로부터 질문 n회 생성
-    for _ in range(RELEVANCY_STRICTNESS):
-        d = _chat(judge, _ragas_prompt(_RELEVANCY_INSTRUCTION, _SCHEMA_RELEVANCY,
-                                       _RELEVANCY_EXAMPLES, {"response": answer}))
+    for d in drafts:
         q = d.get("question")
         # LLM으로부터 생성된 str이 잘 존재하는지 판별 후 -> 판별에 필요한것 저장
         if isinstance(q, str) and q.strip():
@@ -323,11 +485,16 @@ def _context_precision(judge, question: str, reference: str, contexts: list[str]
     """RAGAS ContextPrecision: 청크마다 유용성 판정 → 순위 가중 average precision."""
     if not contexts or not (reference or "").strip():
         return None
-    verdicts = []
-    for c in contexts:  # RAGAS: 청크 하나씩 판정
-        d = _chat(judge, _ragas_prompt(_CTX_PREC_INSTRUCTION, _SCHEMA_VERDICT,
-                                       _CTX_PREC_EXAMPLES, {"question": question, "context": c, "answer": reference}))
-        verdicts.append(1 if _truthy(d.get("verdict")) else 0)
+    # RAGAS: 청크 하나씩 판정 — parallel_map 은 순서를 보존하므로
+    # _average_precision(순위 가중)의 입력이 순차 실행과 동일하다.
+    decisions = parallel_map(
+        lambda c: _chat(judge, _ragas_prompt(_CTX_PREC_INSTRUCTION, _SCHEMA_VERDICT,
+                                             _CTX_PREC_EXAMPLES,
+                                             {"question": question, "context": c, "answer": reference})),
+        list(contexts),
+        _inner_concurrency(),
+    )
+    verdicts = [1 if _truthy(d.get("verdict")) else 0 for d in decisions]
     return _average_precision(verdicts)
 
 def _context_recall(judge, question: str, reference: str, contexts: list[str]):
@@ -435,6 +602,106 @@ def _truthy(v) -> bool:
     return False
 
 
+def _merge_task_values(tasks: list, values: list) -> dict:
+    """병렬 태스크 결과를 트랙 dict 으로 합친다.
+    대부분의 지표는 스칼라를 돌려주지만, answer_correctness 는 부가 플래그를 함께 실어야 해서
+    dict 조각을 돌려준다 — dict 이면 펼쳐 넣고 아니면 태스크 키에 매핑한다."""
+    out: dict = {}
+    for (key, _), value in zip(tasks, values):
+        if isinstance(value, dict):
+            out.update(value)
+        else:
+            out[key] = value
+    return out
+
+
 def _drop_none(d: dict) -> dict:
     """value가 None이면 버리기"""
     return {k: v for k, v in d.items() if v is not None}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  진입 시 RAGAS 측정 + 트랙별 값 접근자 (diagnose 가 소비하는 tier3 측정 API)
+#    실제 트랙  = record.ragas        (검색결과 컨텍스트로 생성한 답)
+#    오라클 트랙 = record.oracle_ragas  (gold 컨텍스트로 생성한 답)
+#  자원(_ctx.ragas_fn)은 agent 가 set_context 로 주입한다. 임계값 판정은 diagnose 소관.
+# ══════════════════════════════════════════════════════════════════
+
+def _compute_ragas_real(record: EvalRecord) -> None:
+    """실제 트랙 RAGAS 를 record.ragas 에 계산·저장. (STEP3-2, diagnose 진입 시 1회.)
+
+    성공/실패 판정 전에 항상 돌린다 — 두 가지가 이걸 필요로 한다:
+      1. diagnose 의 정답 강등 판정(_f1_ok 이 record.ragas_answer_correctness 를 읽는다)
+      2. report/scoring 의 RAGAS 평균 — 실제 트랙만 쓰므로, 성공 probe 도 점수를 가져야
+         '진단이 돌아간 실패 probe'만의 편향된 평균이 되지 않는다.
+
+    비용 게이트는 DEEP 유지 — 그 미만 모드에선 LLM 을 한 번도 부르지 않는다."""
+    if active_mode() < Mode.DEEP:
+        return
+    _ensure_ragas(record, "real")
+
+
+def _compute_ragas_oracle(record: EvalRecord) -> None:
+    """오라클 트랙 RAGAS 를 record.oracle_ragas 에 계산·저장.
+
+    실패로 판정된 probe 에서만 부른다 — 오라클 값의 소비처가 B그룹(생성 실패) 라벨과
+    _oracle_ok 뿐이고, report/scoring 의 평균은 실제 트랙만 쓰기 때문이다. 성공 probe 는
+    진단 자체를 건너뛰므로 이 비용(트랙 하나치 LLM 호출)을 지불할 이유가 없다.
+
+    lazy(_faith_oracle 등이 알아서 _ensure_ragas 호출)로 두지 않고 여기서 명시적으로 채우는
+    이유: _oracle_ok 이 읽는 record.oracle_ragas_answer_correctness 는 dict 만 보는 property 라
+    ensure 를 트리거하지 않는다 — lazy 로 두면 오라클 쪽 answer_correctness 강등이 조용히 죽는다."""
+    if active_mode() < Mode.DEEP:
+        return
+    _ensure_ragas(record, "oracle")
+
+
+def _ensure_ragas(record: EvalRecord, track: str):
+    """트랙 RAGAS 점수를 record 에 계산·저장(트랙별 1회만).
+    빈 결과({})여도 *_done 플래그로 '시도함'을 기록해 같은 트랙 재-LLM호출을 막는다.
+    (oracle 답이 없으면 _ctx.ragas_fn 이 {} 를 돌려준다.)"""
+    if _ctx.ragas_fn is None:
+        return
+    if track == "oracle":
+        if not record.oracle_ragas_done:
+            record.oracle_ragas_done = True
+            record.oracle_ragas = _ctx.ragas_fn(record, "oracle") or {}
+    elif not record.ragas_done:
+        record.ragas_done = True
+        record.ragas = _ctx.ragas_fn(record, "real") or {}
+
+
+def _faith(record: EvalRecord):
+    """faithfulness(충실도) 값 — 실제 트랙. tier3, DEEP+ / 미측정 None."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "real")
+    return record.ragas.get("faithfulness")
+
+
+def _faith_oracle(record: EvalRecord):
+    """faithfulness(충실도) 값 — 오라클 트랙. tier3, DEEP+ / 미측정 None."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "oracle")
+    return record.oracle_ragas.get("faithfulness")
+
+
+def _rel(record: EvalRecord):
+    """response_relevancy(관련성) 값 — 실제 트랙. tier3, DEEP+ / 미측정 None."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "real")
+    return record.ragas.get("response_relevancy")
+
+
+def _rel_oracle(record: EvalRecord):
+    """response_relevancy(관련성) 값 — 오라클 트랙. tier3, DEEP+ / 미측정 None."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "oracle")
+    return record.oracle_ragas.get("response_relevancy")
+
+
+    # answer_correctness 값은 record.ragas_answer_correctness / oracle_ragas_answer_correctness
+    # 속성으로 노출된다(EvalRecord). diagnose 의 정답 강등 판정이 그 속성을 직접 읽는다.

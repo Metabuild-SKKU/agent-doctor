@@ -37,7 +37,11 @@ import graph
 from core.schema import DiagnosticReport, Finding
 from core.state import AgentDoctorState
 from agents.optimize import agent, history
-from agents.optimize.schemas import OptimizationHistoryItem, OptimizationResult
+from agents.optimize.schemas import (
+    OptimizationHistoryItem,
+    OptimizationResult,
+    Verdict,
+)
 
 
 def make_report(overall, pass_threshold=False, label="too_long_context"):
@@ -174,6 +178,19 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
 
+    def test_unjudgeable_rollback_does_not_blacklist(self):
+        # 측정이 없어(before_report None) 판정 불가한 경우: config 는 안전하게 복원하되,
+        # '나빴다는 증거'가 아니므로 블랙리스트엔 넣지 않는다(리뷰 #36). 같은 시나리오라도
+        # 실제 판정으로 악화가 확인되면 블랙리스트에 들어가는 test_worse_rolls_back 과 대비.
+        state = agent.run(make_state(overall=60.0))          # 방문1: 처방 적용 → pending
+        self.assertEqual(len(state.blacklist), 0)
+        pending = history.find_pending(state.optimization_history)
+        pending.metadata["before_report"] = None             # 측정 없음 상황 유발
+        state.report = make_report(50.0)
+        state = agent.run(state)                             # 방문2: 판정 불가 → 롤백(차단 X)
+        self.assertEqual(len(state.blacklist), 0)             # 처방이 소진/차단되지 않음
+        self.assertEqual(state.optimization_history[0].status, "failed")
+
     def test_budget_exhausted_allows_same_label_without_increment(self):
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
         self.assertEqual(state.iteration, 3)                # 방문1: 2 -> 3
@@ -203,6 +220,69 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(state.status, "rolled_back")
         self.assertEqual(state.index_config["top_k"], 4)
         self.assertEqual(state.optimization_report.status, "failed")
+
+    def test_reindex_rollback_requirement_survives_runtime_followup(self):
+        """재색인형 B 롤백 직후 런타임형 C가 복원 작업을 지우지 않는다."""
+        state = make_state(overall=50.0)
+        state.active_index_key = "index-b"
+        state.active_eval_key = "eval-b"
+        request, decision = agent.planner.plan(state)
+        runtime_result = agent.optimizer.run(request)
+        self.assertFalse(runtime_result.needs_reindex)
+
+        judged = OptimizationHistoryItem(
+            trial_id="trial-b",
+            request_id="request-b",
+            iteration=1,
+            failure_labels=["too_long_context"],
+            optimizer="rules",
+            status="failed",
+            before_config={
+                "top_k": 4,
+                "chunk_size": 512,
+                "chunk_overlap": 50,
+            },
+        )
+        judged.metadata.update(
+            {
+                "before_index_key": "index-a",
+                "before_eval_key": "eval-a",
+                "reindex_required": True,
+            }
+        )
+        verdict = Verdict(
+            keep=False,
+            before_score=60.0,
+            after_score=50.0,
+            reason="성능 하락",
+        )
+        baseline_report = make_report(60.0)
+
+        def rollback_first(current):
+            current.index_config = dict(judged.before_config)
+            current.reindex_required = True
+            return judged, verdict, baseline_report
+
+        with (
+            patch(
+                "agents.optimize.agent._judge_pending_trial",
+                side_effect=rollback_first,
+            ),
+            patch(
+                "agents.optimize.agent.planner.plan",
+                return_value=(request, decision),
+            ),
+            patch(
+                "agents.optimize.agent.optimizer.run",
+                return_value=runtime_result,
+            ),
+        ):
+            out = agent.run(state)
+
+        pending = history.find_pending(out.optimization_history)
+        self.assertTrue(out.reindex_required)
+        self.assertEqual(pending.metadata["before_index_key"], "index-a")
+        self.assertEqual(pending.metadata["before_eval_key"], "eval-a")
 
 
 class OptimizeTopKSweepTest(unittest.TestCase):
@@ -357,6 +437,26 @@ class OptimizeReportWiringTest(unittest.TestCase):
         self.assertIn("되돌렸", report.summary)
         self.assertGreater(len(report.metadata.get("floor_violations", [])) +
                            int("점수" in report.summary), 0)  # 롤백 사유가 실림
+
+    def test_rollback_baseline_carries_restored_score_not_degraded(self):
+        """#2 회귀: 롤백 후 같은 방문에서 이어 제안되는 처방의 비교 기준(before_report)은
+        복원된 baseline 점수여야 한다. 롤백 직전의 열화된 Eval 을 baseline 으로 쓰면
+        원래보다 나쁜 처방도 '개선'으로 오판해 유지된다."""
+        # 방문1: Rx1 적용 (baseline=60)
+        state = agent.run(make_state(overall=60.0, label="too_long_context"))
+        self.assertEqual(state.status, "applied")
+        rx1 = history.find_pending(state.optimization_history)
+        self.assertEqual(rx1.metadata["before_report"].overall_score, 60.0)
+
+        # 방문2 진입 전 Eval 이 Rx1 을 열화(40)로 측정 + 새 라벨의 finding 제시.
+        # → Rx1 롤백(40<60) 후, 새 라벨 처방(Rx2)이 같은 방문에서 제안된다.
+        state.report = make_report(40.0, label="retrieval_semantic_mismatch")
+        state = agent.run(state)
+
+        pending = history.find_pending(state.optimization_history)
+        self.assertIsNotNone(pending, "롤백 후 다음 처방이 제안돼야 이 회귀를 검증할 수 있다")
+        # 핵심: Rx2 의 baseline 은 복원된 60 이어야 한다 (열화값 40 이면 버그).
+        self.assertEqual(pending.metadata["before_report"].overall_score, 60.0)
 
     def test_manual_stores_decision_report(self):
         state = agent.run(make_state(label="corpus_gap"))    # 수동 라벨

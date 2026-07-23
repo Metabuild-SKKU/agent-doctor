@@ -32,9 +32,10 @@ RAGAS_CONTEXT_PRECISION_MIN = 0.7
 RAGAS_CONTEXT_RECALL_MIN = 0.7
 RAGAS_RESPONSE_RELEVANCY_MIN = 0.7
 
-# 정답 판정 tier3 승급 임계값 — 답변↔gold 정답 임베딩 코사인.
-# lexical(F1_PASS_THRESHOLD) 미달이어도 이 이상이면 '표면형만 다른 정답'으로 보고 통과.
-ANSWER_SIM_MIN = 0.8
+# 정답 강등 임계값 — RAGAS answer_correctness(답변↔gold 비교, tier3).
+# lexical answer_match(F1_PASS_THRESHOLD)는 통과했지만 이 값 미만이면 '표면형만 비슷한
+# 근접 오답(부정문·3월↔3일 등)'으로 보고 성공 판정을 강등한다. DEEP+ 에서만 적용.
+ANSWER_CORRECTNESS_MIN = 0.5
 
 # STEP5 최종 판정
 # graph.route_after_eval() 이 이 값 기반 pass_threshold 로 Serve/Optimize 를 분기한다.
@@ -81,10 +82,10 @@ MULTIHOP_SUBTYPES = ["bridge", "comparison", "aggregation"]
 # 사용자가 고르는 '진단 깊이'. 값 = 그 모드가 감당하는 최대 자원 tier.
 #   자원 사다리(=tier):  tier1 규칙·기존지표만  <  tier2 추가 검색 쿼리(top-N 재검색·BM25·코퍼스)
 #                        <  tier3 LLM·RAGAS  <  tier4 파이프라인 재실행(ablation)
-# 라벨은 '판별에 필요한 가장 비싼 자원'이 곧 그 라벨의 confirm tier 다(각 신호가 signals.py 에서 self-gate).
-#   mode >= tier 이고 그 확정 신호가 실제 발동 → 확정(confirmed=True), 아니면 예비(confirmed=False).
+# 라벨은 '판별에 필요한 가장 비싼 자원'이 곧 그 라벨의 confirm tier 다(각 측정이 metrics_* 에서 self-gate).
+#   mode >= tier 이고 그 확정 측정이 실제 발동 → 확정(confirmed=True), 아니면 예비(confirmed=False).
 # 생성 원인(B)은 전부 RAGAS(=DEEP) 의존이라, DEEP 미만에선 하나의 예비 'generation_failure' 로 롤업.
-# STEP3-2 RAGAS 자체도 DEEP 이상에서만 실행한다(signals._faith 등 RAGAS 신호의 DEEP 게이트).
+# STEP3-2 RAGAS 자체도 DEEP 이상에서만 실행한다(metrics_ragas._faith 등 RAGAS 측정의 DEEP 게이트).
 class Mode:
     FAST = 1       # 규칙·기존지표만 (추가 쿼리·LLM 없음) — 나열형(enumeration)만 확정
     STANDARD = 2   # + 추가 검색 쿼리(top-N·BM25·코퍼스)   — 검색 원인 대부분 확정
@@ -204,8 +205,25 @@ class EvalRecord:
     oracle_ragas_done: bool = False
 
     # STEP4: 원인 판정
+    # 성공/실패는 별도 필드를 두지 않는다 — findings 가 비었으면 성공(판정 불가 probe 도 findings 가
+    # 없으므로 통과로 집계된다). scoring.reliability_score / report 가 이 규약으로 읽는다.
     findings: list[Finding] = field(default_factory=list)
 
     # 진단 신호 memoize 뷰: agent 가 state.diagnosis_cache[probe_id] 를 주입 → 쓰기가 state 로 전파.
     # 비싼 판별 신호(_signal)가 여기 캐시돼 재진단 시 재사용된다.
     signals: dict = field(default_factory=dict)
+
+    # ragas/oracle_ragas dict 의 answer_correctness 를 속성으로 노출(diagnose 정답 강등 판정용).
+    # _compute_ragas_real/_oracle 이 채우므로(DEEP+), 그 미만·미측정이면 빈 dict → None.
+    # (oracle 쪽은 실패 probe 에서만 채워진다 — 성공 probe 는 진단을 건너뛰므로 None.)
+    @property
+    def ragas_answer_correctness(self) -> Optional[float]:
+        """answer_correctness(답변↔gold 비교) — 실제 트랙. 미측정·DEEP 미만이면 None."""
+        v = self.ragas.get("answer_correctness")
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    @property
+    def oracle_ragas_answer_correctness(self) -> Optional[float]:
+        """answer_correctness(답변↔gold 비교) — 오라클 트랙. 미측정·DEEP 미만이면 None."""
+        v = self.oracle_ragas.get("answer_correctness")
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None

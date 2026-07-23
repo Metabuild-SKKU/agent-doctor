@@ -247,6 +247,8 @@ class InternalAdapterResult:
     best_config: dict[str, Any] | None = None
     best_score: float | None = None
     trial_results: list[InternalTrialResult] = field(default_factory=list)
+    # 탐색 objective 는 overall_score(매끄러운 품질 신호). composite 로 바꾸지 말 것 —
+    # 조화평균은 저신뢰도 구간에서 평평/붕괴해 탐색 신호가 죽는다(history.judge 주석 참고).
     objective_metric: str = "overall_score"
     direction: ObjectiveDirection = "maximize"
     search_space: dict[str, list[Any]] = field(default_factory=dict)
@@ -414,17 +416,27 @@ class Verdict:
 
     Attributes:
         keep: True면 유지, False면 롤백.
-        before_score: 처방 전 단일 점수(Eval overall_score).
-        after_score: 처방 후 단일 점수(Eval overall_score).
+        before_score: 처방 전 단일 점수(Eval overall_score). 최적화 탐색 신호(0~1).
+        after_score: 처방 후 단일 점수(Eval overall_score). 최적화 탐색 신호(0~1).
+        before_composite: 처방 전 설계 종합점수(composite_score.total, 0~100).
+        after_composite: 처방 후 설계 종합점수(composite_score.total, 0~100).
+            유지/롤백 판정은 overall(탐색 신호)로 하되, 표시·게이트용으로 composite 를
+            함께 실어 리포트가 사용자에게 정직한 종합점수를 보여줄 수 있게 한다.
         floor_violations: 하한선을 위반한 지표명 목록. 있으면 무조건 롤백.
         reason: 이 판정을 내린 이유(사람이 읽는 설명).
+        unjudgeable: 리포트 부재로 '측정 자체가 없어' 롤백한 경우 True.
+            처방이 나빴다는 증거가 아니라 판정이 불가했다는 뜻이므로, config 복원은
+            하되 블랙리스트 등록은 건너뛴다(무죄추정). 정상 판정(유지/롤백)은 False.
     """
 
     keep: bool
     before_score: float
     after_score: float
+    before_composite: Optional[float] = None
+    after_composite: Optional[float] = None
     floor_violations: list[str] = field(default_factory=list)
     reason: str = ""
+    unjudgeable: bool = False
 
 
 @dataclass
