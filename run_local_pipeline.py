@@ -3,10 +3,10 @@ run_local_pipeline.py
 전체 파이프라인 로컬 스모크 — Ingest→Index→Eval→Optimize 실행.
 
 소스는 env 로 고른다(state.source_type/source_url 로 들어감):
-  python run_local_pipeline.py                                   # 기본: korquad (data/corpus.jsonl)
-  SOURCE_TYPE=file SOURCE_URL=sample_docs/hr_policy.md python run_local_pipeline.py
+  python run_local_pipeline.py                                   # 기본: file (sample_docs/hr_policy.md)
+  SOURCE_TYPE=korquad SOURCE_URL=data/corpus.jsonl python run_local_pipeline.py
 
-korquad 설정(둘 다 있어야 함 — corpus 는 Ingest, qa 는 Eval):
+korquad 설정(둘 다 있어야 함 — corpus 는 Ingest, qa 는 Eval. data/ 파일은 별도 준비 — data/README.md):
   Ingest : SOURCE_TYPE=korquad, SOURCE_URL=data/corpus.jsonl (원문 복원)
   Eval   : EVAL_PROBE_SOURCE=taxonomy → EVAL_TAXONOMY_QA(기본 data/qa_pairs.jsonl) 로드.
            gold 좌표용 corpus 는 state.source_url(=위 SOURCE_URL)을 그대로 재사용(단일화)
@@ -26,8 +26,7 @@ try:
     from dotenv import load_dotenv
     load_dotenv(override=True)   # 셸/OS 값보다 .env 우선(수정한 .env 가 항상 반영되게)
 except ImportError:
-    print("error")
-    pass
+    pass   # python-dotenv 없으면 셸/OS 환경변수로만 동작(graph.py 와 동일)
 
 from core.run_logger import setup_run_logging
 setup_run_logging(prefix="local_pipeline")  # 이후 모든 print 를 콘솔+로그파일에 동시 출력
@@ -38,7 +37,9 @@ from agents.index.agent import run as index_run
 from agents.eval.agent import run as eval_run
 from agents.optimize.agent import run as optimize_run
 
-SOURCE_TYPE = os.getenv("SOURCE_TYPE", "korquad").strip().lower()
+# 기본값은 레포에 포함된 sample_docs/hr_policy.md(file) 로 둔다 — korquad 는 data/ 파일을
+# 별도 준비해야 하므로(gitignore), 클론 직후 바로 실행되려면 file 이어야 한다(graph.py 와 동일).
+SOURCE_TYPE = os.getenv("SOURCE_TYPE", "file").strip().lower()
 
 state = AgentDoctorState()
 state.source_type = SOURCE_TYPE
