@@ -205,6 +205,8 @@ class EvalRecord:
     oracle_ragas_done: bool = False
 
     # STEP4: 원인 판정
+    # 성공/실패는 별도 필드를 두지 않는다 — findings 가 비었으면 성공(판정 불가 probe 도 findings 가
+    # 없으므로 통과로 집계된다). scoring.reliability_score / report 가 이 규약으로 읽는다.
     findings: list[Finding] = field(default_factory=list)
 
     # 진단 신호 memoize 뷰: agent 가 state.diagnosis_cache[probe_id] 를 주입 → 쓰기가 state 로 전파.
@@ -212,7 +214,8 @@ class EvalRecord:
     signals: dict = field(default_factory=dict)
 
     # ragas/oracle_ragas dict 의 answer_correctness 를 속성으로 노출(diagnose 정답 강등 판정용).
-    # _compute_ragas 가 진입 시 채우므로(DEEP+), 그 미만·미측정 모드에선 빈 dict → None.
+    # _compute_ragas_real/_oracle 이 채우므로(DEEP+), 그 미만·미측정이면 빈 dict → None.
+    # (oracle 쪽은 실패 probe 에서만 채워진다 — 성공 probe 는 진단을 건너뛰므로 None.)
     @property
     def ragas_answer_correctness(self) -> Optional[float]:
         """answer_correctness(답변↔gold 비교) — 실제 트랙. 미측정·DEEP 미만이면 None."""

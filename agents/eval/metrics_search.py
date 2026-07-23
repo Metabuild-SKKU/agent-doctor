@@ -53,7 +53,7 @@ def _bm25_hits_gold(record: EvalRecord):
         missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)
         if not missed:
             return None
-        hits = _ctx.keyword_fn(_ctx.chunks, record.probe.question, _ctx.wide_n)
+        hits = _ctx.keyword_fn(_ctx.chunks, record.probe.question, _ctx.wide_n)  # 위와 같으나 검색 함수만 다름
         kw_ids = {h.get("chunk_id") for h in hits}
         return bool(missed & kw_ids)
 

@@ -43,7 +43,8 @@ from agents.eval.metrics_search import (           # tier2
     _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
 )
 from agents.eval.metrics_ragas import (            # tier3
-    _compute_ragas, _faith, _faith_oracle, _rel, _rel_oracle,
+    _compute_ragas_real, _compute_ragas_oracle,
+    _faith, _faith_oracle, _rel, _rel_oracle,
 )
 
 
@@ -80,6 +81,23 @@ def _oracle_ok(record: EvalRecord) -> bool:
     if ac is None:
         return True
     return ac >= ANSWER_CORRECTNESS_MIN
+
+def _is_success(record: EvalRecord) -> Optional[bool]:
+    """probe 단위 성공/실패 판정 — recall + answer_match(tier1) + RAGAS answer_correctness(tier3).
+
+    True  = 성공 (검색·정답 모두 통과 / 무응답 기대인데 올바르게 기권)
+    False = 실패
+    None  = 판정 불가 (대조할 정답셋이 없음)
+
+    recall 은 정답셋이 있는 경로에서만 본다 — 무응답 기대 probe 는 gold 가 없어
+    recall_at_k = -1 이므로, 앞에서 recall 을 보면 올바른 기권까지 실패가 된다.
+    """
+    if record.probe.answer_exists is False:
+        return is_abstention(record.generated_answer)   # 무응답 기대 → 올바른 기권이 성공(recall 무관)
+    if not record.probe.ground_truth:
+        return None                                     # 대조할 정답 없음 → 판정 불가
+    # 검색 성공(recall=1) + 정답 일치(answer_match, DEEP 이면 ragas answer_correctness 로 강등)
+    return _recall_ok(record) and _f1_ok(record)
 
 def _is_multi_hop(record: EvalRecord) -> bool:
     """멀티홉 질문 여부(probe.qtype). bridge / hop_binding / corpus_gap_partial_hop 판별용."""
@@ -318,7 +336,7 @@ def _context_failed(record: EvalRecord) -> bool:
 
 def too_long_context(record: EvalRecord) -> Optional[Finding]:
     """
-    context가 너무 길어 잡음·과부하로 품질 저하.
+    context가 너무 길어 잡음·과부하로 품질 저하.s
     tier4(축소 재실행) 확정 신호가 유일한 발동 경로였으나 optimize 재실행으로 대체됨.
     # TODO(tier4 제거): 예비 발동 조건(저비용 휴리스틱) 재설계 전까지 dormant.
     """
@@ -553,7 +571,16 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
 
     # metric, ragas 진단
     _compute_metrics(record)      # 지표(recall/f1/oracle_f1) 계산 → record 반영
-    _compute_ragas(record)        # RAGAS(실제·오라클 트랙) 계산 → record 반영 (DEEP 이상)
+    _compute_ragas_real(record)   # 실제 트랙 RAGAS — 강등 판정 + 리포트 평균용 (DEEP 이상)
+
+    # 성공/실패 판정 — 실패(False)일 때만 원인을 찾는다.
+    # None(판정 불가)은 통과로 묶는다: 대조할 정답이 없어 실패라 단정할 근거가 없다.
+    # 이 게이트로 '성공 ⇒ findings 없음' 이 규약이 아니라 보장이 된다.
+    if _is_success(record) is not False:
+        return []
+
+    # 오라클 트랙 RAGAS — 소비처가 B그룹 라벨·_oracle_ok 뿐이라 실패 probe 에서만 지불한다.
+    _compute_ragas_oracle(record)
 
     # 추가 진단
     findings = []

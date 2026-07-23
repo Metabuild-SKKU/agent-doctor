@@ -85,9 +85,8 @@ def exact_match(prediction: str, reference: str) -> bool:
 
 
 # ── 정답 매칭 (KorQuAD 문자 F1 + 짧은 정답 문자-recall) ───────────
-# char_f1 도 결국 F1(P·R 조화평균)이라, gold 가 짧은 추출형 span 인데 답변이 완결 문장이면
-# 프레이밍 문자에 precision 이 깎인다. 짧은 정답은 recall(정답 문자가 답변에 담겼나)만 보는 게
-# 추출형 QA 의 정석 — 표준 char-F1 위에 얹는 확장이다.
+# 정답이 짧고, 답변이 문장이면 precision이 감소함
+# 짧은 정답은 recall(정답 문자가 답변에 담겼나)만 보는 게 표준이다.
 
 _SHORT_REF_MAX_CHARS = 10   # 정규화 후 정답 문자 수 이하면 '짧은 정답'으로 보고 recall 경로 허용
 _CONTAINMENT_MIN = 0.9      # 짧은 정답은 recall 이 이 이상(정답이 거의 다 담김)일 때만 recall 로 통과
@@ -258,8 +257,9 @@ def is_abstention(answer: str) -> bool:
 # ══════════════════════════════════════════════════════════════════
 
 def _compute_metrics(record: EvalRecord) -> None:
-    """규칙 지표(recall/f1/oracle_f1/EM)를 record 에 계산·저장. (STEP3-1, diagnose 진입 시 1회.)
-    diagnose 의 전제 판정·report 가 record.recall_at_k / f1_score / oracle_f1 로 읽는다."""
+    """
+    STEP3-1: 규칙 지표(recall/f1/oracle_f1/EM)를 record 에 계산·저장.
+    """
     gt = record.probe.ground_truth
     span_recall = span_recall_at_k(
         record.probe.gold_spans,
@@ -271,10 +271,10 @@ def _compute_metrics(record: EvalRecord) -> None:
         if span_recall is not None
         else recall_at_k(record.probe.gold_chunk_ids, record.retrieved_chunk_ids)
     )
-    # answer_match: KorQuAD 문자 F1(+짧은 정답 recall) — 표면형에 강건한 tier1 정답 매칭.
+    # answer_match: KorQuAD char-F1 (+짧은 정답 recall).
     record.f1_score = answer_match(record.generated_answer, gt) if gt else 0.0
     record.oracle_f1 = answer_match(record.oracle_answer, gt) if (gt and record.oracle_answer) else 0.0
-    # KorQuAD 공식 EM — 관측용으로만 남긴다(게이트·overall_score 미반영, 리포트에 F1 과 나란히).
+    # KorQuAD 공식 EM — 관측용으로만 남김.
     record.exact_match = exact_match(record.generated_answer, gt) if gt else False
 
 

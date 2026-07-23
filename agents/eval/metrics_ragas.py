@@ -567,24 +567,37 @@ def _drop_none(d: dict) -> dict:
 #  자원(_ctx.ragas_fn)은 agent 가 set_context 로 주입한다. 임계값 판정은 diagnose 소관.
 # ══════════════════════════════════════════════════════════════════
 
-def _compute_ragas(record: EvalRecord) -> None:
-    """RAGAS 점수(실제·오라클 트랙)를 record 에 계산·저장. (STEP3-2, diagnose 진입 시 1회.)
+def _compute_ragas_real(record: EvalRecord) -> None:
+    """실제 트랙 RAGAS 를 record.ragas 에 계산·저장. (STEP3-2, diagnose 진입 시 1회.)
 
-    _compute_metrics 와 같은 자리에서 항상 돌린다 — 진단이 필요 없는 probe(성공·정답셋 없음·
-    올바른 무응답)도 faithfulness/response_relevancy 를 갖게 된다. 예전엔 라벨 함수가 필요할 때만
-    lazy 로 불러서, report 의 RAGAS 평균이 '진단이 돌아간 실패 probe'만의 평균이었다.
+    성공/실패 판정 전에 항상 돌린다 — 두 가지가 이걸 필요로 한다:
+      1. diagnose 의 정답 강등 판정(_f1_ok 이 record.ragas_answer_correctness 를 읽는다)
+      2. report/scoring 의 RAGAS 평균 — 실제 트랙만 쓰므로, 성공 probe 도 점수를 가져야
+         '진단이 돌아간 실패 probe'만의 편향된 평균이 되지 않는다.
 
-    비용 게이트는 DEEP 유지 — 그 미만 모드에선 LLM 을 한 번도 부르지 않는다.
-    이후 접근자(_faith/_rel/_answer_correctness_value)의 호출은 *_done 플래그로 재호출되지 않는다."""
+    비용 게이트는 DEEP 유지 — 그 미만 모드에선 LLM 을 한 번도 부르지 않는다."""
     if active_mode() < Mode.DEEP:
         return
     _ensure_ragas(record, "real")
+
+
+def _compute_ragas_oracle(record: EvalRecord) -> None:
+    """오라클 트랙 RAGAS 를 record.oracle_ragas 에 계산·저장.
+
+    실패로 판정된 probe 에서만 부른다 — 오라클 값의 소비처가 B그룹(생성 실패) 라벨과
+    _oracle_ok 뿐이고, report/scoring 의 평균은 실제 트랙만 쓰기 때문이다. 성공 probe 는
+    진단 자체를 건너뛰므로 이 비용(트랙 하나치 LLM 호출)을 지불할 이유가 없다.
+
+    lazy(_faith_oracle 등이 알아서 _ensure_ragas 호출)로 두지 않고 여기서 명시적으로 채우는
+    이유: _oracle_ok 이 읽는 record.oracle_ragas_answer_correctness 는 dict 만 보는 property 라
+    ensure 를 트리거하지 않는다 — lazy 로 두면 오라클 쪽 answer_correctness 강등이 조용히 죽는다."""
+    if active_mode() < Mode.DEEP:
+        return
     _ensure_ragas(record, "oracle")
 
 
 def _ensure_ragas(record: EvalRecord, track: str):
-    """트랙 RAGAS 점수를 record 에 계산·저장(트랙별 1회만). 실제로는 diagnose 진입 시
-    _compute_ragas 가 두 트랙을 먼저 채우고, 접근자들의 호출은 그 결과를 재사용한다.
+    """트랙 RAGAS 점수를 record 에 계산·저장(트랙별 1회만).
     빈 결과({})여도 *_done 플래그로 '시도함'을 기록해 같은 트랙 재-LLM호출을 막는다.
     (oracle 답이 없으면 _ctx.ragas_fn 이 {} 를 돌려준다.)"""
     if _ctx.ragas_fn is None:
