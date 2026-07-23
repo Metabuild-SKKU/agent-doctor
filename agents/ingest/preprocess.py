@@ -36,8 +36,8 @@ _HEADER_REPEAT_RATIO = 0.6
 _PAGE_NUMBER_RE = re.compile(
     r"""^\s*(?:
         [-–—~<\[(]*\s*\d+\s*[-–—~>\])]*        # 12 · - 12 - · <12>
-      | \d+\s*[/of]{1,2}\s*\d+                 # 12 / 34 · 12 of 34
-      | (?:page|p\.?|페이지)\s*\d+(?:\s*[/of]{1,2}\s*\d+)?
+      | \d+\s*(?:/|of)\s*\d+                   # 12 / 34 · 12 of 34
+      | (?:page|p\.?|페이지)\s*\d+(?:\s*(?:/|of)\s*\d+)?
     )\s*$""",
     re.IGNORECASE | re.VERBOSE,
 )
@@ -238,7 +238,18 @@ def preprocess_pages(
         parts.append(body)
         cursor += len(body)
 
-    content = "".join(parts).strip()
+    # strip() 은 span 좌표계를 바꾼다. spans 는 strip 이전 기준으로 쌓았으므로
+    # 앞에서 잘려나간 만큼 전부 당겨줘야 한다. 표지처럼 첫 페이지가 전처리 후
+    # 비는 문서(머리말만 있던 페이지)에서 실제로 모든 페이지가 밀렸다 —
+    # Chunk.page 가 조용히 틀린 번호를 기록하므로 발견이 어려운 종류의 버그다.
+    joined = "".join(parts)
+    content = joined.strip()
+    lead = len(joined) - len(joined.lstrip())
+    limit = len(content)
+    spans = [
+        (min(max(0, start - lead), limit), min(max(0, end - lead), limit))
+        for start, end in spans
+    ]
     if not content:
         spans = [(0, 0) for _ in cleaned_pages]
 

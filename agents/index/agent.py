@@ -421,7 +421,13 @@ def _page_of_span(document: Document, char_span: tuple[int, int]) -> int | None:
     for page_no, span in enumerate(spans, start=1):
         if not isinstance(span, (list, tuple)) or len(span) != 2:
             continue
-        page_start, page_end = int(span[0]), int(span[1])
+        try:
+            page_start, page_end = int(span[0]), int(span[1])
+        except (TypeError, ValueError):
+            # 이 함수의 방침은 "깨진 입력이면 조용히 None". page_spans 는 직렬화를
+            # 거쳐 오는 값이라 숫자가 아닐 수 있는데, 여기서 예외가 나면 청킹 루프
+            # 한복판에서 터진다 — 출처 표기용 부가 정보 때문에 색인을 죽이지 않는다.
+            continue
         if page_start <= start < page_end:
             return page_no
         # 청크 시작이 페이지 사이 구분자에 걸린 경우(공백만 있는 위치)를 대비해

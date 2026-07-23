@@ -121,6 +121,37 @@ class PageSpanTest(unittest.TestCase):
         result = preprocess_pages(["가나다", "라마바"])
         self.assertEqual(result.content, f"가나다{PAGE_SEPARATOR}라마바")
 
+    def test_leading_empty_page_does_not_shift_spans(self):
+        # 첫 페이지가 비면 content 앞쪽이 strip 으로 잘리는데, span 을 함께 당기지
+        # 않으면 이후 모든 페이지가 PAGE_SEPARATOR 길이만큼 밀린다. 예외 없이
+        # 조용히 틀린 페이지 번호가 되므로 회귀 테스트로 고정한다.
+        pages = [None, "둘째 페이지 본문", "셋째 페이지 본문"]
+        result = preprocess_pages(pages)
+
+        self.assertEqual(len(result.page_spans), 3)
+        second_start, second_end = result.page_spans[1]
+        self.assertEqual(result.content[second_start:second_end], "둘째 페이지 본문")
+        third_start, third_end = result.page_spans[2]
+        self.assertEqual(result.content[third_start:third_end], "셋째 페이지 본문")
+        self.assertEqual(result.page_of(result.content.index("셋째")), 3)
+
+    def test_cover_page_emptied_by_header_strip_keeps_numbering(self):
+        # 표지처럼 머리말·페이지번호만 있던 첫 페이지는 전처리 후 비어버린다.
+        # 실제 PDF 에서 흔한 모양이고, 여기서 span 이 밀리면 Chunk.page 가 전부 틀어진다.
+        pages = [
+            "회사 보고서\n- 1 -",
+            "회사 보고서\n본문 A 입니다.\n- 2 -",
+            "회사 보고서\n본문 B 입니다.\n- 3 -",
+            "회사 보고서\n본문 C 입니다.\n- 4 -",
+        ]
+        result = preprocess_pages(pages)
+
+        self.assertEqual(len(result.page_spans), 4)
+        for page_no, marker in ((2, "본문 A 입니다."), (3, "본문 B 입니다."), (4, "본문 C 입니다.")):
+            start, end = result.page_spans[page_no - 1]
+            self.assertEqual(result.content[start:end], marker)
+            self.assertEqual(result.page_of(result.content.index(marker)), page_no)
+
 
 class ScannedDetectionTest(unittest.TestCase):
     def test_all_none_pages_is_empty(self):

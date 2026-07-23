@@ -32,7 +32,8 @@ _MIN_COLS = 2
 _MAX_CELL_LEN = 200
 
 # 행 문장에서 값이 빈 칸은 건너뛴다 — "연도: 2024, 실업률: , 비고: " 같은 노이즈 방지.
-_EMPTY_CELLS = {"", "-", "–", "—", "n/a", "N/A"}
+# 비교하는 쪽이 .lower() 를 거치므로 항목은 전부 소문자로 둔다("N/A" 를 넣으면 죽은 값).
+_EMPTY_CELLS = {"", "-", "–", "—", "n/a"}
 
 
 def _clean_cell(cell: str | None) -> str:
