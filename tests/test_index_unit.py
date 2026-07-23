@@ -226,6 +226,53 @@ class IndexRunTests(unittest.TestCase):
         self.assertFalse(second.chunks[0].metadata["embedding_fallback"])
         mock_reset.assert_called_once()
 
+    def test_fallback_flag_survives_repeated_failures_then_recovery(self):
+        # 리뷰 회귀(@SeonUI): 재사용 경로가 embedding_fallback 을 이어주지 않으면,
+        # 모델이 두 번 연속 실패하는 사이에 플래그가 기본값 False 로 덮여
+        # 이후 모델이 복구돼도 재임베딩 대상으로 잡히지 않는다(해시 벡터 영구 고착).
+        # 위 2회 테스트는 이 경로를 지나지 않으므로 3회(실패→실패→복구)로 검증한다.
+        FALLBACK_VEC = [0.5, 0.5, 0.5, 0.5]
+        REAL_VEC = [1.0, 0.0, 0.0, 0.0]
+
+        def _tools(is_fallback: bool) -> IndexTools:
+            vec = FALLBACK_VEC if is_fallback else REAL_VEC
+            return IndexTools(
+                get_retriever=lambda *_a, **_k: Mock(),
+                embed=lambda _t, **_k: list(vec),
+                count_tokens=lambda _t, **_k: 3,
+                build_sparse_vector=lambda _t: {"indices": [], "values": []},
+                build_graph_artifacts=lambda _c, _cfg: {},
+                embed_batch=lambda texts, **_k: [list(vec) for _ in texts],
+                embedding_is_fallback=lambda *_a, **_k: is_fallback,
+            )
+
+        state = self._state()
+        state.documents = [_document("doc-1", "두 번 실패 후 복구되는 문서 본문입니다.")]
+
+        # 1) 모델 실패 → fallback 벡터로 색인되고 provenance 기록
+        first = run(state, tools=_tools(is_fallback=True))
+        self.assertTrue(first.chunks[0].metadata["embedding_fallback"])
+
+        # 2) 모델 여전히 실패 → 임베딩 재사용 경로. 여기서 플래그가 유실되면 안 된다.
+        second = run(first, tools=_tools(is_fallback=True))
+        self.assertEqual(second.index_artifacts["reused_embeddings"], len(second.chunks))
+        self.assertTrue(
+            second.chunks[0].metadata["embedding_fallback"],
+            "재사용 경로가 embedding_fallback 을 유실하면 복구 후 재임베딩이 동작하지 않는다",
+        )
+        self.assertEqual(second.chunks[0].embedding, FALLBACK_VEC)
+
+        # 3) 모델 복구 → 2회차를 거쳤어도 여전히 재임베딩 대상이어야 한다
+        with patch("agents.index.agent.reset_retriever_cache") as mock_reset:
+            third = run(second, tools=_tools(is_fallback=False))
+
+        self.assertEqual(third.status, "indexed")
+        self.assertEqual(third.index_artifacts["reused_embeddings"], 0)
+        self.assertEqual(third.index_artifacts["reembedded_fallback"], len(third.chunks))
+        self.assertEqual(third.chunks[0].embedding, REAL_VEC)
+        self.assertFalse(third.chunks[0].metadata["embedding_fallback"])
+        mock_reset.assert_called_once()
+
     def test_recovered_model_still_reuses_non_fallback_chunks(self):
         # 정상(fallback 아님) 벡터로 색인된 청크는 모델이 로드 가능해도 그대로 재사용한다
         # (재임베딩은 fallback provenance 가 있는 청크에만 적용).

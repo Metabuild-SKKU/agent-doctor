@@ -6,7 +6,6 @@ Run:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -20,23 +19,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents.rag.generator import answer_question
 from agents.rag.retriever import Retriever, get_retriever
-
-
-def corpus_fingerprint(chunks: list[dict]) -> str:
-    """로드된 코퍼스의 지문(정렬된 chunk_id:hash sha1 앞 12자).
-
-    Serve(agent.py)가 chunks.json 에 쓴 코퍼스와 이미 실행 중인 API 가 들고 있는
-    코퍼스가 같은지 대조하는 데 쓴다 — 지문이 다르면 이전 파이프라인의 API 가 낡은
-    코퍼스를 서빙 중이라는 뜻이다. hash 가 없는(레거시) 청크는 text 로 폴백한다."""
-    parts = []
-    for chunk in chunks:
-        cid = chunk.get("chunk_id", "")
-        digest = chunk.get("hash") or hashlib.sha1(
-            (chunk.get("text") or "").encode("utf-8")
-        ).hexdigest()
-        parts.append(f"{cid}:{digest}")
-    joined = "|".join(sorted(parts))
-    return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
+# 지문 알고리즘은 Serve agent 와 공유한다(agents/serve/fingerprint.py) — agent.py 가
+# 지문 하나 때문에 이 모듈(uvicorn/fastapi/qdrant_client)을 import 하지 않도록 분리.
+from agents.serve.fingerprint import corpus_fingerprint
 
 app = FastAPI(title="Agent Doctor API", version="0.1.0")
 

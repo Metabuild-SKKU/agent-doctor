@@ -486,6 +486,10 @@ def _refresh_reused_chunk(
             chunk_strategy=chunk_strategy,
             signature=signature,
             embedding_dimension=vector_dim,
+            # 임베딩을 재사용하는 경로이므로 fallback 여부도 그대로 이어야 한다.
+            # 여기서 기본값(False)으로 덮으면, 모델이 두 번 연속 실패하는 동안 플래그가
+            # 지워져 이후 모델이 복구돼도 재임베딩 대상으로 잡히지 않는다(해시 벡터 고착).
+            embedding_fallback=bool(chunk.metadata.get("embedding_fallback")),
         ),
     )
 

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import requests
 
+from agents.serve.fingerprint import corpus_fingerprint
 from core.state import AgentDoctorState
 
 MCP_SERVER  = Path(__file__).parent / "mcp_server.py"
@@ -160,10 +161,8 @@ def _reload_api_server(expected_fingerprint: str) -> bool:
 
 
 def _corpus_fingerprint(state: AgentDoctorState) -> str:
-    """state.chunks 의 코퍼스 지문. api.corpus_fingerprint 와 같은 알고리즘을 쓰도록
-    그 함수를 그대로 재사용한다(청크를 dict 로 변환해 전달) — 양쪽 지문이 드리프트하지 않게."""
-    from agents.serve.api import corpus_fingerprint
-
+    """state.chunks 의 코퍼스 지문. API 서버와 같은 알고리즘을 쓰도록 공용 모듈
+    (agents/serve/fingerprint.py)의 함수를 재사용한다 — 양쪽 지문이 드리프트하지 않게."""
     return corpus_fingerprint([dataclasses.asdict(c) for c in state.chunks])
 
 
