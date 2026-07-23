@@ -22,7 +22,8 @@ openai
 
 # Index Agent
 sentence-transformers  # embeddings (local, free, for testing)
-qdrant-client          # vector DB client
+qdrant-client>=1.15    # vector DB client; native dense/sparse hybrid query models
+numpy                  # vector math/projection utilities used by visualization tests
 
 # Index Agent (member A)
 llama-index

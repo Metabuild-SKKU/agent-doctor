@@ -154,6 +154,17 @@ Qdrant 준비 실패나 임베딩 누락 시 keyword fallback으로 내려간다
 `use_hybrid`, `use_reranker`, `top_k`, `embedding_model`, `embedding_dimension`은
 `state.index_config`와 Chunk metadata에서 복원된다.
 
+기존 dense-only Qdrant 컬렉션은 named dense/sparse shape가 아니므로 native hybrid로
+자동 변환하지 않는다. 이 경우 같은 컬렉션에서는 dense 검색과 keyword fallback이 유지된다.
+native hybrid를 사용하려면 컬렉션을 비워도 되는 환경에서 아래 옵션을 한 번 켠 뒤 재색인한다.
+
+```python
+state.index_config["recreate_collection_on_dimension_mismatch"] = True
+```
+
+재생성 뒤 만들어지는 컬렉션은 named vector `dense`와 sparse vector `sparse`를 가진다.
+운영 데이터가 들어 있는 공유 Qdrant에서는 별도 컬렉션/백업을 먼저 준비한다.
+
 ## Graph 추출
 
 `graph_extraction="auto"`이면 `OPENAI_API_KEY`가 있을 때 LLM JSON extraction을

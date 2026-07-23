@@ -71,8 +71,6 @@ class AgentDoctorState:
             "max_ratio": 0.40,
             "max_overlap": 300,
         },
-        # 임베딩 모델 교체로 벡터 차원이 달라졌을 때 Qdrant 컬렉션을 재생성할지 여부.
-        # False(기본)면 차원 불일치 시 ensure_collection이 ValueError로 막는다.
         "graph_enabled": True,
         "graph_extraction": "auto",
         "graph_llm_model": "gpt-4.1-mini",
@@ -81,6 +79,8 @@ class AgentDoctorState:
         "corpus_visualization_enabled": True,
         "corpus_visualization_output_dir": "output/corpus_visualization",
         "corpus_visualization_max_points": 500,
+        # 임베딩 모델 교체로 벡터 차원이 달라졌을 때 Qdrant 컬렉션을 재생성할지 여부.
+        # False(기본)면 차원 불일치 시 ensure_collection이 ValueError로 막는다.
         "recreate_collection_on_dimension_mismatch": False,
     })
     # 인덱싱 부산물(청크/문서 수, 그래프 파일 경로, failed_documents 등).

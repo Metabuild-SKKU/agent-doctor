@@ -78,10 +78,11 @@ def build_corpus_visualization_data(
     embedded_chunks = [chunk for chunk in chunks if _embedding(chunk)]
     vector_dim = len(_embedding(embedded_chunks[0])) if embedded_chunks else 0
     hashes = [chunk.hash or chunk.metadata.get("chunk_hash") for chunk in chunks]
-    unique_hashes = len({value for value in hashes if value})
+    hashed_chunks = [value for value in hashes if value]
+    unique_hashes = len(set(hashed_chunks))
     duplicate_ratio = (
-        max(0, len(chunks) - unique_hashes) / len(chunks)
-        if chunks and unique_hashes
+        max(0, len(hashed_chunks) - unique_hashes) / len(hashed_chunks)
+        if hashed_chunks
         else 0.0
     )
 

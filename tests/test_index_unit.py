@@ -6,9 +6,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from qdrant_client.models import Distance, VectorParams
+
 from agents.index.agent import CHUNK_STRATEGIES, IndexTools, _chunk_document, run
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
+    COLLECTION,
     build_sparse_vector,
     build_client,
     delete_document_chunks,
@@ -460,6 +463,93 @@ class SearchAndGraphTests(unittest.TestCase):
             )
 
         self.assertEqual({item["chunk_id"] for item in results}, {"dense", "keyword"})
+
+    def test_native_hybrid_search_is_limited_to_retrieval_scope(self):
+        client = build_client(":memory:")
+        ensure_collection(client, vector_dim=2)
+        chunks = [
+            Chunk(
+                chunk_id="shared",
+                doc_id="doc-a",
+                text="Oracle Test from corpus A",
+                embedding=[0.0, 1.0],
+                sparse_vector=build_sparse_vector("Oracle Test from corpus A"),
+                metadata={"retrieval_scope_id": "scope-a"},
+            ),
+            Chunk(
+                chunk_id="shared",
+                doc_id="doc-b",
+                text="Oracle Test from corpus B",
+                embedding=[1.0, 0.0],
+                sparse_vector=build_sparse_vector("Oracle Test from corpus B"),
+                metadata={"retrieval_scope_id": "scope-b"},
+            ),
+        ]
+        upsert_chunks(client, chunks)
+
+        results = hybrid_search(
+            client,
+            query_vector=[1.0, 0.0],
+            query="Oracle Test",
+            chunks=[],
+            top_k=2,
+            dense_weight=0.5,
+            retrieval_scope_id="scope-b",
+        )
+
+        self.assertEqual([item["doc_id"] for item in results], ["doc-b"])
+
+    def test_point_id_includes_scope_and_delete_respects_scope(self):
+        client = build_client(":memory:")
+        ensure_collection(client, vector_dim=2)
+        chunks = [
+            Chunk(
+                chunk_id="same-chunk",
+                doc_id="same-doc",
+                text="first corpus",
+                embedding=[1.0, 0.0],
+                metadata={"retrieval_scope_id": "scope-a"},
+            ),
+            Chunk(
+                chunk_id="same-chunk",
+                doc_id="same-doc",
+                text="second corpus",
+                embedding=[0.0, 1.0],
+                metadata={"retrieval_scope_id": "scope-b"},
+            ),
+        ]
+        upsert_chunks(client, chunks)
+
+        self.assertEqual(len(search(client, [1.0, 0.0], top_k=5)), 2)
+
+        delete_document_chunks(client, ["same-doc"], retrieval_scope_id="scope-a")
+
+        remaining = search(client, [0.0, 1.0], top_k=5)
+        self.assertEqual([item["retrieval_scope_id"] for item in remaining], ["scope-b"])
+
+    def test_legacy_dense_only_collection_uses_dense_upsert_and_search(self):
+        client = build_client(":memory:")
+        client.create_collection(
+            collection_name=COLLECTION,
+            vectors_config=VectorParams(size=2, distance=Distance.COSINE),
+        )
+        ensure_collection(client, vector_dim=2)
+        upsert_chunks(
+            client,
+            [
+                Chunk(
+                    chunk_id="legacy",
+                    doc_id="doc",
+                    text="legacy dense collection",
+                    embedding=[1.0, 0.0],
+                    sparse_vector=build_sparse_vector("legacy dense collection"),
+                )
+            ],
+        )
+
+        results = search(client, [1.0, 0.0], top_k=1)
+
+        self.assertEqual(results[0]["chunk_id"], "legacy")
 
     def test_graph_artifacts_are_written(self):
         chunk = Chunk(

@@ -361,7 +361,11 @@ def _populate(
                 recreate_on_mismatch=settings.recreate_collection_on_dimension_mismatch,
             )
             if delete_doc_ids:
-                delete_document_chunks(client, list(delete_doc_ids))
+                delete_document_chunks(
+                    client,
+                    list(delete_doc_ids),
+                    retrieval_scope_id=scope_id,
+                )
             upsert_chunks(client, embedded)
         except Exception as exc:
             print(f"[Retriever] Qdrant setup failed, using keyword fallback: {exc}")
@@ -431,9 +435,29 @@ def _population_key(
         scope_id,
         settings.embedding_model,
         _first_embedding_dim(raw_chunks) or settings.embedding_dimension,
+        settings.use_hybrid,
+        _sparse_population_signature(raw_chunks) if settings.use_hybrid else "",
         settings.qdrant_url,
         settings.qdrant_api_key,
     )
+
+
+def _sparse_population_signature(raw_chunks: list[dict]) -> str:
+    """캐시 키용 sparse vector 존재/지문.
+
+    같은 chunk_id/hash라도 use_hybrid=False로 먼저 적재된 뒤 True로 바뀌면
+    Qdrant point가 dense-only로 남을 수 있다. sparse vector 상태를 키에 넣어
+    hybrid 전환 시 재적재되도록 한다.
+    """
+    rows = [
+        {
+            "chunk_id": chunk.get("chunk_id", ""),
+            "has_sparse": bool((chunk.get("sparse_vector") or {}).get("indices")),
+        }
+        for chunk in raw_chunks
+    ]
+    raw = json.dumps(sorted(rows, key=lambda item: item["chunk_id"]), sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
 def get_retriever(

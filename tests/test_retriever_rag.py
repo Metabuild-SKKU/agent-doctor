@@ -3,13 +3,16 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from agents.index.qdrant_store import build_client
-from agents.rag.retriever import build_retriever
+from agents.index.qdrant_store import build_client, build_sparse_vector
+from agents.rag.retriever import build_retriever, get_retriever, reset_retriever_cache
 from agents.rag.generator import answer_question, answer_text, generate_answer
 from core.schema import Chunk
 
 
 class RetrieverTests(unittest.TestCase):
+    def tearDown(self):
+        reset_retriever_cache()
+
     def test_keyword_fallback_works_without_embeddings(self):
         retriever = build_retriever(
             [
@@ -98,6 +101,32 @@ class RetrieverTests(unittest.TestCase):
         self.assertFalse(response["fallback_used"])
         self.assertEqual(response["search_mode"], "dense")
         self.assertEqual([item["doc_id"] for item in response["results"]], ["corpus-b"])
+
+    def test_retriever_cache_repopulates_when_hybrid_flag_changes(self):
+        client = build_client(":memory:")
+        chunks = [
+            Chunk(
+                chunk_id="policy",
+                doc_id="doc",
+                text="hybrid policy",
+                embedding=[1.0, 0.0],
+                sparse_vector=build_sparse_vector("hybrid policy"),
+            )
+        ]
+
+        with patch("agents.rag.retriever.upsert_chunks") as upsert:
+            get_retriever(
+                chunks,
+                config={"embedding_model": "test-model", "embedding_dimension": 2, "use_hybrid": False},
+                client=client,
+            )
+            get_retriever(
+                chunks,
+                config={"embedding_model": "test-model", "embedding_dimension": 2, "use_hybrid": True},
+                client=client,
+            )
+
+        self.assertEqual(upsert.call_count, 2)
 
 
 class RagGeneratorTests(unittest.TestCase):
