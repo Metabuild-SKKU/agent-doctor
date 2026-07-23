@@ -41,3 +41,6 @@ CLAUDE.md
 
 # 벡터 DB
 qdrant_storage/
+
+# 로컬 작업용 별도 클론(추적 대상 아님)
+pr34b/
