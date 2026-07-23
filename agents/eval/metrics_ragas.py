@@ -1,10 +1,14 @@
 """
 agents/eval/metrics_ragas.py
-STEP3-2: LLM 진단 (RAGAS 지표 측정)
+[tier3] LLM(RAGAS) 호출이 필요한 측정을 모은 파일. (STEP3-2: LLM 진단)
+
+`active_mode() < DEEP` 이면 한 번도 LLM 을 부르지 않고 None 을 돌려준다(비용 게이트).
+트랙별 결과는 record.ragas / record.oracle_ragas 에 1회만 채운다(*_done 플래그).
+여기는 '측정'만 한다 — 임계값 판정과 라벨 부여는 diagnose 소관이다.
 
 RAGAS 4개 지표 + AspectCritic 을 **LLM-as-Judge** 로 측정한다.
-    - 실제 트랙  : Faithfulness, Context Precision/Recall, Response Relevancy
-    - 오라클 트랙 : Faithfulness, Response Relevancy (gold context 투입 결과)
+    - 실제 트랙  : Faithfulness, Context Precision/Recall, Response Relevancy, Answer Correctness
+    - 오라클 트랙 : Faithfulness, Response Relevancy, Answer Correctness (gold context 투입 결과)
     - AspectCritic: contradiction 이진 판정
 
 프롬프트 출처:

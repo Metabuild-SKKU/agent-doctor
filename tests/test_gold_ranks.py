@@ -4,9 +4,9 @@ gold 순위(gold_rank) 노출 검증 — 2단계.
 
 목적: top_k 근거값을 '개수'가 아니라 '순위'로 산정하기 위해, Eval 이 wide 재검색에서
 gold 청크의 순위를 재어 Finding.metadata 로 넘긴다. 그 배선을 세 층에서 검증한다.
-  1. metrics_basic._gold_ranks    : wide 재검색 결과에서 순위(1-based)를 뽑는다.
-  2. metrics_basic._wide_hits      : low_rank·순위 계산이 재검색 1회를 memoize 로 공유한다.
-  3. diagnose._finding       : 대상 라벨에만 gold_ranks 를 싣는다(모드 게이팅 존중).
+  1. metrics_search._gold_ranks : wide 재검색 결과에서 순위(1-based)를 뽑는다(tier2 단일 소스).
+  2. diagnose.retrieval_low_rank: 그 순위 맵에서 파생 — 재검색 1회를 memoize 로 공유한다.
+  3. diagnose._finding          : 대상 라벨에만 gold_ranks 를 싣는다(모드 게이팅 존중).
 
 qdrant 등 무거운 자원 없이, set_context 로 가짜 retrieve_fn 을 주입해 tier2 를 흉내낸다.
 """
@@ -17,7 +17,7 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.schema import Probe
-from agents.eval import metrics_common, metrics_basic, diagnose
+from agents.eval import metrics_common, metrics_search, diagnose
 from agents.eval.types import EvalRecord, Mode
 
 
@@ -57,7 +57,7 @@ class GoldRanksTest(unittest.TestCase):
         metrics_common.set_context(retrieve_fn=retriever, chunks=[])
         record = _record(["g_a", "g_b", "g_c"], ["g_a", "g_b"])
 
-        ranks = metrics_basic._gold_ranks(record)
+        ranks = metrics_search._gold_ranks(record)
         self.assertEqual(ranks, {"g_a": 1, "g_b": 3, "g_c": 13})
 
     def test_gold_beyond_wide_n_is_none(self):
@@ -66,7 +66,7 @@ class GoldRanksTest(unittest.TestCase):
         metrics_common.set_context(retrieve_fn=retriever, chunks=[])
         record = _record(["g_a", "g_far"], ["g_a"])
 
-        ranks = metrics_basic._gold_ranks(record)
+        ranks = metrics_search._gold_ranks(record)
         self.assertEqual(ranks, {"g_a": 1, "g_far": None})
 
     def test_fast_mode_yields_no_ranks(self):
@@ -76,7 +76,7 @@ class GoldRanksTest(unittest.TestCase):
         metrics_common.set_mode(Mode.FAST)
         record = _record(["g_a"], [])
 
-        self.assertIsNone(metrics_basic._gold_ranks(record))
+        self.assertIsNone(metrics_search._gold_ranks(record))
         self.assertEqual(retriever.calls, 0)
 
     def test_wide_search_shared_between_signals(self):
@@ -86,7 +86,7 @@ class GoldRanksTest(unittest.TestCase):
         record = _record(["g_a", "g_b"], ["g_a"])  # g_b 놓침
 
         self.assertIsNotNone(diagnose.retrieval_low_rank(record))  # low_rank 확정(순위 파생)
-        metrics_basic._gold_ranks(record)
+        metrics_search._gold_ranks(record)
         self.assertEqual(retriever.calls, 1)  # low_rank·순위가 wide 검색을 한 번만 공유
 
 

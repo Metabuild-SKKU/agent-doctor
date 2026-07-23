@@ -8,7 +8,7 @@ Eval Agent — RAG 파이프라인 품질 진단
 설계 문서(Evaluate Module)의 STEP 1~5 를 순서대로 실행한다:
     STEP1  Probe 생성            → probe_gen.generate_probes
     STEP2  각 Probe로 검색·생성   → retrieval.retrieve / generate_answer
-    STEP3-1 규칙 지표            → diagnose 내부 _compute_metrics (recall_at_k / token_f1)
+    STEP3-1 규칙 지표            → diagnose 내부 _compute_metrics (recall_at_k / char_f1)
     STEP3-2 LLM(RAGAS) 진단      → diagnose 내부 _compute_ragas (DEEP 이상에서 전 probe 측정)
     STEP4  원인 판정(Finding)     → diagnose.diagnose
     STEP5  DiagnosticReport 생성  → report.build_report

@@ -1,9 +1,9 @@
 """
 agents/eval/metrics_common.py
-측정 레이어 공통 자원 — 진단 모드(비용 게이트 기준)·자원 컨텍스트(_ctx)·memoize(_cache).
+[tier 없음 · 인프라] 측정 레이어 공통 자원 — 진단 모드(비용 게이트 기준)·자원 컨텍스트(_ctx)·memoize(_cache).
 
-metrics_basic / metrics_chunk / metrics_ragas 가 공유한다. diagnose() 가 진입 시
-set_mode / set_context 로 설정·주입한다.
+tier 별 측정 파일(metrics_basic=tier1 / metrics_search=tier2 / metrics_ragas=tier3)이 공유한다.
+diagnose() 가 진입 시 set_mode / set_context 로 설정·주입한다.
 
 주의: _active_mode 는 재바인딩되는 int 이므로 다른 모듈에서 `from ... import _active_mode`
 하면 정지 바인딩이 된다(set_mode 후에도 옛 값을 봄). 반드시 active_mode() 로 조회할 것.
