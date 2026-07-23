@@ -1,6 +1,6 @@
 import unittest
 
-from agents.eval.metrics import span_recall_at_k
+from agents.eval.metrics_basic import span_recall_at_k
 from core.schema import Chunk
 
 

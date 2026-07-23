@@ -8,8 +8,9 @@ Eval Agent — RAG 파이프라인 품질 진단
 설계 문서(Evaluate Module)의 STEP 1~5 를 순서대로 실행한다:
     STEP1  Probe 생성            → probe_gen.generate_probes
     STEP2  각 Probe로 검색·생성   → retrieval.retrieve / generate_answer
-    STEP3-1 규칙 지표            → diagnose 내부 _compute_metrics (recall_at_k / token_f1)
-    STEP3-2 LLM(RAGAS) 진단      → diagnose 내부 _compute_ragas (DEEP 이상에서 전 probe 측정)
+    STEP3-1 규칙 지표            → diagnose 내부 _compute_metrics (recall_at_k / char_f1)
+    STEP3-2 LLM(RAGAS) 진단      → diagnose 내부 _compute_ragas_real (DEEP 이상 전 probe)
+                                   + _compute_ragas_oracle (실패로 판정된 probe 만)
     STEP4  원인 판정(Finding)     → diagnose.diagnose
     STEP5  DiagnosticReport 생성  → report.build_report
 
@@ -41,9 +42,11 @@ from agents.index.qdrant_store import keyword_search
 from agents.rag.generator import generate_answer
 from agents.rag.retriever import Retriever, get_retriever
 from agents.eval.metrics_ragas import (
-    evaluate_real_track, evaluate_oracle_track, answer_similarity, _judge as _ragas_judge,
+    evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge,
 )
-from agents.eval.diagnose import diagnose, set_context as set_diag_context
+from agents.eval.metrics_common import set_context as set_diag_context
+from agents.eval.metrics_basic import _compute_metrics
+from agents.eval.diagnose import diagnose, _is_success
 from agents.eval.report import build_report
 
 
@@ -66,18 +69,6 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
     except Exception as e:
         print(f"[Eval] RAGAS({track}) 실패({e}) → 폴백")
         return {}
-
-
-def _answer_sim_track(record: EvalRecord, track: str):
-    """diagnose 가 lazy 로 부르는 답변↔gold 정답 의미 유사도(set_context 로 주입).
-    tier3 게이트 — 비활성(EVAL_ENABLE_LLM)·키없음·실패 → None. (DEEP 게이트는 diagnose 신호가 담당.)"""
-    if not llm_eval_enabled():
-        return None
-    try:
-        return answer_similarity(record, track)
-    except Exception as e:
-        print(f"[Eval] 의미 유사도({track}) 실패({e}) → 폴백")
-        return None
 
 
 def run(state: AgentDoctorState) -> AgentDoctorState:
@@ -165,11 +156,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         chunk_text = {c.chunk_id: c.text for c in state.chunks}
         top_k = int(state.index_config.get("top_k", DEFAULT_TOP_K))
 
-        # tier2/tier4 판별 훅(재검색·코퍼스·재생성)이 쓸 자원 주입
+        # tier2/tier3 판별 훅(재검색·코퍼스·RAGAS)이 쓸 자원 주입
         set_diag_context(client=retriever, chunks=state.chunks,
                          retrieve_fn=_retrieve_with_rag, keyword_fn=keyword_search,
-                         generate_fn=generate_answer, ragas_fn=_ragas_track,
-                         sim_fn=_answer_sim_track)
+                         ragas_fn=_ragas_track)
 
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
@@ -201,25 +191,35 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             else:
                 rec.oracle_answer = answer
 
-        # Phase B2(병렬): RAGAS 선계산 — probe×track 태스크를 동시 실행하고 *_done
-        # 플래그를 세워, Phase C 의 _compute_ragas→_ensure_ragas 가 캐시 히트만 하게
-        # 한다. _ragas_track 은 signals 전역과 무관한 모듈 함수라 병렬 구간에 안전.
-        # 게이트는 _compute_ragas 와 동일(mode >= DEEP); LLM 비활성·키없음은
+        # Phase B2(병렬): RAGAS 선계산 — 트랙별로 필요한 probe 만 동시 실행하고 *_done
+        # 플래그를 세워, Phase C 의 _compute_ragas_real/_oracle 이 캐시 히트만 하게 한다.
+        # _ragas_track 은 진단 전역과 무관한 모듈 함수라 병렬 구간에 안전.
+        # 게이트는 _compute_ragas_* 와 동일(mode >= DEEP); LLM 비활성·키없음은
         # _ragas_track 이 {} 폴백이라 기존과 같은 동작으로 수렴한다.
-        # 동시성 1이면 태스크 순서가 기존 Phase C 호출 순서(probe별 real→oracle)와 일치.
+        # 동시성 1이면 태스크 순서가 Phase C 호출 순서(probe 순)와 일치.
         if mode >= Mode.DEEP:
-            ragas_tasks: list[tuple[EvalRecord, str]] = []
+            # B2-1: 실제 트랙은 전 probe 에 필요하다 — 성공/실패 판정(_f1_ok 의 강등)과
+            # 리포트 RAGAS 평균이 모두 실제 트랙을 쓴다.
+            if concurrency > 1 and len(records) > 1:
+                print(f"[Eval] STEP3-2: RAGAS 실제 트랙 {len(records)}건 병렬 실행 (동시성 {concurrency})")
+            real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records, concurrency)
+            for rec, score in zip(records, real_scores):
+                rec.ragas, rec.ragas_done = score, True
+
+            # B2-2: 오라클 트랙은 '실패로 판정된 probe' 에만 필요하다 — 소비처가 B그룹 라벨과
+            # _oracle_ok 뿐이고, 리포트 평균은 실제 트랙만 쓴다. 성공 probe 는 diagnose 가
+            # 성공 게이트에서 바로 끝나므로 오라클 LLM 비용을 지불할 이유가 없다.
+            # 판정에 쓸 규칙 지표를 먼저 채운다(_compute_metrics 는 순수·멱등이라 Phase C 에서
+            # diagnose 가 다시 불러도 같은 값이 나온다).
             for rec in records:
-                ragas_tasks.append((rec, "real"))
-                ragas_tasks.append((rec, "oracle"))
-            if concurrency > 1 and len(ragas_tasks) > 1:
-                print(f"[Eval] STEP3-2: RAGAS {len(ragas_tasks)}트랙 병렬 실행 (동시성 {concurrency})")
-            scores = parallel_map(lambda t: _ragas_track(t[0], t[1]) or {},
-                                  ragas_tasks, concurrency)
-            for (rec, track), score in zip(ragas_tasks, scores):
-                if track == "real":
-                    rec.ragas, rec.ragas_done = score, True
-                else:
+                _compute_metrics(rec)
+            failed = [rec for rec in records if _is_success(rec) is False]
+            if failed:
+                if concurrency > 1 and len(failed) > 1:
+                    print(f"[Eval] STEP3-2: RAGAS 오라클 트랙 {len(failed)}건 병렬 실행 "
+                          f"(실패 probe 만, 전체 {len(records)}건 중)")
+                oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency)
+                for rec, score in zip(failed, oracle_scores):
                     rec.oracle_ragas, rec.oracle_ragas_done = score, True
 
         # Phase C(순차): 지표·진단·로그 — diagnose 는 signals 전역·진단 캐시·tier2

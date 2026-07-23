@@ -44,3 +44,6 @@ qdrant_storage/
 
 # 로그 (Serve API 기동 로그 등)
 *.log
+
+# 로컬 작업용 별도 클론(추적 대상 아님)
+pr34b/

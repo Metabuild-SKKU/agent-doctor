@@ -174,6 +174,19 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
 
+    def test_unjudgeable_rollback_does_not_blacklist(self):
+        # 측정이 없어(before_report None) 판정 불가한 경우: config 는 안전하게 복원하되,
+        # '나빴다는 증거'가 아니므로 블랙리스트엔 넣지 않는다(리뷰 #36). 같은 시나리오라도
+        # 실제 판정으로 악화가 확인되면 블랙리스트에 들어가는 test_worse_rolls_back 과 대비.
+        state = agent.run(make_state(overall=60.0))          # 방문1: 처방 적용 → pending
+        self.assertEqual(len(state.blacklist), 0)
+        pending = history.find_pending(state.optimization_history)
+        pending.metadata["before_report"] = None             # 측정 없음 상황 유발
+        state.report = make_report(50.0)
+        state = agent.run(state)                             # 방문2: 판정 불가 → 롤백(차단 X)
+        self.assertEqual(len(state.blacklist), 0)             # 처방이 소진/차단되지 않음
+        self.assertEqual(state.optimization_history[0].status, "failed")
+
     def test_budget_exhausted_allows_same_label_without_increment(self):
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
         self.assertEqual(state.iteration, 3)                # 방문1: 2 -> 3

@@ -2,28 +2,28 @@
 agents/eval/diagnose.py
 STEP4: 원인 판정 (Finding 생성)
 
-구조 원칙(브랜치 없음):
+구조 원칙:
   1. 라벨마다 판정 함수 1개: 각 함수는 자기 라벨의 '판별 신호(원인)'를 검사해
-     맞으면 Finding, 아니면 None 을 돌려준다. 각 라벨은 자기 싼 전제(recall/f1/oracle)로
-     self-scope 하므로, 안 맞는 슬롯은 자연히 빈다.
-  2. diagnose() 가 모든 원인 슬롯을 시도: 슬롯당 _pick 으로 '한 원인' 채택(확정 우선),
-     corpus_gap 은 additive. 판별 신호는 전부 signals 모듈에서 lazy·memoize.
-     지표(_compute_metrics)와 RAGAS(_compute_ragas)는 판정 전에 항상 측정한다.
+     맞으면 Finding, 아니면 None 을 돌려준다. 
+  2. diagnose() 가 모든 원인 슬롯을 시도
+     슬롯당 _pick 으로 '한 원인' 채택.
+     측정값은 전부 metrics_* 모듈에서 lazy·memoize, 임계값 판정은 여기가 담당.
+  3. 기본 지표와 RAGAS는 판정 전에 항상 측정한다.
 
-Finding에 label을 담고 다음단계로 진행된다.
+Finding에 label들을 담고 다음단계로 진행한다.
 
 라벨 그룹: A 검색실패 / B 생성실패 / C context구조 / D 데이터.
 Finding.type 필드에 라벨 그룹을 담고, Finding.label 필드에 세분화 라벨을 담는다.
 
 진단 모드:
-  - 1[FAST], 2[STANDARD], 3[DEEP], 4[FULL]
-  - diagnose() 진입 시 signals.set_mode 로 현재 실행 모드를 설정한다.
-  - 지정된 진단 모드 이하 tier 까지만 확정할 수 있다(그 위 tier 라벨은 예비).
-  - 각 라벨은 확정 신호(비용 큼)·예비 신호(비용 작음, 없는 경우가 많음)를 가진다.
-  - 생성 원인(B)은 전부 RAGAS(DEEP) 의존 → DEEP 미만이면 예비 generation_failure 로 롤업한다.
+  - 1[FAST], 2[STANDARD], 3[DEEP] (삭제됨)4[FULL]
+  - diagnose() 진입 시 metrics_common.set_mode 로 현재 실행 모드를 설정한다.
+  - 지정된 진단 모드 이하 tier인 진단만 수행할 수 있다.
+  - 파이프라인 재실행(tier4)로 context 원인을 확정하던 경로는 제거됨. 관련 라벨은 예비 Finding 으로만 남긴다.
 
-판별 신호·지표·전제·진단 자원(_ctx)·모드 상태는 agents/eval/signals.py 에 존재한다.
-여기서는 라벨 함수와 조립(diagnose)만 담당한다.
+측정값·진단 자원(_ctx)·모드 상태는 tier 별 측정 파일에 존재한다:
+  metrics_common(인프라) / metrics_basic(tier1) / metrics_search(tier2) / metrics_ragas(tier3).
+여기서는 임계값 전제 판정, 라벨 함수, 조립(diagnose)을 담당한다.
 """
 from __future__ import annotations
 
@@ -31,20 +31,83 @@ from typing import Optional
 
 from core.schema import Finding
 from agents.eval.types import (
-    EvalRecord, Mode, resolve_mode,
+    DEFAULT_TOP_K, EvalRecord, Mode, resolve_mode,
+    F1_PASS_THRESHOLD, ANSWER_CORRECTNESS_MIN,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
 )
-from agents.eval.signals import (
-    set_mode, set_context, _compute_metrics, _compute_ragas, _no_diagnosis,
-    _retrieval_failed, _generation_failed, _context_applicable,
-    _is_multi_hop, _enumeration_cache,
-    _gold_in_wider_candidates, _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
-    _faith, _faith_oracle, _rel, _rel_oracle, _both_high,
-    _context_shorten_helps, _gold_front_helps, _noise_removal_helps,
-    _bridge_decompose_recovers, _gold_span_boundary_analysis,
-    _boundary_merge_helps,
+from agents.eval.metrics_common import set_mode, set_context
+from agents.eval.metrics_basic import (            # tier1
+    is_abstention, _compute_metrics, _gold_span_boundary_analysis,
+)
+from agents.eval.metrics_search import (           # tier2
+    _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
+)
+from agents.eval.metrics_ragas import (            # tier3
+    _compute_ragas_real, _compute_ragas_oracle,
+    _faith, _faith_oracle, _rel, _rel_oracle,
 )
 
+
+# ══════════════════════════════════════════════════════════════════
+#  임계값 판정 함수
+# ══════════════════════════════════════════════════════════════════
+
+def _recall_ok(record: EvalRecord) -> bool:
+    """검색 성공"""
+    return record.recall_at_k >= 1
+
+def _f1_ok(record: EvalRecord) -> bool:
+    """
+    Response 정답 판정
+    1. lexical(f1_score) 임계값 이상
+    2-1. llm이 사용 가능하다면, ragas answer_correctness도 임계값 이상이어야함.
+    """
+    if record.f1_score < F1_PASS_THRESHOLD:
+        return False
+    
+    ac = record.ragas_answer_correctness
+    if ac is None:
+        return True
+    return ac >= ANSWER_CORRECTNESS_MIN
+
+def _oracle_ok(record: EvalRecord) -> bool:
+    """"
+    Oracle 정답 판정 (위와 동일)
+    """
+    if record.oracle_f1 < F1_PASS_THRESHOLD:
+        return False
+    
+    ac = record.oracle_ragas_answer_correctness
+    if ac is None:
+        return True
+    return ac >= ANSWER_CORRECTNESS_MIN
+
+def _is_success(record: EvalRecord) -> Optional[bool]:
+    """probe 단위 성공/실패 판정 — recall + answer_match(tier1) + RAGAS answer_correctness(tier3).
+
+    True  = 성공 (검색·정답 모두 통과 / 무응답 기대인데 올바르게 기권)
+    False = 실패
+    None  = 판정 불가 (대조할 정답셋이 없음)
+
+    recall 은 정답셋이 있는 경로에서만 본다 — 무응답 기대 probe 는 gold 가 없어
+    recall_at_k = -1 이므로, 앞에서 recall 을 보면 올바른 기권까지 실패가 된다.
+    """
+    if record.probe.answer_exists is False:
+        return is_abstention(record.generated_answer)   # 무응답 기대 → 올바른 기권이 성공(recall 무관)
+    if not record.probe.ground_truth:
+        return None                                     # 대조할 정답 없음 → 판정 불가
+    # 검색 성공(recall=1) + 정답 일치(answer_match, DEEP 이면 ragas answer_correctness 로 강등)
+    return _recall_ok(record) and _f1_ok(record)
+
+def _is_multi_hop(record: EvalRecord) -> bool:
+    """멀티홉 질문 여부(probe.qtype). bridge / hop_binding / corpus_gap_partial_hop 판별용."""
+    return record.probe.qtype in ("bridge", "comparison", "aggregation")
+
+def _enumeration_cache(record: EvalRecord) -> bool:
+    """gold 개수가 top-k(=검색 결과 수)에 근접/초과 → 나열형 누락. incomplete_enumeration 용."""
+    k = len(record.retrieved_chunk_ids) or DEFAULT_TOP_K
+    gold_n = len(record.probe.gold_chunk_ids)
+    return gold_n >= 2 and gold_n >= int(k * 0.8)
 
 # ══════════════════════════════════════════════════════════════════
 #  A그룹: 검색 실패 (Oracle 통과) — retrieval_*
@@ -54,9 +117,12 @@ def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
     """
     gold가 top-N 후보엔 있으나 순위가 낮아 top-k 밖.
     확정: top-N 재검색에서 gold 발견(tier2).
-    예비: 없음
     """
-    if _gold_in_wider_candidates(record) is True:
+    ranks = _gold_ranks(record)
+    if ranks is None:
+        return None
+    missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)
+    if missed and any(ranks.get(g) is not None for g in missed):
         return _finding(
             record, "retrieval_low_rank", "retrieval_failure", confirmed=True,
             reason=f"gold_in_wider_candidates=True, recall@k={_v(record.recall_at_k)}",
@@ -68,7 +134,6 @@ def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
     dense는 놓쳤으나 BM25로 잡히는 단어 불일치.
     확정: BM25 가 gold 를 잡음(tier2).
-    예비: 없음
     """
     if _bm25_hits_gold(record) is True:
         return _finding(
@@ -82,7 +147,6 @@ def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
     dense·BM25 모두 놓친 의미 연결 실패. (단 gold 가 코퍼스엔 있을 때만 — 없으면 corpus_gap)
     확정: BM25 도 gold 를 못 잡음 + gold 는 코퍼스에 존재(tier2).
-    예비: 없음
     """
     in_corpus = _gold_in_corpus(record)
     if _bm25_hits_gold(record) is False and in_corpus is not False:
@@ -98,11 +162,7 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
     """
     gold는 corpus에 있으나 top-k에 없음.
     확정: 코퍼스에 gold 존재(tier2).
-    예비: recall<1(tier1, 코퍼스 확인 전).
     """
-    if not _retrieval_failed(record):
-        return None
-
     in_corpus = _gold_in_corpus(record)
     if in_corpus is True:
         return _finding(
@@ -121,29 +181,27 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
 def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     """정답 근거가 현재 청크 경계에 나뉘어 한 청크에 온전히 없음을 판정한다.
 
-    gold span과 현재 청크의 원문 좌표만 비교해 경계 분할 후보를 찾는다.
-    검색 실패와 경계 분할이 함께 보여도 좌표의 동시 발생만으로 인과를 확정하지
-    않는다. 검색은 성공했지만 답변이 실패한 경우에만 FULL 모드의 분할 조각 병합
-    재생성으로 실제 원인인지 확인한다.
+    gold span과 현재 청크의 원문 좌표만 비교해 경계 분할을 잡는다(저비용·결정적, LLM 없음).
+
+    확정(tier1): 경계 분할이 실측되면 confirmed. 이 코드베이스의 confirmed 는 '처방이 통한다'가
+    아니라 '그 원인의 판별 신호가 실제로 측정됐다'는 뜻이다 — retrieval_low_rank(gold 가 wide
+    후보에 있음)·retrieval_missing_gold(코퍼스에 있음)와 같은 기준이며, 그 라벨들도 처방 효과를
+    증명하진 않는다. planner 가 처방 후보를 만들 때 쓰는 근거도 같은 기하 정보다
+    (candidate_grounding.source = gold_span_boundary_geometry).
+
+    단 _RETRIEVAL_CAUSE 안에서는 맨 뒤에 둔다 — 실측된 다른 검색 원인(enumeration/low_rank 등)이
+    있으면 그쪽이 먼저 채택되고, 경계 분할은 달리 설명이 없을 때 채택된다.
     """
 
     analysis = _gold_span_boundary_analysis(record)
     if not isinstance(analysis, dict) or analysis.get("boundary_split_count", 0) <= 0:
         return None
-    confirmed = False
-    if _retrieval_failed(record):
-        # 경계가 나뉘었다는 사실만으로 검색 실패 원인을 청킹으로 단정할 수 없다.
-        # 예비 Finding으로 남겨 _pick이 실측된 정석 검색 원인을 우선하게 한다.
-        confirmed = False
-    elif _context_applicable(record):
-        helps = _boundary_merge_helps(record)
-        if helps is False:
-            return None
-        confirmed = helps is True
-    else:
+    if _recall_ok(record) and not _context_failed(record):
         return None
     finding = _finding(
-        record, "chunking_context_mismatch", "retrieval_failure", confirmed
+        record, "chunking_context_mismatch", "retrieval_failure", confirmed=True,
+        reason=f"boundary_split={analysis.get('boundary_split_count')}, "
+               f"recall@k={_v(record.recall_at_k)}, f1={_v(record.f1_score)}",
     )
     finding.metadata["boundary_analysis"] = dict(analysis)
     return finding
@@ -152,27 +210,17 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
 def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]:
     """
     멀티홉 연쇄형: 2번째 hop 근거가 1번째 hop에 의존.
-    확정: decompose 재실행 시 회복(tier4).
-    예비: 멀티홉+recall<1(tier1).
+    예비: 멀티홉 + 실제 검색 실패(gold 있는데 일부 미검색, 0<=recall<1). 멀티홉이라는 것만으론
+    bridge 의존이라 단정 못 한다(low_rank·lexical 등 다른 원인일 수도). 실제 bridge 인지는
+    decompose 재검색으로 회복되는지 봐야 하고(제거된 tier4), 그 확정은 optimize 가 위임받는다 → 예비.
     """
-    if not _retrieval_failed(record) or not _is_multi_hop(record):
+    if not _is_multi_hop(record) or not (0 <= record.recall_at_k < 1):
         return None
 
-    recovers = _bridge_decompose_recovers(record)
-    if recovers is True:
-        return _finding(
-            record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=True,
-            reason=f"bridge_decompose_recovers=True, qtype={record.probe.qtype}, "
-                   f"recall@k={_v(record.recall_at_k)}",
-        )
-    if recovers is None:
-        return _finding(
-            record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False,
-            reason=f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}, "
-                   f"bridge_decompose_recovers=-",
-        )
-    if recovers is False:
-        return None
+    return _finding(
+        record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False,
+        reason=f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
+    )
 
 
 def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
@@ -180,8 +228,7 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
     나열형: 필요한 근거 개수 가변인데 top-k 고정이라 누락.
     확정: gold수 vs top-k 순수 규칙(tier1) — 바로 확정.?????????
     """
-    if not _retrieval_failed(record):
-        return None
+
     if _enumeration_cache(record):
         return _finding(
             record, "retrieval_incomplete_enumeration", "retrieval_failure", confirmed=True,
@@ -190,24 +237,36 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
         )
     return None
 
+def retrieval_failure(record: EvalRecord) -> Optional[Finding]:
+    """검색 실패 롤업"""
+    return _finding(
+        record, "retrieval_failure", "retrieval_failure", confirmed=False,
+        reason=f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, "
+                f"faithfulness={_v(_faith_oracle(record))}, relevancy={_v(_rel_oracle(record))}",
+    )
 
 # ══════════════════════════════════════════════════════════════════
 #  B그룹: 생성 실패 (Oracle 실패) — generation_*
 # ══════════════════════════════════════════════════════════════════
 
-def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
+def _generation_failed(record: EvalRecord) -> bool:
+    """생성 실패 전제(B 공통): gold 컨텍스트로도 답이 틀림, 또는 무응답인데 답을 지어냄."""
+    if record.oracle_answer is not None and not _oracle_ok(record):
+        return True
+    if record.probe.answer_exists is False and not is_abstention(record.generated_answer):
+        return True
+    return False
+
+
+def generation_no_abstention(record: EvalRecord) -> Optional[Finding]:
     """
-    멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음).
-    확정: faithfulness 높음.
+    무응답 기대(answer_exists=False) probe인데 기권하지 않고 답을 지어냄.
+    확정: answer_exists=False + is_abstention 아님.
     """
-    if not _generation_failed(record):
-        return None
-    faith = _faith_oracle(record)
-    if _is_multi_hop(record) and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN:
+    if record.probe.answer_exists is False and not is_abstention(record.generated_answer):
         return _finding(
-            record, "generation_hop_binding_error", "generation_failure", confirmed=True,
-            reason=f"faithfulness={_v(faith)}>={RAGAS_FAITHFULNESS_MIN}, qtype={record.probe.qtype}, "
-                   f"oracle_f1={_v(record.oracle_f1)}",
+            record, "generation_no_abstention", "generation_failure", confirmed=True,
+            reason=f"answer_exists=False, 기권 아님(f1={_v(record.f1_score)})",
         )
     return None
 
@@ -217,8 +276,6 @@ def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
     정답 context가 있는데 지어냄.
     확정: faithfulness 낮음.
     """
-    if not _generation_failed(record):
-        return None
     faith = _faith_oracle(record)
     if faith is not None and faith < RAGAS_FAITHFULNESS_MIN:
         return _finding(
@@ -227,14 +284,25 @@ def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
         )
     return None
 
+def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
+    """
+    멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음).
+    확정: faithfulness 높음.
+    """
+    faith = _faith_oracle(record)
+    if _is_multi_hop(record) and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN:
+        return _finding(
+            record, "generation_hop_binding_error", "generation_failure", confirmed=True,
+            reason=f"faithfulness={_v(faith)}>={RAGAS_FAITHFULNESS_MIN}, qtype={record.probe.qtype}, "
+                   f"oracle_f1={_v(record.oracle_f1)}",
+        )
+    return None
 
 def generation_partial_answer(record: EvalRecord) -> Optional[Finding]:
     """
     정답 context가 있는데 일부 요소·조건 누락.
     확정: relevancy 낮음.
     """
-    if not _generation_failed(record):
-        return None
     rel = _rel_oracle(record)
     if rel is not None and rel < RAGAS_RESPONSE_RELEVANCY_MIN:
         return _finding(
@@ -246,15 +314,12 @@ def generation_partial_answer(record: EvalRecord) -> Optional[Finding]:
 
 
 def generation_failure(record: EvalRecord) -> Optional[Finding]:
-    """생성 실패 예비 롤업. 생성이 실패(oracle 실패/무응답 위반)했는데 위 세분화 라벨이
-    확정 못 했을 때(RAGAS 미실행 등) 예비로 낸다. 생성 슬롯의 마지막 후보."""
-    if _generation_failed(record):
-        return _finding(
-            record, "generation_failure", "generation_failure", confirmed=False,
-            reason=f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, "
-                   f"faithfulness={_v(_faith_oracle(record))}, relevancy={_v(_rel_oracle(record))}",
-        )
-    return None
+    """생성 실패 롤업"""
+    return _finding(
+        record, "generation_failure", "generation_failure", confirmed=False,
+        reason=f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, "
+                f"faithfulness={_v(_faith_oracle(record))}, relevancy={_v(_rel_oracle(record))}",
+    )
 
 
 # 나중에 개발
@@ -271,58 +336,43 @@ def generation_failure(record: EvalRecord) -> Optional[Finding]:
 #  C그룹: context 구조 문제
 # ══════════════════════════════════════════════════════════════════
 
+def _context_failed(record: EvalRecord) -> bool:
+    """컨텍스트 구조 문제(C) 전제: 검색 성공(recall=1)·생성 가능(oracle 통과)인데 실제 답만 틀림."""
+    return _recall_ok(record) and _oracle_ok(record) and not _f1_ok(record)
+
 def too_long_context(record: EvalRecord) -> Optional[Finding]:
     """
-    context가 너무 길어 잡음·과부하로 품질 저하.
-    확정: 축소 재실행 시 회복(tier4).
-    예비: 없음
+    context가 너무 길어 잡음·과부하로 품질 저하.s
+    tier4(축소 재실행) 확정 신호가 유일한 발동 경로였으나 optimize 재실행으로 대체됨.
+    # TODO(tier4 제거): 예비 발동 조건(저비용 휴리스틱) 재설계 전까지 dormant.
     """
-    if not _context_applicable(record):
-        return None
-    if _context_shorten_helps(record) is True:
-        return _finding(
-            record, "too_long_context", "retrieval_failure", confirmed=True,
-            reason=f"context_shorten_helps=True, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
-        )
     return None
 
 
 def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
     """
     청크가 긴 context 중간이라 LLM이 참조 못함.
-    확정: gold 앞배치 재실행 시 회복(tier4).
-    예비: 없음
+    tier4(gold 앞배치 재실행) 확정 신호가 유일한 발동 경로였으나 optimize 재실행으로 대체됨.
+    # TODO(tier4 제거): 예비 발동 조건(저비용 휴리스틱) 재설계 전까지 dormant.
     """
-    if not _context_applicable(record):
-        return None
-    if _gold_front_helps(record) is True:
-        return _finding(
-            record, "lost_in_the_middle", "retrieval_failure", confirmed=True,
-            reason=f"gold_front_helps=True, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
-        )
     return None
 
 
 def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     """
     비-gold 청크의 상충 정보에 이끌림.
-    확정: 노이즈 제거 재실행 시 회복(tier4).
-    예비: 확정 전엔 항상 예비.
+    예비: recall=1·oracle 통과인데 실제 답만 틀림. 노이즈 제거로 회복되는지는
+    optimize 가 top_k 축소·리랭커를 적용해 재실행하며 검증한다.
     """
-    if not _context_applicable(record):
-        return None
-    helps = _noise_removal_helps(record)
-    if helps is True:
-        return _finding(
-            record, "context_noise_interference", "retrieval_failure", confirmed=True,
-            reason=f"noise_removal_helps=True, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
-        )
-    if helps is None:
-        return _finding(
-            record, "context_noise_interference", "retrieval_failure", confirmed=False,
-            reason=f"noise_removal_helps=-, f1={_v(record.f1_score)}, oracle_f1={_v(record.oracle_f1)}",
-        )
     return None
+
+def context_failure(record: EvalRecord) -> Optional[Finding]:
+    """콘텍스트 실패 롤업"""
+    return _finding(
+        record, "context_failure", "context_failure", confirmed=False,
+        reason=f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, "
+                f"faithfulness={_v(_faith_oracle(record))}, relevancy={_v(_rel_oracle(record))}",
+    )
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -331,29 +381,28 @@ def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
 
 def bad_gold_answer(record: EvalRecord) -> Optional[Finding]:
     """
-    정답셋 자체 오류/모호(충실도·관련성 모두 고득점인데 gold만 불일치) — 실제 트랙(컨텍스트 계열).
+    정답셋 자체 오류/모호
+    콘텍스트 실패 계열 (C 그룹에 함께 있음)
     확정(자동): faith·rel 둘 다 측정 고득점(tier3). [진짜 확정은 사람 검수.]
     """
-    if not _context_applicable(record):
-        return None
     faith, rel = _faith(record), _rel(record)
-    if _both_high(faith, rel):
+    if (faith is not None and faith >= RAGAS_FAITHFULNESS_MIN
+        and rel is not None and rel >= RAGAS_RESPONSE_RELEVANCY_MIN):
         return _finding(
             record, "bad_gold_answer", "gap", confirmed=True,
             reason=f"faithfulness={_v(faith)}, response_relevancy={_v(rel)}, f1={_v(record.f1_score)}",
         )
     return None
 
-
 def bad_gold_answer_oracle(record: EvalRecord) -> Optional[Finding]:
     """
-    bad_gold_answer 의 오라클 트랙 버전(생성 실패 계열).
+    bad_gold_answer 의 오라클 트랙 버전
+    생성 실패 계열 (B 그룹에 함께 있음)
     라벨은 동일('bad_gold_answer').
     """
-    if not _generation_failed(record):
-        return None
     faith, rel = _faith_oracle(record), _rel_oracle(record)
-    if _both_high(faith, rel):
+    if (faith is not None and faith >= RAGAS_FAITHFULNESS_MIN
+        and rel is not None and rel >= RAGAS_RESPONSE_RELEVANCY_MIN):
         return _finding(
             record, "bad_gold_answer", "gap", confirmed=True,
             reason=f"faithfulness(oracle)={_v(faith)}, response_relevancy(oracle)={_v(rel)}, "
@@ -366,10 +415,7 @@ def corpus_gap(record: EvalRecord) -> Optional[Finding]:
     """
     필요한 자료가 코퍼스에 없음(단일홉).
     확정: 코퍼스에 gold 없음(tier2).
-    예비: 없음
     """
-    if not _retrieval_failed(record):
-        return None
     if _gold_in_corpus(record) is False and not _is_multi_hop(record):
         return _finding(
             record, "corpus_gap", "gap", confirmed=True,
@@ -382,9 +428,7 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
     """
     멀티홉 중 일부 hop 근거만 코퍼스에 없음.
     확정: 코퍼스에 gold 없음(tier2).
-    예비: 없음"""
-    if not _retrieval_failed(record):
-        return None
+    """
     if _gold_in_corpus(record) is False and _is_multi_hop(record):
         return _finding(
             record, "corpus_gap_partial_hop", "gap", confirmed=True,
@@ -401,24 +445,36 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 _RETRIEVAL_CAUSE = (
-    chunking_context_mismatch, retrieval_incomplete_enumeration,
-    retrieval_missing_bridge_dependency,
+    retrieval_incomplete_enumeration, retrieval_missing_bridge_dependency,
     retrieval_low_rank, retrieval_lexical_mismatch, retrieval_semantic_mismatch, retrieval_missing_gold,
+    # chunking 은 확정이지만 맨 뒤 — 실측된 다른 검색 원인이 있으면 그쪽을 먼저 채택한다.
+    chunking_context_mismatch,
+    retrieval_failure
 )
 _GENERATION_CAUSE = (
-    bad_gold_answer_oracle, generation_hop_binding_error, generation_hallucination,
-    generation_partial_answer, generation_failure,
+    generation_no_abstention,bad_gold_answer_oracle, generation_hop_binding_error, 
+    generation_hallucination, generation_partial_answer,
+    generation_failure,
 )
+# chunking_context_mismatch 는 A·C 양쪽에 등록한다 — 경계 분할은 '검색이 gold 를 통째로
+# 못 가져옴'(A)으로도, '검색은 됐는데 잘린 근거로 답이 틀림'(C)으로도 나타난다.
+# A 슬롯에만 두면 recall=1 인 경계 분할 실패에서 도달 자체가 불가능하다(_dedup 이 중복 제거).
 _CONTEXT_CAUSE = (
-    bad_gold_answer, too_long_context, lost_in_the_middle, context_noise_interference,
+    bad_gold_answer, chunking_context_mismatch,
+    too_long_context, lost_in_the_middle, context_noise_interference,
+    context_failure
 )
 
 
 # ── 판정 콤비네이터 ──────────────────────────────────────────────
 
 def _pick(record: EvalRecord, funcs) -> Optional[Finding]:
-    """funcs 중 '한 원인'을 고른다: 확정된(confirmed) 첫 라벨 우선, 없으면 첫 매치(예비), 없으면 None.
-    라벨이 자기 전제·신호로 self-scope 하므로, 브랜치 없이 모든 슬롯에 던져도 안 맞으면 None 이 난다."""
+    """
+    라벨 함수 중 하나 선택 
+    1. 확정된 첫 라벨
+    2. 없으면 예비 첫 라벨
+    3. 없으면 None.
+    """
     first_match = None
     for fn in funcs:
         f = fn(record)
@@ -474,12 +530,7 @@ def _severity_of(label: str) -> str:
     return "warning"
 
 
-# gold 순위(top-N 재검색)가 top_k 근거값 계산에 쓰이는 라벨.
-# 이 라벨의 Finding 에만 gold_ranks 를 실어 planner(_GROUNDED_VALUES)가 개수 대신
-# 순위로 top_k 를 산정하게 한다. tier2(STANDARD+) 에서만 순위가 나오고, 그 아래
-# 모드에선 gold_ranks 가 안 실려 planner 가 개수 근사로 폴백한다.
-# retrieval_low_rank 는 제외: 정석 처방이 리랭커라 top_k 근거값을 planner 가 쓰지
-#   않는다(planner._GROUNDED_VALUES 참고). 순위를 실어봤자 안 쓰이는 무효 데이터다.
+# gold 순위를 함께 저장해야하는 라벨들.
 _RANK_LABELS = {
     "retrieval_incomplete_enumeration",
     "retrieval_missing_gold",
@@ -494,22 +545,12 @@ def _v(x) -> str:
 
 
 def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool, reason: str = "") -> Finding:
-    """라벨 함수 공통 Finding 생성기.
-
-    confirmed 는 라벨 함수가 명시한다 — '확정 신호가 실제로 발동했는지'.
-      True  = 확정 신호(그 자원)가 발동해 확정.
-      False = 예비 신호로 의심만(확정 자원 미실행) → 상위 모드에서 확정.
-    (mode>=tier 자동판정 아님 — 자원 미실행/미측정이면 예비.)
-
-    reason 은 이 라벨을 고르게 한 판별 신호의 실제 값 한 줄(로그·리포트용). 예: "faithfulness=0.31<0.6, oracle_f1=0.24"
-    """
+    """ 라벨 함수 공통 Finding 생성기. """
     probe = record.probe
     group = _group_of(label, ftype)
     prefix = "" if confirmed else "[예비] "
     metadata: dict = {"group": group, "reason": reason}
     if label in _RANK_LABELS:
-        # planner 가 top_k 근거값을 계산할 원시 순위(집계는 planner 소관).
-        # None(모드·자원 미충족)이면 싣지 않아 planner 가 개수 폴백을 쓰게 둔다.
         ranks = _gold_ranks(record)
         if ranks:
             metadata["gold_ranks"] = ranks
@@ -534,29 +575,37 @@ _SEV_ORDER = {"critical": 0, "warning": 1, "info": 2}
 
 def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
     """
-    지표(STEP3-1)와 RAGAS(STEP3-2)를 먼저 전부 측정하고, diagnosis가 필요없는 경우 return한다
-    (기존 성공 브랜치). 이후 모든 라벨에 대해 검사한다.
+    지표(STEP3-1)와 RAGAS(STEP3-2)를 먼저 전부 측정하고 이후 모든 라벨에 대해 검사한다.
 
-    측정은 스킵하지 않는다 — 성공 probe 도 RAGAS 점수를 갖고 리포트 평균에 들어간다.
-    (RAGAS 는 DEEP 이상에서만 실행되므로 그 미만 모드의 비용은 그대로다.)
+    라벨은 세 분류로 나뉘어, 해당되는 라벨만 검사된다. 
     """
     set_mode(mode if mode is not None else resolve_mode())
 
+    # metric, ragas 진단
     _compute_metrics(record)      # 지표(recall/f1/oracle_f1) 계산 → record 반영
-    _compute_ragas(record)        # RAGAS(실제·오라클 트랙) 계산 → record 반영 (DEEP 이상)
+    _compute_ragas_real(record)   # 실제 트랙 RAGAS — 강등 판정 + 리포트 평균용 (DEEP 이상)
 
-    if _no_diagnosis(record):     # 정답셋 없음 / 올바른 무응답 / 성공
+    # 성공/실패 판정 — 실패(False)일 때만 원인을 찾는다.
+    # None(판정 불가)은 통과로 묶는다: 대조할 정답이 없어 실패라 단정할 근거가 없다.
+    # 이 게이트로 '성공 ⇒ findings 없음' 이 규약이 아니라 보장이 된다.
+    if _is_success(record) is not False:
         return []
 
-    findings = _collect(
-        corpus_gap(record),                    # D 데이터 (additive)
-        corpus_gap_partial_hop(record),        # D 데이터 (additive)
-        _pick(record, _RETRIEVAL_CAUSE),       # A 검색 원인 1개
-        _pick(record, _CONTEXT_CAUSE),         # C 컨텍스트 원인 1개
-        _pick(record, _GENERATION_CAUSE),      # B 생성 원인 1개 (generation_failure 롤업 포함)
-    )
+    # 오라클 트랙 RAGAS — 소비처가 B그룹 라벨·_oracle_ok 뿐이라 실패 probe 에서만 지불한다.
+    _compute_ragas_oracle(record)
 
-    findings = _dedup(findings)
+    # 추가 진단
+    findings = []
+    if 0 <= record.recall_at_k < 1:                     # A: 검색 실패 (gold 있는데 일부 미검색)
+        findings.append(_pick(record, _RETRIEVAL_CAUSE))
+        findings.append(corpus_gap(record))             # D: 코퍼스에 gold 없음 (additive)
+        findings.append(corpus_gap_partial_hop(record))
+    if _generation_failed(record):                      # B: 생성 실패
+        findings.append(_pick(record, _GENERATION_CAUSE))
+    if _context_failed(record):                         # C: context 구조
+        findings.append(_pick(record, _CONTEXT_CAUSE))
+
+    findings = _dedup(_collect(*findings))
     findings.sort(key=lambda f: (
         _GROUP_ORDER.get(f.metadata.get("group"), 9),
         _SEV_ORDER.get(f.severity, 9),
