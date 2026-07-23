@@ -404,6 +404,33 @@ def _validate_config(config: dict) -> None:
         raise ValueError("top_k는 1 이상의 정수여야 합니다.")
 
 
+def _page_of_span(document: Document, char_span: tuple[int, int]) -> int | None:
+    """청크가 원본 문서의 몇 페이지에서 나왔는지 (1-based). 모르면 None.
+
+    Ingest(agents/ingest/preprocess.py)가 PDF 에서만 document.metadata["page_spans"]
+    를 채운다. char_span 과 같은 좌표계(Document.content 기준)라 시작 위치만 대조하면
+    된다. 청크가 페이지 경계를 걸치면 "시작한 페이지"로 본다 — 인용 표기 목적이라
+    첫 페이지가 사람이 찾아가기에 맞다.
+    """
+    spans = document.metadata.get("page_spans")
+    if not isinstance(spans, (list, tuple)):
+        return None
+
+    start = char_span[0]
+    last_nonempty: int | None = None
+    for page_no, span in enumerate(spans, start=1):
+        if not isinstance(span, (list, tuple)) or len(span) != 2:
+            continue
+        page_start, page_end = int(span[0]), int(span[1])
+        if page_start <= start < page_end:
+            return page_no
+        # 청크 시작이 페이지 사이 구분자에 걸린 경우(공백만 있는 위치)를 대비해
+        # "여기까지 지나온 마지막 페이지"를 기억해둔다.
+        if page_start <= start:
+            last_nonempty = page_no
+    return last_nonempty
+
+
 def _chunk_metadata(
     document: Document,
     config: dict,
@@ -417,14 +444,22 @@ def _chunk_metadata(
     embedding_dimension: int,
     embedding_fallback: bool = False,
 ) -> dict[str, Any]:
+    # page_spans 는 문서 단위 정보라 청크마다 복사하면 payload 가 페이지 수만큼 불어난다.
+    # 아래에서 이 청크의 "page" 하나로 접어 넣으므로 원본 목록은 뺀다.
+    doc_metadata = {k: v for k, v in document.metadata.items() if k != "page_spans"}
+
     # Serve는 Qdrant payload만 보고 검색 옵션을 복원하므로 retrieval 설정도 같이 저장한다.
     return {
-        **document.metadata,
+        **doc_metadata,
         "chunk_index": chunk_index,
         "source": document.source,
         "document_hash": document_hash,
         "chunk_hash": chunk_hash,
         "char_span": [char_span[0], char_span[1]],
+        # 출처 표기용 페이지 번호. document.metadata 의 page_spans 를 그대로 물려받으면
+        # 청크마다 문서 전체 span 목록이 payload 에 복사되므로, 여기서 이 청크의
+        # 페이지 하나로 접고 원본 목록은 뺀다.
+        "page": _page_of_span(document, char_span),
         "chunk_strategy": chunk_strategy,
         "index_signature": signature,
         "embedding_model": config["embedding_model"],
@@ -473,6 +508,8 @@ def _refresh_reused_chunk(
         chunk,
         chunk_id=f"{document.doc_id}_chunk_{chunk_index:03d}",
         doc_id=document.doc_id,
+        # 재청킹되면 char_span 이 달라지므로 페이지도 다시 계산한다(replace 는 옛 값을 남긴다).
+        page=_page_of_span(document, char_span),
         char_span=char_span,
         parent_id=_parent_id(document, chunk.section),
         hash=chunk_hash[:16],
@@ -545,6 +582,7 @@ def _reembed_stale_chunks(
             chunk,
             chunk_id=f"{document.doc_id}_chunk_{chunk_index:03d}",
             doc_id=document.doc_id,
+            page=metadata.get("page"),
             char_span=char_span,
             parent_id=_parent_id(document, chunk.section),
             hash=chunk_hash[:16],
@@ -740,6 +778,7 @@ def _process_document(
             chunk_id=f"{document.doc_id}_chunk_{chunk_index:03d}",
             doc_id=document.doc_id,
             text=draft.text,
+            page=metadata.get("page"),
             section=draft.section,
             char_span=char_span,
             token_count=tools.count_tokens(
