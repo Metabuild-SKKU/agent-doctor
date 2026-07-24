@@ -35,7 +35,7 @@ from agents.eval.types import (
     F1_PASS_THRESHOLD, ANSWER_CORRECTNESS_MIN,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
 )
-from agents.eval.metrics_common import set_mode, set_context
+from agents.eval.metrics_common import set_mode, set_context, _missed_gold_ids
 from agents.eval.metrics_basic import (            # tier1
     is_abstention, _compute_metrics, _gold_span_boundary_analysis,
 )
@@ -121,7 +121,7 @@ def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
     ranks = _gold_ranks(record)
     if ranks is None:
         return None
-    missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)
+    missed = _missed_gold_ids(record)
     if missed and any(ranks.get(g) is not None for g in missed):
         return _finding(
             record, "retrieval_low_rank", "retrieval_failure", confirmed=True,
@@ -163,6 +163,8 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
     gold는 corpus에 있으나 top-k에 없음.
     확정: 코퍼스에 gold 존재(tier2).
     """
+    if not _missed_gold_ids(record):
+        return None                      # 놓친 gold 청크가 없음 → 'top-k 에 없다'가 성립 안 함
     in_corpus = _gold_in_corpus(record)
     if in_corpus is True:
         return _finding(
@@ -216,6 +218,8 @@ def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]
     """
     if not _is_multi_hop(record) or not (0 <= record.recall_at_k < 1):
         return None
+    if not _missed_gold_ids(record):
+        return None                      # 놓친 hop 근거가 없음 → bridge 의존을 의심할 근거 없음
 
     return _finding(
         record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False,
@@ -228,6 +232,8 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
     나열형: 필요한 근거 개수 가변인데 top-k 고정이라 누락.
     확정: gold수 vs top-k 순수 규칙(tier1) — 바로 확정.?????????
     """
+    if not _missed_gold_ids(record):
+        return None                      # 놓친 gold 청크가 없음 → 개수 부족으로 인한 '누락'이 아님
 
     if _enumeration_cache(record):
         return _finding(
