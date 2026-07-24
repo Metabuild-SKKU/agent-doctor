@@ -225,4 +225,7 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     args = parser.parse_args()
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    # access_log=False: 브라우저가 1.5초마다 폴링하는 /runs/{id}/status 요청이
+    # 매번 "INFO ... 200 OK" 한 줄로 찍혀 파이프라인 로그를 덮는 것을 막는다.
+    # 서버 시작/에러 등 다른 INFO 는 그대로 유지.
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info", access_log=False)
