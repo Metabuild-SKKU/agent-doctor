@@ -283,6 +283,26 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         )
         self.assertIn("decrease_top_k", out)
         self.assertIn("shrink_chunk_size", out)
+        self.assertIn("판정 결과: keep=false, before=60.00, after=40.00", out)
+        self.assertLess(out.index("decrease_top_k"), out.index("shrink_chunk_size"))
+
+    def test_keep_then_followup_application_logs_previous_verdict(self):
+        state = agent.run(make_state(overall=60.0))
+        state.report = make_report(75.0, label="retrieval_semantic_mismatch")
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)
+
+        out = buf.getvalue()
+        self.assertEqual(state.optimization_history[0].status, "applied")
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "shrink_chunk_size",
+        )
+        self.assertIn("선택한 처방: decrease_top_k", out)
+        self.assertIn("판정 결과: keep=true, before=60.00, after=75.00", out)
+        self.assertIn("선택한 처방: shrink_chunk_size", out)
         self.assertLess(out.index("decrease_top_k"), out.index("shrink_chunk_size"))
 
     def test_unjudgeable_rollback_does_not_blacklist(self):
@@ -311,9 +331,17 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
 
         # 방문2: 악화 + 검색시점 라벨 → 롤백(재색인 요구) 후 dynamic_top_k(재색인 불필요) 적용
         state.report = make_report(50.0, label="retrieval_incomplete_enumeration")
-        state = agent.run(state)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)
         self.assertEqual(state.status, "applied")
         self.assertTrue(state.reindex_required)   # 롤백 재색인 요구가 보존됨
+        out = buf.getvalue()
+        self.assertIn("선택한 처방: shrink_chunk_size", out)
+        self.assertIn("판정 결과: keep=false, before=60.00, after=50.00", out)
+        self.assertIn("선택한 처방: dynamic_top_k", out)
+        self.assertIn("reindex_required=true", out[out.rindex("dynamic_top_k"):])
+        self.assertIn("다음 단계: Index 재색인 후 Eval 재실행", out[out.rindex("dynamic_top_k"):])
 
     def test_budget_exhausted_allows_same_label_without_increment(self):
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
