@@ -55,6 +55,11 @@ class AgentDoctorState:
         "eval_graph_top_k": 12,
         "eval_graph_batch_size": 512,
         "use_hybrid": True,
+        # baseline 검색 결과를 먼저 측정한 뒤 retrieval_low_rank 처방이 켠다.
+        # 모델명과 후보 수를 상태에 명시해 Eval과 Serve가 같은 reranker 계약을 쓴다.
+        "use_reranker": False,
+        "reranker_model": "BAAI/bge-reranker-v2-m3",
+        "rerank_candidates": 20,
         # 검색 시 가져올 청크 수. Eval(agents/eval/agent.py)이 검색에, Index가 청크
         # metadata 기록에 소비한다. 둘 다 미지정 시 5를 폴백으로 쓰고 있어 같은 값을
         # 명시해 동작을 바꾸지 않으면서 Optimize가 조정할 baseline을 드러낸다.

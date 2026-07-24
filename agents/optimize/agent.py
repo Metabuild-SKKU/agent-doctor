@@ -68,7 +68,6 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
         with timer.measure("이전 처방 판정"):
             judged_item, verdict, rollback_baseline_report = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
-        rollback_reindex_required = bool(state.reindex_required) if rolled_back else False
 
         # (2) 새 처방 선택. 저비용 사전검증에서 baseline이 이기면 현재 처방을
         # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
@@ -101,8 +100,8 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                 result = optimizer.run(request)
             # skipped 처방(baseline 무개선·적용 불가 경로·빈 search space)이면 포기하지 않고
             # 그 처방을 블랙리스트에 넣어 다음 우선순위 처방으로 넘어간다. 한 라벨의 처방이
-            # 막혀도(예: enable_reranker 는 reranker 미연동으로 적용 불가) 다른 actionable
-            # finding 이 처방받을 기회를 준다. (issue #26)
+            # 한 처방이 미지원 경로로 막혀도 다른 actionable finding 이 처방받을
+            # 기회를 준다. (issue #26)
             if result.status != "skipped":
                 break
 
@@ -137,16 +136,19 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
         # 롤백 전의 열화된 Eval 이라, 그걸 baseline 으로 쓰면 이 처방이 원래보다
         # 나빠도 '개선'으로 오판해 유지된다(#2). 롤백이 없었으면 현재 report 가 기준.
         before_report = rollback_baseline_report if rolled_back else state.report
+        # 롤백이 요구한 재색인(_judge_pending_trial 이 state.reindex_required 에 세팅)을
+        # 기억해둔다. index-time 처방을 롤백하면 config 는 되돌아가지만 실제 Qdrant
+        # 인덱스는 아직 열화 상태라 이 재색인이 반드시 일어나야 한다.
+        rollback_reindex_required = state.reindex_required if rolled_back else False
 
         # 검증된 처방을 실제 index_config 에 반영(canonical→flat 변환은 mapper 담당)
         with timer.measure("설정 반영·이력 기록"):
             config_mapper.apply_config_patch(state.index_config, result.config_patch)
-            # 재색인형 처방을 롤백한 직후 런타임형 처방을 적용하면, 새 처방의 False가
-            # 롤백 복원에 필요한 True를 지우면 안 된다. Index도 fingerprint를 검증하지만
-            # 상태 신호 자체도 실제 필요한 작업을 보존한다.
+            # 새 처방의 재색인 필요 여부와 '롤백이 요구한 재색인'을 OR 로 합친다.
+            # 검색시점 처방(needs_reindex=False)이 baseline 복원 요구를 덮지 않게 한다.
             state.reindex_required = (
-                rollback_reindex_required
-                or bool(result.needs_reindex)
+                bool(result.needs_reindex)
+                or rollback_reindex_required
             )
 
             # pending 이력 생성(다음 방문에서 finalize) + iteration 1회 증가

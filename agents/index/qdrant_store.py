@@ -414,7 +414,23 @@ def rerank(
     if model is None:
         return results[:top_k]
 
-    scores = model.predict([(query, item.get("text", "")) for item in results])
+    try:
+        scores = list(
+            model.predict([(query, item.get("text", "")) for item in results])
+        )
+        if len(scores) != len(results):
+            raise ValueError(
+                f"reranker 점수 개수 불일치: {len(scores)} != {len(results)}"
+            )
+    except Exception as exc:
+        # 깨진 모델 객체로 매 요청마다 같은 실패를 반복하지 않고 쿨다운 후 다시 로드한다.
+        _rerankers.pop(model_name, None)
+        _failed_rerankers[model_name] = time.monotonic()
+        print(
+            f"[Index] reranker 추론 실패, 기존 순위 유지 "
+            f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
+        )
+        return results[:top_k]
     reranked = [
         {**item, "retrieval_score": item.get("score", 0.0), "score": float(score)}
         for item, score in zip(results, scores)

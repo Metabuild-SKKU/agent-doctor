@@ -26,10 +26,13 @@ state.documents
 | Vector DB | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY` |
 | 검색 | Dense, top-k 5 | `top_k` |
 | Hybrid | 기본 OFF | `use_hybrid=True` |
-| Reranker | 기본 OFF | `use_reranker=True` |
+| Reranker | 기본 OFF, 후보 20개 | `use_reranker=True`, `rerank_candidates` |
 | Graph | NetworkX + Mermaid/PyVis | `graph_*` 설정 |
 
 Hybrid와 reranker는 baseline 결과를 먼저 측정한 뒤 Optimize가 켜는 기능이다.
+`retrieval_low_rank`가 확정되면 Optimize가 `reranker.enabled=True`를
+`state.index_config["use_reranker"]`로 변환해 적용하고, 공통 Retriever가
+`BAAI/bge-reranker-v2-m3`로 후보를 재정렬한다.
 
 ## 롤백 2-slot 캐시
 

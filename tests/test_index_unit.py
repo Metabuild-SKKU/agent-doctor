@@ -198,12 +198,18 @@ class IndexRunTests(unittest.TestCase):
 
         first.index_config["top_k"] = 9
         first.index_config["use_reranker"] = True
+        first.index_config["rerank_candidates"] = 40
         second = run(first, tools=_index_tools())
 
         self.assertEqual(second.status, "indexed")
         self.assertEqual(second.index_artifacts["reused_embeddings"], 1)
         self.assertEqual(second.chunks[0].metadata["top_k"], 9)
         self.assertTrue(second.chunks[0].metadata["use_reranker"])
+        self.assertEqual(
+            second.chunks[0].metadata["reranker_model"],
+            "BAAI/bge-reranker-v2-m3",
+        )
+        self.assertEqual(second.chunks[0].metadata["rerank_candidates"], 40)
 
     def test_model_recovery_reembeds_fallback_chunks(self):
         # 리뷰 회귀: 최초 색인이 fallback(해시 벡터)으로 이뤄진 뒤 모델이 복구되면,
