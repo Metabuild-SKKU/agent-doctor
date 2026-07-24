@@ -109,3 +109,35 @@ class DiagnosticReport:
     pass_threshold: bool = False
     created_at: datetime = field(default_factory=datetime.now)
     iteration: int = 1
+
+
+@dataclass
+class IndexSnapshot:
+    """
+    롤백용 인덱스 스냅샷.
+
+    Index Agent만 생성·갱신하며, 현재 인덱스와 직전 인덱스까지 최대 두 개를
+    AgentDoctorState에 보관한다.
+    """
+    cache_key: str
+    chunks: list[Chunk] = field(default_factory=list)
+    index_artifacts: dict = field(default_factory=dict)
+    collection_name: str = ""
+    created_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class EvalSnapshot:
+    """
+    롤백용 진단 결과 스냅샷.
+
+    Eval Agent가 생성한 Probe·리포트·진단 신호를 함께 보관해, 동일한 파이프라인
+    버전으로 돌아왔을 때 답변 생성과 RAGAS 호출 없이 결과를 복원한다.
+    """
+    cache_key: str
+    index_key: str
+    probes: list[Probe] = field(default_factory=list)
+    report: Optional[DiagnosticReport] = None
+    diagnosis_cache: dict = field(default_factory=dict)
+    diagnosis_cache_version: str = ""
+    created_at: datetime = field(default_factory=datetime.now)

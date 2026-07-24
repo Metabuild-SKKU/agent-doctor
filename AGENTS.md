@@ -31,12 +31,15 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 | 필드 | 쓰는 에이전트(생산자) | 읽는 에이전트(소비자) |
 |------|----------------------|----------------------|
-| `source_url`, `source_type`, `user_questions` | (파이프라인 입력) | Ingest / Eval |
+| `source_url`, `source_type`, `user_questions` | (파이프라인 입력) | Ingest / Index / Eval |
 | `documents` | Ingest | Index |
 | `chunks` | Index | Eval, Serve |
 | `index_config` | Optimize (수정) | Index |
 | `index_artifacts` | Index | (그래프 산출물·통계 출력) |
+| `index_cache`, `active_index_key`, `index_cache_hit` | Index | Index, Eval, Optimize |
 | `probes`, `report` | Eval | Optimize, Serve, `graph.py` 분기 |
+| `diagnosis_cache`, `diagnosis_cache_version` | Eval | Eval |
+| `eval_cache`, `active_eval_key`, `eval_cache_hit` | Eval | Eval, Optimize |
 | `optimization_history` | Optimize | Optimize (다음 라운드), `route_after_eval()` (pending 확인) |
 | `iteration`, `max_iterations` | 반복 제어 | `route_after_eval()` |
 | `mcp_endpoint` | Serve | (최종 출력) |

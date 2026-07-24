@@ -11,10 +11,11 @@ Optimize 노드의 진입점(오케스트레이션 계층).
   모든 경로에서 같은 state 를 반환한다(AGENTS.md 2절 계약).
 
 [읽는 것]  state.report, state.index_config, state.iteration, state.max_iterations,
-           state.blacklist, state.optimization_history
+           state.blacklist, state.optimization_history,
+           state.active_index_key, state.active_eval_key
 [쓰는 것]  state.index_config, state.iteration, state.status, state.error,
            state.current_agent, state.blacklist, state.optimization_history,
-           state.optimization_report
+           state.optimization_report, state.reindex_required
 
 [state.status 신호]  (graph 라우팅이 참고)
   - "applied"      : 새 처방을 적용함 → 재색인 필요(Index)
@@ -141,6 +142,16 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             state, request, prescription_id, before_config, before_report
         )
         item.metadata["reindex_required"] = bool(result.needs_reindex)
+        if rolled_back and judged_item is not None:
+            item.metadata["before_index_key"] = judged_item.metadata.get(
+                "before_index_key", ""
+            )
+            item.metadata["before_eval_key"] = judged_item.metadata.get(
+                "before_eval_key", ""
+            )
+        else:
+            item.metadata["before_index_key"] = state.active_index_key
+            item.metadata["before_eval_key"] = state.active_eval_key
         state.optimization_history.append(item)
         if starts_new_label:
             state.iteration += 1
