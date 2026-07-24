@@ -51,6 +51,12 @@ class AgentDoctorState:
         # metadata 기록에 소비한다. 둘 다 미지정 시 5를 폴백으로 쓰고 있어 같은 값을
         # 명시해 동작을 바꾸지 않으면서 Optimize가 조정할 baseline을 드러낸다.
         "top_k": 5,
+        "chunk_strategy": "markdown_recursive",
+        "embedding_dimension": 1024,
+        "deduplicate": True,
+        "hybrid_dense_weight": 0.7,
+        "use_reranker": False,
+        "reranker_model": "BAAI/bge-reranker-v2-m3",
         # gold span 길이 분포에서 chunk_size 탐색 후보를 만드는 정책.
         # Optimize가 상태를 통해 읽도록 두어 코드 하드코딩 없이 조정할 수 있다.
         "chunk_candidate_policy": {
@@ -72,6 +78,14 @@ class AgentDoctorState:
             "max_ratio": 0.40,
             "max_overlap": 300,
         },
+        "graph_enabled": True,
+        "graph_extraction": "auto",
+        "graph_llm_model": "gpt-4.1-mini",
+        "graph_similarity_threshold": 0.9,
+        "graph_output_dir": "output/index_graph",
+        "corpus_visualization_enabled": True,
+        "corpus_visualization_output_dir": "output/corpus_visualization",
+        "corpus_visualization_max_points": 500,
         # 임베딩 모델 교체로 벡터 차원이 달라졌을 때 Qdrant 컬렉션을 재생성할지 여부.
         # False(기본)면 차원 불일치 시 ensure_collection이 ValueError로 막는다.
         "recreate_collection_on_dimension_mismatch": False,

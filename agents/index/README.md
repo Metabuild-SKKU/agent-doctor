@@ -24,12 +24,14 @@ state.documents
 | 크기 | 512자, overlap 50자 | `state.index_config` |
 | 임베딩 | `BAAI/bge-m3` (1024차원) | `embedding_model`, `embedding_dimension` |
 | Vector DB | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY` |
-| 검색 | Dense, top-k 5 | `top_k` |
-| Hybrid | 기본 OFF | `use_hybrid=True` |
+| 검색 | Dense/Hybrid, top-k 5 | `top_k` |
+| Hybrid | 기본 ON | `use_hybrid=False` |
 | Reranker | 기본 OFF | `use_reranker=True` |
 | Graph | NetworkX + Mermaid/PyVis | `graph_*` 설정 |
 
-Hybrid와 reranker는 baseline 결과를 먼저 측정한 뒤 Optimize가 켜는 기능이다.
+Hybrid는 Qdrant named dense/sparse vector와 RRF fusion을 우선 사용한다. 기존 dense-only
+컬렉션처럼 native sparse 검색을 쓸 수 없는 환경에서는 local dense+keyword fusion으로
+fallback한다. Reranker는 baseline 결과를 먼저 측정한 뒤 Optimize가 켜는 기능이다.
 
 ## 롤백 2-slot 캐시
 
@@ -155,6 +157,42 @@ state.index_artifacts = {
 `embedding_model`과 검색 설정이 들어간다. Eval은 `char_span`으로 재청킹
 후에도 gold 위치를 다시 찾고, Serve API는 저장된 모델 설정으로 질문을
 동일한 벡터 공간에 임베딩한다.
+
+## Eval/RAG 검색 인터페이스
+
+Eval의 임시 `retrieval_temp.py`는 아래 호출로 대체한다.
+
+```python
+from agents.rag.retriever import get_retriever
+from agents.rag.generator import answer_text
+
+retriever = get_retriever(state.chunks, state.index_config)
+answer = answer_text(
+    probe.question,
+    retriever,
+    top_k=state.index_config.get("top_k", 5),
+    config=state.index_config,
+)
+```
+
+`get_retriever()`는 임베딩이 있으면 Qdrant dense/hybrid 검색을 준비한다.
+`use_hybrid=True`이면 Qdrant sparse vector prefetch와 dense prefetch를 RRF로 합친다.
+Qdrant 준비 실패나 임베딩 누락 시 keyword fallback으로 내려간다.
+같은 프로세스에서 같은 청크 집합을 반복 검색할 때는 적재 캐시를 사용하고,
+공유 컬렉션에 여러 코퍼스가 올라가도 현재 청크 scope로 검색 결과를 제한한다.
+`use_hybrid`, `use_reranker`, `top_k`, `embedding_model`, `embedding_dimension`은
+`state.index_config`와 Chunk metadata에서 복원된다.
+
+기존 dense-only Qdrant 컬렉션은 named dense/sparse shape가 아니므로 native hybrid로
+자동 변환하지 않는다. 이 경우 같은 컬렉션에서는 dense 검색과 keyword fallback이 유지된다.
+native hybrid를 사용하려면 컬렉션을 비워도 되는 환경에서 아래 옵션을 한 번 켠 뒤 재색인한다.
+
+```python
+state.index_config["recreate_collection_on_dimension_mismatch"] = True
+```
+
+재생성 뒤 만들어지는 컬렉션은 named vector `dense`와 sparse vector `sparse`를 가진다.
+운영 데이터가 들어 있는 공유 Qdrant에서는 별도 컬렉션/백업을 먼저 준비한다.
 
 ## Graph 추출
 

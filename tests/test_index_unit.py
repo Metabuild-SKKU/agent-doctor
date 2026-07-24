@@ -7,9 +7,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from qdrant_client.models import Distance, VectorParams
+
 from agents.index.agent import CHUNK_STRATEGIES, IndexTools, _chunk_document, run
 from agents.index.graph_index import build_graph_artifacts
+from agents.index import qdrant_store
 from agents.index.qdrant_store import (
+    COLLECTION,
+    build_sparse_vector,
     build_client,
     delete_document_chunks,
     ensure_collection,
@@ -537,6 +542,226 @@ class SearchAndGraphTests(unittest.TestCase):
         )
 
         self.assertEqual({item["chunk_id"] for item in results}, {"dense", "keyword"})
+
+    def test_native_hybrid_search_uses_qdrant_sparse_vector(self):
+        client = build_client(":memory:")
+        ensure_collection(client, vector_dim=2)
+        chunks = [
+            Chunk(
+                chunk_id="dense",
+                doc_id="d1",
+                text="semantic policy guide",
+                embedding=[1.0, 0.0],
+                sparse_vector=build_sparse_vector("semantic policy guide"),
+            ),
+            Chunk(
+                chunk_id="keyword",
+                doc_id="d2",
+                text="RAGAS Oracle Test setting",
+                embedding=[0.0, 1.0],
+                sparse_vector=build_sparse_vector("RAGAS Oracle Test setting"),
+            ),
+        ]
+        upsert_chunks(client, chunks)
+
+        with patch(
+            "agents.index.qdrant_store.search",
+            side_effect=AssertionError("local fusion used"),
+        ):
+            results = hybrid_search(
+                client,
+                query_vector=[1.0, 0.0],
+                query="Oracle Test",
+                chunks=[],
+                top_k=2,
+                dense_weight=0.5,
+            )
+
+        self.assertEqual({item["chunk_id"] for item in results}, {"dense", "keyword"})
+
+    def test_native_hybrid_search_is_limited_to_retrieval_scope(self):
+        client = build_client(":memory:")
+        ensure_collection(client, vector_dim=2)
+        chunks = [
+            Chunk(
+                chunk_id="shared",
+                doc_id="doc-a",
+                text="Oracle Test from corpus A",
+                embedding=[0.0, 1.0],
+                sparse_vector=build_sparse_vector("Oracle Test from corpus A"),
+                metadata={"retrieval_scope_id": "scope-a"},
+            ),
+            Chunk(
+                chunk_id="shared",
+                doc_id="doc-b",
+                text="Oracle Test from corpus B",
+                embedding=[1.0, 0.0],
+                sparse_vector=build_sparse_vector("Oracle Test from corpus B"),
+                metadata={"retrieval_scope_id": "scope-b"},
+            ),
+        ]
+        upsert_chunks(client, chunks)
+
+        results = hybrid_search(
+            client,
+            query_vector=[1.0, 0.0],
+            query="Oracle Test",
+            chunks=[],
+            top_k=2,
+            dense_weight=0.5,
+            retrieval_scope_id="scope-b",
+        )
+
+        self.assertEqual([item["doc_id"] for item in results], ["doc-b"])
+
+    def test_point_id_includes_scope_and_delete_respects_scope(self):
+        client = build_client(":memory:")
+        ensure_collection(client, vector_dim=2)
+        chunks = [
+            Chunk(
+                chunk_id="same-chunk",
+                doc_id="same-doc",
+                text="first corpus",
+                embedding=[1.0, 0.0],
+                metadata={"retrieval_scope_id": "scope-a"},
+            ),
+            Chunk(
+                chunk_id="same-chunk",
+                doc_id="same-doc",
+                text="second corpus",
+                embedding=[0.0, 1.0],
+                metadata={"retrieval_scope_id": "scope-b"},
+            ),
+        ]
+        upsert_chunks(client, chunks)
+
+        self.assertEqual(len(search(client, [1.0, 0.0], top_k=5)), 2)
+
+        delete_document_chunks(client, ["same-doc"], retrieval_scope_id="scope-a")
+
+        remaining = search(client, [0.0, 1.0], top_k=5)
+        self.assertEqual([item["retrieval_scope_id"] for item in remaining], ["scope-b"])
+
+    def test_legacy_dense_only_collection_uses_dense_upsert_and_search(self):
+        client = build_client(":memory:")
+        client.create_collection(
+            collection_name=COLLECTION,
+            vectors_config=VectorParams(size=2, distance=Distance.COSINE),
+        )
+        ensure_collection(client, vector_dim=2)
+        upsert_chunks(
+            client,
+            [
+                Chunk(
+                    chunk_id="legacy",
+                    doc_id="doc",
+                    text="legacy dense collection",
+                    embedding=[1.0, 0.0],
+                    sparse_vector=build_sparse_vector("legacy dense collection"),
+                )
+            ],
+        )
+
+        results = search(client, [1.0, 0.0], top_k=1)
+
+        self.assertEqual(results[0]["chunk_id"], "legacy")
+
+    def test_legacy_dense_search_uses_query_points_without_search_api(self):
+        client = build_client(":memory:")
+        client.create_collection(
+            collection_name=COLLECTION,
+            vectors_config=VectorParams(size=2, distance=Distance.COSINE),
+        )
+        ensure_collection(client, vector_dim=2)
+        upsert_chunks(
+            client,
+            [
+                Chunk(
+                    chunk_id="legacy",
+                    doc_id="doc",
+                    text="legacy dense collection",
+                    embedding=[1.0, 0.0],
+                )
+            ],
+        )
+
+        real_query_points = client.query_points
+        calls = []
+
+        def spy_query_points(**kwargs):
+            calls.append(kwargs)
+            return real_query_points(**kwargs)
+
+        with patch.object(client, "query_points", side_effect=spy_query_points):
+            results = search(client, [1.0, 0.0], top_k=1)
+
+        self.assertEqual(results[0]["chunk_id"], "legacy")
+        self.assertTrue(calls)
+        self.assertNotIn("using", calls[0])
+
+    def test_dense_search_rechecks_shape_cache_after_collection_migration(self):
+        client = build_client(":memory:")
+        ensure_collection(client, vector_dim=2)
+        upsert_chunks(
+            client,
+            [
+                Chunk(
+                    chunk_id="native",
+                    doc_id="doc",
+                    text="native hybrid collection",
+                    embedding=[1.0, 0.0],
+                    sparse_vector=build_sparse_vector("native hybrid collection"),
+                )
+            ],
+        )
+        qdrant_store._collection_native_hybrid_cache[client] = False
+
+        results = search(client, [1.0, 0.0], top_k=1)
+
+        self.assertEqual(results[0]["chunk_id"], "native")
+        self.assertTrue(qdrant_store._collection_has_native_hybrid(client))
+
+    def test_upsert_rechecks_shape_after_transient_probe_failure(self):
+        client = build_client(":memory:")
+        ensure_collection(client, vector_dim=2)
+        chunk = Chunk(
+            chunk_id="native",
+            doc_id="doc",
+            text="native hybrid collection",
+            embedding=[1.0, 0.0],
+            sparse_vector=build_sparse_vector("native hybrid collection"),
+        )
+        qdrant_store._clear_collection_shape_cache(client)
+        real_get_collection = client.get_collection
+        calls = {"n": 0}
+
+        def flaky_get_collection(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("temporary qdrant probe failure")
+            return real_get_collection(*args, **kwargs)
+
+        with patch.object(client, "get_collection", side_effect=flaky_get_collection):
+            upsert_chunks(client, [chunk])
+            upsert_chunks(client, [chunk])
+
+        results = search(client, [1.0, 0.0], top_k=1)
+        self.assertEqual(results[0]["chunk_id"], "native")
+        self.assertTrue(qdrant_store._collection_has_native_hybrid(client))
+
+    def test_recreate_legacy_collection_logs_shape_migration(self):
+        client = build_client(":memory:")
+        client.create_collection(
+            collection_name=COLLECTION,
+            vectors_config=VectorParams(size=2, distance=Distance.COSINE),
+        )
+
+        with patch("builtins.print") as print_mock:
+            ensure_collection(client, vector_dim=2, recreate_on_mismatch=True)
+
+        self.assertTrue(
+            any("legacy dense-only 컬렉션 재생성" in str(call) for call in print_mock.call_args_list)
+        )
 
     def test_graph_artifacts_are_written(self):
         chunk = Chunk(
