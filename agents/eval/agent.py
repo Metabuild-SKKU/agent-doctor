@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 
 from core.schema import Probe
-from core.llm_usage import print_summary
+from core.llm_usage import agent_box, reset_steps, step
 from core.parallel import parallel_map
 from core.state import AgentDoctorState
 
@@ -71,10 +72,13 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
         return {}
 
 
+_MODE_NAMES = {Mode.FAST: "fast", Mode.STANDARD: "standard", Mode.DEEP: "deep", Mode.FULL: "full"}
+
+
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
-    print(f"[Eval] 청크 {len(state.chunks)}개, 반복 {state.iteration + 1}/{state.max_iterations}")
+    reset_steps()   # Optimize 루프로 재진입할 때 이전 회차의 스텝 기록이 섞이지 않게
 
     if not state.chunks:
         state.status = "error"
@@ -84,7 +88,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     # 진단 모드(비용 tier 상한): EVAL_MODE 환경변수. STEP3-2/STEP4/리포트가 이 값으로 게이팅된다.
     mode = resolve_mode()
-    print(f"[Eval] 진단 모드 = {mode} (1=fast·2=standard·3=deep·4=full)")
+    print(f"[Eval] 청크 {len(state.chunks)}개, 반복 {state.iteration + 1}/{state.max_iterations}"
+          f" · 진단 모드 {_MODE_NAMES.get(mode, mode)}({mode})")
 
     # 진단 신호 캐시: 파이프라인 버전(index_config+코퍼스)이 바뀌면 무효화 → stale 재사용 방지.
     # 진단 신호(예: gold_in_wider_candidates)는 top_k 로 검색한 결과에 의존하므로,
@@ -109,38 +114,39 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # made: 코퍼스 버전과 무관하게 이미 만들어 둔 eval_probes.json 을 그대로 재사용
         # (파일 없음/비었으면 자동 생성으로 폴백해 저장). user_questions 보다 우선한다.
         probe_source = resolve_probe_source()
-        if probe_source == PROBE_SOURCE_MADE:
-            probes = load_probes(probe_version, ignore_version=True)
-            if probes:
-                probes = _resync_gold_chunk_ids(
-                    probes,
-                    state.chunks,
-                    state.documents,
-                )
-                print(f"[Eval] STEP1: made 소스 — 저장된 Probe {len(probes)}개 재사용")
-            else:
-                print("[Eval] STEP1: made 소스지만 저장된 Probe 없음 → 자동 생성 후 저장")
+        with step("Eval", 1, "Probe 생성"):
+            if probe_source == PROBE_SOURCE_MADE:
+                probes = load_probes(probe_version, ignore_version=True)
+                if probes:
+                    probes = _resync_gold_chunk_ids(
+                        probes,
+                        state.chunks,
+                        state.documents,
+                    )
+                    print(f"  made 소스 — 저장된 Probe {len(probes)}개 재사용")
+                else:
+                    print("  made 소스지만 저장된 Probe 없음 → 자동 생성 후 저장")
+                    probes = generate_probes(state)
+                    save_probes(probes, probe_version)
+            elif probe_source == PROBE_SOURCE_TAXONOMY:
+                # taxonomy 는 probe_version 키(corpus_version=청크+문서)에 없는 입력(QA 파일·
+                # KORQUAD_MAX_DOCS/QA_LIMIT)에 좌우되므로 캐시를 타면 auto/다른 QA 의 Probe 를 재사용해 오염된다.
+                # 파일 로드+resync 는 LLM 없이 저비용이라 매번 새로 만든다(캐시 우회).
                 probes = generate_probes(state)
-                save_probes(probes, probe_version)
-        elif probe_source == PROBE_SOURCE_TAXONOMY:
-            # taxonomy 는 probe_version 키(corpus_version=청크+문서)에 없는 입력(QA 파일·
-            # KORQUAD_MAX_DOCS/QA_LIMIT)에 좌우되므로 캐시를 타면 auto/다른 QA 의 Probe 를 재사용해 오염된다.
-            # 파일 로드+resync 는 LLM 없이 저비용이라 매번 새로 만든다(캐시 우회).
-            probes = generate_probes(state)
-        elif uses_user_log(state):
-            probes = generate_probes(state)
-        else:
-            probes = load_probes(probe_version)
-            if probes is None:
+            elif uses_user_log(state):
                 probes = generate_probes(state)
-                save_probes(probes, probe_version)
             else:
-                probes = _resync_gold_chunk_ids(
-                    probes,
-                    state.chunks,
-                    state.documents,
-                )
-                print(f"[Eval] STEP1: 저장된 Probe {len(probes)}개 재사용(버전 일치)")
+                probes = load_probes(probe_version)
+                if probes is None:
+                    probes = generate_probes(state)
+                    save_probes(probes, probe_version)
+                else:
+                    probes = _resync_gold_chunk_ids(
+                        probes,
+                        state.chunks,
+                        state.documents,
+                    )
+                    print(f"  저장된 Probe {len(probes)}개 재사용(버전 일치)")
         if not probes:
             print("[Eval] 경고: Probe 0개 생성 → 평가 불가, 통과 처리")
             state.probes = []
@@ -161,85 +167,103 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                          retrieve_fn=_retrieve_with_rag, keyword_fn=keyword_search,
                          ragas_fn=_ragas_track)
 
-        # ── STEP2~4: probe 별 평가 ────────────────────────────
+        # ── STEP2: 검색 + 답변 생성 ───────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
         #   진단 중 계산한 비싼 신호가 state 에 누적되어 재진단 시 재사용된다.
         #   LLM 호출(답변 생성)만 병렬화하고 검색·진단은 순차 유지 — Qdrant/임베딩/
         #   signals 전역이 병렬 구간에 들어가지 않게 하는 설계(계획 B안).
-        print(f"\n[Eval] STEP2-4: probe별 평가 ({len(probes)}개)\n")
-
-        # Phase A(순차): 검색 + record 준비, 답변 생성 태스크 수집
-        records = []
-        gen_tasks: list[tuple[EvalRecord, str, list[str]]] = []
-        for p in probes:
-            rec = _prepare_record(p, retriever, chunk_text, top_k,
-                                  state.diagnosis_cache.setdefault(p.probe_id, {}))
-            records.append(rec)
-            gen_tasks.append((rec, "real", rec.retrieved_context))
-            if rec.oracle_context:  # gold context 가 있을 때만 Oracle 트랙 (기존 동일)
-                gen_tasks.append((rec, "oracle", rec.oracle_context))
-
-        # Phase B(병렬): LLM 답변 생성만 동시 실행 (EVAL_LLM_CONCURRENCY, 1이면 순차)
         concurrency = resolve_llm_concurrency()
-        if concurrency > 1 and len(gen_tasks) > 1:
-            print(f"[Eval] STEP2: 답변 생성 {len(gen_tasks)}건 병렬 실행 (동시성 {concurrency})")
-        answers = parallel_map(lambda t: generate_answer(t[0].probe.question, t[2]),
-                               gen_tasks, concurrency)
-        for (rec, track, _ctx), answer in zip(gen_tasks, answers):
-            if track == "real":
-                rec.generated_answer = answer
-            else:
-                rec.oracle_answer = answer
+        with step("Eval", 2, "검색 + 답변 생성"):
+            # Phase A(순차): 검색 + record 준비, 답변 생성 태스크 수집
+            records = []
+            gen_tasks: list[tuple[EvalRecord, str, list[str]]] = []
+            for p in probes:
+                rec = _prepare_record(p, retriever, chunk_text, top_k,
+                                      state.diagnosis_cache.setdefault(p.probe_id, {}))
+                records.append(rec)
+                gen_tasks.append((rec, "real", rec.retrieved_context))
+                if rec.oracle_context:  # gold context 가 있을 때만 Oracle 트랙 (기존 동일)
+                    gen_tasks.append((rec, "oracle", rec.oracle_context))
 
+            # Phase B(병렬): LLM 답변 생성만 동시 실행 (EVAL_LLM_CONCURRENCY, 1이면 순차)
+            parallel_note = (f" 병렬 (동시성 {concurrency})"
+                             if concurrency > 1 and len(gen_tasks) > 1 else " 순차")
+            print(f"  probe {len(probes)}개 · 답변 {len(gen_tasks)}건{parallel_note}")
+            answers = parallel_map(lambda t: generate_answer(t[0].probe.question, t[2]),
+                                   gen_tasks, concurrency)
+            for (rec, track, _ctx), answer in zip(gen_tasks, answers):
+                if track == "real":
+                    rec.generated_answer = answer
+                else:
+                    rec.oracle_answer = answer
+
+        # ── STEP3: 지표 · RAGAS 진단 ──────────────────────────
         # Phase B2(병렬): RAGAS 선계산 — 트랙별로 필요한 probe 만 동시 실행하고 *_done
         # 플래그를 세워, Phase C 의 _compute_ragas_real/_oracle 이 캐시 히트만 하게 한다.
         # _ragas_track 은 진단 전역과 무관한 모듈 함수라 병렬 구간에 안전.
         # 게이트는 _compute_ragas_* 와 동일(mode >= DEEP); LLM 비활성·키없음은
         # _ragas_track 이 {} 폴백이라 기존과 같은 동작으로 수렴한다.
         # 동시성 1이면 태스크 순서가 Phase C 호출 순서(probe 순)와 일치.
-        if mode >= Mode.DEEP:
-            # B2-1: 실제 트랙은 전 probe 에 필요하다 — 성공/실패 판정(_f1_ok 의 강등)과
-            # 리포트 RAGAS 평균이 모두 실제 트랙을 쓴다.
-            if concurrency > 1 and len(records) > 1:
-                print(f"[Eval] STEP3-2: RAGAS 실제 트랙 {len(records)}건 병렬 실행 (동시성 {concurrency})")
-            real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records, concurrency)
-            for rec, score in zip(records, real_scores):
-                rec.ragas, rec.ragas_done = score, True
+        with step("Eval", 3, "지표 · RAGAS 진단"):
+            if mode < Mode.DEEP:
+                print(f"  모드 {_MODE_NAMES.get(mode, mode)} — RAGAS 생략 (deep 이상에서 실행)")
+            else:
+                # B2-1: 실제 트랙은 전 probe 에 필요하다 — 성공/실패 판정(_f1_ok 의 강등)과
+                # 리포트 RAGAS 평균이 모두 실제 트랙을 쓴다.
+                real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records, concurrency)
+                for rec, score in zip(records, real_scores):
+                    rec.ragas, rec.ragas_done = score, True
 
-            # B2-2: 오라클 트랙은 '실패로 판정된 probe' 에만 필요하다 — 소비처가 B그룹 라벨과
-            # _oracle_ok 뿐이고, 리포트 평균은 실제 트랙만 쓴다. 성공 probe 는 diagnose 가
-            # 성공 게이트에서 바로 끝나므로 오라클 LLM 비용을 지불할 이유가 없다.
-            # 판정에 쓸 규칙 지표를 먼저 채운다(_compute_metrics 는 순수·멱등이라 Phase C 에서
-            # diagnose 가 다시 불러도 같은 값이 나온다).
-            for rec in records:
-                _compute_metrics(rec)
-            failed = [rec for rec in records if _is_success(rec) is False]
-            if failed:
-                if concurrency > 1 and len(failed) > 1:
-                    print(f"[Eval] STEP3-2: RAGAS 오라클 트랙 {len(failed)}건 병렬 실행 "
-                          f"(실패 probe 만, 전체 {len(records)}건 중)")
-                oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency)
-                for rec, score in zip(failed, oracle_scores):
-                    rec.oracle_ragas, rec.oracle_ragas_done = score, True
+                # B2-2: 오라클 트랙은 '실패로 판정된 probe' 에만 필요하다 — 소비처가 B그룹 라벨과
+                # _oracle_ok 뿐이고, 리포트 평균은 실제 트랙만 쓴다. 성공 probe 는 diagnose 가
+                # 성공 게이트에서 바로 끝나므로 오라클 LLM 비용을 지불할 이유가 없다.
+                # 판정에 쓸 규칙 지표를 먼저 채운다(_compute_metrics 는 순수·멱등이라 Phase C 에서
+                # diagnose 가 다시 불러도 같은 값이 나온다).
+                for rec in records:
+                    _compute_metrics(rec)
+                failed = [rec for rec in records if _is_success(rec) is False]
+                print(f"  RAGAS 실제 {len(records)}건 / 오라클 {len(failed)}건 (실패 probe 만)")
+                if failed:
+                    oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency)
+                    for rec, score in zip(failed, oracle_scores):
+                        rec.oracle_ragas, rec.oracle_ragas_done = score, True
 
+        # ── STEP4: 원인 판정 ──────────────────────────────────
         # Phase C(순차): 지표·진단·로그 — diagnose 는 signals 전역·진단 캐시·tier2
         # 재검색을 쓰므로 병렬 구간 밖에서 실행한다.
-        for i, rec in enumerate(records, 1):
-            rec.findings = diagnose(rec, mode)
-            _log_probe(i, len(records), rec)
+        with step("Eval", 4, "원인 판정"):
+            print()
+            for i, rec in enumerate(records, 1):
+                rec.findings = diagnose(rec, mode)
+                _log_probe(i, len(records), rec)
+            _log_diagnosis_summary(records)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
-        state.probes = probes
-        state.report = build_report(records, state.iteration, mode)
-        state.status = "evaluated"
+        with step("Eval", 5, "리포트"):
+            state.probes = probes
+            state.report = build_report(records, state.iteration, mode)
+            state.status = "evaluated"
 
     except Exception as e:  # 계약: 예외를 밖으로 던지지 않는다
         state.status = "error"
         state.error = f"평가 실패: {e}"
         print(f"[Eval] 오류: {e}")
 
-    print_summary(tag="Eval")
+    agent_box("Eval")
     return state
+
+
+def _log_diagnosis_summary(records: list[EvalRecord]) -> None:
+    """STEP4 마감 요약 — 성공/실패 probe 수와 Finding 확정·예비 내역."""
+    findings = [f for r in records for f in r.findings]
+    failed = sum(1 for r in records if r.findings)
+    confirmed = sum(1 for f in findings if f.confirmed)
+    # '↳' 는 step() 의 마감줄 전용 — 여기서 같이 쓰면 STEP4 끝에 화살표 두 줄이 붙는다.
+    line = f"  판정: 성공 {len(records) - failed} / 실패 {failed}"
+    if findings:
+        line += (f" · Finding {len(findings)}건 "
+                 f"(확정 {confirmed} · 예비 {len(findings) - confirmed})")
+    print(line)
 
 
 # ── probe 1개 평가 (STEP2 → STEP3 → STEP4) ───────────────────────
@@ -263,8 +287,23 @@ def _short_cid(cid: str) -> str:
     return cid[i + 1:] if i != -1 else cid
 
 
+def _mark(ok: bool) -> str:
+    """성공/실패 마크. 콘솔이 이모지를 못 그리면(Windows cp949 등) ASCII 로 폴백한다 —
+    run_logger 의 Tee 가 '?' 로 치환하면 성공/실패 구분이 사라지기 때문.
+
+    getattr 로 encoding 을 읽는 이유: run_logger._Tee 로 교체된 stdout 에는 encoding
+    속성이 아예 없다. 속성 접근을 그대로 두면 AttributeError 가 run() 의 except 로
+    올라가, 정상 진행된 평가가 통째로 error 로 뒤집힌다(실제로 그랬다)."""
+    glyph = "✅" if ok else "❌"
+    try:
+        glyph.encode(getattr(sys.stdout, "encoding", None) or "utf-8")
+    except (UnicodeEncodeError, LookupError):
+        return "[OK]" if ok else "[FAIL]"
+    return glyph
+
+
 def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
-    """probe 1개 평가 결과를 블록 형태로 출력(STEP2~4 진행 가시성용).
+    """probe 1개 평가 결과를 블록 형태로 출력(STEP4 진행 가시성용).
     질문(Q)·정답(A)·생성 답변(R)·검색/gold·지표·판정 라벨을 한 블록으로 남기고 빈 줄로 구분한다."""
     p = rec.probe
     meta = "·".join(filter(None, [p.source, p.qtype or "single"]))
@@ -273,21 +312,18 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
     oracle = _fmt_metric(rec.oracle_f1, rec.oracle_answer is not None)
     retrieved = ", ".join(_short_cid(c) for c in rec.retrieved_chunk_ids)
     gold = ", ".join(_short_cid(c) for c in p.gold_chunk_ids)
+    # 판정은 finding 유무로 — diagnose 가 원인을 하나도 못 붙였으면 정상 처리된 probe 다.
+    status = _mark(not rec.findings) + (f" {len(rec.findings)}건" if rec.findings else "")
 
-    print(f"[{idx}/{total}] {p.probe_id}  ({meta})")
-    print(f"Q: {_clip(p.question, 80)}")
-    print(f"A: {_clip(p.ground_truth, 80) if p.ground_truth else '-'}")
-    print(f"R: {_clip(rec.generated_answer, 80) if rec.generated_answer else '-'}")
-    print(f"검색: [{retrieved}]")
-    print(f"골드: [{gold}]")
-    print(f"메트릭 결과: recall@k={recall}  f1={f1}  oracle_f1={oracle}")
-    print(f"-Findings({len(rec.findings)})-")
-    if rec.findings:
-        for i, f in enumerate(rec.findings, 1):
-            mark = "" if f.confirmed else "(예비)"
-            print(f"[{i}] {f.label}{mark}: {f.metadata.get('reason') or '-'}")
-    else:
-        print("없음(정상)")
+    print(f"  [{idx}/{total}] {p.probe_id}  ({meta})  {status}")
+    print(f"    Q: {_clip(p.question, 80)}")
+    print(f"    A: {_clip(p.ground_truth, 80) if p.ground_truth else '-'}")
+    print(f"    R: {_clip(rec.generated_answer, 80) if rec.generated_answer else '-'}")
+    print(f"    검색 [{retrieved}] / 골드 [{gold}]")
+    print(f"    recall@k={recall}  f1={f1}  oracle_f1={oracle}")
+    for f in rec.findings:
+        mark = "" if f.confirmed else "(예비)"
+        print(f"    ! {f.label}{mark}: {f.metadata.get('reason') or '-'}")
     print()  # 블록 구분 빈 줄
 
 

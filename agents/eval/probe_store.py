@@ -67,7 +67,7 @@ def save_probes(probes: list[Probe], version: str, path: str = DEFAULT_STORE_PAT
         data = {"version": version, "probes": [asdict(p) for p in probes]}
         Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as e:
-        print(f"[Eval] STEP1: probe 저장 실패({e}) → 다음 실행에서 재생성됨")
+        print(f"  probe 저장 실패({e}) → 다음 실행에서 재생성됨")
 
 
 def load_probes(

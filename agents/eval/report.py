@@ -212,17 +212,17 @@ def _oracle_accuracy(records: list[EvalRecord]) -> float | None:
 # ── 로그 요약 ─────────────────────────────────────────────────────
 
 def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
-    n = len(records)
-    fail = sum(1 for r in records if r.findings)
+    # 들여쓰기 2칸: agents/eval/agent.py 의 STEP5 스텝 블록 본문으로 출력된다
+    # (스텝 헤더가 이미 'Eval STEP5' 를 말하므로 줄마다 접두사를 다시 붙이지 않는다).
     fs = report.findings_summary
-    print(f"[Eval] STEP5: 리포트 생성 - probe {n}개, 실패 {fail}개, "
-          f"overall={report.overall_score}, pass={report.pass_threshold} (모드 {fs.get('mode')})")
-    print(f"[Eval]        종합점수: {format_composite(report.composite_score)}")
+    pass_mark = "✓" if report.pass_threshold else "✗"
+    print(f"  종합점수 {format_composite(report.composite_score)}"
+          f" · overall {report.overall_score} · pass {pass_mark}")
     rs = report.ragas_scores
     if "mean_f1" in rs:   # KorQuAD식 관측 지표: F1 과 EM 을 나란히
-        print(f"[Eval]        정답매칭(관측): F1={rs['mean_f1']:.3f}  EM={rs.get('mean_exact_match', 0.0):.3f}")
+        print(f"  정답매칭(관측) F1={rs['mean_f1']:.3f}  EM={rs.get('mean_exact_match', 0.0):.3f}")
     if rs.get("answer_correctness_degraded"):
-        print(f"[Eval]        ⚠ 정답 판정 degrade {rs['answer_correctness_degraded']}건 — "
+        print(f"  ⚠ 정답 판정 degrade {rs['answer_correctness_degraded']}건 — "
               f"판정기(TP/FP/FN 분류) 실패로 의미유사도 단독 계산. 근접 오답을 못 걸렀을 수 있음")
     if report.findings:
         # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
@@ -239,9 +239,8 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
         for src in (fs.get("confirmed_labels", {}), fs.get("preliminary_labels", {})):
             for label, w in src.items():
                 by_label[label] = round(by_label.get(label, 0.0) + w, 3)
-        print(f"[Eval]        Finding {len(report.findings)}개 "
-              f"(확정 {fs.get('confirmed', 0)} / 예비 {fs.get('preliminary', 0)}), "
-              f"가중 타입분포 {by_type}")
-        print(f"[Eval]        가중 라벨분포 {dict(sorted(by_label.items(), key=lambda kv: -kv[1]))}")
+        # Finding 개수(확정/예비)는 STEP4 마감줄이 이미 보고했다 — 여기선 분포만.
+        print(f"  가중 타입분포 {by_type}")
+        print(f"  가중 라벨분포 {dict(sorted(by_label.items(), key=lambda kv: -kv[1]))}")
         if fs.get("preliminary"):
-            print(f"[Eval]        예비 {fs['preliminary']}개는 더 깊은 모드(EVAL_MODE=deep/full)에서 확정 가능")
+            print(f"  예비 {fs['preliminary']}개는 더 깊은 모드(EVAL_MODE=deep/full)에서 확정 가능")

@@ -101,7 +101,7 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
 
     if uses_user_log(state):
         probes = _from_user_questions(state.user_questions)
-        print(f"[Eval] STEP1: user_log Probe {len(probes)}개 생성")
+        print(f"  user_log Probe {len(probes)}개 생성")
         return _finalize_probes(probes, state)
 
     graph = knowledge_graph.build_graph(state.chunks)
@@ -137,11 +137,11 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
 
     probes = ragas_probes + datamorgana_probes + no_answer_probes
     ragas_label = "ragas(단일홉 폴백)" if ragas_fallback else "ragas"
-    print(f"[Eval] STEP1: llm_generated Probe {len(probes)}개 생성 "
+    print(f"  llm_generated Probe {len(probes)}개 생성 "
           f"({ragas_label}={len(ragas_probes)}, datamorgana={len(datamorgana_probes)}, "
           f"no_answer={len(no_answer_probes)})")
     if len(probes) < testset_size:
-        print(f"[Eval] STEP1: 요청 {testset_size}개 중 {len(probes)}개만 생성됨 "
+        print(f"  요청 {testset_size}개 중 {len(probes)}개만 생성됨 "
               f"(그래프 노드/pair 또는 사용 가능한 청크 부족)")
     return _finalize_probes(probes, state)
 
@@ -183,7 +183,7 @@ def _from_taxonomy(state: AgentDoctorState) -> list[Probe]:
                                   max_docs=korquad_max_docs())
     probes = _resync_gold_chunk_ids(probes, state.chunks, state.documents)
     matched = sum(1 for p in probes if p.gold_chunk_ids)
-    print(f"[Eval] STEP1: taxonomy Probe {len(probes)}개 로드 "
+    print(f"  taxonomy Probe {len(probes)}개 로드 "
           f"(gold 매칭 {matched}/{len(probes)})")
     return probes
 
@@ -335,7 +335,7 @@ def _from_chunks(
             gen_method = "llm_single_hop"
         issue = probe_quality_issue(question, ground_truth)
         if issue:
-            print(f"[Eval] STEP1: Probe 폐기({issue}) — {question[:40]}")
+            print(f"  Probe 폐기({issue}) — {question[:40]}")
             continue
         probe = Probe(
             probe_id=f"probe_gen_{len(probes):03d}",
@@ -451,11 +451,11 @@ def _llm_generate_single_hop(chunk_text: str) -> tuple[str, str] | None:
         if not question or not ground_truth:
             # chat_json 은 JSON 파싱 실패도 {} 로 돌려주므로 여기서 "빈 응답"과 "잘린 응답"이
             # 같은 모양이 된다. 로그가 없으면 휴리스틱 폴백이 조용히 일어나 원인 추적이 불가능하다.
-            print("[Eval] STEP1: Probe LLM 생성 실패(빈 응답/JSON 파싱) → 휴리스틱 폴백")
+            print("  Probe LLM 생성 실패(빈 응답/JSON 파싱) → 휴리스틱 폴백")
             return None
         return question, ground_truth
     except Exception as e:
-        print(f"[Eval] STEP1: Probe LLM 생성 실패({e}) → 휴리스틱 폴백")
+        print(f"  Probe LLM 생성 실패({e}) → 휴리스틱 폴백")
         return None
 
 
@@ -1055,7 +1055,7 @@ def _generate_ragas_probes(
     if len(probes) < target:
         # 여유분까지 소진하고도 모자란 경우. 쓰레기로 채우면 지금 상태와 같으므로
         # 부족한 대로 두되, 조용히 넘어가지는 않는다.
-        print(f"[Eval] STEP1: RAGAS Probe {len(probes)}/{target}개 — 품질 게이트 통과분 부족")
+        print(f"  RAGAS Probe {len(probes)}/{target}개 — 품질 게이트 통과분 부족")
     return probes
 
 
@@ -1103,7 +1103,7 @@ def _generate_datamorgana_probes(
             continue
         issue = probe_quality_issue(result.question, result.ground_truth)
         if issue:
-            print(f"[Eval] STEP1: Probe 폐기({issue}) — {result.question[:40]}")
+            print(f"  Probe 폐기({issue}) — {result.question[:40]}")
             continue
         probe = Probe(
             # 폐기가 생겨도 번호가 비지 않도록 조립 순번(len(probes))을 쓴다.
@@ -1132,7 +1132,7 @@ def _generate_datamorgana_probes(
             fallback_span_count=fallback_count,
         ))
     if len(probes) < n:
-        print(f"[Eval] STEP1: DataMorgana Probe {len(probes)}/{n}개 — 품질 게이트 통과분 부족")
+        print(f"  DataMorgana Probe {len(probes)}/{n}개 — 품질 게이트 통과분 부족")
     return probes
 
 
@@ -1239,7 +1239,7 @@ def _false_premise_question(chunk_text: str) -> str | None:
             if question:
                 return question
         except Exception as e:
-            print(f"[Eval] STEP1: False Premise 질문 생성 실패({e}) → 휴리스틱 폴백")
+            print(f"  False Premise 질문 생성 실패({e}) → 휴리스틱 폴백")
     topic = _topic_of(chunk_text)
     return f"{topic}과 관련된 특별 예외 규정은 정확히 몇 조 몇 항에 명시되어 있나요?"
 
@@ -1283,7 +1283,7 @@ def _build_ragas_probe(
         return None
     issue = probe_quality_issue(result.question, result.ground_truth)
     if issue:
-        print(f"[Eval] STEP1: Probe 폐기({issue}) — {result.question[:40]}")
+        print(f"  Probe 폐기({issue}) — {result.question[:40]}")
         return None
 
     gen_method = f"ragas_{quadrant}_{subtype}" if is_multi else f"ragas_{quadrant}"
@@ -1416,7 +1416,7 @@ def _llm_synthesize_query(
         if not question or not ground_truth:
             # 위 _llm_generate_single_hop 과 같은 이유로 로그를 남긴다 — 이 침묵이
             # 쓰레기 Probe 대량 생성의 원인이었다.
-            print("[Eval] STEP1: RAGAS Probe 합성 실패(빈 응답/JSON 파싱) → 휴리스틱 폴백")
+            print("  RAGAS Probe 합성 실패(빈 응답/JSON 파싱) → 휴리스틱 폴백")
             return None
         return _SynthesizedProbe(
             question=question,
@@ -1424,7 +1424,7 @@ def _llm_synthesize_query(
             evidence=_parse_evidence(data.get("evidence")),
         )
     except Exception as e:
-        print(f"[Eval] STEP1: RAGAS Probe 합성 실패({e}) -> 휴리스틱 폴백")
+        print(f"  RAGAS Probe 합성 실패({e}) -> 휴리스틱 폴백")
         return None
 
 

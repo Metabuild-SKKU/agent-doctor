@@ -25,6 +25,7 @@ except ImportError:
 
 from langgraph.graph import StateGraph, END
 
+from core.llm_usage import print_agent_table
 from core.state import AgentDoctorState
 from agents.ingest.agent import run as ingest_run
 from agents.index.agent import run as index_run
@@ -136,6 +137,8 @@ def run_pipeline(
     # (노드 안에서는 AgentDoctorState 객체지만 invoke() 최종 반환은 dict).
     if isinstance(final_state, dict):
         final_state = AgentDoctorState(**final_state)
+
+    print_agent_table()   # 에이전트별 LLM 사용량 누적(루프를 여러 번 돌았어도 총계)
 
     print("=" * 60)
     print("완료")
