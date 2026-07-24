@@ -79,8 +79,14 @@ def check_floor(metrics: dict[str, float]) -> list[str]:
 # ── 2. 유지/롤백 판정 ─────────────────────────────────────────────
 
 def _read_score(report: DiagnosticReport) -> float:
-    """Eval 이 계산한 단일 점수(overall_score)를 읽는다.
-    아직 없으면 0.0 으로 보수적으로 취급한다."""
+    """탐색 심판(keep/rollback)이 쓰는 단일 점수 — 정규화 composite(0~1).
+    composite 은 품질×신뢰도라 검색 실패에 민감해, overall(검색에 둔감)이 오르는 동안에도
+    신뢰도가 무너지면 하락한다 → composite 이 내려가면 롤백이 걸린다(overall 만 보던 때의
+    '오서빙' 회귀를 여기서 차단). composite 미측정(평가 신호 없음)이면 overall 로 폴백하고,
+    그마저 없으면 0.0 으로 보수적으로 취급한다."""
+    total = (report.composite_score or {}).get("total")
+    if total is not None:
+        return float(total) / 100.0
     return report.overall_score if report.overall_score is not None else 0.0
 
 
@@ -101,23 +107,24 @@ def judge(
     처방 전후 Eval 리포트를 비교해 유지/롤백을 판정한다. (CONTEXT.md 5번)
       ① after 가 하한선을 위반하면 → 무조건 롤백 (지표별 원값으로 검사)
       ② Eval 단일 점수가 올랐으면 → 유지, 아니면 → 롤백
-    단일 점수는 Eval 이 계산한 overall_score 를 그대로 쓴다(여기서 재계산 안 함).
+    단일 점수는 정규화 composite(품질×신뢰도, 0~1)를 쓴다(_read_score, 여기서 재계산 안 함).
 
-    ── 탐색 신호는 overall 이어야 한다 (composite 로 바꾸지 말 것) ──────────────
-    표시·게이트(gate.py)는 설계 종합점수 composite(품질×신뢰도 조화평균)를 쓰지만,
-    최적화 탐색(이 judge 의 유지/롤백)은 반드시 overall(품질 단일축, 연속값)을 써야 한다.
-    이유: composite 의 조화평균은 신뢰도가 낮은 구간(=최적화가 가장 필요한 지점)에서
-    거의 평평해지거나 0 으로 붕괴해, "합격선을 아직 못 넘은 부분 진전"을 신호로 못 준다.
-    그러면 통과선 직전의 좋은 처방까지 롤백돼 최적화가 구멍에서 못 나온다.
-    overall 은 통과 판정을 이루는 지표(recall·faithfulness 등)의 연속 평균이라 신뢰도가
-    오를 방향으로 매끄럽게 움직인다 → 등반용 나침반으로 적합. "매끄러운 대리지표로 탐색,
-    정직한 종합점수(composite)로 게이트/표시"라는 분리가 이 설계의 핵심이다.
-    (composite 를 탐색에 넣으려면 조화평균이 아닌 매끄러운 blend 여야 하며, 근거 측정
-     없이는 도입하지 않는다.)
+    ── 탐색 신호를 composite 으로 통일한다 (과거엔 overall 이었음) ──────────────
+    표시·게이트(gate.py)도, 탐색(이 judge)도 이제 같은 composite 을 쓴다.
+    과거엔 탐색을 overall(품질 단일축)로 분리했는데, 그 이유는 "composite 의 신뢰도 축이
+    이진 통과/실패 카운트라 계단 함수 → 저신뢰도 구간에서 평평해 탐색 신호가 죽는다"는
+    것이었다. 그 근본 원인(이진 신뢰도)이 scoring.reliability_score 의 연속화로 제거되면서,
+    composite 은 저신뢰도 구간에서 오히려 기울기가 큰 매끄러운 신호가 됐다(조화평균은
+    약한 축을 강하게 반영 → 등반 방향을 또렷하게 가리킴).
+    핵심 효과: overall 은 검색 실패에 둔감해, 코퍼스가 커져 검색이 새는데도(신뢰도↓)
+    답변 품질만 보고 상승 → 그 사이 composite(=실제 표시·서빙 점수)이 나빠지는 config 를
+    "개선"으로 오인해 유지·서빙했다(오서빙 회귀). composite 으로 심판하면 신뢰도 하락이
+    곧 점수 하락이라 그런 처방이 롤백된다. "탐색·게이트·표시를 하나의 정직한 종합점수로
+    통일"하는 것이 이 설계 변경의 핵심이다.
     """
     before_score = _read_score(before_report)
     after_score = _read_score(after_report)
-    # 판정은 overall(탐색 신호)로 하되, 표시·게이트용 composite 도 함께 실어 보낸다.
+    # 판정도 표시도 모두 composite 기준. 심판용(0~1)과 표시용(0~100)을 함께 싣는다.
     before_composite = _read_composite(before_report)
     after_composite = _read_composite(after_report)
 
@@ -140,7 +147,7 @@ def judge(
             after_score=after_score,
             before_composite=before_composite,
             after_composite=after_composite,
-            reason=f"점수 상승 {before_score:.1f}→{after_score:.1f} → 유지",
+            reason=f"종합점수 상승 {before_score:.3f}→{after_score:.3f} → 유지",
         )
 
     return Verdict(
@@ -149,7 +156,7 @@ def judge(
         after_score=after_score,
         before_composite=before_composite,
         after_composite=after_composite,
-        reason=f"점수 미상승 {before_score:.1f}→{after_score:.1f} → 롤백",
+        reason=f"종합점수 미상승 {before_score:.3f}→{after_score:.3f} → 롤백",
     )
 
 

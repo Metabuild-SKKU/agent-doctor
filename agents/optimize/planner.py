@@ -1102,10 +1102,11 @@ def _build_request(
     )
     use_internal = candidate_count > 1
     metadata: dict[str, Any] = {
-        # 후보별 trade-off의 최종 심판은 항상 Eval의 단일 overall_score다.
-        # (composite 로 바꾸지 말 것 — 탐색 신호는 매끄러운 overall 이어야 한다.
-        #  근거는 history.judge 의 "탐색 신호는 overall 이어야 한다" 주석 참고.)
-        "primary_metric": "overall_score",
+        # 후보별 trade-off의 최종 심판은 Eval의 정규화 composite_score(0~1)다.
+        # 신뢰도 축이 연속값이 된 뒤 composite 이 매끄러워져, 표시·게이트와 같은 지표로
+        # 탐색까지 통일한다(과거 overall 을 따로 쓴 이유였던 '이진 신뢰도의 계단'이 사라짐).
+        # 근거: history.judge 주석 + scoring.reliability_score.
+        "primary_metric": "composite_score",
         "study_baseline_config": dict(state.index_config),
         "baseline_metrics": _report_metrics(state),
         "trial_results": [],
@@ -1158,6 +1159,12 @@ def _report_metrics(state: AgentDoctorState) -> dict[str, Any]:
     metrics: dict[str, Any] = dict(state.report.ragas_scores)
     if state.report.overall_score is not None:
         metrics["overall_score"] = state.report.overall_score
+    # 탐색 objective 는 composite_score(0~1). baseline 관측값에도 실어 sweep 이 같은
+    # 지표로 후보와 baseline 을 비교하게 한다(없으면 _extract_score 가 overall 로 폴백).
+    composite_total = (state.report.composite_score or {}).get("total")
+    if composite_total is not None:
+        metrics["composite_total"] = float(composite_total)
+        metrics["composite_score"] = float(composite_total) / 100.0
     metrics["pass_threshold"] = gate.passes_report(state.report)
     return metrics
 

@@ -269,6 +269,8 @@ class InternalAdapter:
         if configured is None and request.target_metrics:
             configured = request.target_metrics[0]
         if configured is None:
+            # 하위호환 안전망 — 아무 지표도 명시 안 된 경우만. 프로덕션은 planner 가
+            # primary_metric=composite_score 를 항상 명시하므로 이 기본값은 거의 안 쓰인다.
             configured = "overall_score"
         if not isinstance(configured, str) or not configured.strip():
             raise ValueError("primary_metric은 비어 있지 않은 문자열이어야 합니다.")

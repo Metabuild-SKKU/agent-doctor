@@ -413,12 +413,19 @@ def _report_metrics(state: AgentDoctorState) -> dict:
     composite_total = (state.report.composite_score or {}).get("total")
     if composite_total is not None:
         metrics["composite_total"] = float(composite_total)
+        # 탐색 objective(sweep 승자 선택)용 정규화 composite(0~1). overall_score 와 같은
+        # 스케일이라 objective 미측정 시 overall 폴백이 스케일-안전하다(internal_adapter).
+        metrics["composite_score"] = float(composite_total) / 100.0
     metrics["pass_threshold"] = gate.passes_report(state.report)
     return metrics
 
 
 def _report_score(report) -> float:
-    """저장된 baseline report에서 overall_score를 안전하게 읽는다."""
+    """baseline report의 탐색 점수 — 정규화 composite(0~1). sweep 승자 best_score(=composite)
+    와 같은 지표라야 before/after 가 같은 축에서 비교된다. composite 미측정이면 overall 폴백."""
+    total = (getattr(report, "composite_score", None) or {}).get("total")
+    if total is not None:
+        return float(total) / 100.0
     score = getattr(report, "overall_score", None)
     return float(score) if isinstance(score, (int, float)) else 0.0
 
