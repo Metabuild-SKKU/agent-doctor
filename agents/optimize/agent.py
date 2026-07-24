@@ -343,6 +343,9 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # 인덱스는 아직 열화 상태라 이 재색인이 반드시 일어나야 한다.
         rollback_reindex_required = state.reindex_required if rolled_back else False
 
+        if rolled_back and judged_item is not None:
+            _log_optimize_rollback(state, judged_item)
+
         # 검증된 처방을 실제 index_config 에 반영(canonical→flat 변환은 mapper 담당)
         config_diff = config_mapper.apply_config_patch(state.index_config, result.config_patch)
         # 새 처방의 재색인 필요 여부와 '롤백이 요구한 재색인'을 OR 로 합친다. 검색시점

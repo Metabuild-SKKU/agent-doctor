@@ -267,6 +267,24 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
 
+    def test_rollback_then_followup_application_logs_both_prescriptions(self):
+        state = agent.run(make_state(overall=60.0))
+        state.report = make_report(40.0, label="retrieval_semantic_mismatch")
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)
+
+        out = buf.getvalue()
+        self.assertEqual(state.optimization_history[0].status, "failed")
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "shrink_chunk_size",
+        )
+        self.assertIn("decrease_top_k", out)
+        self.assertIn("shrink_chunk_size", out)
+        self.assertLess(out.index("decrease_top_k"), out.index("shrink_chunk_size"))
+
     def test_unjudgeable_rollback_does_not_blacklist(self):
         # 측정이 없어(before_report None) 판정 불가한 경우: config 는 안전하게 복원하되,
         # '나빴다는 증거'가 아니므로 블랙리스트엔 넣지 않는다(리뷰 #36). 같은 시나리오라도
