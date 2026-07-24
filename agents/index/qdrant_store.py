@@ -108,7 +108,6 @@ def _collection_has_native_hybrid(
             and SPARSE_VECTOR_NAME in sparse_vectors
         )
     except Exception:
-        cache[collection_name] = False
         return False
     cache[collection_name] = has_native
     return has_native
@@ -245,44 +244,56 @@ def upsert_chunks(
     chunks: list,
     collection_name: str = COLLECTION,
 ) -> None:
-    use_native_hybrid = _collection_has_native_hybrid(client, collection_name)
-    points = []
-    for chunk in chunks:
-        if not chunk.embedding:
-            continue
-        metadata = chunk.metadata or {}
-        retrieval_scope_id = metadata.get("retrieval_scope_id")
-        sparse = _sparse_vector(chunk.sparse_vector)
-        if use_native_hybrid:
-            vector = {DENSE_VECTOR_NAME: chunk.embedding}
-        else:
-            vector = chunk.embedding
-        if use_native_hybrid and sparse is not None:
-            vector[SPARSE_VECTOR_NAME] = sparse
-        payload = {
-            "chunk_id": chunk.chunk_id,
-            "doc_id": chunk.doc_id,
-            "text": chunk.text,
-            "section": chunk.section,
-            "char_span": chunk.char_span,
-            "token_count": chunk.token_count,
-            "parent_id": chunk.parent_id,
-            "hash": chunk.hash,
-            "metadata": metadata,
-            "sparse_vector": chunk.sparse_vector,
-            "retrieval_scope_id": retrieval_scope_id,
-            "index_cache_key": metadata.get("index_cache_key"),
-        }
-        points.append(
-            PointStruct(
-                id=_point_id(chunk.chunk_id, retrieval_scope_id),
-                vector=vector,
-                payload=payload,
+    def _points(use_native_hybrid: bool) -> list[PointStruct]:
+        points = []
+        for chunk in chunks:
+            if not chunk.embedding:
+                continue
+            metadata = chunk.metadata or {}
+            retrieval_scope_id = metadata.get("retrieval_scope_id")
+            sparse = _sparse_vector(chunk.sparse_vector)
+            if use_native_hybrid:
+                vector = {DENSE_VECTOR_NAME: chunk.embedding}
+            else:
+                vector = chunk.embedding
+            if use_native_hybrid and sparse is not None:
+                vector[SPARSE_VECTOR_NAME] = sparse
+            payload = {
+                "chunk_id": chunk.chunk_id,
+                "doc_id": chunk.doc_id,
+                "text": chunk.text,
+                "section": chunk.section,
+                "char_span": chunk.char_span,
+                "token_count": chunk.token_count,
+                "parent_id": chunk.parent_id,
+                "hash": chunk.hash,
+                "metadata": metadata,
+                "sparse_vector": chunk.sparse_vector,
+                "retrieval_scope_id": retrieval_scope_id,
+                "index_cache_key": metadata.get("index_cache_key"),
+            }
+            points.append(
+                PointStruct(
+                    id=_point_id(chunk.chunk_id, retrieval_scope_id),
+                    vector=vector,
+                    payload=payload,
+                )
             )
-        )
-    if points:
+        return points
+
+    use_native_hybrid = _collection_has_native_hybrid(client, collection_name)
+    points = _points(use_native_hybrid)
+    if not points:
+        return
+    try:
         client.upsert(collection_name=collection_name, points=points)
-        print(f"[Qdrant] {len(points)}개 청크 저장 완료")
+    except Exception as exc:
+        if not _is_collection_shape_error(exc):
+            raise
+        _clear_collection_shape_cache(client, collection_name)
+        points = _points(_collection_has_native_hybrid(client, collection_name))
+        client.upsert(collection_name=collection_name, points=points)
+    print(f"[Qdrant] {len(points)}개 청크 저장 완료")
 
 
 def collection_index_cache_key(

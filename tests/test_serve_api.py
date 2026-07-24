@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from importlib.util import find_spec
 
 from agents.rag.retriever import RetrievalSettings
 
@@ -20,16 +21,23 @@ class _FakeFastAPI:
 
         return decorator
 
+    def post(self, *args, **kwargs):
+        def decorator(fn):
+            return fn
 
-fastapi_module = types.ModuleType("fastapi")
-fastapi_module.FastAPI = _FakeFastAPI
-fastapi_module.HTTPException = Exception
-cors_module = types.ModuleType("fastapi.middleware.cors")
-cors_module.CORSMiddleware = object
-sys.modules.setdefault("uvicorn", types.ModuleType("uvicorn"))
-sys.modules.setdefault("fastapi", fastapi_module)
-sys.modules.setdefault("fastapi.middleware", types.ModuleType("fastapi.middleware"))
-sys.modules.setdefault("fastapi.middleware.cors", cors_module)
+        return decorator
+
+
+if find_spec("fastapi") is None:
+    fastapi_module = types.ModuleType("fastapi")
+    fastapi_module.FastAPI = _FakeFastAPI
+    fastapi_module.HTTPException = Exception
+    cors_module = types.ModuleType("fastapi.middleware.cors")
+    cors_module.CORSMiddleware = object
+    sys.modules.setdefault("uvicorn", types.ModuleType("uvicorn"))
+    sys.modules.setdefault("fastapi", fastapi_module)
+    sys.modules.setdefault("fastapi.middleware", types.ModuleType("fastapi.middleware"))
+    sys.modules.setdefault("fastapi.middleware.cors", cors_module)
 
 from agents.serve import api  # noqa: E402
 

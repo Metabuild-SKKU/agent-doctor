@@ -721,6 +721,34 @@ class SearchAndGraphTests(unittest.TestCase):
         self.assertEqual(results[0]["chunk_id"], "native")
         self.assertTrue(qdrant_store._collection_has_native_hybrid(client))
 
+    def test_upsert_rechecks_shape_after_transient_probe_failure(self):
+        client = build_client(":memory:")
+        ensure_collection(client, vector_dim=2)
+        chunk = Chunk(
+            chunk_id="native",
+            doc_id="doc",
+            text="native hybrid collection",
+            embedding=[1.0, 0.0],
+            sparse_vector=build_sparse_vector("native hybrid collection"),
+        )
+        qdrant_store._clear_collection_shape_cache(client)
+        real_get_collection = client.get_collection
+        calls = {"n": 0}
+
+        def flaky_get_collection(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("temporary qdrant probe failure")
+            return real_get_collection(*args, **kwargs)
+
+        with patch.object(client, "get_collection", side_effect=flaky_get_collection):
+            upsert_chunks(client, [chunk])
+            upsert_chunks(client, [chunk])
+
+        results = search(client, [1.0, 0.0], top_k=1)
+        self.assertEqual(results[0]["chunk_id"], "native")
+        self.assertTrue(qdrant_store._collection_has_native_hybrid(client))
+
     def test_recreate_legacy_collection_logs_shape_migration(self):
         client = build_client(":memory:")
         client.create_collection(
