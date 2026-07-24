@@ -168,6 +168,30 @@ def _log_optimize_rollback(
     )
 
 
+def _log_optimize_keep(
+    state: AgentDoctorState,
+    item: OptimizationHistoryItem,
+    verdict: Verdict,
+    *,
+    next_step: str,
+) -> None:
+    diff = config_mapper.build_config_diff(item.before_config, item.after_config)
+    _log_optimize_transition(
+        state,
+        label=item.failure_labels[0] if item.failure_labels else None,
+        prescription_id=item.selected_prescription_id,
+        before_config=item.before_config,
+        after_config=item.after_config,
+        changed_keys=_diff_visible_keys(diff),
+        reindex_required=False,
+        next_step=next_step,
+    )
+    print(
+        f"[Optimize] 판정 결과: keep=true, "
+        f"before={_fmt_score(verdict.before_score)}, after={_fmt_score(verdict.after_score)}"
+    )
+
+
 def _log_optimize_decision(
     state: AgentDoctorState,
     decision: OptimizeDecision,
@@ -226,6 +250,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 state.status = "rolled_back" if rolled_back else "verified"
                 if rolled_back and judged_item is not None:
                     _log_optimize_rollback(state, judged_item)
+                elif judged_item is not None and verdict is not None and verdict.keep:
+                    _log_optimize_keep(
+                        state,
+                        judged_item,
+                        verdict,
+                        next_step="Serve 이동 (verified, 반복 예산 소진)",
+                    )
                 else:
                     _log_optimize_decision(
                         state,

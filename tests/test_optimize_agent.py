@@ -436,11 +436,20 @@ class OptimizeReportWiringTest(unittest.TestCase):
     def test_keep_stores_applied_trial_report(self):
         # 방문2가 '판정만' 하도록 예산을 소진시킨다(예산이 남으면 새 처방 적용이 headline).
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
+        self.assertEqual(state.optimization_history[-1].selected_prescription_id, "decrease_top_k")
         state.report = make_report(75.0, label="retrieval_missing_gold")  # 개선 + 다음 라벨
-        state = agent.run(state)                             # 방문2: 예산소진 → 유지 판정만
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)                         # 방문2: 예산소진 → 유지 판정만
         report = state.optimization_report
         self.assertEqual(report.status, "applied")
         self.assertIn("유지", report.summary)
+        out = buf.getvalue()
+        self.assertIn("선택한 라벨: too_long_context", out)
+        self.assertIn("선택한 처방: decrease_top_k", out)
+        self.assertIn("판정 결과: keep=true, before=60.00, after=75.00", out)
+        self.assertIn("다음 단계: Serve 이동 (verified, 반복 예산 소진)", out)
+        self.assertNotIn("선택한 처방: -", out)
 
     def test_rollback_stores_failed_trial_report(self):
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
