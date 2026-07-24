@@ -61,6 +61,11 @@ def _record(
     return rec
 
 
+def _spans(n, doc="d1"):
+    """개수만 필요한 곳에 쓰는 더미 gold_spans n개(좌표는 겹치지 않는 유효값)."""
+    return [{"doc_id": doc, "start": i * 10, "end": i * 10 + 5} for i in range(n)]
+
+
 class _FakeRetriever:
     def __init__(self, ranked_ids):
         self.ranked_ids = ranked_ids
@@ -123,8 +128,8 @@ class MissedGoldGuardTest(_DiagnoseTestBase):
 
     def test_enumeration_silent_when_nothing_missed(self):
         rec = _record(("g_a", "g_b"), ("g_a", "g_b"), recall=0.5)
-        self.assertTrue(diagnose._enumeration_cache(rec))       # 개수 전제는 성립
-        self.assertIsNone(diagnose.retrieval_incomplete_enumeration(rec))
+        self.assertIsNot(diagnose._enumeration_pressure(rec), False)     # 개수 전제는 성립(legacy)
+        self.assertIsNone(diagnose.retrieval_incomplete_enumeration(rec))   # 놓친 gold 없음 → 침묵
 
     def test_bridge_silent_when_nothing_missed(self):
         rec = _record(("g_a", "g_b"), ("g_a", "g_b"), recall=0.5, qtype="bridge")
@@ -232,33 +237,82 @@ class RetrievalMissingGoldTest(_DiagnoseTestBase):
 
 
 class RetrievalEnumerationTest(_DiagnoseTestBase):
-    """[설계 논의 중] 현행은 gold 개수 vs 실행 시점 top-k 비교만 본다.
+    """개수 압박은 청킹 불변량인 gold_spans 수로 센다(gold_chunk_ids 아님).
+    확정 = span 압박 + qtype=aggregation. None qtype·legacy·wide-N 밖은 예비/침묵."""
 
-    아래 두 테스트는 옳음을 주장하지 않는다 — qtype 을 안 보고, top_k 를 키우면
-    임계가 함께 올라 라벨이 꺼지는 현행 동작을 기록해둔 것이다.
-    """
-
-    def test_single_gold_never_fires(self):
-        rec = _record(("g_a",), ("x",), recall=0.0)
+    def test_single_span_never_fires(self):
+        rec = _record(("g_a",), ("x",), recall=0.0, qtype="aggregation", gold_spans=_spans(1))
         self.assertIsNone(diagnose.retrieval_incomplete_enumeration(rec))
 
-    def test_confirmed_when_gold_count_reaches_top_k(self):
-        rec = _record(("g_a", "g_b", "g_c"), ("g_a", "x", "y"), recall=0.33)
+    def test_confirmed_when_aggregation_and_span_pressure(self):
+        rec = _record(("g_a", "g_b", "g_c"), ("g_a", "x", "y"),
+                      recall=0.33, qtype="aggregation", gold_spans=_spans(3))   # k=3, span 3 압박
         finding = diagnose.retrieval_incomplete_enumeration(rec)
         self.assertIsNotNone(finding)
         self.assertTrue(finding.confirmed)
 
-    def test_fires_regardless_of_qtype(self):
-        """[설계 논의 중] 나열형(aggregation) 전용이 아니라 comparison 에도 붙는다."""
+    def test_preliminary_when_qtype_untagged(self):
+        """span 압박은 성립하나 qtype 미태깅(None) → 확정 못 하고 예비."""
         rec = _record(("g_a", "g_b", "g_c"), ("g_a", "x", "y"),
-                      recall=0.33, qtype="comparison")
-        self.assertIsNotNone(diagnose.retrieval_incomplete_enumeration(rec))
+                      recall=0.33, qtype=None, gold_spans=_spans(3))
+        finding = diagnose.retrieval_incomplete_enumeration(rec)
+        self.assertIsNotNone(finding)
+        self.assertFalse(finding.confirmed)
+
+    def test_preliminary_when_spans_absent_legacy(self):
+        """gold_spans 미제공(legacy) → 청크 수 폴백, aggregation 이어도 예비."""
+        rec = _record(("g_a", "g_b", "g_c"), ("g_a", "x", "y"),
+                      recall=0.33, qtype="aggregation")               # gold_spans 없음
+        finding = diagnose.retrieval_incomplete_enumeration(rec)
+        self.assertIsNotNone(finding)
+        self.assertFalse(finding.confirmed)
+
+    def test_silent_when_chunk_count_inflated_but_few_spans(self):
+        """gold_chunk_ids 는 많아도(세밀 청킹) 근거 span 은 1개 → 나열형 아님, 침묵(→chunking)."""
+        rec = _record(("g_a", "g_b", "g_c"), ("g_a", "x", "y"),
+                      recall=0.33, qtype="aggregation", gold_spans=_spans(1))
+        self.assertIsNone(diagnose.retrieval_incomplete_enumeration(rec))
+
+    def test_silent_when_all_missed_outside_wide_search(self):
+        """놓친 gold 가 wide-N 밖이면 top_k↑ 무효 → semantic 영역, 침묵."""
+        self._with(retrieve=["g_a", "p", "q"])                       # 놓친 g_b·g_c 가 wide 밖
+        rec = _record(("g_a", "g_b", "g_c"), ("g_a", "x", "y"),
+                      recall=0.33, qtype="aggregation", gold_spans=_spans(3))
+        self.assertIsNone(diagnose.retrieval_incomplete_enumeration(rec))
+
+    def test_silent_when_retrieval_returned_nothing(self):
+        """검색 0건(장애)은 슬롯 부족이 아니라 롤업 영역 → 침묵."""
+        rec = _record(("g_a", "g_b", "g_c"), (),
+                      recall=0.0, qtype="aggregation", gold_spans=_spans(3))
+        self.assertIsNone(diagnose.retrieval_incomplete_enumeration(rec))
 
     def test_larger_top_k_raises_the_threshold_and_silences_label(self):
-        """[설계 논의 중] 처방(top_k 증가)이 진단을 끈다 — gold 3개, top-k 10 → 미발동."""
+        """top_k 를 키우면 임계도 오른다 — span 3, top-k 10 → 압박 해소, 미발동."""
         rec = _record(("g_a", "g_b", "g_c"), ["g_a"] + [f"x{i}" for i in range(9)],
-                      recall=0.33)
+                      recall=0.33, qtype="aggregation", gold_spans=_spans(3))
         self.assertIsNone(diagnose.retrieval_incomplete_enumeration(rec))
+
+
+class ChunkingGateTest(_DiagnoseTestBase):
+    """chunking 은 enumeration 과 반대 게이트로 배타 — span 압박이면 나열형에 양보.
+    base 청크 좌표: g_a(0,100)·g_b(100,200)·g_c(200,300) in d1."""
+
+    def test_fires_on_boundary_split_without_span_pressure(self):
+        """경계 분할 span 1개(압박 없음) → chunking 확정."""
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5,
+                      gold_spans=[{"doc_id": "d1", "start": 80, "end": 120}])   # g_a·g_b 경계
+        finding = diagnose.chunking_context_mismatch(rec)
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+        self.assertIsNone(diagnose.retrieval_incomplete_enumeration(rec))       # 압박 없음
+
+    def test_yields_to_enumeration_under_span_pressure(self):
+        """경계 분할이 있어도 span 개수 압박이면 슬롯 부족이 지배 → chunking 침묵, enumeration 이 가져감."""
+        rec = _record(("g_a", "g_b", "g_c"), ("g_a", "x", "y"), recall=0.33, qtype="aggregation",
+                      gold_spans=[{"doc_id": "d1", "start": 80, "end": 120},
+                                  {"doc_id": "d1", "start": 180, "end": 220}])  # 2 경계 분할, k=3
+        self.assertIsNone(diagnose.chunking_context_mismatch(rec))
+        self.assertTrue(diagnose.retrieval_incomplete_enumeration(rec).confirmed)
 
 
 class RetrievalBridgeTest(_DiagnoseTestBase):
