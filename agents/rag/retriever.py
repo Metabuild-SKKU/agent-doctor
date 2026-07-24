@@ -432,6 +432,7 @@ def _populate(
                 delete_document_chunks(
                     client,
                     list(delete_doc_ids),
+                    retrieval_scope_id=scope_id,
                     collection_name=settings.collection_name,
                 )
             upsert_chunks(
@@ -470,7 +471,7 @@ def build_retriever(
 
 # ── 적재 캐시 ────────────────────────────────────────────────────
 # Index → Eval → (Optimize → Index → Eval)* 로 도는 동안 같은 청크 집합을 매번
-# 다시 upsert 하던 문제를 없앤다. 
+# 다시 upsert 하던 문제를 없앤다.
 
 _cache_lock = threading.Lock()
 _MAX_CACHED_INDEXES = 2

@@ -10,6 +10,7 @@ import time
 import uuid
 from collections import Counter
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -19,10 +20,19 @@ from qdrant_client.models import (
     MatchAny,
     MatchValue,
     PointStruct,
+    SparseVector,
+    SparseVectorParams,
     VectorParams,
 )
 
+try:  # qdrant-client<1.15에는 native hybrid query 모델이 없을 수 있다.
+    from qdrant_client.models import Prefetch, Rrf, RrfQuery
+except ImportError:  # pragma: no cover - installed client version dependent
+    Prefetch = Rrf = RrfQuery = None
+
 COLLECTION = "agent_doctor"
+DENSE_VECTOR_NAME = "dense"
+SPARSE_VECTOR_NAME = "sparse"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 VECTOR_DIM = 1024
@@ -47,6 +57,9 @@ _FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
 _rerankers: dict[str, Any] = {}
 _failed_rerankers: dict[str, float] = {}
 _FAILED_RERANKER_RETRY_SEC = _env_float("INDEX_RERANKER_RETRY_SEC", 300.0)
+_collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, dict[str, bool]] = (
+    WeakKeyDictionary()
+)
 
 
 # 테스트에서는 in-memory, 운영에서는 실제 Qdrant endpoint로 붙는다.
@@ -63,11 +76,110 @@ def _collection_vector_size(
 ) -> int | None:
     try:
         vectors = client.get_collection(collection_name).config.params.vectors
+        if isinstance(vectors, dict):
+            dense = vectors.get(DENSE_VECTOR_NAME)
+            if dense is not None and hasattr(dense, "size"):
+                return int(dense.size)
+            return None
         if hasattr(vectors, "size"):
             return int(vectors.size)
     except Exception:
         return None
     return None
+
+
+def _collection_has_native_hybrid(
+    client: QdrantClient,
+    collection_name: str = COLLECTION,
+) -> bool:
+    cache = _collection_native_hybrid_cache.setdefault(client, {})
+    if isinstance(cache, bool):
+        cache = {COLLECTION: cache}
+        _collection_native_hybrid_cache[client] = cache
+    if collection_name in cache:
+        return cache[collection_name]
+    try:
+        params = client.get_collection(collection_name).config.params
+        vectors = params.vectors
+        sparse_vectors = getattr(params, "sparse_vectors", None) or {}
+        has_native = (
+            isinstance(vectors, dict)
+            and DENSE_VECTOR_NAME in vectors
+            and SPARSE_VECTOR_NAME in sparse_vectors
+        )
+    except Exception:
+        return False
+    cache[collection_name] = has_native
+    return has_native
+
+
+def _clear_collection_shape_cache(
+    client: QdrantClient,
+    collection_name: str | None = None,
+) -> None:
+    if collection_name is None:
+        _collection_native_hybrid_cache.pop(client, None)
+        return
+    cache = _collection_native_hybrid_cache.get(client)
+    if cache is not None:
+        cache.pop(collection_name, None)
+
+
+def _is_collection_shape_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "vector" in message
+        and (
+            "not found" in message
+            or "name" in message
+            or "existing vector" in message
+            or "dense" in message
+            or "sparse" in message
+        )
+    )
+
+
+def _query_filter(retrieval_scope_id: str | None) -> Filter | None:
+    if not retrieval_scope_id:
+        return None
+    return Filter(
+        must=[
+            FieldCondition(
+                key="retrieval_scope_id",
+                match=MatchValue(value=retrieval_scope_id),
+            )
+        ]
+    )
+
+
+def _sparse_vector(data: dict | None) -> SparseVector | None:
+    if not data:
+        return None
+    indices = data.get("indices") or []
+    values = data.get("values") or []
+    if not indices or not values or len(indices) != len(values):
+        return None
+    return SparseVector(
+        indices=[int(index) for index in indices],
+        values=[float(value) for value in values],
+    )
+
+
+def _hit_to_result(hit) -> dict:
+    payload = hit.payload or {}
+    return {
+        "score": float(hit.score),
+        "text": payload.get("text", ""),
+        "metadata": payload.get("metadata", {}),
+        "chunk_id": payload.get("chunk_id", ""),
+        "doc_id": payload.get("doc_id", ""),
+        "section": payload.get("section"),
+        "char_span": payload.get("char_span"),
+        "token_count": payload.get("token_count"),
+        "parent_id": payload.get("parent_id"),
+        "hash": payload.get("hash"),
+        "retrieval_scope_id": payload.get("retrieval_scope_id"),
+    }
 
 
 def ensure_collection(
@@ -81,24 +193,49 @@ def ensure_collection(
     if collection_name in existing:
         current_dim = _collection_vector_size(client, collection_name)
         if current_dim is None or current_dim == vector_dim:
+            if _collection_has_native_hybrid(client, collection_name):
+                return
+            if recreate_on_mismatch:
+                print(
+                    f"[Qdrant] legacy dense-only 컬렉션 재생성: {collection_name} "
+                    "(native hybrid shape로 마이그레이션)"
+                )
+                client.delete_collection(collection_name=collection_name)
+                _clear_collection_shape_cache(client, collection_name)
+            else:
+                print(
+                    f"[Qdrant] legacy dense-only 컬렉션 사용: {collection_name} "
+                    "(native hybrid를 쓰려면 컬렉션 재생성이 필요합니다)"
+                )
+                return
+        else:
+            if not recreate_on_mismatch:
+                raise ValueError(
+                    f"Qdrant 벡터 차원이 다릅니다: 기존={current_dim}, 요청={vector_dim}. "
+                    "recreate_collection_on_dimension_mismatch를 켜거나 새 컬렉션을 사용하세요."
+                )
+            client.delete_collection(collection_name=collection_name)
+            _clear_collection_shape_cache(client, collection_name)
+        if collection_name in [collection.name for collection in client.get_collections().collections]:
             return
-        if not recreate_on_mismatch:
-            raise ValueError(
-                f"Qdrant 벡터 차원이 다릅니다: 기존={current_dim}, 요청={vector_dim}. "
-                "recreate_collection_on_dimension_mismatch를 켜거나 새 컬렉션을 사용하세요."
-            )
-        client.delete_collection(collection_name=collection_name)
 
     client.create_collection(
         collection_name=collection_name,
-        vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE),
+        vectors_config={
+            DENSE_VECTOR_NAME: VectorParams(size=vector_dim, distance=Distance.COSINE),
+        },
+        sparse_vectors_config={
+            SPARSE_VECTOR_NAME: SparseVectorParams(),
+        },
     )
+    _clear_collection_shape_cache(client, collection_name)
     print(f"[Qdrant] 컬렉션 준비: {collection_name} (dim={vector_dim})")
 
 
 # 같은 chunk_id는 같은 point id를 쓰게 해서 재색인을 안전하게 만든다.
-def _point_id(chunk_id: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"agent-doctor:{chunk_id}"))
+def _point_id(chunk_id: str, retrieval_scope_id: str | None = None) -> str:
+    scope = retrieval_scope_id or "global"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"agent-doctor:{scope}:{chunk_id}"))
 
 
 # Serve가 payload를 그대로 읽으므로 provenance 필드는 빼지 않는다.
@@ -107,34 +244,56 @@ def upsert_chunks(
     chunks: list,
     collection_name: str = COLLECTION,
 ) -> None:
-    points = []
-    for chunk in chunks:
-        if not chunk.embedding:
-            continue
-        metadata = chunk.metadata or {}
-        points.append(
-            PointStruct(
-                id=_point_id(chunk.chunk_id),
-                vector=chunk.embedding,
-                payload={
-                    "chunk_id": chunk.chunk_id,
-                    "doc_id": chunk.doc_id,
-                    "text": chunk.text,
-                    "section": chunk.section,
-                    "char_span": chunk.char_span,
-                    "token_count": chunk.token_count,
-                    "parent_id": chunk.parent_id,
-                    "hash": chunk.hash,
-                    "metadata": metadata,
-                    "sparse_vector": chunk.sparse_vector,
-                    "retrieval_scope_id": metadata.get("retrieval_scope_id"),
-                    "index_cache_key": metadata.get("index_cache_key"),
-                },
+    def _points(use_native_hybrid: bool) -> list[PointStruct]:
+        points = []
+        for chunk in chunks:
+            if not chunk.embedding:
+                continue
+            metadata = chunk.metadata or {}
+            retrieval_scope_id = metadata.get("retrieval_scope_id")
+            sparse = _sparse_vector(chunk.sparse_vector)
+            if use_native_hybrid:
+                vector = {DENSE_VECTOR_NAME: chunk.embedding}
+            else:
+                vector = chunk.embedding
+            if use_native_hybrid and sparse is not None:
+                vector[SPARSE_VECTOR_NAME] = sparse
+            payload = {
+                "chunk_id": chunk.chunk_id,
+                "doc_id": chunk.doc_id,
+                "text": chunk.text,
+                "section": chunk.section,
+                "char_span": chunk.char_span,
+                "token_count": chunk.token_count,
+                "parent_id": chunk.parent_id,
+                "hash": chunk.hash,
+                "metadata": metadata,
+                "sparse_vector": chunk.sparse_vector,
+                "retrieval_scope_id": retrieval_scope_id,
+                "index_cache_key": metadata.get("index_cache_key"),
+            }
+            points.append(
+                PointStruct(
+                    id=_point_id(chunk.chunk_id, retrieval_scope_id),
+                    vector=vector,
+                    payload=payload,
+                )
             )
-        )
-    if points:
+        return points
+
+    use_native_hybrid = _collection_has_native_hybrid(client, collection_name)
+    points = _points(use_native_hybrid)
+    if not points:
+        return
+    try:
         client.upsert(collection_name=collection_name, points=points)
-        print(f"[Qdrant] {len(points)}개 청크 저장 완료")
+    except Exception as exc:
+        if not _is_collection_shape_error(exc):
+            raise
+        _clear_collection_shape_cache(client, collection_name)
+        points = _points(_collection_has_native_hybrid(client, collection_name))
+        client.upsert(collection_name=collection_name, points=points)
+    print(f"[Qdrant] {len(points)}개 청크 저장 완료")
 
 
 def collection_index_cache_key(
@@ -164,36 +323,49 @@ def collection_index_cache_key(
 def delete_document_chunks(
     client: QdrantClient,
     doc_ids: list[str],
+    retrieval_scope_id: str | None = None,
     collection_name: str = COLLECTION,
 ) -> None:
     unique_ids = sorted({doc_id for doc_id in doc_ids if doc_id})
     if not unique_ids:
         return
     try:
+        must = [
+            FieldCondition(
+                key="doc_id",
+                match=MatchAny(any=unique_ids),
+            )
+        ]
+        if retrieval_scope_id:
+            must.append(
+                FieldCondition(
+                    key="retrieval_scope_id",
+                    match=MatchValue(value=retrieval_scope_id),
+                )
+            )
         client.delete(
             collection_name=collection_name,
-            points_selector=Filter(
-                must=[
-                    FieldCondition(
-                        key="doc_id",
-                        match=MatchAny(any=unique_ids),
-                    )
-                ]
-            ),
+            points_selector=Filter(must=must),
         )
     except Exception:
         # MatchAny를 지원하지 않는 구버전에서는 문서별로 삭제한다.
         for doc_id in unique_ids:
+            must = [
+                FieldCondition(
+                    key="doc_id",
+                    match=MatchValue(value=doc_id),
+                )
+            ]
+            if retrieval_scope_id:
+                must.append(
+                    FieldCondition(
+                        key="retrieval_scope_id",
+                        match=MatchValue(value=retrieval_scope_id),
+                    )
+                )
             client.delete(
                 collection_name=collection_name,
-                points_selector=Filter(
-                    must=[
-                        FieldCondition(
-                            key="doc_id",
-                            match=MatchValue(value=doc_id),
-                        )
-                    ]
-                ),
+                points_selector=Filter(must=must),
             )
 
 
@@ -204,51 +376,39 @@ def search(
     retrieval_scope_id: str | None = None,
     collection_name: str = COLLECTION,
 ) -> list[dict]:
-    query_filter = None
-    if retrieval_scope_id:
-        query_filter = Filter(
-            must=[
-                FieldCondition(
-                    key="retrieval_scope_id",
-                    match=MatchValue(value=retrieval_scope_id),
-                )
-            ]
-        )
+    query_filter = _query_filter(retrieval_scope_id)
     # dense 검색 결과를 Serve가 쓰는 공통 dict 모양으로 맞춘다.
-    try:
+    def _query_once(native_hybrid_collection: bool):
         kwargs = {
             "collection_name": collection_name,
             "query": query_vector,
             "limit": top_k,
         }
+        if native_hybrid_collection:
+            kwargs["using"] = DENSE_VECTOR_NAME
         if query_filter is not None:
             kwargs["query_filter"] = query_filter
-        hits = client.query_points(**kwargs).points
-    except AttributeError:
-        kwargs = {
-            "collection_name": collection_name,
-            "query_vector": query_vector,
-            "limit": top_k,
-        }
-        if query_filter is not None:
-            kwargs["query_filter"] = query_filter
-        hits = client.search(**kwargs)
-    return [
-        {
-            "score": float(hit.score),
-            "text": hit.payload.get("text", ""),
-            "metadata": hit.payload.get("metadata", {}),
-            "chunk_id": hit.payload.get("chunk_id", ""),
-            "doc_id": hit.payload.get("doc_id", ""),
-            "section": hit.payload.get("section"),
-            "char_span": hit.payload.get("char_span"),
-            "token_count": hit.payload.get("token_count"),
-            "parent_id": hit.payload.get("parent_id"),
-            "hash": hit.payload.get("hash"),
-            "retrieval_scope_id": hit.payload.get("retrieval_scope_id"),
-        }
-        for hit in hits
-    ]
+        if hasattr(client, "query_points"):
+            return client.query_points(**kwargs).points
+        if not native_hybrid_collection and hasattr(client, "search"):
+            search_kwargs = {
+                "collection_name": collection_name,
+                "query_vector": query_vector,
+                "limit": top_k,
+            }
+            if query_filter is not None:
+                search_kwargs["query_filter"] = query_filter
+            return client.search(**search_kwargs)
+        raise AttributeError("Qdrant client has neither query_points nor legacy search")
+
+    try:
+        hits = _query_once(_collection_has_native_hybrid(client, collection_name))
+    except Exception as exc:
+        if not _is_collection_shape_error(exc):
+            raise
+        _clear_collection_shape_cache(client, collection_name)
+        hits = _query_once(_collection_has_native_hybrid(client, collection_name))
+    return [_hit_to_result(hit) for hit in hits]
 
 
 # 형태소 분석기 없이도 테스트/하이브리드 검색이 돌아가게 가볍게 쪼갠다.
@@ -341,6 +501,18 @@ def hybrid_search(
     retrieval_scope_id: str | None = None,
     collection_name: str = COLLECTION,
 ) -> list[dict]:
+    native_results = _native_hybrid_search(
+        client,
+        query_vector=query_vector,
+        query=query,
+        top_k=top_k,
+        dense_weight=dense_weight,
+        retrieval_scope_id=retrieval_scope_id,
+        collection_name=collection_name,
+    )
+    if native_results is not None:
+        return native_results
+
     # dense 점수와 lexical 점수를 chunk_id 기준으로 합친다.
     dense_weight = min(1.0, max(0.0, float(dense_weight)))
     dense_results = search(
@@ -378,6 +550,54 @@ def hybrid_search(
 
     fused.sort(key=lambda item: item["score"], reverse=True)
     return fused[:top_k]
+
+
+def _native_hybrid_search(
+    client: QdrantClient,
+    *,
+    query_vector: list[float],
+    query: str,
+    top_k: int,
+    dense_weight: float,
+    retrieval_scope_id: str | None,
+    collection_name: str = COLLECTION,
+) -> list[dict] | None:
+    if Prefetch is None or Rrf is None or RrfQuery is None:
+        return None
+    sparse = _sparse_vector(build_sparse_vector(query))
+    if sparse is None or not _collection_has_native_hybrid(client, collection_name):
+        return None
+
+    dense_weight = min(1.0, max(0.0, float(dense_weight)))
+    sparse_weight = 1.0 - dense_weight
+    candidate_k = max(top_k * 4, 20)
+    query_filter = _query_filter(retrieval_scope_id)
+    try:
+        hits = client.query_points(
+            collection_name=collection_name,
+            prefetch=[
+                Prefetch(
+                    query=sparse,
+                    using=SPARSE_VECTOR_NAME,
+                    filter=query_filter,
+                    limit=candidate_k,
+                ),
+                Prefetch(
+                    query=query_vector,
+                    using=DENSE_VECTOR_NAME,
+                    filter=query_filter,
+                    limit=candidate_k,
+                ),
+            ],
+            query=RrfQuery(rrf=Rrf(weights=[sparse_weight, dense_weight])),
+            query_filter=query_filter,
+            limit=top_k,
+        ).points
+    except Exception as exc:
+        print(f"[Qdrant] native hybrid search 실패, local fusion 사용: {exc}")
+        return None
+
+    return [_hit_to_result(hit) for hit in hits]
 
 
 def rerank(
