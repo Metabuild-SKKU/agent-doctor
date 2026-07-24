@@ -40,3 +40,5 @@ google-genai            # only when EVAL_LLM_PROVIDER=gemini (temp bridge before
 
 # Tests (개발용) — tests/ 의 pytest 방식 테스트 실행에 필요 (예: tests/test_korquad.py)
 pytest>=8.0
+httpx                   # fastapi.testclient.TestClient 의 필수 의존성 (tests/test_serve_api_reload.py).
+                        # 없으면 pytest 가 collection 에러로 실행 전체를 중단한다.

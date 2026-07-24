@@ -2,14 +2,18 @@
 agents/eval/agent.py
 Eval Agent — RAG 파이프라인 품질 진단
 
-읽기: state.documents, state.chunks, state.user_questions, state.index_config, state.iteration
-쓰기: state.probes, state.report, state.status, state.error, state.current_agent
+읽기: state.documents, state.chunks, state.user_questions, state.index_config, state.iteration,
+      state.optimization_history, state.active_index_key, state.eval_cache
+쓰기: state.probes, state.report, state.diagnosis_cache, state.diagnosis_cache_version,
+      state.eval_cache, state.active_eval_key, state.eval_cache_hit,
+      state.status, state.error, state.current_agent
 
 설계 문서(Evaluate Module)의 STEP 1~5 를 순서대로 실행한다:
     STEP1  Probe 생성            → probe_gen.generate_probes
     STEP2  각 Probe로 검색·생성   → retrieval.retrieve / generate_answer
-    STEP3-1 규칙 지표            → diagnose 내부 _compute_metrics (recall_at_k / token_f1)
-    STEP3-2 LLM(RAGAS) 진단      → diagnose 내부 _compute_ragas (DEEP 이상에서 전 probe 측정)
+    STEP3-1 규칙 지표            → diagnose 내부 _compute_metrics (recall_at_k / char_f1)
+    STEP3-2 LLM(RAGAS) 진단      → diagnose 내부 _compute_ragas_real (DEEP 이상 전 probe)
+                                   + _compute_ragas_oracle (실패로 판정된 probe 만)
     STEP4  원인 판정(Finding)     → diagnose.diagnose
     STEP5  DiagnosticReport 생성  → report.build_report
 
@@ -24,8 +28,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from copy import deepcopy
+from pathlib import Path
 
-from core.schema import Probe
+from core.schema import Probe, EvalSnapshot
 from core.llm_usage import print_summary
 from core.parallel import parallel_map
 from core.state import AgentDoctorState
@@ -36,15 +43,218 @@ from agents.eval.types import (
     PROBE_SOURCE_MADE, PROBE_SOURCE_TAXONOMY,
 )
 from agents.eval.probe_gen import generate_probes, uses_user_log, _resync_gold_chunk_ids
-from agents.eval.probe_store import save_probes, load_probes, corpus_version
+from agents.eval.probe_store import (
+    DEFAULT_STORE_PATH,
+    save_probes,
+    load_probes,
+    corpus_version,
+)
 from agents.index.qdrant_store import keyword_search
 from agents.rag.generator import generate_answer
 from agents.rag.retriever import Retriever, get_retriever
 from agents.eval.metrics_ragas import (
-    evaluate_real_track, evaluate_oracle_track, answer_similarity, _judge as _ragas_judge,
+    evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge,
 )
-from agents.eval.diagnose import diagnose, set_context as set_diag_context
+from agents.eval.metrics_common import set_context as set_diag_context
+from agents.eval.metrics_basic import _compute_metrics
+from agents.eval.diagnose import diagnose, _is_success
 from agents.eval.report import build_report
+
+
+_EVAL_CACHE_ENV_KEYS = (
+    "EVAL_PROBE_SOURCE",
+    "EVAL_ENABLE_LLM",
+    "EVAL_LLM_PROVIDER",
+    "EVAL_GEN_MODEL",
+    "EVAL_GEN_MODEL_GEMINI",
+    "EVAL_GEN_MODEL_GITHUB",
+    "EVAL_JUDGE_MODEL",
+    "EVAL_JUDGE_MODEL_GEMINI",
+    "EVAL_JUDGE_MODEL_GITHUB",
+    "EVAL_RELEVANCY_STRICTNESS",
+    "EVAL_EMBED_MODEL",
+    "EVAL_EMBED_MODEL_GEMINI",
+    "EVAL_TESTSET_SIZE",
+    "EVAL_TAXONOMY_QA",
+    "KORQUAD_MAX_DOCS",
+    "KORQUAD_QA_LIMIT",
+    "RAG_LLM_PROVIDER",
+    "RAG_LLM_MODEL",
+    "RAG_OPENAI_MODEL",
+    "RAG_GEMINI_MODEL",
+    "RAG_GITHUB_MODEL",
+)
+_EVAL_CACHE_SECRET_KEYS = (
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GITHUB_MODELS_TOKEN",
+    "GITHUB_TOKEN",
+)
+
+
+def _eval_cache_limit(state: AgentDoctorState) -> int:
+    if not state.index_config.get("rollback_cache_enabled", True):
+        return 0
+    try:
+        requested = int(
+            state.index_config.get("rollback_cache_max_versions", 2)
+        )
+    except (TypeError, ValueError):
+        requested = 2
+    return max(1, min(2, requested))
+
+
+def _eval_cache_key(
+    state: AgentDoctorState,
+    mode: Mode,
+    pipeline_version: str,
+    probe_version: str,
+) -> str:
+    """검색·생성·진단 결과를 바꾸는 입력을 묶어 완전 진단 캐시 키를 만든다."""
+    meaningful_config = {
+        key: value
+        for key, value in state.index_config.items()
+        if key not in {
+            "rollback_cache_enabled",
+            "rollback_cache_max_versions",
+            "recreate_collection_on_dimension_mismatch",
+        }
+    }
+    probe_source = resolve_probe_source()
+    payload = {
+        "schema_version": 1,
+        "pipeline_version": pipeline_version,
+        "probe_version": probe_version,
+        "active_index_key": state.active_index_key,
+        "index_config": meaningful_config,
+        "user_questions": state.user_questions,
+        "mode": int(mode),
+        "probe_source": probe_source,
+        "probe_file": _probe_file_identity(state, probe_source),
+        "environment": {
+            key: os.getenv(key)
+            for key in _EVAL_CACHE_ENV_KEYS
+        },
+        "provider_available": {
+            key: bool(os.getenv(key))
+            for key in _EVAL_CACHE_SECRET_KEYS
+        },
+    }
+    raw = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _probe_file_identity(
+    state: AgentDoctorState,
+    probe_source: str,
+) -> dict:
+    """실제 STEP1 경로가 읽는 외부 Probe 파일만 캐시 키에 넣는다."""
+    if probe_source == PROBE_SOURCE_TAXONOMY:
+        return _file_identity(
+            os.getenv("EVAL_TAXONOMY_QA", "data/qa_pairs.jsonl")
+        )
+    if probe_source == PROBE_SOURCE_MADE or not uses_user_log(state):
+        return _file_identity(DEFAULT_STORE_PATH)
+    return {}
+
+
+def _file_identity(path: str) -> dict:
+    """외부 Probe 파일이 바뀌면 진단 캐시도 무효화한다."""
+    target = Path(path)
+    try:
+        stat = target.stat()
+        digest = hashlib.sha256()
+        with target.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return {
+            "path": str(target.resolve()),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "sha256": digest.hexdigest(),
+        }
+    except OSError:
+        return {"path": str(target), "missing": True}
+
+
+def _find_eval_snapshot(
+    state: AgentDoctorState,
+    cache_key: str,
+) -> EvalSnapshot | None:
+    """캐시 hit를 LRU 최신 위치로 옮긴다."""
+    if _eval_cache_limit(state) == 0:
+        state.eval_cache = []
+        return None
+    for index, snapshot in enumerate(state.eval_cache):
+        if snapshot.cache_key != cache_key:
+            continue
+        state.eval_cache.append(state.eval_cache.pop(index))
+        return state.eval_cache[-1]
+    return None
+
+
+def _store_eval_snapshot(
+    state: AgentDoctorState,
+    cache_key: str,
+) -> None:
+    """성공한 Eval 결과만 저장하고 현재/직전 두 버전만 남긴다."""
+    limit = _eval_cache_limit(state)
+    state.active_eval_key = cache_key
+    if limit == 0 or state.report is None:
+        if limit == 0:
+            state.eval_cache = []
+        return
+    state.eval_cache = [
+        snapshot
+        for snapshot in state.eval_cache
+        if snapshot.cache_key != cache_key
+    ]
+    state.eval_cache.append(
+        EvalSnapshot(
+            cache_key=cache_key,
+            index_key=state.active_index_key,
+            probes=deepcopy(state.probes),
+            report=deepcopy(state.report),
+            diagnosis_cache=deepcopy(state.diagnosis_cache),
+            diagnosis_cache_version=state.diagnosis_cache_version,
+        )
+    )
+    pinned_key = _pending_baseline_eval_key(state)
+    pinned = next(
+        (
+            snapshot
+            for snapshot in state.eval_cache
+            if snapshot.cache_key == pinned_key
+        ),
+        None,
+    )
+    current = state.eval_cache[-1]
+    if (
+        limit == 2
+        and pinned is not None
+        and pinned.cache_key != current.cache_key
+    ):
+        # top_k sweep처럼 후보가 여러 개여도 study baseline과 현재 후보만 남긴다.
+        state.eval_cache = [pinned, current]
+    else:
+        state.eval_cache = state.eval_cache[-limit:]
+
+
+def _pending_baseline_eval_key(state: AgentDoctorState) -> str:
+    """판정 대기 study가 되돌아갈 baseline Eval 키를 찾는다."""
+    for item in reversed(state.optimization_history):
+        metadata = getattr(item, "metadata", {}) or {}
+        if not metadata.get("pending"):
+            continue
+        key = metadata.get("before_eval_key")
+        if key:
+            return str(key)
+    return ""
 
 
 def _retrieve_with_rag(retriever: Retriever, chunks, question: str, top_k: int) -> list[dict]:
@@ -68,22 +278,14 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
         return {}
 
 
-def _answer_sim_track(record: EvalRecord, track: str):
-    """diagnose 가 lazy 로 부르는 답변↔gold 정답 의미 유사도(set_context 로 주입).
-    tier3 게이트 — 비활성(EVAL_ENABLE_LLM)·키없음·실패 → None. (DEEP 게이트는 diagnose 신호가 담당.)"""
-    if not llm_eval_enabled():
-        return None
-    try:
-        return answer_similarity(record, track)
-    except Exception as e:
-        print(f"[Eval] 의미 유사도({track}) 실패({e}) → 폴백")
-        return None
-
-
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
-    print(f"[Eval] 청크 {len(state.chunks)}개, 반복 {state.iteration + 1}/{state.max_iterations}")
+    # state.iteration 은 raw 값을 그대로 찍는다(graph.py Orchestrator 로그와 표시 일치).
+    # 예전엔 +1 을 더해 "다음 Optimize 방문에서 증가할 값"을 미리 보여줬는데, 같은 라벨이
+    # 이어지는 방문(starts_new_label=False)에서는 실제로 증가하지 않아(위 반복 카운터
+    # 설명 참고) Eval 로그만 매번 부풀려진 값을 반복 표시하는 불일치가 있었다.
+    print(f"[Eval] 청크 {len(state.chunks)}개, 반복 {state.iteration}/{state.max_iterations}")
 
     if not state.chunks:
         state.status = "error"
@@ -94,6 +296,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     # 진단 모드(비용 tier 상한): EVAL_MODE 환경변수. STEP3-2/STEP4/리포트가 이 값으로 게이팅된다.
     mode = resolve_mode()
     print(f"[Eval] 진단 모드 = {mode} (1=fast·2=standard·3=deep·4=full)")
+    state.eval_cache_hit = False
 
     # 진단 신호 캐시: 파이프라인 버전(index_config+코퍼스)이 바뀌면 무효화 → stale 재사용 방지.
     # 진단 신호(예: gold_in_wider_candidates)는 top_k 로 검색한 결과에 의존하므로,
@@ -103,10 +306,27 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.diagnosis_cache = {}
         state.diagnosis_cache_version = version
 
+    probe_version = corpus_version(state.chunks, state.documents)
+    eval_cache_key = _eval_cache_key(
+        state,
+        mode,
+        version,
+        probe_version,
+    )
+    snapshot = _find_eval_snapshot(state, eval_cache_key)
+    if snapshot is not None and snapshot.report is not None:
+        state.probes = deepcopy(snapshot.probes)
+        state.report = deepcopy(snapshot.report)
+        state.diagnosis_cache = deepcopy(snapshot.diagnosis_cache)
+        state.diagnosis_cache_version = snapshot.diagnosis_cache_version
+        state.active_eval_key = eval_cache_key
+        state.eval_cache_hit = True
+        state.status = "evaluated"
+        print(f"[Eval] 롤백 진단 캐시 복원: {eval_cache_key[:12]}")
+        return state
+
     # Probe 캐시는 원문 문서에 의존한다. top_k뿐 아니라 chunk_size가 바뀌어도 같은
     # 질문/gold_spans를 유지하고, 불러온 뒤 현재 청크 기준 gold_chunk_ids만 재동기화한다.
-    probe_version = corpus_version(state.chunks, state.documents)
-
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
         # user_log 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
@@ -155,6 +375,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             state.probes = []
             state.report = build_report([], state.iteration, mode)
             state.status = "evaluated"
+            eval_cache_key = _eval_cache_key(
+                state,
+                mode,
+                version,
+                probe_version,
+            )
+            _store_eval_snapshot(state, eval_cache_key)
             return state
 
         # 검색 인덱스 준비: 공통 RAG retriever가 Qdrant/keyword fallback을 오케스트레이션한다.
@@ -165,11 +392,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         chunk_text = {c.chunk_id: c.text for c in state.chunks}
         top_k = int(state.index_config.get("top_k", DEFAULT_TOP_K))
 
-        # tier2/tier4 판별 훅(재검색·코퍼스·재생성)이 쓸 자원 주입
+        # tier2/tier3 판별 훅(재검색·코퍼스·RAGAS)이 쓸 자원 주입
         set_diag_context(client=retriever, chunks=state.chunks,
                          retrieve_fn=_retrieve_with_rag, keyword_fn=keyword_search,
-                         generate_fn=generate_answer, ragas_fn=_ragas_track,
-                         sim_fn=_answer_sim_track)
+                         ragas_fn=_ragas_track)
 
         # ── STEP2~4: probe 별 평가 ────────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →
@@ -201,25 +427,35 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             else:
                 rec.oracle_answer = answer
 
-        # Phase B2(병렬): RAGAS 선계산 — probe×track 태스크를 동시 실행하고 *_done
-        # 플래그를 세워, Phase C 의 _compute_ragas→_ensure_ragas 가 캐시 히트만 하게
-        # 한다. _ragas_track 은 signals 전역과 무관한 모듈 함수라 병렬 구간에 안전.
-        # 게이트는 _compute_ragas 와 동일(mode >= DEEP); LLM 비활성·키없음은
+        # Phase B2(병렬): RAGAS 선계산 — 트랙별로 필요한 probe 만 동시 실행하고 *_done
+        # 플래그를 세워, Phase C 의 _compute_ragas_real/_oracle 이 캐시 히트만 하게 한다.
+        # _ragas_track 은 진단 전역과 무관한 모듈 함수라 병렬 구간에 안전.
+        # 게이트는 _compute_ragas_* 와 동일(mode >= DEEP); LLM 비활성·키없음은
         # _ragas_track 이 {} 폴백이라 기존과 같은 동작으로 수렴한다.
-        # 동시성 1이면 태스크 순서가 기존 Phase C 호출 순서(probe별 real→oracle)와 일치.
+        # 동시성 1이면 태스크 순서가 Phase C 호출 순서(probe 순)와 일치.
         if mode >= Mode.DEEP:
-            ragas_tasks: list[tuple[EvalRecord, str]] = []
+            # B2-1: 실제 트랙은 전 probe 에 필요하다 — 성공/실패 판정(_f1_ok 의 강등)과
+            # 리포트 RAGAS 평균이 모두 실제 트랙을 쓴다.
+            if concurrency > 1 and len(records) > 1:
+                print(f"[Eval] STEP3-2: RAGAS 실제 트랙 {len(records)}건 병렬 실행 (동시성 {concurrency})")
+            real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records, concurrency)
+            for rec, score in zip(records, real_scores):
+                rec.ragas, rec.ragas_done = score, True
+
+            # B2-2: 오라클 트랙은 '실패로 판정된 probe' 에만 필요하다 — 소비처가 B그룹 라벨과
+            # _oracle_ok 뿐이고, 리포트 평균은 실제 트랙만 쓴다. 성공 probe 는 diagnose 가
+            # 성공 게이트에서 바로 끝나므로 오라클 LLM 비용을 지불할 이유가 없다.
+            # 판정에 쓸 규칙 지표를 먼저 채운다(_compute_metrics 는 순수·멱등이라 Phase C 에서
+            # diagnose 가 다시 불러도 같은 값이 나온다).
             for rec in records:
-                ragas_tasks.append((rec, "real"))
-                ragas_tasks.append((rec, "oracle"))
-            if concurrency > 1 and len(ragas_tasks) > 1:
-                print(f"[Eval] STEP3-2: RAGAS {len(ragas_tasks)}트랙 병렬 실행 (동시성 {concurrency})")
-            scores = parallel_map(lambda t: _ragas_track(t[0], t[1]) or {},
-                                  ragas_tasks, concurrency)
-            for (rec, track), score in zip(ragas_tasks, scores):
-                if track == "real":
-                    rec.ragas, rec.ragas_done = score, True
-                else:
+                _compute_metrics(rec)
+            failed = [rec for rec in records if _is_success(rec) is False]
+            if failed:
+                if concurrency > 1 and len(failed) > 1:
+                    print(f"[Eval] STEP3-2: RAGAS 오라클 트랙 {len(failed)}건 병렬 실행 "
+                          f"(실패 probe 만, 전체 {len(records)}건 중)")
+                oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency)
+                for rec, score in zip(failed, oracle_scores):
                     rec.oracle_ragas, rec.oracle_ragas_done = score, True
 
         # Phase C(순차): 지표·진단·로그 — diagnose 는 signals 전역·진단 캐시·tier2
@@ -232,6 +468,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.probes = probes
         state.report = build_report(records, state.iteration, mode)
         state.status = "evaluated"
+        eval_cache_key = _eval_cache_key(
+            state,
+            mode,
+            version,
+            probe_version,
+        )
+        _store_eval_snapshot(state, eval_cache_key)
 
     except Exception as e:  # 계약: 예외를 밖으로 던지지 않는다
         state.status = "error"
@@ -297,8 +540,23 @@ def _pipeline_version(state: AgentDoctorState) -> str:
     청크 id 와 함께 본문 hash 도 넣는다 — doc_id 는 출처로 고정돼 있어서(Ingest 의
     _stable_doc_id) 같은 파일을 고쳐도 id 는 그대로다. hash 를 빼면 본문이 바뀌었는데도
     버전이 같아져, 옛 gold_chunk_ids 를 가리키는 stale probe 를 재사용하게 된다."""
-    key = json.dumps(state.index_config, sort_keys=True, default=str)
-    key += "|chunks=" + ",".join(sorted(f"{c.chunk_id}:{c.hash}" for c in state.chunks))
+    meaningful_config = {
+        name: value
+        for name, value in state.index_config.items()
+        if name not in {
+            "rollback_cache_enabled",
+            "rollback_cache_max_versions",
+            "recreate_collection_on_dimension_mismatch",
+        }
+    }
+    key = json.dumps(meaningful_config, sort_keys=True, default=str)
+    key += f"|index={state.active_index_key}"
+    key += "|chunks=" + ",".join(
+        sorted(
+            f"{chunk.chunk_id}:{chunk.hash or hashlib.sha1(chunk.text.encode('utf-8')).hexdigest()}"
+            for chunk in state.chunks
+        )
+    )
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 

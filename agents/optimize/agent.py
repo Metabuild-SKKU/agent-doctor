@@ -11,10 +11,11 @@ Optimize 노드의 진입점(오케스트레이션 계층).
   모든 경로에서 같은 state 를 반환한다(AGENTS.md 2절 계약).
 
 [읽는 것]  state.report, state.index_config, state.iteration, state.max_iterations,
-           state.blacklist, state.optimization_history
+           state.blacklist, state.optimization_history,
+           state.active_index_key, state.active_eval_key
 [쓰는 것]  state.index_config, state.iteration, state.status, state.error,
            state.current_agent, state.blacklist, state.optimization_history,
-           state.optimization_report
+           state.optimization_report, state.reindex_required
 
 [state.status 신호]  (graph 라우팅이 참고)
   - "applied"      : 새 처방을 적용함 → 재색인 필요(Index)
@@ -337,10 +338,17 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # 롤백 전의 열화된 Eval 이라, 그걸 baseline 으로 쓰면 이 처방이 원래보다
         # 나빠도 '개선'으로 오판해 유지된다(#2). 롤백이 없었으면 현재 report 가 기준.
         before_report = rollback_baseline_report if rolled_back else state.report
+        # 롤백이 요구한 재색인(_judge_pending_trial 이 state.reindex_required 에 세팅)을
+        # 기억해둔다. index-time 처방을 롤백하면 config 는 되돌아가지만 실제 Qdrant
+        # 인덱스는 아직 열화 상태라 이 재색인이 반드시 일어나야 한다.
+        rollback_reindex_required = state.reindex_required if rolled_back else False
 
         # 검증된 처방을 실제 index_config 에 반영(canonical→flat 변환은 mapper 담당)
         config_diff = config_mapper.apply_config_patch(state.index_config, result.config_patch)
-        state.reindex_required = bool(result.needs_reindex)
+        # 새 처방의 재색인 필요 여부와 '롤백이 요구한 재색인'을 OR 로 합친다. 검색시점
+        # 처방(needs_reindex=False)이 롤백의 재색인 요구를 덮어써, baseline 청킹이 인덱스에
+        # 복원되지 않고 열화된 인덱스가 그대로 재사용되던 버그(config/인덱스 불일치)를 막는다.
+        state.reindex_required = bool(result.needs_reindex) or rollback_reindex_required
 
         # pending 이력 생성(다음 방문에서 finalize) + iteration 1회 증가
         prescription_id = (
@@ -350,6 +358,16 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             state, request, prescription_id, before_config, before_report
         )
         item.metadata["reindex_required"] = bool(result.needs_reindex)
+        if rolled_back and judged_item is not None:
+            item.metadata["before_index_key"] = judged_item.metadata.get(
+                "before_index_key", ""
+            )
+            item.metadata["before_eval_key"] = judged_item.metadata.get(
+                "before_eval_key", ""
+            )
+        else:
+            item.metadata["before_index_key"] = state.active_index_key
+            item.metadata["before_eval_key"] = state.active_eval_key
         state.optimization_history.append(item)
         if starts_new_label:
             state.iteration += 1
@@ -525,6 +543,11 @@ def _finish_internal_study(
                 after_score=after_score,
                 reason="모든 top_k 후보 평가 후 가장 좋은 후보를 선택",
             )
+            # 비교 기준은 before_config(study baseline)가 아니라 after_config 가 맞다.
+            # after_config 는 '마지막으로 적용·재색인된 후보'(=현재 물리 인덱스가 반영
+            # 중인 config)의 스냅샷이므로, best 가 마지막 후보와 같으면 이미 색인돼 있어
+            # 재색인 불필요("verified"), 다르면 "applied" 로 Index 재색인을 태운다.
+            # (첫 후보 단계의 after_config={} 는 비교가 항상 True 라 "applied" 로 안전.)
             state.status = (
                 "applied"
                 if state.index_config != item.after_config
@@ -550,6 +573,13 @@ def _finish_internal_study(
     # 복원 시 before 와 동일(설정을 되돌렸으므로), 아니면 sweep 이 full report 를 남기지
     # 않아 미상(None) — 표시부가 fallback 한다.
     before_composite = history._read_composite(item.metadata.get("before_report"))
+    # baseline 복원이면 설정을 되돌렸으니 after=before. 새 후보가 이겼으면 그 후보의
+    # 관측값에 실린 composite_total 을 쓴다(_report_metrics 가 실어둠). 없으면 None →
+    # 표시부가 overall×100 으로 폴백.
+    after_composite = (
+        before_composite if baseline_selected
+        else best_metrics.get("composite_total")
+    )
     item.metadata.update(
         {
             "pending": False,
@@ -557,7 +587,7 @@ def _finish_internal_study(
             "before_score": verdict.before_score,
             "after_score": verdict.after_score,
             "before_composite": before_composite,
-            "after_composite": before_composite if baseline_selected else None,
+            "after_composite": after_composite,
             "best_config": dict(result.best_config or {}),
         }
     )
@@ -648,6 +678,11 @@ def _report_metrics(state: AgentDoctorState) -> dict:
     metrics = dict(state.report.ragas_scores)
     if state.report.overall_score is not None:
         metrics["overall_score"] = state.report.overall_score
+    # 표시·게이트용 종합점수(0~100)도 관측값에 실어, sweep 승자의 after_composite 를
+    # 표시부가 복원하게 한다(없으면 overall×100 폴백 → before/after 스케일 뒤섞임).
+    composite_total = (state.report.composite_score or {}).get("total")
+    if composite_total is not None:
+        metrics["composite_total"] = float(composite_total)
     metrics["pass_threshold"] = gate.passes_report(state.report)
     return metrics
 
@@ -703,10 +738,12 @@ def _judge_pending_trial(
     after_report = state.report
 
     if before_report is None or after_report is None:
-        # 비교할 점수가 없어 판정 불가 → 보수적으로 유지 처리하고 확정만.
+        # 비교할 점수가 없어 판정 불가 → 안전망 취지대로 롤백(원래 설정 복원)한다.
+        # before_config 스냅샷은 리포트와 무관하게 항상 있으므로 복원은 안전하며,
+        # '유지'로 두면 성능을 떨어뜨린 처방도 검증 없이 굳어질 수 있다(방향이 위험).
         verdict = Verdict(
-            keep=True, before_score=0.0, after_score=0.0,
-            reason="판정 불가(리포트 없음) — 유지",
+            keep=False, before_score=0.0, after_score=0.0,
+            reason="판정 불가(리포트 없음) — 롤백", unjudgeable=True,
         )
     else:
         verdict = history.judge(before_report, after_report)
@@ -723,8 +760,11 @@ def _judge_pending_trial(
             restored["recreate_collection_on_dimension_mismatch"] = True
         state.index_config = restored
         state.reindex_required = bool(pending.metadata.get("reindex_required", True))
+        # 측정이 없어(unjudgeable) 롤백한 경우는 '나빴다는 증거'가 아니므로 블랙리스트
+        # 등록을 건너뛴다. 영구 차단하면 리포트 부재만으로 처방이 소진되고, before_report
+        # None 이 다음 방문으로 전파돼 판정 불가→롤백→차단이 연쇄될 수 있다(리뷰 #36).
         label = pending.failure_labels[0] if pending.failure_labels else ""
-        if label and pending.selected_prescription_id:
+        if label and pending.selected_prescription_id and not verdict.unjudgeable:
             state.blacklist.add((label, pending.selected_prescription_id))
 
     history.finalize_item(pending, verdict, after_config, after_report)
