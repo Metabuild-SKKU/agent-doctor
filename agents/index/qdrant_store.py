@@ -6,6 +6,7 @@ import hashlib
 import math
 import os
 import re
+import time
 import uuid
 from collections import Counter
 from typing import Any
@@ -36,11 +37,29 @@ DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 VECTOR_DIM = 1024
 
+def _env_float(name: str, default: float) -> float:
+    """환경변수 float 파싱 — 비정수/오타면 기본값으로 폴백. import 시점 크래시 방지
+    (오타 하나로 모듈 전체 import 가 실패하지 않도록)."""
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 _models: dict[str, Any] = {}
-_failed_models: set[str] = set()
+# model_name → 마지막 로드 실패 시각(monotonic). 실패를 영구 캐시하면 일시적
+# 원인(네트워크 등) 후에도 프로세스 내내 fallback 임베딩만 조용히 쓰게 되므로,
+# 쿨다운이 지나면 재시도한다.
+_failed_models: dict[str, float] = {}
+_FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
+# reranker_model → 마지막 로드 실패 시각(monotonic). embedding 모델과 같은 쿨다운
+# 정책을 따른다 — 영구 캐시하면 일시적 실패 후에도 프로세스 내내 리랭킹이 죽는다.
 _rerankers: dict[str, Any] = {}
-_failed_rerankers: set[str] = set()
-_collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, bool] = WeakKeyDictionary()
+_failed_rerankers: dict[str, float] = {}
+_FAILED_RERANKER_RETRY_SEC = _env_float("INDEX_RERANKER_RETRY_SEC", 300.0)
+_collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, dict[str, bool]] = (
+    WeakKeyDictionary()
+)
 
 
 # 테스트에서는 in-memory, 운영에서는 실제 Qdrant endpoint로 붙는다.
@@ -51,9 +70,12 @@ def build_client(url: str = ":memory:", api_key: str | None = None) -> QdrantCli
 
 
 # Qdrant client 버전별 응답 차이를 여기서만 흡수한다.
-def _collection_vector_size(client: QdrantClient) -> int | None:
+def _collection_vector_size(
+    client: QdrantClient,
+    collection_name: str = COLLECTION,
+) -> int | None:
     try:
-        vectors = client.get_collection(COLLECTION).config.params.vectors
+        vectors = client.get_collection(collection_name).config.params.vectors
         if isinstance(vectors, dict):
             dense = vectors.get(DENSE_VECTOR_NAME)
             if dense is not None and hasattr(dense, "size"):
@@ -66,11 +88,18 @@ def _collection_vector_size(client: QdrantClient) -> int | None:
     return None
 
 
-def _collection_has_native_hybrid(client: QdrantClient) -> bool:
-    if client in _collection_native_hybrid_cache:
-        return _collection_native_hybrid_cache[client]
+def _collection_has_native_hybrid(
+    client: QdrantClient,
+    collection_name: str = COLLECTION,
+) -> bool:
+    cache = _collection_native_hybrid_cache.setdefault(client, {})
+    if isinstance(cache, bool):
+        cache = {COLLECTION: cache}
+        _collection_native_hybrid_cache[client] = cache
+    if collection_name in cache:
+        return cache[collection_name]
     try:
-        params = client.get_collection(COLLECTION).config.params
+        params = client.get_collection(collection_name).config.params
         vectors = params.vectors
         sparse_vectors = getattr(params, "sparse_vectors", None) or {}
         has_native = (
@@ -79,14 +108,22 @@ def _collection_has_native_hybrid(client: QdrantClient) -> bool:
             and SPARSE_VECTOR_NAME in sparse_vectors
         )
     except Exception:
-        _collection_native_hybrid_cache[client] = False
+        cache[collection_name] = False
         return False
-    _collection_native_hybrid_cache[client] = has_native
+    cache[collection_name] = has_native
     return has_native
 
 
-def _clear_collection_shape_cache(client: QdrantClient) -> None:
-    _collection_native_hybrid_cache.pop(client, None)
+def _clear_collection_shape_cache(
+    client: QdrantClient,
+    collection_name: str | None = None,
+) -> None:
+    if collection_name is None:
+        _collection_native_hybrid_cache.pop(client, None)
+        return
+    cache = _collection_native_hybrid_cache.get(client)
+    if cache is not None:
+        cache.pop(collection_name, None)
 
 
 def _is_collection_shape_error(exc: Exception) -> bool:
@@ -150,24 +187,25 @@ def ensure_collection(
     client: QdrantClient,
     vector_dim: int = VECTOR_DIM,
     recreate_on_mismatch: bool = False,
+    collection_name: str = COLLECTION,
 ) -> None:
     # 차원이 다른 컬렉션에 그대로 덮어쓰면 검색이 깨져서, 명시 옵션 없이는 막는다.
     existing = [collection.name for collection in client.get_collections().collections]
-    if COLLECTION in existing:
-        current_dim = _collection_vector_size(client)
+    if collection_name in existing:
+        current_dim = _collection_vector_size(client, collection_name)
         if current_dim is None or current_dim == vector_dim:
-            if _collection_has_native_hybrid(client):
+            if _collection_has_native_hybrid(client, collection_name):
                 return
             if recreate_on_mismatch:
                 print(
-                    f"[Qdrant] legacy dense-only 컬렉션 재생성: {COLLECTION} "
+                    f"[Qdrant] legacy dense-only 컬렉션 재생성: {collection_name} "
                     "(native hybrid shape로 마이그레이션)"
                 )
-                client.delete_collection(collection_name=COLLECTION)
-                _clear_collection_shape_cache(client)
+                client.delete_collection(collection_name=collection_name)
+                _clear_collection_shape_cache(client, collection_name)
             else:
                 print(
-                    f"[Qdrant] legacy dense-only 컬렉션 사용: {COLLECTION} "
+                    f"[Qdrant] legacy dense-only 컬렉션 사용: {collection_name} "
                     "(native hybrid를 쓰려면 컬렉션 재생성이 필요합니다)"
                 )
                 return
@@ -177,13 +215,13 @@ def ensure_collection(
                     f"Qdrant 벡터 차원이 다릅니다: 기존={current_dim}, 요청={vector_dim}. "
                     "recreate_collection_on_dimension_mismatch를 켜거나 새 컬렉션을 사용하세요."
                 )
-            client.delete_collection(collection_name=COLLECTION)
-            _clear_collection_shape_cache(client)
-        if COLLECTION in [collection.name for collection in client.get_collections().collections]:
+            client.delete_collection(collection_name=collection_name)
+            _clear_collection_shape_cache(client, collection_name)
+        if collection_name in [collection.name for collection in client.get_collections().collections]:
             return
 
     client.create_collection(
-        collection_name=COLLECTION,
+        collection_name=collection_name,
         vectors_config={
             DENSE_VECTOR_NAME: VectorParams(size=vector_dim, distance=Distance.COSINE),
         },
@@ -191,8 +229,8 @@ def ensure_collection(
             SPARSE_VECTOR_NAME: SparseVectorParams(),
         },
     )
-    _clear_collection_shape_cache(client)
-    print(f"[Qdrant] 컬렉션 준비: {COLLECTION} (dim={vector_dim})")
+    _clear_collection_shape_cache(client, collection_name)
+    print(f"[Qdrant] 컬렉션 준비: {collection_name} (dim={vector_dim})")
 
 
 # 같은 chunk_id는 같은 point id를 쓰게 해서 재색인을 안전하게 만든다.
@@ -202,8 +240,12 @@ def _point_id(chunk_id: str, retrieval_scope_id: str | None = None) -> str:
 
 
 # Serve가 payload를 그대로 읽으므로 provenance 필드는 빼지 않는다.
-def upsert_chunks(client: QdrantClient, chunks: list) -> None:
-    use_native_hybrid = _collection_has_native_hybrid(client)
+def upsert_chunks(
+    client: QdrantClient,
+    chunks: list,
+    collection_name: str = COLLECTION,
+) -> None:
+    use_native_hybrid = _collection_has_native_hybrid(client, collection_name)
     points = []
     for chunk in chunks:
         if not chunk.embedding:
@@ -229,6 +271,7 @@ def upsert_chunks(client: QdrantClient, chunks: list) -> None:
             "metadata": metadata,
             "sparse_vector": chunk.sparse_vector,
             "retrieval_scope_id": retrieval_scope_id,
+            "index_cache_key": metadata.get("index_cache_key"),
         }
         points.append(
             PointStruct(
@@ -238,8 +281,31 @@ def upsert_chunks(client: QdrantClient, chunks: list) -> None:
             )
         )
     if points:
-        client.upsert(collection_name=COLLECTION, points=points)
+        client.upsert(collection_name=collection_name, points=points)
         print(f"[Qdrant] {len(points)}개 청크 저장 완료")
+
+
+def collection_index_cache_key(
+    client: QdrantClient,
+    collection_name: str = COLLECTION,
+) -> str | None:
+    """컬렉션 payload에 기록한 논리 인덱스 키를 한 건 읽는다."""
+    try:
+        points, _ = client.scroll(
+            collection_name=collection_name,
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points:
+            return None
+        payload = points[0].payload or {}
+        key = payload.get("index_cache_key")
+        if not key:
+            key = (payload.get("metadata") or {}).get("index_cache_key")
+        return str(key) if key else None
+    except Exception:
+        return None
 
 
 # 재색인 대상 문서의 옛 chunk가 검색에 섞이지 않도록 먼저 지운다.
@@ -247,6 +313,7 @@ def delete_document_chunks(
     client: QdrantClient,
     doc_ids: list[str],
     retrieval_scope_id: str | None = None,
+    collection_name: str = COLLECTION,
 ) -> None:
     unique_ids = sorted({doc_id for doc_id in doc_ids if doc_id})
     if not unique_ids:
@@ -266,7 +333,7 @@ def delete_document_chunks(
                 )
             )
         client.delete(
-            collection_name=COLLECTION,
+            collection_name=collection_name,
             points_selector=Filter(must=must),
         )
     except Exception:
@@ -286,7 +353,7 @@ def delete_document_chunks(
                     )
                 )
             client.delete(
-                collection_name=COLLECTION,
+                collection_name=collection_name,
                 points_selector=Filter(must=must),
             )
 
@@ -296,12 +363,13 @@ def search(
     query_vector: list[float],
     top_k: int = 5,
     retrieval_scope_id: str | None = None,
+    collection_name: str = COLLECTION,
 ) -> list[dict]:
     query_filter = _query_filter(retrieval_scope_id)
     # dense 검색 결과를 Serve가 쓰는 공통 dict 모양으로 맞춘다.
     def _query_once(native_hybrid_collection: bool):
         kwargs = {
-            "collection_name": COLLECTION,
+            "collection_name": collection_name,
             "query": query_vector,
             "limit": top_k,
         }
@@ -313,7 +381,7 @@ def search(
             return client.query_points(**kwargs).points
         if not native_hybrid_collection and hasattr(client, "search"):
             search_kwargs = {
-                "collection_name": COLLECTION,
+                "collection_name": collection_name,
                 "query_vector": query_vector,
                 "limit": top_k,
             }
@@ -323,12 +391,12 @@ def search(
         raise AttributeError("Qdrant client has neither query_points nor legacy search")
 
     try:
-        hits = _query_once(_collection_has_native_hybrid(client))
+        hits = _query_once(_collection_has_native_hybrid(client, collection_name))
     except Exception as exc:
         if not _is_collection_shape_error(exc):
             raise
-        _clear_collection_shape_cache(client)
-        hits = _query_once(_collection_has_native_hybrid(client))
+        _clear_collection_shape_cache(client, collection_name)
+        hits = _query_once(_collection_has_native_hybrid(client, collection_name))
     return [_hit_to_result(hit) for hit in hits]
 
 
@@ -420,6 +488,7 @@ def hybrid_search(
     top_k: int = 5,
     dense_weight: float = 0.7,
     retrieval_scope_id: str | None = None,
+    collection_name: str = COLLECTION,
 ) -> list[dict]:
     native_results = _native_hybrid_search(
         client,
@@ -428,6 +497,7 @@ def hybrid_search(
         top_k=top_k,
         dense_weight=dense_weight,
         retrieval_scope_id=retrieval_scope_id,
+        collection_name=collection_name,
     )
     if native_results is not None:
         return native_results
@@ -439,6 +509,7 @@ def hybrid_search(
         query_vector,
         top_k=max(top_k * 4, 20),
         retrieval_scope_id=retrieval_scope_id,
+        collection_name=collection_name,
     )
     dense_by_id = {item["chunk_id"]: item for item in dense_results}
 
@@ -478,11 +549,12 @@ def _native_hybrid_search(
     top_k: int,
     dense_weight: float,
     retrieval_scope_id: str | None,
+    collection_name: str = COLLECTION,
 ) -> list[dict] | None:
     if Prefetch is None or Rrf is None or RrfQuery is None:
         return None
     sparse = _sparse_vector(build_sparse_vector(query))
-    if sparse is None or not _collection_has_native_hybrid(client):
+    if sparse is None or not _collection_has_native_hybrid(client, collection_name):
         return None
 
     dense_weight = min(1.0, max(0.0, float(dense_weight)))
@@ -491,7 +563,7 @@ def _native_hybrid_search(
     query_filter = _query_filter(retrieval_scope_id)
     try:
         hits = client.query_points(
-            collection_name=COLLECTION,
+            collection_name=collection_name,
             prefetch=[
                 Prefetch(
                     query=sparse,
@@ -526,14 +598,24 @@ def rerank(
     # reranker가 있으면 한 번 더 정렬하고, 없으면 기존 순서를 유지한다.
     if not results:
         return []
-    if model_name not in _rerankers and model_name not in _failed_rerankers:
-        try:
-            from sentence_transformers import CrossEncoder
+    if model_name not in _rerankers:
+        failed_at = _failed_rerankers.get(model_name)
+        in_cooldown = (
+            failed_at is not None
+            and time.monotonic() - failed_at < _FAILED_RERANKER_RETRY_SEC
+        )
+        if not in_cooldown:
+            try:
+                from sentence_transformers import CrossEncoder
 
-            _rerankers[model_name] = CrossEncoder(model_name)
-        except Exception as exc:
-            _failed_rerankers.add(model_name)
-            print(f"[Index] reranker 로드 실패, 기존 순위 유지: {exc}")
+                _rerankers[model_name] = CrossEncoder(model_name)
+                _failed_rerankers.pop(model_name, None)
+            except Exception as exc:
+                _failed_rerankers[model_name] = time.monotonic()
+                print(
+                    f"[Index] reranker 로드 실패, 기존 순위 유지 "
+                    f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
+                )
 
     model = _rerankers.get(model_name)
     if model is None:
@@ -564,15 +646,37 @@ def _fallback_embedding(text: str, vector_dim: int) -> list[float]:
 
 def _get_embedding_model(model_name: str) -> Any | None:
     # 프로세스 내 1회 로드(전역 캐시). 실패 시 None → 호출부가 fallback 사용.
-    if model_name not in _models and model_name not in _failed_models:
-        try:
-            from sentence_transformers import SentenceTransformer
+    # 실패는 쿨다운(_FAILED_MODEL_RETRY_SEC) 후 재시도한다 — fallback 임베딩은
+    # 의미 검색이 안 되는 해시 벡터라, 이 상태로 Eval/Optimize가 돌면 점수 전체가
+    # 무효가 되므로 일시적 실패에서 반드시 복구 기회를 줘야 한다.
+    if model_name not in _models:
+        failed_at = _failed_models.get(model_name)
+        in_cooldown = (
+            failed_at is not None
+            and time.monotonic() - failed_at < _FAILED_MODEL_RETRY_SEC
+        )
+        if not in_cooldown:
+            try:
+                from sentence_transformers import SentenceTransformer
 
-            _models[model_name] = SentenceTransformer(model_name)
-        except Exception as exc:
-            _failed_models.add(model_name)
-            print(f"[Index] 임베딩 모델 로드 실패, deterministic fallback 사용: {exc}")
+                _models[model_name] = SentenceTransformer(model_name)
+                _failed_models.pop(model_name, None)
+            except Exception as exc:
+                _failed_models[model_name] = time.monotonic()
+                print(
+                    f"[Index] 임베딩 모델 '{model_name}' 로드 실패 — deterministic "
+                    f"fallback 사용, {_FAILED_MODEL_RETRY_SEC:.0f}초 후 재시도: {exc}"
+                )
     return _models.get(model_name)
+
+
+def embedding_is_fallback(model_name: str = DEFAULT_EMBEDDING_MODEL) -> bool:
+    """지금 이 모델로 임베딩하면 (해시) fallback 이 되는지 여부.
+
+    호출부(index)가 청크에 임베딩 provenance 를 기록하고, 모델 복구 후 fallback 으로
+    색인된 청크를 강제 재임베딩할지 판단하는 데 쓴다. 쿨다운 중이면 로드를 시도하지
+    않으므로 계속 True 를 돌려준다(복구 시도는 쿨다운 경과 후). None → fallback."""
+    return _get_embedding_model(model_name) is None
 
 
 def embed(
@@ -627,6 +731,10 @@ def count_tokens(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
 ) -> int:
     # tokenizer가 있으면 그걸 쓰고, 없으면 대략적인 토큰 수로 기록한다.
+    # 순수 dict 조회로만 캐시된 모델을 본다(부작용 없음). 프로덕션 유일 호출부
+    # (index/agent.py)는 항상 embed 뒤에 불려 모델이 이미 캐시에 있으므로 실제
+    # tokenizer를 쓴다. 여기서 _get_embedding_model 로 지연 로드하면 모델 없는
+    # 환경에서 HF 다운로드를 유발해 토큰 세기 한 번이 수 초 블로킹된다(리뷰 #36).
     model = _models.get(model_name)
     tokenizer = getattr(model, "tokenizer", None) if model is not None else None
     if tokenizer is None:

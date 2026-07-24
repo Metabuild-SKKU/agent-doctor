@@ -12,6 +12,7 @@ import json
 import hashlib
 import os
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,10 +20,12 @@ from typing import Any
 from qdrant_client import QdrantClient
 
 from agents.index.qdrant_store import (
+    COLLECTION,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_RERANKER_MODEL,
     VECTOR_DIM,
     build_client,
+    collection_index_cache_key,
     delete_document_chunks,
     embed,
     ensure_collection,
@@ -51,6 +54,10 @@ class RetrievalSettings:
     reranker_model: str = DEFAULT_RERANKER_MODEL
     qdrant_url: str = ":memory:"
     qdrant_api_key: str | None = None
+    collection_name: str = COLLECTION
+    index_cache_key: str = ""
+    replace_collection: bool = False
+    reuse_existing_collection: bool = False
     recreate_collection_on_dimension_mismatch: bool = False
 
 # true, yes, y, on, 1 -> true로 처리 (bool 정규화)
@@ -120,6 +127,12 @@ def resolve_retrieval_settings(
         reranker_model=str(pick("reranker_model", DEFAULT_RERANKER_MODEL)),
         qdrant_url=str(config.get("qdrant_url") or os.getenv("QDRANT_URL", ":memory:")),
         qdrant_api_key=config.get("qdrant_api_key") or os.getenv("QDRANT_API_KEY"),
+        collection_name=str(pick("qdrant_collection_name", COLLECTION)),
+        index_cache_key=str(pick("index_cache_key", "")),
+        replace_collection=_as_bool(pick("replace_qdrant_collection", False)),
+        reuse_existing_collection=_as_bool(
+            pick("reuse_existing_collection", False)
+        ),
         recreate_collection_on_dimension_mismatch=_as_bool(
             pick("recreate_collection_on_dimension_mismatch", False)
         ),
@@ -220,6 +233,11 @@ class Retriever:
             for chunk in self.chunks
             if chunk.get("chunk_id")
         }
+        self._chunks_by_id = {
+            chunk.get("chunk_id", ""): chunk
+            for chunk in self.chunks
+            if chunk.get("chunk_id")
+        }
         self.retrieval_scope_id = (
             _first_metadata(self.chunks).get("retrieval_scope_id")
             if self.chunks
@@ -237,11 +255,25 @@ class Retriever:
     def _current_results(self, results: list[dict]) -> list[dict]:
         if not self.chunk_ids:
             return results
-        return [
-            item
-            for item in results
-            if item.get("chunk_id") in self.chunk_ids
-        ]
+        current_results = []
+        for item in results:
+            chunk = self._chunks_by_id.get(item.get("chunk_id"))
+            if chunk is None:
+                continue
+            current_results.append(
+                {
+                    **item,
+                    "doc_id": chunk.get("doc_id", ""),
+                    "text": chunk.get("text", ""),
+                    "section": chunk.get("section"),
+                    "char_span": chunk.get("char_span"),
+                    "token_count": chunk.get("token_count"),
+                    "parent_id": chunk.get("parent_id"),
+                    "hash": chunk.get("hash"),
+                    "metadata": chunk.get("metadata", {}),
+                }
+            )
+        return current_results
 
     """
     1) 빈 query -> 빈 결과
@@ -286,6 +318,7 @@ class Retriever:
                         top_k=vector_candidate_k,
                         dense_weight=self.settings.hybrid_dense_weight,
                         retrieval_scope_id=self.retrieval_scope_id,
+                        collection_name=self.settings.collection_name,
                     )
                 else:
                     mode = "dense"
@@ -294,6 +327,7 @@ class Retriever:
                         query_vector,
                         top_k=vector_candidate_k,
                         retrieval_scope_id=self.retrieval_scope_id,
+                        collection_name=self.settings.collection_name,
                     )
                 results = self._current_results(results)
             except Exception as exc:
@@ -355,18 +389,57 @@ def _populate(
                 api_key=settings.qdrant_api_key,
             )
             vector_dim = len(embedded[0].embedding or []) or settings.embedding_dimension or VECTOR_DIM
+            existing = {
+                item.name
+                for item in client.get_collections().collections
+            }
+            reuse_requested = (
+                settings.reuse_existing_collection
+                and settings.collection_name in existing
+            )
+            stored_index_key = (
+                collection_index_cache_key(
+                    client,
+                    collection_name=settings.collection_name,
+                )
+                if reuse_requested
+                else None
+            )
+            if (
+                reuse_requested
+                and settings.index_cache_key
+                and stored_index_key == settings.index_cache_key
+            ):
+                ensure_collection(
+                    client,
+                    vector_dim=vector_dim,
+                    recreate_on_mismatch=False,
+                    collection_name=settings.collection_name,
+                )
+                return raw_chunks, client, True
+            if settings.replace_collection or reuse_requested:
+                if settings.collection_name in existing:
+                    client.delete_collection(
+                        collection_name=settings.collection_name
+                    )
             ensure_collection(
                 client,
                 vector_dim=vector_dim,
                 recreate_on_mismatch=settings.recreate_collection_on_dimension_mismatch,
+                collection_name=settings.collection_name,
             )
             if delete_doc_ids:
                 delete_document_chunks(
                     client,
                     list(delete_doc_ids),
                     retrieval_scope_id=scope_id,
+                    collection_name=settings.collection_name,
                 )
-            upsert_chunks(client, embedded)
+            upsert_chunks(
+                client,
+                embedded,
+                collection_name=settings.collection_name,
+            )
         except Exception as exc:
             print(f"[Retriever] Qdrant setup failed, using keyword fallback: {exc}")
             return raw_chunks, None, False
@@ -401,8 +474,11 @@ def build_retriever(
 # 다시 upsert 하던 문제를 없앤다.
 
 _cache_lock = threading.Lock()
-_cached_key: tuple | None = None
-_cached_payload: tuple[list[dict], QdrantClient | None] | None = None
+_MAX_CACHED_INDEXES = 2
+_cached_entries: OrderedDict[
+    tuple,
+    tuple[list[dict], QdrantClient | None, str],
+] = OrderedDict()
 
 
 def _population_key(
@@ -433,11 +509,37 @@ def _population_key(
     """
     return (
         scope_id,
+        settings.index_cache_key or _legacy_payload_signature(raw_chunks),
         settings.embedding_model,
         _first_embedding_dim(raw_chunks) or settings.embedding_dimension,
         settings.qdrant_url,
         settings.qdrant_api_key,
+        settings.collection_name,
     )
+
+
+def _legacy_payload_signature(raw_chunks: list[dict]) -> str:
+    """논리 인덱스 키가 없는 옛 청크는 Qdrant payload 전체로 충돌을 막는다."""
+    raw = json.dumps(
+        sorted(raw_chunks, key=lambda item: item.get("chunk_id", "")),
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+        separators=(",", ":"),
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _evict_oldest_index() -> None:
+    """가장 오래된 프로세스 내 적재 캐시만 제거한다.
+
+    임의의 custom collection은 다른 파이프라인 소유일 수 있어 여기서 삭제하지
+    않는다. Index가 관리하는 고정 슬롯은 새 버전을 쓸 때 _populate가 정확한
+    대상 슬롯만 교체한다.
+    """
+    if not _cached_entries:
+        return
+    _cached_entries.popitem(last=False)
 
 
 def get_retriever(
@@ -459,33 +561,47 @@ def get_retriever(
     비우지는 않는다. 슬롯이 하나뿐이라도 방금 실패한 키와 앞서 성공한 키는 서로 다른 청크
     집합이고, 그 키로 다시 들어오면 옛 항목은 여전히 유효하다.
     """
-    global _cached_key, _cached_payload
-
     settings = resolve_retrieval_settings(chunks, config)
     raw_chunks = [_chunk_to_dict(chunk) for chunk in chunks]
     scope_id = _scope_id(raw_chunks)
     key = _population_key(raw_chunks, scope_id, settings)
 
     with _cache_lock:
-        if _cached_key == key and _cached_payload is not None:
-            raw_chunks, cached_client = _cached_payload
+        if key in _cached_entries:
+            _, cached_client, _ = _cached_entries.pop(key)
+            if any(chunk.get("embedding") for chunk in raw_chunks):
+                raw_chunks = _with_scope(raw_chunks, scope_id)
+            _cached_entries[key] = (
+                raw_chunks,
+                cached_client,
+                settings.collection_name,
+            )
         else:
+            # 고정 2-slot의 한쪽을 새 버전으로 덮어쓸 때는 그 물리 슬롯의
+            # 이전 캐시 항목만 제거한다. 단순 LRU로 baseline을 먼저 지우면
+            # 같은 Optimize 방문의 후속 처방이 다시 실패했을 때 롤백할 수 없다.
+            for cached_key, payload in list(_cached_entries.items()):
+                if payload[2] == settings.collection_name:
+                    _cached_entries.pop(cached_key)
+            if len(_cached_entries) >= _MAX_CACHED_INDEXES:
+                _evict_oldest_index()
             raw_chunks, cached_client, cacheable = _populate(
                 raw_chunks, scope_id, settings, client, delete_doc_ids
             )
             if cacheable:
-                _cached_key = key
-                _cached_payload = (raw_chunks, cached_client)
+                _cached_entries[key] = (
+                    raw_chunks,
+                    cached_client,
+                    settings.collection_name,
+                )
 
     return Retriever(raw_chunks, settings, client=cached_client)
 
 
 def reset_retriever_cache() -> None:
     """적재 캐시를 비운다(테스트·장기 실행 프로세스에서 인덱스를 강제로 다시 만들 때)."""
-    global _cached_key, _cached_payload
     with _cache_lock:
-        _cached_key = None
-        _cached_payload = None
+        _cached_entries.clear()
 
 # serve 쪽에서 chunk.json 읽을 때 helper
 def load_chunks(path: str | Path) -> list[dict]:

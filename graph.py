@@ -152,12 +152,14 @@ if __name__ == "__main__":
     import os
 
     # 소스는 env 로 받는다(run_local_pipeline.py 와 동일 계약: SOURCE_TYPE / SOURCE_URL).
-    #   SOURCE_TYPE=korquad SOURCE_URL=data/corpus.jsonl python graph.py   # 기본
-    #   SOURCE_TYPE=file    SOURCE_URL=sample_docs/hr_policy.md python graph.py
+    #   SOURCE_TYPE=file    SOURCE_URL=sample_docs/hr_policy.md python graph.py   # 기본
+    #   SOURCE_TYPE=korquad SOURCE_URL=data/corpus.jsonl python graph.py
     #   SOURCE_TYPE=notion  SOURCE_URL=https://notion.so/... python graph.py
     # run_local_pipeline.py 와 달리 Serve 까지 띄우고, 품질 미달 시 재색인·재평가
     # 루프(route_after_eval/optimize)를 예산 소진까지 반복한다.
-    source_type = os.getenv("SOURCE_TYPE", "korquad").strip().lower()
+    # 기본값은 레포에 포함된 sample_docs/hr_policy.md 로 둔다 — korquad 는 data/ 파일을
+    # 별도 준비해야 하므로(gitignore), 클론 직후 바로 실행되려면 file 이어야 한다.
+    source_type = os.getenv("SOURCE_TYPE", "file").strip().lower()
     defaults = {
         "korquad": "data/corpus.jsonl",
         "file": "sample_docs/hr_policy.md",

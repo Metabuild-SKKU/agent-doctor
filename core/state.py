@@ -7,7 +7,14 @@ LangGraph 공유 상태 정의
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
-from core.schema import Document, Chunk, Probe, DiagnosticReport
+from core.schema import (
+    Document,
+    Chunk,
+    Probe,
+    DiagnosticReport,
+    IndexSnapshot,
+    EvalSnapshot,
+)
 
 
 @dataclass
@@ -82,10 +89,20 @@ class AgentDoctorState:
         # 임베딩 모델 교체로 벡터 차원이 달라졌을 때 Qdrant 컬렉션을 재생성할지 여부.
         # False(기본)면 차원 불일치 시 ensure_collection이 ValueError로 막는다.
         "recreate_collection_on_dimension_mismatch": False,
+        # 롤백 캐시는 현재/직전 버전만 유지한다. 현재 구현은 최대 2개만 지원한다.
+        "rollback_cache_enabled": True,
+        "rollback_cache_max_versions": 2,
+        # 같은 Qdrant를 여러 파이프라인이 공유하면 고유 namespace를 지정한다.
+        # 비어 있으면 Index가 문서 ID/source 조합에서 안정적으로 파생한다.
+        "qdrant_collection_namespace": "",
     })
     # 인덱싱 부산물(청크/문서 수, 그래프 파일 경로, failed_documents 등).
     # 선언 없이 동적 속성으로 쓰면 LangGraph가 노드 간 상태 복사 시 유실할 수 있다.
     index_artifacts: dict = field(default_factory=dict)
+    # Index Agent 소유. 현재/직전 인덱스 스냅샷을 LRU 순서로 최대 두 개 보관한다.
+    index_cache: list[IndexSnapshot] = field(default_factory=list)
+    active_index_key: str = ""
+    index_cache_hit: bool = False
 
     # Eval Agent 결과
     probes: list[Probe] = field(default_factory=list)
@@ -94,6 +111,10 @@ class AgentDoctorState:
     # 버전(index_config+코퍼스)이 바뀌면 Eval 진입 시 무효화한다.
     diagnosis_cache: dict = field(default_factory=dict)
     diagnosis_cache_version: str = ""
+    # Eval Agent 소유. 현재/직전 완전 진단 결과를 LRU 순서로 최대 두 개 보관한다.
+    eval_cache: list[EvalSnapshot] = field(default_factory=list)
+    active_eval_key: str = ""
+    eval_cache_hit: bool = False
 
     # 반복 제어
     iteration: int = 0

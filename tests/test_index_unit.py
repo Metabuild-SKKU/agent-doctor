@@ -1,6 +1,7 @@
 # 외부 모델이나 Qdrant 서버 없이 Index 계약만 확인하는 테스트.
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -189,6 +190,119 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(second.index_artifacts["reused_embeddings"], 1)
         self.assertEqual(second.chunks[0].metadata["top_k"], 9)
         self.assertTrue(second.chunks[0].metadata["use_reranker"])
+
+    def test_model_recovery_reembeds_fallback_chunks(self):
+        # 리뷰 회귀: 최초 색인이 fallback(해시 벡터)으로 이뤄진 뒤 모델이 복구되면,
+        # 같은 문서·설정으로 재색인해도 fallback 청크를 그대로 재사용하면 안 되고
+        # 실제 모델 벡터로 강제 재임베딩해야 한다(문서·질의 벡터 공간 불일치 방지).
+        FALLBACK_VEC = [0.5, 0.5, 0.5, 0.5]
+        REAL_VEC = [1.0, 0.0, 0.0, 0.0]
+
+        def _tools(is_fallback: bool) -> IndexTools:
+            vec = FALLBACK_VEC if is_fallback else REAL_VEC
+            return IndexTools(
+                get_retriever=lambda *_a, **_k: Mock(),
+                embed=lambda _t, **_k: list(vec),
+                count_tokens=lambda _t, **_k: 3,
+                build_sparse_vector=lambda _t: {"indices": [], "values": []},
+                build_graph_artifacts=lambda _c, _cfg: {},
+                embed_batch=lambda texts, **_k: [list(vec) for _ in texts],
+                embedding_is_fallback=lambda *_a, **_k: is_fallback,
+            )
+
+        state = self._state()
+        state.documents = [_document("doc-1", "복구 대상 문서 본문입니다.")]
+
+        # 1) 모델 로드 실패 상태로 색인 → fallback 벡터 + provenance 기록
+        first = run(state, tools=_tools(is_fallback=True))
+        self.assertEqual(first.status, "indexed")
+        self.assertTrue(first.chunks[0].metadata["embedding_fallback"])
+        self.assertEqual(first.chunks[0].embedding, FALLBACK_VEC)
+
+        # 2) 모델 복구 후 재색인 → fallback 청크는 실제 벡터로 재임베딩, 캐시 reset
+        with patch("agents.index.agent.reset_retriever_cache") as mock_reset:
+            second = run(first, tools=_tools(is_fallback=False))
+
+        self.assertEqual(second.status, "indexed")
+        # fallback 이었으므로 재사용이 아니라 재임베딩돼야 한다.
+        self.assertEqual(second.index_artifacts["reused_embeddings"], 0)
+        self.assertEqual(second.index_artifacts["reembedded_fallback"], len(second.chunks))
+        self.assertEqual(second.chunks[0].embedding, REAL_VEC)
+        self.assertFalse(second.chunks[0].metadata["embedding_fallback"])
+        mock_reset.assert_called_once()
+
+    def test_fallback_flag_survives_repeated_failures_then_recovery(self):
+        # 리뷰 회귀(@SeonUI): 재사용 경로가 embedding_fallback 을 이어주지 않으면,
+        # 모델이 두 번 연속 실패하는 사이에 플래그가 기본값 False 로 덮여
+        # 이후 모델이 복구돼도 재임베딩 대상으로 잡히지 않는다(해시 벡터 영구 고착).
+        # 위 2회 테스트는 이 경로를 지나지 않으므로 3회(실패→실패→복구)로 검증한다.
+        FALLBACK_VEC = [0.5, 0.5, 0.5, 0.5]
+        REAL_VEC = [1.0, 0.0, 0.0, 0.0]
+
+        def _tools(is_fallback: bool) -> IndexTools:
+            vec = FALLBACK_VEC if is_fallback else REAL_VEC
+            return IndexTools(
+                get_retriever=lambda *_a, **_k: Mock(),
+                embed=lambda _t, **_k: list(vec),
+                count_tokens=lambda _t, **_k: 3,
+                build_sparse_vector=lambda _t: {"indices": [], "values": []},
+                build_graph_artifacts=lambda _c, _cfg: {},
+                embed_batch=lambda texts, **_k: [list(vec) for _ in texts],
+                embedding_is_fallback=lambda *_a, **_k: is_fallback,
+            )
+
+        state = self._state()
+        state.documents = [_document("doc-1", "두 번 실패 후 복구되는 문서 본문입니다.")]
+
+        # 1) 모델 실패 → fallback 벡터로 색인되고 provenance 기록
+        first = run(state, tools=_tools(is_fallback=True))
+        self.assertTrue(first.chunks[0].metadata["embedding_fallback"])
+
+        # 2) 모델 여전히 실패 → 임베딩 재사용 경로. 여기서 플래그가 유실되면 안 된다.
+        second = run(first, tools=_tools(is_fallback=True))
+        self.assertEqual(second.index_artifacts["reused_embeddings"], len(second.chunks))
+        self.assertTrue(
+            second.chunks[0].metadata["embedding_fallback"],
+            "재사용 경로가 embedding_fallback 을 유실하면 복구 후 재임베딩이 동작하지 않는다",
+        )
+        self.assertEqual(second.chunks[0].embedding, FALLBACK_VEC)
+
+        # 3) 모델 복구 → 2회차를 거쳤어도 여전히 재임베딩 대상이어야 한다
+        with patch("agents.index.agent.reset_retriever_cache") as mock_reset:
+            third = run(second, tools=_tools(is_fallback=False))
+
+        self.assertEqual(third.status, "indexed")
+        self.assertEqual(third.index_artifacts["reused_embeddings"], 0)
+        self.assertEqual(third.index_artifacts["reembedded_fallback"], len(third.chunks))
+        self.assertEqual(third.chunks[0].embedding, REAL_VEC)
+        self.assertFalse(third.chunks[0].metadata["embedding_fallback"])
+        mock_reset.assert_called_once()
+
+    def test_recovered_model_still_reuses_non_fallback_chunks(self):
+        # 정상(fallback 아님) 벡터로 색인된 청크는 모델이 로드 가능해도 그대로 재사용한다
+        # (재임베딩은 fallback provenance 가 있는 청크에만 적용).
+        def _tools() -> IndexTools:
+            return IndexTools(
+                get_retriever=lambda *_a, **_k: Mock(),
+                embed=lambda _t, **_k: [1.0, 0.0, 0.0, 0.0],
+                count_tokens=lambda _t, **_k: 3,
+                build_sparse_vector=lambda _t: {"indices": [], "values": []},
+                build_graph_artifacts=lambda _c, _cfg: {},
+                embed_batch=lambda texts, **_k: [[1.0, 0.0, 0.0, 0.0] for _ in texts],
+                embedding_is_fallback=lambda *_a, **_k: False,
+            )
+
+        state = self._state()
+        state.documents = [_document("doc-1", "정상 색인 문서 본문입니다.")]
+        first = run(state, tools=_tools())
+        self.assertFalse(first.chunks[0].metadata["embedding_fallback"])
+
+        with patch("agents.index.agent.reset_retriever_cache") as mock_reset:
+            second = run(first, tools=_tools())
+
+        self.assertEqual(second.index_artifacts["reused_embeddings"], len(second.chunks))
+        self.assertEqual(second.index_artifacts["reembedded_fallback"], 0)
+        mock_reset.assert_not_called()
 
     def test_runtime_only_config_change_skips_reindex_work(self):
         state = self._state()
@@ -642,6 +756,67 @@ class SearchAndGraphTests(unittest.TestCase):
             self.assertTrue(Path(artifacts["graphml"]).exists())
             self.assertTrue(Path(artifacts["mermaid"]).exists())
             self.assertGreater(artifacts["graph_nodes"], 2)
+
+
+class ModelLoadCooldownTests(unittest.TestCase):
+    """로드 실패를 영구 캐시하지 않고 쿨다운 후 재시도하는지 확인(embedding·reranker).
+
+    sentence_transformers import 를 None 으로 막아 로드를 실패시키고, time.monotonic 을
+    가짜로 진행시켜 '쿨다운 중에는 재시도 안 함 / 지나면 재시도함'을 검증한다.
+    """
+
+    def setUp(self):
+        import agents.index.qdrant_store as store
+        self.store = store
+        # 각 테스트가 깨끗한 실패 캐시에서 시작하도록 초기화한다.
+        store._failed_models.clear()
+        store._failed_rerankers.clear()
+        store._models.pop("m", None)
+        store._rerankers.pop("m", None)
+        self.addCleanup(store._failed_models.clear)
+        self.addCleanup(store._failed_rerankers.clear)
+
+    def test_embedding_model_retries_after_cooldown(self):
+        store = self.store
+        # import 를 막아 로드를 실패시킨다.
+        with patch.dict(sys.modules, {"sentence_transformers": None}), \
+             patch.object(store, "_FAILED_MODEL_RETRY_SEC", 300.0), \
+             patch.object(store.time, "monotonic") as clock:
+            clock.return_value = 1000.0
+            self.assertIsNone(store._get_embedding_model("m"))
+            self.assertIn("m", store._failed_models)
+
+            # 쿨다운 중(=재시도 안 함): 실패 시각이 그대로여야 한다.
+            clock.return_value = 1100.0   # +100s < 300s
+            first_failed_at = store._failed_models["m"]
+            self.assertIsNone(store._get_embedding_model("m"))
+            self.assertEqual(store._failed_models["m"], first_failed_at)
+
+            # 쿨다운 경과 후: 재시도하여 실패 시각이 갱신된다.
+            clock.return_value = 1400.0   # +400s > 300s
+            self.assertIsNone(store._get_embedding_model("m"))
+            self.assertEqual(store._failed_models["m"], 1400.0)
+
+    def test_reranker_retries_after_cooldown(self):
+        store = self.store
+        results = [{"chunk_id": "c1", "text": "t1", "score": 0.5}]
+        with patch.dict(sys.modules, {"sentence_transformers": None}), \
+             patch.object(store, "_FAILED_RERANKER_RETRY_SEC", 300.0), \
+             patch.object(store.time, "monotonic") as clock:
+            clock.return_value = 1000.0
+            store.rerank("q", results, model_name="m", top_k=5)
+            self.assertIn("m", store._failed_rerankers)
+            first_failed_at = store._failed_rerankers["m"]
+
+            # 쿨다운 중: 실패 시각 유지(재시도 안 함).
+            clock.return_value = 1100.0
+            store.rerank("q", results, model_name="m", top_k=5)
+            self.assertEqual(store._failed_rerankers["m"], first_failed_at)
+
+            # 쿨다운 경과 후: 재시도로 실패 시각 갱신.
+            clock.return_value = 1400.0
+            store.rerank("q", results, model_name="m", top_k=5)
+            self.assertEqual(store._failed_rerankers["m"], 1400.0)
 
 
 if __name__ == "__main__":
