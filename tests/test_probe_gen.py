@@ -185,13 +185,14 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
         )
 
     @patch("agents.eval.probe_gen._llm_synthesize_query", return_value=None)
-    def test_ragas_heuristic_path_uses_short_exact_evidence(self, _synthesize):
+    def test_ragas_heuristic_path_is_discarded_as_self_referential(self, _synthesize):
+        """LLM 합성이 실패하면 휴리스틱이 원문 문장을 질문·정답에 그대로 쓴다 —
+        '질문=정답' 형태라 품질 게이트가 폐기한다(None 반환)."""
         content = (
             "소개입니다. "
             "정책 신청은 전날 오후 여섯 시까지 제출해야 합니다. "
             "이후 요청은 다음 날 처리됩니다."
         )
-        evidence = "정책 신청은 전날 오후 여섯 시까지 제출해야 합니다."
         document = Document("d1", "memory", "txt", content)
         chunk = Chunk("c1", "d1", content, char_span=(0, len(content)))
         node = KGNode("c1", "d1", content)
@@ -205,14 +206,7 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
             {"d1": document},
         )
 
-        start = content.index(evidence)
-        self.assertEqual(probe.gold_spans, [{
-            "doc_id": "d1",
-            "start": start,
-            "end": start + len(evidence),
-        }])
-        self.assertEqual(probe.ground_truth, evidence)
-        self.assertEqual(probe.metadata["span_grounding"]["status"], "exact")
+        self.assertIsNone(probe)
 
     def test_heuristic_caps_unpunctuated_long_evidence(self):
         content = "근거내용" * 200
@@ -318,7 +312,9 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
 
     @patch(
         "agents.eval.probe_gen._llm_generate_single_hop",
-        return_value=("레거시 청크 질문", "레거시 청크 정답"),
+        # 이 테스트의 관심사는 span 그라운딩이므로, 품질 게이트는 통과하는
+        # (의문형 + 정답을 되풀이하지 않는) 질문을 준다.
+        return_value=("레거시 청크의 위치는 어디인가요?", "레거시 청크 정답"),
     )
     def test_chunk_fallback_locates_legacy_chunk_without_char_span(self, _generate):
         chunk_text = "레거시 청크도 원문에서 위치를 다시 찾을 수 있어야 합니다."
@@ -337,22 +333,41 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
         self.assertEqual(probes[0].gold_spans[0]["start"], content.index(chunk_text))
 
     @patch("agents.eval.probe_gen._llm_generate_single_hop", return_value=None)
-    def test_chunk_heuristic_locates_selected_sentence_exactly(self, _generate):
+    def test_chunk_heuristic_probe_is_discarded_as_self_referential(self, _generate):
+        """휴리스틱 폴백은 원문 조각을 질문·정답에 그대로 써서 '질문=정답' Probe 를
+        만든다. 품질 게이트가 노리는 바로 그 형태이므로 조립 단계에서 폐기돼야 한다
+        (이 경로로 만든 Probe 가 살아남으면 bad_gold_answer 가 무더기로 찍힌다)."""
         chunk_text = "제목입니다. 실제 근거로 사용할 충분히 구체적인 문장입니다. 마무리입니다."
-        evidence = "실제 근거로 사용할 충분히 구체적인 문장입니다."
         document = Document("d1", "memory", "txt", chunk_text)
         chunk = Chunk("c1", "d1", chunk_text, char_span=(0, len(chunk_text)))
 
         probes = _from_chunks([chunk], 1, {"d1": document})
 
-        start = chunk_text.index(evidence)
+        self.assertEqual(probes, [])
+
+    @patch("agents.eval.probe_gen._llm_generate_single_hop")
+    def test_chunk_llm_probe_survives_gate_and_anchors_to_chunk(self, generate):
+        """게이트를 통과하는 LLM 합성 Probe 는 살아남고, gold_span 이 원문에 앵커된다.
+
+        단일홉 LLM 경로는 evidence 인용을 따로 받지 않아 청크 전체를 span 으로 잡는다
+        (chunk_fallback). 문장 단위 정밀 앵커는 evidence 를 주는 RAGAS 경로의 몫이다.
+        """
+        evidence = "실제 근거로 사용할 충분히 구체적인 문장입니다."
+        chunk_text = f"제목입니다. {evidence} 마무리입니다."
+        generate.return_value = ("근거 문장은 무엇인가요?", evidence)
+        document = Document("d1", "memory", "txt", chunk_text)
+        chunk = Chunk("c1", "d1", chunk_text, char_span=(0, len(chunk_text)))
+
+        probes = _from_chunks([chunk], 1, {"d1": document})
+
+        self.assertEqual(len(probes), 1)
         self.assertEqual(probes[0].gold_spans, [{
             "doc_id": "d1",
-            "start": start,
-            "end": start + len(evidence),
+            "start": 0,
+            "end": len(chunk_text),
         }])
-        self.assertEqual(probes[0].metadata["span_grounding"]["status"], "exact")
-        self.assertEqual(probes[0].metadata["gen_method"], "heuristic_evidence")
+        self.assertEqual(probes[0].metadata["span_grounding"]["status"], "chunk_fallback")
+        self.assertEqual(probes[0].metadata["gen_method"], "llm_single_hop")
 
     def test_resync_replaces_gold_chunk_ids_after_rechunking(self):
         content = "가" * 100 + "정답근거" + "나" * 100
