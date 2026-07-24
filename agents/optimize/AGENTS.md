@@ -140,10 +140,10 @@ AGENTS/README에 별도 처방 테이블을 복제하지 않는다.
   Index를 경유해 재임베딩·재저장한 뒤 Eval한다.
 - top-k, hybrid, reranker, context ordering 같은 런타임 변경도 실제 검색/생성 소비자가
   변경값을 읽는 경로가 있어야 검증할 수 있다.
-- 현재 `agents/index/agent.py`가 실제로 읽는 값은 `chunk_size`와 `chunk_overlap`뿐이다.
-  `embedding_model`, `use_hybrid`, `top_k`, reranker 계열은 현재 파이프라인 전체에서
-  적용되지 않거나 별도 요청값으로 처리된다. downstream 소비가 확인되지 않은 patch는
-  `applied` 또는 개선 완료로 기록하지 않는다.
+- 현재 공통 Retriever가 `top_k`, `use_hybrid`, `use_reranker`,
+  `reranker_model`, `rerank_candidates`를 Eval과 Serve에서 함께 소비한다.
+  runtime-only 변경은 Index가 청크 metadata를 갱신해 Serve까지 전달한다.
+  그 밖에 downstream 소비가 확인되지 않은 patch는 `applied` 또는 개선 완료로 기록하지 않는다.
 - 현재 flat `use_hybrid=True` patch를 mapper에 직접 넣으면 canonical 변환 과정에서
   의도와 반대로 `False`가 될 수 있다. ready 처방별 mapper 계약 테스트가 생기기 전에는
   이 직접 경로를 사용하지 말고 `retriever.search_type="hybrid"` 같은 검증된 canonical
@@ -257,7 +257,7 @@ adapter 하위 기능만 검증하며, Optimize 노드나 전체 파이프라인
 - manual과 actionable finding이 동시에 있을 때의 실행 정책
 - target profile별 threshold·가중치와 전역 rollback 하한선
 - `internal`을 자체 탐색 backend로 예약할지, 규칙 기반 직접 경로의 별도 이름
-- Index/Serve의 top-k, reranker, hybrid, query rewrite, MMR, context compression,
+- Index/Serve의 hybrid, query rewrite, MMR, context compression,
   chunking strategy 지원 범위
 - AutoRAG 도입 시점과 복합 원인을 AutoRAG로 보내는 정량 기준
 - RAGBuilder native 결과의 전체 trial/Optuna DB 추출 및 strict hybrid 보장 방식

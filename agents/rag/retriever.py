@@ -52,6 +52,7 @@ class RetrievalSettings:
     hybrid_dense_weight: float = 0.7
     use_reranker: bool = False
     reranker_model: str = DEFAULT_RERANKER_MODEL
+    rerank_candidates: int = 20
     qdrant_url: str = ":memory:"
     qdrant_api_key: str | None = None
     collection_name: str = COLLECTION
@@ -116,6 +117,9 @@ def resolve_retrieval_settings(
         _first_embedding_dim(chunks) or VECTOR_DIM,
     )
     top_k = _as_int(pick("top_k", 5), 5) or 5
+    rerank_candidates = (
+        _as_int(pick("rerank_candidates", 20), 20) or 20
+    )
 
     return RetrievalSettings(
         embedding_model=str(pick("embedding_model", DEFAULT_EMBEDDING_MODEL)),
@@ -124,7 +128,11 @@ def resolve_retrieval_settings(
         use_hybrid=_as_bool(pick("use_hybrid", False)),
         hybrid_dense_weight=float(pick("hybrid_dense_weight", 0.7)),
         use_reranker=_as_bool(pick("use_reranker", False)),
-        reranker_model=str(pick("reranker_model", DEFAULT_RERANKER_MODEL)),
+        reranker_model=str(
+            pick("reranker_model", DEFAULT_RERANKER_MODEL)
+            or DEFAULT_RERANKER_MODEL
+        ),
+        rerank_candidates=max(1, rerank_candidates),
         qdrant_url=str(config.get("qdrant_url") or os.getenv("QDRANT_URL", ":memory:")),
         qdrant_api_key=config.get("qdrant_api_key") or os.getenv("QDRANT_API_KEY"),
         collection_name=str(pick("qdrant_collection_name", COLLECTION)),
@@ -295,7 +303,11 @@ class Retriever:
             }
 
         requested_top_k = max(1, int(top_k or self.settings.top_k))
-        candidate_k = requested_top_k * 4 if self.settings.use_reranker else requested_top_k
+        candidate_k = (
+            max(requested_top_k, self.settings.rerank_candidates)
+            if self.settings.use_reranker
+            else requested_top_k
+        )
         vector_candidate_k = self._vector_candidate_k(candidate_k)
         results: list[dict] = []
         mode = "keyword"
@@ -330,6 +342,8 @@ class Retriever:
                         collection_name=self.settings.collection_name,
                     )
                 results = self._current_results(results)
+                if self.settings.use_reranker:
+                    results = results[:candidate_k]
             except Exception as exc:
                 print(f"[Retriever] vector search failed, using keyword fallback: {exc}")
                 results = []
@@ -348,7 +362,9 @@ class Retriever:
                 model_name=self.settings.reranker_model,
                 top_k=requested_top_k,
             )
-            reranked = True
+            # 모델 로드/추론 실패 시 rerank()는 원래 순위를 돌려준다.
+            # retrieval_score는 CrossEncoder가 실제 점수를 만들었을 때만 붙는다.
+            reranked = any("retrieval_score" in item for item in results)
         else:
             results = results[:requested_top_k]
 
