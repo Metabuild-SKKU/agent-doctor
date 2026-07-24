@@ -41,14 +41,13 @@ class OptimizerPolicyTest(unittest.TestCase):
 
         self.assertEqual(values, [100])
 
-    def test_capability_defaults_are_conservative(self):
+    def test_reranker_is_enabled_because_common_retriever_consumes_it(self):
         supported, reason = is_capability_supported("reranker")
 
-        self.assertFalse(supported)
-        self.assertEqual(reason, "unsupported_capability")
+        self.assertTrue(supported)
+        self.assertIsNone(reason)
 
     def test_top_k_is_enabled_because_eval_consumes_it(self):
-        # 보수적 기본값 원칙 자체는 위 reranker 케이스가 계속 지킨다.
         supported, reason = is_capability_supported("retriever.top_k")
 
         self.assertTrue(supported)
@@ -187,21 +186,25 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertEqual(result.config_patch.changes, {"retriever.top_k": 5})
         self.assertFalse(result.needs_reindex)
 
-    def test_capability_override_cannot_bypass_state_mapper_support(self):
+    def test_reranker_toggle_is_mappable_and_does_not_reindex(self):
         candidate = self.make_candidate(
             prescription_id="enable_reranker",
             search_space={"reranker.enabled": [True]},
             reindex=False,
         )
         request = self.make_request(
+            baseline_config={"use_reranker": False},
             candidates=[candidate],
-            metadata={"capabilities": {"reranker": True}},
         )
 
         result = run(request)
 
-        self.assertEqual(result.status, "skipped")
-        self.assertEqual(result.metadata["error_code"], "unsupported_backend_path")
+        self.assertEqual(result.status, "proposed")
+        self.assertEqual(
+            result.config_patch.changes,
+            {"reranker.enabled": True},
+        )
+        self.assertFalse(result.needs_reindex)
 
     def test_missing_search_space_is_skipped_without_symbolic_interpretation(self):
         request = self.make_request(
@@ -233,9 +236,8 @@ class OptimizerExecutionTest(unittest.TestCase):
 
     def test_candidates_are_checked_in_planner_order(self):
         unsupported = self.make_candidate(
-            prescription_id="enable_reranker",
-            search_space={"reranker.enabled": [True]},
-            reindex=False,
+            prescription_id="swap_embedding_model",
+            search_space={"embedding.model": ["unsupported/model"]},
         )
         supported = self.make_candidate(
             prescription_id="resize_chunks",
@@ -249,7 +251,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertEqual(result.config_patch.changes, {"chunker.chunk_size": 700})
         self.assertEqual(
             result.metadata["skipped_candidates"][0]["prescription_id"],
-            "enable_reranker",
+            "swap_embedding_model",
         )
 
     def test_internal_next_candidate_is_normalized_to_patch(self):

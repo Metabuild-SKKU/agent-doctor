@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_RERANKER_MODEL,
     build_sparse_vector,
     count_tokens,
     embed,
@@ -599,7 +600,10 @@ def _refresh_runtime_metadata(
                 config.get("hybrid_dense_weight", 0.7)
             ),
             "use_reranker": bool(config.get("use_reranker", False)),
-            "reranker_model": config.get("reranker_model"),
+            "reranker_model": (
+                config.get("reranker_model") or DEFAULT_RERANKER_MODEL
+            ),
+            "rerank_candidates": int(config.get("rerank_candidates", 20)),
             "top_k": int(config.get("top_k", 5)),
             "qdrant_collection_name": config.get(
                 "qdrant_collection_name"
@@ -695,7 +699,10 @@ def _chunk_metadata(
         "use_hybrid": bool(config.get("use_hybrid", False)),
         "hybrid_dense_weight": float(config.get("hybrid_dense_weight", 0.7)),
         "use_reranker": bool(config.get("use_reranker", False)),
-        "reranker_model": config.get("reranker_model"),
+        "reranker_model": (
+            config.get("reranker_model") or DEFAULT_RERANKER_MODEL
+        ),
+        "rerank_candidates": int(config.get("rerank_candidates", 20)),
         "top_k": int(config.get("top_k", 5)),
         "qdrant_collection_name": config.get("qdrant_collection_name"),
         "index_cache_key": config.get("index_cache_key"),
