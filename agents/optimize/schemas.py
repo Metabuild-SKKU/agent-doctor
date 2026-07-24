@@ -247,8 +247,10 @@ class InternalAdapterResult:
     best_config: dict[str, Any] | None = None
     best_score: float | None = None
     trial_results: list[InternalTrialResult] = field(default_factory=list)
-    # 탐색 objective 는 overall_score(매끄러운 품질 신호). composite 로 바꾸지 말 것 —
-    # 조화평균은 저신뢰도 구간에서 평평/붕괴해 탐색 신호가 죽는다(history.judge 주석 참고).
+    # 실제 탐색 objective 는 planner 가 primary_metric=composite_score(정규화 0~1)로 구동한다
+    # — 신뢰도 축이 연속값이 된 뒤 composite 이 매끄러워져 표시·게이트와 같은 지표로 통일됨
+    # (history.judge · scoring.reliability_score 주석 참고). 이 필드 기본값은 result 가
+    # 항상 실제 objective 로 덮어쓰므로 하위호환 안전망일 뿐이다.
     objective_metric: str = "overall_score"
     direction: ObjectiveDirection = "maximize"
     search_space: dict[str, list[Any]] = field(default_factory=dict)
