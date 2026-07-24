@@ -61,8 +61,21 @@ def corpus_version(
     return h.hexdigest()[:12]
 
 
-def save_probes(probes: list[Probe], version: str, path: str = DEFAULT_STORE_PATH) -> None:
+def resolve_store_path(path: str | None = None) -> str:
+    """저장 경로 결정 — 인자 > EVAL_PROBE_STORE 환경변수 > DEFAULT_STORE_PATH.
+
+    기본값을 시그니처에 박지 않고 호출 시점에 읽는다. 정의 시점에 바인딩하면
+    DEFAULT_STORE_PATH 를 나중에 바꿔도 반영되지 않아, 코퍼스별로 QA셋을 다른
+    파일에 두려는 호출부(tests/run_corpus.py)가 조용히 레포 루트에 쓰게 된다.
+    """
+    if path:
+        return path
+    return os.getenv("EVAL_PROBE_STORE") or DEFAULT_STORE_PATH
+
+
+def save_probes(probes: list[Probe], version: str, path: str | None = None) -> None:
     """probes 를 버전과 함께 JSON으로 저장. 쓰기 실패(권한 등)는 조용히 무시(캐시일 뿐 필수 아님)."""
+    path = resolve_store_path(path)
     try:
         data = {"version": version, "probes": [asdict(p) for p in probes]}
         Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -71,7 +84,7 @@ def save_probes(probes: list[Probe], version: str, path: str = DEFAULT_STORE_PAT
 
 
 def load_probes(
-    version: str, path: str = DEFAULT_STORE_PATH, *, ignore_version: bool = False
+    version: str, path: str | None = None, *, ignore_version: bool = False
 ) -> list[Probe] | None:
     """
     저장된 Probe 리스트를 반환, 없거나(파일 없음·손상·스키마 불일치) 버전이 어긋나면 None
@@ -80,6 +93,7 @@ def load_probes(
     ignore_version=True 면 버전 검사를 건너뛰고 저장된 Probe 를 그대로 재사용한다
     (EVAL_PROBE_SOURCE=made — 코퍼스가 바뀌어도 고정 테스트셋으로 진단하고 싶을 때).
     """
+    path = resolve_store_path(path)
     if not os.path.exists(path):
         return None
     try:
