@@ -250,7 +250,26 @@ _FURNITURE_RE = re.compile(
 # 정답이 숫자·구분자로만 이루어졌는지 판정할 비율. 표 행("50,466 23,886 111.3%")은
 # 이 비중이 압도적으로 높다. 서술형 정답에 숫자가 좀 섞인 정도로는 걸리지 않는다.
 _NUMERIC_GROUND_TRUTH_RATIO = 0.6
-_MIN_QUESTION_CHARS = 15
+
+# 길이 하한. 한국어는 조사가 붙어 같은 뜻을 영어보다 짧게 쓴다 — "연차는 며칠이야?"(9자),
+# "성과급은 언제 나와?"(11자) 처럼 멀쩡한 실사용 질문이 10자 안팎이다(run_local_pipeline
+# 의 샘플 질문도 9~14자). 예전 값 15자는 이런 질문을 전부 폐기해, 사용자가 넣은 질문이
+# 조용히 사라지고 Probe 0개가 되는 일이 있었다.
+_MIN_QUESTION_CHARS = 7
+
+# 질문다움 판별. 길이만으로는 쓰레기와 짧은 질문을 못 가른다 — 걸러야 할 표 조각
+# ("총점 185 190" 10자)이 살려야 할 질문("연차는 며칠이야?" 9자)보다 길기 때문이다.
+# 길이 대신 "묻는 형식인가"를 본다: 물음표 · 의문사 · 의문형 어미 · 명령형 요청 어미.
+# (휴리스틱 템플릿의 "…에 대해 설명해줘." 같은 명령형도 정상 Probe 라 함께 통과시킨다.)
+_QUESTION_FORM_RE = re.compile(
+    r"[?？]\s*$"                                            # 물음표로 끝남
+    r"|(?:무엇|뭐|어디|언제|누가|누구|어떻게|어떤|왜|몇|얼마)"      # 의문사
+    r"|(?:인가요|나요|까요|습니까|는가|은가)"                     # 의문형 어미
+    # 요청·명령형 어미. 동사를 일일이 세지 않고 "…하십시오/하시오/하세요/해줘/해라" 류의
+    # 어미로 끝나는지를 본다 — 실측에서 "설명하십시오." "설명하시오." 같은 격식체가 나왔다.
+    r"|(?:십시오|시오|세요|보세요|바랍니다|부탁\w*)\s*[.]?\s*$"
+    r"|(?:해줘|해 줘|해라|알려줘|설명해|정리해|확인해|보고해|요약해|분석해)"
+)
 
 
 # 게이트 폐기분을 메우려고 추가로 합성할 비율. 실측(30개 중 5개 폐기 ≈ 17%)에 여유를
@@ -288,11 +307,17 @@ def probe_quality_issue(question: str, ground_truth: str) -> str | None:
 
     조립 단계에서 호출하는 순수 함수 — LLM 합성 결과든 휴리스틱 폴백이든 동일하게 통과시킨다.
     """
+    asked = (question or "").strip()
     topic = _strip_template_suffix(question)
     answer = (ground_truth or "").strip()
 
-    if len(topic) < _MIN_QUESTION_CHARS:
+    # 길이·형식은 원문(asked)으로 본다. topic 은 "…에 대해 설명해줘." 같은 어미를 떼어낸
+    # 뒤라 명사구만 남는데("연차 규정" 5자), 그걸 재면 멀쩡한 템플릿 질문이 짧다고 폐기된다.
+    # topic 은 아래 자기참조 판정에만 쓴다(질문의 알맹이가 정답과 겹치는지).
+    if len(asked) < _MIN_QUESTION_CHARS:
         return "질문이 너무 짧음"
+    if not _QUESTION_FORM_RE.search(asked):
+        return "질문 형식이 아님(표 조각·라벨)"
     if _FURNITURE_RE.search(question or "") or _FURNITURE_RE.search(answer):
         return "페이지 푸터·URL 조각"
     if _numeric_ratio(answer) >= _NUMERIC_GROUND_TRUTH_RATIO:
