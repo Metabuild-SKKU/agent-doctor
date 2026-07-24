@@ -35,7 +35,7 @@ from agents.eval.types import (
     F1_PASS_THRESHOLD, ANSWER_CORRECTNESS_MIN,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
 )
-from agents.eval.metrics_common import set_mode, set_context
+from agents.eval.metrics_common import set_mode, set_context, _missed_gold_ids
 from agents.eval.metrics_basic import (            # tier1
     is_abstention, _compute_metrics, _gold_span_boundary_analysis,
 )
@@ -103,11 +103,25 @@ def _is_multi_hop(record: EvalRecord) -> bool:
     """멀티홉 질문 여부(probe.qtype). bridge / hop_binding / corpus_gap_partial_hop 판별용."""
     return record.probe.qtype in ("bridge", "comparison", "aggregation")
 
-def _enumeration_cache(record: EvalRecord) -> bool:
-    """gold 개수가 top-k(=검색 결과 수)에 근접/초과 → 나열형 누락. incomplete_enumeration 용."""
+def _enumeration_pressure(record: EvalRecord) -> Optional[bool]:
+    """근거 개수가 top-k 슬롯에 근접/초과하나(나열형 압박). 개수는 청킹 불변량인 span 수로.
+    True=span 압박 / None=span 없음(legacy)→청크 수 폴백 / False=압박 없음."""
     k = len(record.retrieved_chunk_ids) or DEFAULT_TOP_K
-    gold_n = len(record.probe.gold_chunk_ids)
-    return gold_n >= 2 and gold_n >= int(k * 0.8)
+    threshold = int(k * 0.8)
+    spans = record.probe.gold_spans
+    if spans:
+        return bool(len(spans) >= 2 and len(spans) >= threshold)
+    gold_n = len(record.probe.gold_chunk_ids)          # legacy: 청크 수 폴백
+    return None if (gold_n >= 2 and gold_n >= threshold) else False
+
+
+def _enumeration_recoverable_by_top_k(record: EvalRecord) -> bool:
+    """놓친 gold 가 wide-N 안에 있나(top_k↑ 로 회복 가능). 전부 밖이면 semantic 영역.
+    tier2 미측정(None)이면 보수적으로 True."""
+    ranks = _gold_ranks(record)
+    if ranks is None:
+        return True
+    return any(ranks.get(g) is not None for g in _missed_gold_ids(record))
 
 # ══════════════════════════════════════════════════════════════════
 #  A그룹: 검색 실패 (Oracle 통과) — retrieval_*
@@ -121,7 +135,7 @@ def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
     ranks = _gold_ranks(record)
     if ranks is None:
         return None
-    missed = set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)
+    missed = _missed_gold_ids(record)
     if missed and any(ranks.get(g) is not None for g in missed):
         return _finding(
             record, "retrieval_low_rank", "retrieval_failure", confirmed=True,
@@ -133,36 +147,51 @@ def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
 def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
     dense는 놓쳤으나 BM25로 잡히는 단어 불일치.
-    확정: BM25 가 gold 를 잡음(tier2).
+    확정: BM25 가 gold 를 잡음 + dense wide-N 도 그 gold 를 못 잡음(tier2).
+    dense wide-N 에 있으면 low_rank 영역 — 튜플 순서 대신 함수 자체로 배타(ranks memoize 공유).
     """
-    if _bm25_hits_gold(record) is True:
-        return _finding(
-            record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True,
-            reason=f"bm25_hits_gold=True, recall@k={_v(record.recall_at_k)}",
-        )
-    return None
+    if _bm25_hits_gold(record) is not True:
+        return None
+    ranks = _gold_ranks(record) or {}
+    if any(ranks.get(g) is not None for g in _missed_gold_ids(record)):
+        return None                      # dense wide-N 에 있음 → low_rank
+    return _finding(
+        record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True,
+        reason=f"bm25_hits_gold=True, dense_missed=True, recall@k={_v(record.recall_at_k)}",
+    )
 
 
 def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
     dense·BM25 모두 놓친 의미 연결 실패. (단 gold 가 코퍼스엔 있을 때만 — 없으면 corpus_gap)
     확정: BM25 도 gold 를 못 잡음 + gold 는 코퍼스에 존재(tier2).
+    코퍼스 멤버십 미측정(None)은 corpus_gap 과 구분 불가라 예비(missing_gold 와 동일 기준).
     """
+    if _bm25_hits_gold(record) is not False:
+        return None
     in_corpus = _gold_in_corpus(record)
-    if _bm25_hits_gold(record) is False and in_corpus is not False:
+    if in_corpus is True:
         return _finding(
             record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=True,
-            reason=f"bm25_hits_gold=False, gold_in_corpus={_v(in_corpus)}, "
-                   f"recall@k={_v(record.recall_at_k)}",
+            reason=f"bm25_hits_gold=False, gold_in_corpus=True, recall@k={_v(record.recall_at_k)}",
         )
-    return None
+    if in_corpus is None:
+        return _finding(
+            record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=False,
+            reason=f"bm25_hits_gold=False, gold_in_corpus=-, recall@k={_v(record.recall_at_k)}",
+        )
+    return None                          # in_corpus is False → corpus_gap 영역
 
 
 def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
     """
     gold는 corpus에 있으나 top-k에 없음.
     확정: 코퍼스에 gold 존재(tier2).
+    [폴백] 메커니즘(순위/어휘/의미)은 못 밝히고 코퍼스 존재만 실측 — 자원 다 주입된 런타임에선
+    앞 라벨들이 선점하고, 자원 빠진 구성에서만 이 라벨이 잡는다.
     """
+    if not _missed_gold_ids(record):
+        return None                      # 놓친 gold 청크가 없음 → 'top-k 에 없다'가 성립 안 함
     in_corpus = _gold_in_corpus(record)
     if in_corpus is True:
         return _finding(
@@ -198,6 +227,10 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
         return None
     if _recall_ok(record) and not _context_failed(record):
         return None
+    # 반대 게이트: span 개수 압박이면 슬롯 부족이 지배 → enumeration 에 양보.
+    if (_missed_gold_ids(record) and _enumeration_pressure(record) is True
+            and _enumeration_recoverable_by_top_k(record)):
+        return None
     finding = _finding(
         record, "chunking_context_mismatch", "retrieval_failure", confirmed=True,
         reason=f"boundary_split={analysis.get('boundary_split_count')}, "
@@ -216,6 +249,8 @@ def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]
     """
     if not _is_multi_hop(record) or not (0 <= record.recall_at_k < 1):
         return None
+    if not _missed_gold_ids(record):
+        return None                      # 놓친 hop 근거가 없음 → bridge 의존을 의심할 근거 없음
 
     return _finding(
         record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False,
@@ -225,17 +260,30 @@ def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]
 
 def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
     """
-    나열형: 필요한 근거 개수 가변인데 top-k 고정이라 누락.
-    확정: gold수 vs top-k 순수 규칙(tier1) — 바로 확정.?????????
+    나열형(aggregation): 필요한 근거 개수가 가변인데 top-k 고정이라 일부 누락.
+    확정: span 개수 압박(청킹 불변량) + qtype=aggregation + 놓친 gold 가 wide-N 안.
+    개수를 gold_chunk_ids 로 세면 세밀 청킹이 부풀려 chunking 을 나열형으로 오진 → span 수로.
+    압박 없으면 chunking 에 양보(반대 게이트). qtype None·legacy 는 예비.
     """
+    missed = _missed_gold_ids(record)
+    if not missed:
+        return None                      # 놓친 gold 없음 → 개수 부족 누락 아님
+    if not record.retrieved_chunk_ids:
+        return None                      # 검색 0건(장애) → 슬롯 부족이 아니라 롤업 영역
 
-    if _enumeration_cache(record):
-        return _finding(
-            record, "retrieval_incomplete_enumeration", "retrieval_failure", confirmed=True,
-            reason=f"gold={len(record.probe.gold_chunk_ids)}, top_k={len(record.retrieved_chunk_ids)}, "
-                   f"recall@k={_v(record.recall_at_k)}",
-        )
-    return None
+    pressure = _enumeration_pressure(record)
+    if pressure is False:
+        return None                      # 개수 압박 없음 → chunking 등 다른 원인
+    if not _enumeration_recoverable_by_top_k(record):
+        return None                      # 놓친 gold 전부 wide-N 밖 → top_k↑ 무효, semantic 영역
+
+    confirmed = pressure is True and record.probe.qtype == "aggregation"
+    return _finding(
+        record, "retrieval_incomplete_enumeration", "retrieval_failure", confirmed=confirmed,
+        reason=f"spans={len(record.probe.gold_spans)}, gold_chunks={len(record.probe.gold_chunk_ids)}, "
+               f"top_k={len(record.retrieved_chunk_ids)}, qtype={record.probe.qtype}, "
+               f"recall@k={_v(record.recall_at_k)}",
+    )
 
 def retrieval_failure(record: EvalRecord) -> Optional[Finding]:
     """검색 실패 롤업"""

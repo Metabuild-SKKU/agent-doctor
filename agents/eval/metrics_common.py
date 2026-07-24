@@ -61,6 +61,26 @@ def set_context(client=None, chunks=None, retrieve_fn=None, keyword_fn=None,
     _ctx.wide_n = wide_n
 
 
+# ── 검색 원인 라벨 공통 기준 (tier 없음 · 자원 불필요) ──────────────
+
+def _missed_gold_ids(record: EvalRecord) -> set[str]:
+    """top-k 가 놓친 gold 청크 id 집합 — 검색 원인(A) 라벨들의 공통 근거.
+
+    recall_at_k 는 gold_spans(원문 좌표) 기준이라 '정답 구간이 청크 경계에 잘려 덜 덮였다'
+    까지 실패로 센다. 반면 검색 원인 라벨(enumeration/bridge/low_rank/lexical/semantic/
+    missing_gold)은 전부 '어떤 gold 청크를 놓쳤나'를 근거로 삼는다.
+
+    두 단위가 어긋나는 경우가 있다 — gold 청크는 전부 검색됐는데 span 은 부분만 덮인 상황
+    (gold_chunk_ids 는 span 에서 파생된 캐시라 재청킹 후 경계가 달라지면 생긴다). 이때
+    '놓친 청크'가 없으므로 위 라벨들은 근거가 없다. 그런데도 발동하면 "gold 가 top-k 에
+    없다" 같은 사실과 반대되는 주장을 confirmed 로 내게 된다.
+
+    그래서 이 집합이 비면 chunk-id 기반 검색 라벨은 전부 스스로 빠지고, 좌표 기반인
+    chunking_context_mismatch(경계 분할)가 그 자리를 가져간다 — 실제 원인에 맞는 라벨이다.
+    """
+    return set(record.probe.gold_chunk_ids) - set(record.retrieved_chunk_ids)
+
+
 # ── memoize ──────────────────────────────────────────────────────
 
 def _cache(record: EvalRecord, name: str, compute):
