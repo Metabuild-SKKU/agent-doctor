@@ -97,6 +97,33 @@ class HeaderFooterStripTest(unittest.TestCase):
         self.assertIn("가나다라마 본문입니다", result.content)
         self.assertNotIn("Page 7", result.content)
 
+    def test_source_only_footer_residue_is_removed(self):
+        # 마커를 뗀 나머지가 출처 표시뿐이면 줄째 버린다. 남겨두면 그 잔여물이
+        # 청크가 되어 Probe 주제로 뽑히고 "dart.fss.or.kr 의 관계를 설명해줘" 같은
+        # 답할 수 없는 질문이 만들어진다(실측: web_run_20260723_180513, 30개 중 3개).
+        pages = [
+            "본문 첫 페이지입니다.\n전자공시시스템 dart.fss.or.kr Page 522",
+            "본문 둘째 페이지입니다.\n전자공시시스템 dart.fss.or.kr Page 523",
+            "본문 셋째 페이지입니다.\n전자공시시스템 dart.fss.or.kr Page 524",
+        ]
+        result = preprocess_pages(pages)
+
+        self.assertNotIn("dart.fss.or.kr", result.content)
+        self.assertNotIn("전자공시시스템", result.content)
+        self.assertIn("본문 첫 페이지입니다", result.content)
+
+    def test_body_line_citing_a_domain_survives(self):
+        # 도메인이 인용된 본문 문장까지 지우면 안 된다 — 출처 표시만 버리는 게 목적이다.
+        pages = [
+            "공시는 dart.fss.or.kr 에서 확인할 수 있습니다 Page 5",
+            "다른 페이지",
+            "또 다른 페이지",
+        ]
+        result = preprocess_pages(pages)
+
+        self.assertIn("공시는 dart.fss.or.kr 에서 확인할 수 있습니다", result.content)
+        self.assertNotIn("Page 5", result.content)
+
     def test_repeated_body_text_is_not_stripped(self):
         # 가장자리가 아닌 본문 중간에 반복되는 문장은 살아남아야 한다.
         long_line = "이 문장은 본문 한가운데에서 반복되는 충분히 긴 서술형 문장입니다."

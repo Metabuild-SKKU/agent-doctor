@@ -52,6 +52,20 @@ _TRAILING_PAGE_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 페이지 마커를 떼고 남은 조각이 "출처 표시"뿐인 경우 — "전자공시시스템 dart.fss.or.kr".
+# 마커만 잘라내면 이 잔여물이 본문으로 남아 그대로 청크가 되고, Probe 의 주제 문구로
+# 뽑혀 답할 수 없는 질문이 된다(실측: 30개 중 3개). 도메인/URL 과 그 앞뒤의 짧은
+# 라벨만으로 이루어진 줄일 때만 버리므로, 도메인이 인용된 본문 문장은 살아남는다.
+_SOURCE_ONLY_LINE_RE = re.compile(
+    r"""^\s*
+        [^\s]{0,20}?\s*                          # 앞에 붙는 짧은 라벨(전자공시시스템 등)
+        (?:https?://|www\.)?
+        [\w.-]+\.(?:or|co|com|go|net|kr)(?:\.kr)?  # dart.fss.or.kr
+        \s*[^\s]{0,20}?
+    \s*$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
 # 줄 끝 하이픈 + 줄바꿈 = 조판상 단어가 잘린 것. 영문 PDF 에서 흔하다.
 # 앞뒤가 모두 알파벳일 때만 붙인다("- 항목" 같은 목록 기호나 숫자 범위는 건드리지 않음).
 _HYPHEN_BREAK_RE = re.compile(r"([A-Za-z])[-­]\n([a-z])")
@@ -198,7 +212,11 @@ def _strip_page_furniture(page: str, repeated: set[str]) -> tuple[str, list[str]
         trimmed = _TRAILING_PAGE_MARKER_RE.sub("", stripped)
         if trimmed != stripped:
             removed.append(stripped[len(trimmed):].strip())
-            if not trimmed:
+            # 마커를 뗀 나머지가 출처 표시뿐이면 본문이 아니라 푸터의 일부다.
+            # 남겨두면 "전자공시시스템 dart.fss.or.kr" 이 청크가 되어 Probe 주제로 쓰인다.
+            if not trimmed or _SOURCE_ONLY_LINE_RE.match(trimmed):
+                if trimmed:
+                    removed.append(trimmed)
                 continue
             kept.append(trimmed)
             continue
