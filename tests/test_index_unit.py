@@ -10,6 +10,7 @@ from qdrant_client.models import Distance, VectorParams
 
 from agents.index.agent import CHUNK_STRATEGIES, IndexTools, _chunk_document, run
 from agents.index.graph_index import build_graph_artifacts
+from agents.index import qdrant_store
 from agents.index.qdrant_store import (
     COLLECTION,
     build_sparse_vector,
@@ -550,6 +551,75 @@ class SearchAndGraphTests(unittest.TestCase):
         results = search(client, [1.0, 0.0], top_k=1)
 
         self.assertEqual(results[0]["chunk_id"], "legacy")
+
+    def test_legacy_dense_search_uses_query_points_without_search_api(self):
+        client = build_client(":memory:")
+        client.create_collection(
+            collection_name=COLLECTION,
+            vectors_config=VectorParams(size=2, distance=Distance.COSINE),
+        )
+        ensure_collection(client, vector_dim=2)
+        upsert_chunks(
+            client,
+            [
+                Chunk(
+                    chunk_id="legacy",
+                    doc_id="doc",
+                    text="legacy dense collection",
+                    embedding=[1.0, 0.0],
+                )
+            ],
+        )
+
+        real_query_points = client.query_points
+        calls = []
+
+        def spy_query_points(**kwargs):
+            calls.append(kwargs)
+            return real_query_points(**kwargs)
+
+        with patch.object(client, "query_points", side_effect=spy_query_points):
+            results = search(client, [1.0, 0.0], top_k=1)
+
+        self.assertEqual(results[0]["chunk_id"], "legacy")
+        self.assertTrue(calls)
+        self.assertNotIn("using", calls[0])
+
+    def test_dense_search_rechecks_shape_cache_after_collection_migration(self):
+        client = build_client(":memory:")
+        ensure_collection(client, vector_dim=2)
+        upsert_chunks(
+            client,
+            [
+                Chunk(
+                    chunk_id="native",
+                    doc_id="doc",
+                    text="native hybrid collection",
+                    embedding=[1.0, 0.0],
+                    sparse_vector=build_sparse_vector("native hybrid collection"),
+                )
+            ],
+        )
+        qdrant_store._collection_native_hybrid_cache[client] = False
+
+        results = search(client, [1.0, 0.0], top_k=1)
+
+        self.assertEqual(results[0]["chunk_id"], "native")
+        self.assertTrue(qdrant_store._collection_has_native_hybrid(client))
+
+    def test_recreate_legacy_collection_logs_shape_migration(self):
+        client = build_client(":memory:")
+        client.create_collection(
+            collection_name=COLLECTION,
+            vectors_config=VectorParams(size=2, distance=Distance.COSINE),
+        )
+
+        with patch("builtins.print") as print_mock:
+            ensure_collection(client, vector_dim=2, recreate_on_mismatch=True)
+
+        self.assertTrue(
+            any("legacy dense-only 컬렉션 재생성" in str(call) for call in print_mock.call_args_list)
+        )
 
     def test_graph_artifacts_are_written(self):
         chunk = Chunk(

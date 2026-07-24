@@ -102,7 +102,7 @@ class RetrieverTests(unittest.TestCase):
         self.assertEqual(response["search_mode"], "dense")
         self.assertEqual([item["doc_id"] for item in response["results"]], ["corpus-b"])
 
-    def test_retriever_cache_repopulates_when_hybrid_flag_changes(self):
+    def test_retriever_cache_reuses_population_when_hybrid_flag_changes(self):
         client = build_client(":memory:")
         chunks = [
             Chunk(
@@ -126,7 +126,7 @@ class RetrieverTests(unittest.TestCase):
                 client=client,
             )
 
-        self.assertEqual(upsert.call_count, 2)
+        self.assertEqual(upsert.call_count, 1)
 
 
 class RagGeneratorTests(unittest.TestCase):

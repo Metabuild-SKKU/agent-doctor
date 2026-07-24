@@ -9,6 +9,7 @@ import re
 import uuid
 from collections import Counter
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -39,7 +40,7 @@ _models: dict[str, Any] = {}
 _failed_models: set[str] = set()
 _rerankers: dict[str, Any] = {}
 _failed_rerankers: set[str] = set()
-_collection_native_hybrid_cache: dict[int, bool] = {}
+_collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, bool] = WeakKeyDictionary()
 
 
 # 테스트에서는 in-memory, 운영에서는 실제 Qdrant endpoint로 붙는다.
@@ -66,9 +67,8 @@ def _collection_vector_size(client: QdrantClient) -> int | None:
 
 
 def _collection_has_native_hybrid(client: QdrantClient) -> bool:
-    cache_key = id(client)
-    if cache_key in _collection_native_hybrid_cache:
-        return _collection_native_hybrid_cache[cache_key]
+    if client in _collection_native_hybrid_cache:
+        return _collection_native_hybrid_cache[client]
     try:
         params = client.get_collection(COLLECTION).config.params
         vectors = params.vectors
@@ -79,14 +79,28 @@ def _collection_has_native_hybrid(client: QdrantClient) -> bool:
             and SPARSE_VECTOR_NAME in sparse_vectors
         )
     except Exception:
-        _collection_native_hybrid_cache[cache_key] = False
+        _collection_native_hybrid_cache[client] = False
         return False
-    _collection_native_hybrid_cache[cache_key] = has_native
+    _collection_native_hybrid_cache[client] = has_native
     return has_native
 
 
 def _clear_collection_shape_cache(client: QdrantClient) -> None:
-    _collection_native_hybrid_cache.pop(id(client), None)
+    _collection_native_hybrid_cache.pop(client, None)
+
+
+def _is_collection_shape_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "vector" in message
+        and (
+            "not found" in message
+            or "name" in message
+            or "existing vector" in message
+            or "dense" in message
+            or "sparse" in message
+        )
+    )
 
 
 def _query_filter(retrieval_scope_id: str | None) -> Filter | None:
@@ -145,6 +159,10 @@ def ensure_collection(
             if _collection_has_native_hybrid(client):
                 return
             if recreate_on_mismatch:
+                print(
+                    f"[Qdrant] legacy dense-only 컬렉션 재생성: {COLLECTION} "
+                    "(native hybrid shape로 마이그레이션)"
+                )
                 client.delete_collection(collection_name=COLLECTION)
                 _clear_collection_shape_cache(client)
             else:
@@ -281,19 +299,19 @@ def search(
 ) -> list[dict]:
     query_filter = _query_filter(retrieval_scope_id)
     # dense 검색 결과를 Serve가 쓰는 공통 dict 모양으로 맞춘다.
-    native_hybrid_collection = _collection_has_native_hybrid(client)
-    try:
-        if native_hybrid_collection and hasattr(client, "query_points"):
-            kwargs = {
-                "collection_name": COLLECTION,
-                "query": query_vector,
-                "using": DENSE_VECTOR_NAME,
-                "limit": top_k,
-            }
-            if query_filter is not None:
-                kwargs["query_filter"] = query_filter
-            hits = client.query_points(**kwargs).points
-        else:
+    def _query_once(native_hybrid_collection: bool):
+        kwargs = {
+            "collection_name": COLLECTION,
+            "query": query_vector,
+            "limit": top_k,
+        }
+        if native_hybrid_collection:
+            kwargs["using"] = DENSE_VECTOR_NAME
+        if query_filter is not None:
+            kwargs["query_filter"] = query_filter
+        if hasattr(client, "query_points"):
+            return client.query_points(**kwargs).points
+        if not native_hybrid_collection and hasattr(client, "search"):
             search_kwargs = {
                 "collection_name": COLLECTION,
                 "query_vector": query_vector,
@@ -301,18 +319,16 @@ def search(
             }
             if query_filter is not None:
                 search_kwargs["query_filter"] = query_filter
-            hits = client.search(**search_kwargs)
-    except Exception:
-        if not hasattr(client, "query_points"):
+            return client.search(**search_kwargs)
+        raise AttributeError("Qdrant client has neither query_points nor legacy search")
+
+    try:
+        hits = _query_once(_collection_has_native_hybrid(client))
+    except Exception as exc:
+        if not _is_collection_shape_error(exc):
             raise
-        kwargs = {
-            "collection_name": COLLECTION,
-            "query": query_vector,
-            "limit": top_k,
-        }
-        if query_filter is not None:
-            kwargs["query_filter"] = query_filter
-        hits = client.query_points(**kwargs).points
+        _clear_collection_shape_cache(client)
+        hits = _query_once(_collection_has_native_hybrid(client))
     return [_hit_to_result(hit) for hit in hits]
 
 
