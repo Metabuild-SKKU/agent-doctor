@@ -74,7 +74,11 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
-    print(f"[Eval] 청크 {len(state.chunks)}개, 반복 {state.iteration + 1}/{state.max_iterations}")
+    # state.iteration 은 raw 값을 그대로 찍는다(graph.py Orchestrator 로그와 표시 일치).
+    # 예전엔 +1 을 더해 "다음 Optimize 방문에서 증가할 값"을 미리 보여줬는데, 같은 라벨이
+    # 이어지는 방문(starts_new_label=False)에서는 실제로 증가하지 않아(위 반복 카운터
+    # 설명 참고) Eval 로그만 매번 부풀려진 값을 반복 표시하는 불일치가 있었다.
+    print(f"[Eval] 청크 {len(state.chunks)}개, 반복 {state.iteration}/{state.max_iterations}")
 
     if not state.chunks:
         state.status = "error"
