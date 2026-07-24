@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents.rag.generator import answer_question
 from agents.rag.retriever import Retriever, get_retriever
+# 지문 알고리즘은 Serve agent 와 공유한다(agents/serve/fingerprint.py) — agent.py 가
+# 지문 하나 때문에 이 모듈(uvicorn/fastapi/qdrant_client)을 import 하지 않도록 분리.
+from agents.serve.fingerprint import corpus_fingerprint
 
 app = FastAPI(title="Agent Doctor API", version="0.1.0")
 
@@ -31,13 +34,17 @@ app.add_middleware(
 
 _retriever: Retriever | None = None
 _chunks_raw: list[dict] = []
+_chunks_file: str | None = None
+_fingerprint: str = ""
 
 
 def init_qdrant(chunks_file: str) -> None:
-    global _retriever, _chunks_raw
+    global _retriever, _chunks_raw, _chunks_file, _fingerprint
 
+    _chunks_file = chunks_file
     _chunks_raw = json.loads(Path(chunks_file).read_text(encoding="utf-8"))
-    print(f"[API] loaded {len(_chunks_raw)} chunks")
+    _fingerprint = corpus_fingerprint(_chunks_raw)
+    print(f"[API] loaded {len(_chunks_raw)} chunks (fingerprint {_fingerprint})")
 
     _retriever = get_retriever(
         _chunks_raw,
@@ -64,7 +71,21 @@ def health():
         "status": "ok",
         "chunks": len(_chunks_raw),
         "qdrant": _retriever is not None and _retriever.client is not None,
+        "fingerprint": _fingerprint,
     }
+
+
+@app.post("/reload")
+def reload():
+    """chunks.json 을 다시 읽어 retriever 를 재구축한다.
+
+    Serve(agent.py)가 새 코퍼스를 chunks.json 에 쓴 뒤, 이미 실행 중인 이 서버가
+    낡은 코퍼스를 서빙하고 있을 때 호출한다. init_qdrant 를 그대로 재실행해
+    _chunks_raw·_retriever·_fingerprint 를 최신 파일 내용으로 교체한다."""
+    if not _chunks_file:
+        raise HTTPException(status_code=503, detail="No chunks file to reload from.")
+    init_qdrant(_chunks_file)
+    return {"status": "reloaded", "chunks": len(_chunks_raw), "fingerprint": _fingerprint}
 
 
 @app.get("/search")

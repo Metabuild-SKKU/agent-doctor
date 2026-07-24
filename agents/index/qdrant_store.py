@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
+import time
 import uuid
 from collections import Counter
 from typing import Any
@@ -25,10 +27,28 @@ DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 VECTOR_DIM = 1024
 
-_models: dict[tuple[str, str], Any] = {}
-_failed_models: set[tuple[str, str]] = set()
+def _env_float(name: str, default: float) -> float:
+    """환경변수 float 파싱 — 비정수/오타면 기본값으로 폴백. import 시점 크래시 방지
+    (오타 하나로 모듈 전체 import 가 실패하지 않도록)."""
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# GPU 브랜치는 (모델, 장치)별 모델을 보관하고, 메인의 단건 호환 함수는 모델명
+# 키를 사용한다. 두 경로를 같은 저장소에 담되 접근 함수에서 키 형태를 구분한다.
+_models: dict[Any, Any] = {}
+# 모델 키 → 마지막 로드 실패 시각(monotonic). 실패를 영구 캐시하면 일시적
+# 원인(네트워크 등) 후에도 프로세스 내내 fallback 임베딩만 조용히 쓰게 되므로,
+# 쿨다운이 지나면 재시도한다.
+_failed_models: dict[Any, float] = {}
+_FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
+# reranker_model → 마지막 로드 실패 시각(monotonic). embedding 모델과 같은 쿨다운
+# 정책을 따른다 — 영구 캐시하면 일시적 실패 후에도 프로세스 내내 리랭킹이 죽는다.
 _rerankers: dict[str, Any] = {}
-_failed_rerankers: set[str] = set()
+_failed_rerankers: dict[str, float] = {}
+_FAILED_RERANKER_RETRY_SEC = _env_float("INDEX_RERANKER_RETRY_SEC", 300.0)
 
 
 # 테스트에서는 in-memory, 운영에서는 실제 Qdrant endpoint로 붙는다.
@@ -371,14 +391,24 @@ def rerank(
     # reranker가 있으면 한 번 더 정렬하고, 없으면 기존 순서를 유지한다.
     if not results:
         return []
-    if model_name not in _rerankers and model_name not in _failed_rerankers:
-        try:
-            from sentence_transformers import CrossEncoder
+    if model_name not in _rerankers:
+        failed_at = _failed_rerankers.get(model_name)
+        in_cooldown = (
+            failed_at is not None
+            and time.monotonic() - failed_at < _FAILED_RERANKER_RETRY_SEC
+        )
+        if not in_cooldown:
+            try:
+                from sentence_transformers import CrossEncoder
 
-            _rerankers[model_name] = CrossEncoder(model_name)
-        except Exception as exc:
-            _failed_rerankers.add(model_name)
-            print(f"[Index] reranker 로드 실패, 기존 순위 유지: {exc}")
+                _rerankers[model_name] = CrossEncoder(model_name)
+                _failed_rerankers.pop(model_name, None)
+            except Exception as exc:
+                _failed_rerankers[model_name] = time.monotonic()
+                print(
+                    f"[Index] reranker 로드 실패, 기존 순위 유지 "
+                    f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
+                )
 
     model = _rerankers.get(model_name)
     if model is None:
@@ -431,23 +461,74 @@ def resolve_embedding_device(device: str = "auto") -> str:
 
 
 def _load_embedding_model(model_name: str, device: str) -> tuple[Any | None, str]:
-    """장치별 모델을 캐시하고 GPU 로드 실패 시 같은 모델을 CPU에서 다시 시도한다."""
+    """장치별 모델을 캐시하고, 실패 쿨다운과 GPU→CPU 폴백을 함께 적용한다."""
     actual_device = resolve_embedding_device(device)
     key = (model_name, actual_device)
-    if key not in _models and key not in _failed_models:
+    cached = _models.get(key)
+    if cached is not None:
+        return cached, actual_device
+
+    failed_at = _failed_models.get(key)
+    in_cooldown = (
+        failed_at is not None
+        and time.monotonic() - failed_at < _FAILED_MODEL_RETRY_SEC
+    )
+    if not in_cooldown:
         try:
             from sentence_transformers import SentenceTransformer
 
             _models[key] = SentenceTransformer(model_name, device=actual_device)
+            _failed_models.pop(key, None)
         except Exception as exc:
-            _failed_models.add(key)
+            _failed_models[key] = time.monotonic()
             if actual_device != "cpu":
-                print(f"[Index] GPU 임베딩 모델 로드 실패, CPU로 재시도: {exc}")
+                print(
+                    f"[Index] GPU 임베딩 모델 로드 실패, CPU로 재시도 "
+                    f"({_FAILED_MODEL_RETRY_SEC:.0f}초 후 GPU 재시도): {exc}"
+                )
                 return _load_embedding_model(model_name, "cpu")
-            print(f"[Index] 임베딩 모델 로드 실패, deterministic fallback 사용: {exc}")
-    if key in _failed_models and actual_device != "cpu":
+            print(
+                f"[Index] 임베딩 모델 로드 실패, deterministic fallback 사용 "
+                f"({_FAILED_MODEL_RETRY_SEC:.0f}초 후 재시도): {exc}"
+            )
+    elif actual_device != "cpu":
         return _load_embedding_model(model_name, "cpu")
     return _models.get(key), actual_device
+
+
+def _get_embedding_model(model_name: str) -> Any | None:
+    """메인의 단건 호환 API. 실패한 모델은 쿨다운 뒤 다시 로드한다."""
+    cached = _models.get(model_name)
+    if cached is not None:
+        return cached
+
+    failed_at = _failed_models.get(model_name)
+    in_cooldown = (
+        failed_at is not None
+        and time.monotonic() - failed_at < _FAILED_MODEL_RETRY_SEC
+    )
+    if not in_cooldown:
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            _models[model_name] = SentenceTransformer(model_name)
+            _failed_models.pop(model_name, None)
+        except Exception as exc:
+            _failed_models[model_name] = time.monotonic()
+            print(
+                f"[Index] 임베딩 모델 '{model_name}' 로드 실패 — deterministic "
+                f"fallback 사용, {_FAILED_MODEL_RETRY_SEC:.0f}초 후 재시도: {exc}"
+            )
+    return _models.get(model_name)
+
+
+def embedding_is_fallback(
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+    device: str = "auto",
+) -> bool:
+    """현재 장치에서 실제 모델을 못 불러 해시 fallback을 쓸 상태인지 반환한다."""
+    model, _actual_device = _load_embedding_model(model_name, device)
+    return model is None
 
 
 def _is_cuda_oom(exc: Exception) -> bool:
@@ -551,7 +632,16 @@ def count_tokens(
     # 순수 dict 조회로만 캐시된 모델을 본다(부작용 없음). 여기서 모델을 지연
     # 로드하면 HF 다운로드가 발생할 수 있으므로 장치별 캐시만 조회한다.
     model = next(
-        (cached for (name, _device), cached in _models.items() if name == model_name),
+        (
+            cached
+            for key, cached in _models.items()
+            if (
+                key[0]
+                if isinstance(key, tuple) and len(key) == 2
+                else key
+            )
+            == model_name
+        ),
         None,
     )
     tokenizer = getattr(model, "tokenizer", None) if model is not None else None

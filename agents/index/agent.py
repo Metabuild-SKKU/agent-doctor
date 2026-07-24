@@ -25,9 +25,10 @@ from agents.index.qdrant_store import (
     count_tokens,
     embed,
     embed_batch,
+    embedding_is_fallback,
     resolve_embedding_device,
 )
-from agents.rag.retriever import get_retriever
+from agents.rag.retriever import get_retriever, reset_retriever_cache
 from core.schema import Chunk, Document, IndexSnapshot
 from core.state import AgentDoctorState
 from core.timing import StageTimer
@@ -60,6 +61,10 @@ class IndexTools:
     # 배치 임베딩(없으면 단건 embed 루프 폴백) — 필드 끝에 default 로 두어
     # embed 만 주입하는 기존 테스트/실험 코드가 그대로 동작한다.
     embed_batch: Callable[..., list[list[float]]] | None = None
+    # "지금 임베딩하면 fallback 인가" 술어(없으면 provenance 미기록=항상 실제로 간주).
+    # 모델 로드 실패로 만든 해시 fallback 벡터를 청크에 표시하고, 복구 후 강제
+    # 재임베딩할지 판단하는 데 쓴다. default 로 둬 기존 주입 코드 호환.
+    embedding_is_fallback: Callable[..., bool] | None = None
 
 
 # Ingest가 넘겨준 Document도 Index 경계에서 한 번 더 확인한다.
@@ -366,6 +371,7 @@ def _default_tools() -> IndexTools:
         build_sparse_vector=build_sparse_vector,
         build_graph_artifacts=build_graph_artifacts,
         embed_batch=embed_batch,
+        embedding_is_fallback=embedding_is_fallback,
     )
 
 
@@ -629,6 +635,39 @@ def _validate_config(config: dict) -> None:
         raise ValueError("embedding_device는 auto, cpu, cuda 또는 cuda:N이어야 합니다.")
 
 
+def _page_of_span(document: Document, char_span: tuple[int, int]) -> int | None:
+    """청크가 원본 문서의 몇 페이지에서 나왔는지 (1-based). 모르면 None.
+
+    Ingest(agents/ingest/preprocess.py)가 PDF 에서만 document.metadata["page_spans"]
+    를 채운다. char_span 과 같은 좌표계(Document.content 기준)라 시작 위치만 대조하면
+    된다. 청크가 페이지 경계를 걸치면 "시작한 페이지"로 본다 — 인용 표기 목적이라
+    첫 페이지가 사람이 찾아가기에 맞다.
+    """
+    spans = document.metadata.get("page_spans")
+    if not isinstance(spans, (list, tuple)):
+        return None
+
+    start = char_span[0]
+    last_nonempty: int | None = None
+    for page_no, span in enumerate(spans, start=1):
+        if not isinstance(span, (list, tuple)) or len(span) != 2:
+            continue
+        try:
+            page_start, page_end = int(span[0]), int(span[1])
+        except (TypeError, ValueError):
+            # 이 함수의 방침은 "깨진 입력이면 조용히 None". page_spans 는 직렬화를
+            # 거쳐 오는 값이라 숫자가 아닐 수 있는데, 여기서 예외가 나면 청킹 루프
+            # 한복판에서 터진다 — 출처 표기용 부가 정보 때문에 색인을 죽이지 않는다.
+            continue
+        if page_start <= start < page_end:
+            return page_no
+        # 청크 시작이 페이지 사이 구분자에 걸린 경우(공백만 있는 위치)를 대비해
+        # "여기까지 지나온 마지막 페이지"를 기억해둔다.
+        if page_start <= start:
+            last_nonempty = page_no
+    return last_nonempty
+
+
 def _chunk_metadata(
     document: Document,
     config: dict,
@@ -640,19 +679,31 @@ def _chunk_metadata(
     chunk_strategy: str,
     signature: str,
     embedding_dimension: int,
+    embedding_fallback: bool = False,
 ) -> dict[str, Any]:
+    # page_spans 는 문서 단위 정보라 청크마다 복사하면 payload 가 페이지 수만큼 불어난다.
+    # 아래에서 이 청크의 "page" 하나로 접어 넣으므로 원본 목록은 뺀다.
+    doc_metadata = {k: v for k, v in document.metadata.items() if k != "page_spans"}
+
     # Serve는 Qdrant payload만 보고 검색 옵션을 복원하므로 retrieval 설정도 같이 저장한다.
     return {
-        **document.metadata,
+        **doc_metadata,
         "chunk_index": chunk_index,
         "source": document.source,
         "document_hash": document_hash,
         "chunk_hash": chunk_hash,
         "char_span": [char_span[0], char_span[1]],
+        # 출처 표기용 페이지 번호. document.metadata 의 page_spans 를 그대로 물려받으면
+        # 청크마다 문서 전체 span 목록이 payload 에 복사되므로, 여기서 이 청크의
+        # 페이지 하나로 접고 원본 목록은 뺀다.
+        "page": _page_of_span(document, char_span),
         "chunk_strategy": chunk_strategy,
         "index_signature": signature,
         "embedding_model": config["embedding_model"],
         "embedding_dimension": embedding_dimension,
+        # 이 벡터가 (의미 없는) 해시 fallback 으로 만들어졌는지. True 면 모델 복구 후
+        # 재색인 시 강제 재임베딩 대상이다(_process_document reusable 분기).
+        "embedding_fallback": bool(embedding_fallback),
         "use_hybrid": bool(config.get("use_hybrid", False)),
         "hybrid_dense_weight": float(config.get("hybrid_dense_weight", 0.7)),
         "use_reranker": bool(config.get("use_reranker", False)),
@@ -696,6 +747,8 @@ def _refresh_reused_chunk(
         chunk,
         chunk_id=f"{document.doc_id}_chunk_{chunk_index:03d}",
         doc_id=document.doc_id,
+        # 재청킹되면 char_span 이 달라지므로 페이지도 다시 계산한다(replace 는 옛 값을 남긴다).
+        page=_page_of_span(document, char_span),
         char_span=char_span,
         parent_id=_parent_id(document, chunk.section),
         hash=chunk_hash[:16],
@@ -709,8 +762,78 @@ def _refresh_reused_chunk(
             chunk_strategy=chunk_strategy,
             signature=signature,
             embedding_dimension=vector_dim,
+            # 임베딩을 재사용하는 경로이므로 fallback 여부도 그대로 이어야 한다.
+            # 여기서 기본값(False)으로 덮으면, 모델이 두 번 연속 실패하는 동안 플래그가
+            # 지워져 이후 모델이 복구돼도 재임베딩 대상으로 잡히지 않는다(해시 벡터 고착).
+            embedding_fallback=bool(chunk.metadata.get("embedding_fallback")),
         ),
     )
+
+
+def _reembed_stale_chunks(
+    document_chunks: list[Chunk],
+    stale: list[tuple[int, "Chunk", str]],
+    document: Document,
+    config: dict,
+    tools: "IndexTools",
+    *,
+    document_hash: str,
+    chunk_strategy: str,
+    signature: str,
+) -> list[Chunk]:
+    """fallback 으로 색인됐던 청크들을 복구된 모델로 다시 임베딩해 교체한다.
+
+    document_chunks 의 placeholder(원본 fallback 청크) 자리를, 실제 모델 벡터와
+    embedding_fallback=False 메타데이터를 가진 새 Chunk 로 바꿔 돌려준다.
+    좌표·section·hash 등 임베딩 외 속성은 원본을 그대로 잇는다(재청킹 아님)."""
+    texts = [chunk.text for _idx, chunk, _h in stale]
+    if tools.embed_batch is not None:
+        vectors = tools.embed_batch(
+            texts,
+            model_name=config["embedding_model"],
+            vector_dim=config.get("embedding_dimension"),
+        )
+    else:
+        vectors = [
+            tools.embed(
+                text,
+                model_name=config["embedding_model"],
+                vector_dim=config.get("embedding_dimension"),
+            )
+            for text in texts
+        ]
+
+    for (chunk_index, chunk, chunk_hash), vector in zip(stale, vectors):
+        char_span = _span_from_chunk(chunk)
+        metadata = _chunk_metadata(
+            document,
+            config,
+            chunk_index=chunk_index,
+            document_hash=document_hash,
+            chunk_hash=chunk_hash,
+            char_span=char_span,
+            chunk_strategy=chunk_strategy,
+            signature=signature,
+            embedding_dimension=len(vector),
+            embedding_fallback=False,
+        )
+        document_chunks[chunk_index] = replace(
+            chunk,
+            chunk_id=f"{document.doc_id}_chunk_{chunk_index:03d}",
+            doc_id=document.doc_id,
+            page=metadata.get("page"),
+            char_span=char_span,
+            parent_id=_parent_id(document, chunk.section),
+            hash=chunk_hash[:16],
+            embedding=vector,
+            sparse_vector=(
+                tools.build_sparse_vector(chunk.text)
+                if config.get("use_hybrid", False)
+                else chunk.sparse_vector
+            ),
+            metadata=metadata,
+        )
+    return document_chunks
 
 
 def _previous_chunks_by_document(chunks: list[Chunk]) -> dict[tuple[str, str], list[Chunk]]:
@@ -729,6 +852,7 @@ class _DocResult:
     new_hashes: set[str]       # 성공 시에만 seen_chunks에 커밋할 청크 해시
     document_hash: str
     reused: int                # 재사용 임베딩 개수 (신규는 0)
+    reembedded: int = 0        # 모델 복구로 fallback 벡터를 실제 벡터로 다시 임베딩한 개수
 
 
 # 문서 하나를 청크 리스트로 변환한다. 공유 상태(seen_*)는 읽기만 하고,
@@ -769,26 +893,65 @@ def _process_document(
 
     reusable = previous.get((document_hash, signature), [])
     if reusable:
+        # 모델이 (다시) 로드 가능해졌으면, 이전에 fallback(해시 벡터)으로 색인된 청크는
+        # 재사용하면 안 된다 — 문서 벡터는 fallback 공간, 질의 벡터는 실제 모델 공간이라
+        # 서로 다른 벡터 공간을 비교하게 되어 검색 점수가 무의미해진다. 이런 청크만
+        # 골라 강제 재임베딩하고, 나머지는 기존대로 임베딩을 재사용한다.
+        model_recovered = bool(
+            tools.embedding_is_fallback
+            and not tools.embedding_is_fallback(config["embedding_model"])
+        )
+
         document_chunks: list[Chunk] = []
+        stale: list[tuple[int, Chunk, str]] = []   # (chunk_index, chunk, chunk_hash) — 재임베딩 대상
+        reused_count = 0
         for chunk in reusable:
             chunk_hash = _sha256(chunk.text)
             if _is_duplicate(chunk_hash):
                 continue
             new_hashes.add(chunk_hash)
+            chunk_index = len(document_chunks)
+            was_fallback = bool(chunk.metadata.get("embedding_fallback"))
+            if model_recovered and was_fallback:
+                # 자리(순서)만 잡아 두고 뒤에서 실제 벡터로 채운다.
+                document_chunks.append(chunk)   # placeholder, 아래서 교체
+                stale.append((chunk_index, chunk, chunk_hash))
+                continue
             document_chunks.append(
                 _refresh_reused_chunk(
                     chunk,
                     document,
                     config,
-                    chunk_index=len(document_chunks),
+                    chunk_index=chunk_index,
                     document_hash=document_hash,
                     chunk_hash=chunk_hash,
                     chunk_strategy=chunk_strategy,
                     signature=signature,
                 )
             )
-        print(f"[Index] 기존 임베딩 재사용: {document.doc_id} ({len(document_chunks)}개)")
-        return _DocResult(document_chunks, new_hashes, document_hash, len(document_chunks))
+            reused_count += 1
+
+        if stale:
+            document_chunks = _reembed_stale_chunks(
+                document_chunks,
+                stale,
+                document,
+                config,
+                tools,
+                document_hash=document_hash,
+                chunk_strategy=chunk_strategy,
+                signature=signature,
+            )
+            print(
+                f"[Index] 모델 복구 감지 → fallback 청크 재임베딩: "
+                f"{document.doc_id} ({len(stale)}개, 재사용 {reused_count}개)"
+            )
+        else:
+            print(f"[Index] 기존 임베딩 재사용: {document.doc_id} ({reused_count}개)")
+        return _DocResult(
+            document_chunks, new_hashes, document_hash, reused_count,
+            reembedded=len(stale),
+        )
 
     with timer.measure(f"청킹 ({document.doc_id})"):
         drafts = _chunk_document(
@@ -811,6 +974,13 @@ def _process_document(
             continue
         new_hashes.add(chunk_hash)
         unique_drafts.append((draft, chunk_hash))
+
+    # 모델 로드 실패로 해시 fallback을 쓰는 경우 provenance를 남겨, 모델이
+    # 복구된 다음 실행에서 해당 청크만 실제 벡터로 다시 임베딩한다.
+    fallback_now = bool(
+        tools.embedding_is_fallback
+        and tools.embedding_is_fallback(config["embedding_model"])
+    )
 
     # pass 2: 살아남은 draft를 설정된 장치에서 한 번에 배치 임베딩한다.
     texts = [draft.text for draft, _chunk_hash in unique_drafts]
@@ -858,11 +1028,13 @@ def _process_document(
             chunk_strategy=chunk_strategy,
             signature=signature,
             embedding_dimension=len(vector),
+            embedding_fallback=fallback_now,
         )
         chunk = Chunk(
             chunk_id=f"{document.doc_id}_chunk_{chunk_index:03d}",
             doc_id=document.doc_id,
             text=draft.text,
+            page=metadata.get("page"),
             section=draft.section,
             char_span=char_span,
             token_count=tools.count_tokens(
@@ -1050,6 +1222,7 @@ def _run(
         seen_chunks: set[str] = set()
         all_chunks: list[Chunk] = []
         reused_count = 0
+        reembedded_count = 0
 
         failed_documents: list[dict] = []
 
@@ -1081,6 +1254,7 @@ def _run(
             seen_documents.add(res.document_hash)
             all_chunks.extend(res.chunks)
             reused_count += res.reused
+            reembedded_count += res.reembedded
 
         if not all_chunks:
             failure_summary = (
@@ -1099,6 +1273,13 @@ def _run(
             )
 
         vector_dim = len(next(chunk.embedding for chunk in all_chunks if chunk.embedding))
+        # fallback 벡터를 실제 벡터로 재임베딩한 경우, 적재 캐시를 비운다.
+        # get_retriever 의 캐시 키(_population_key)는 (scope_id, 모델명, 차원, 저장소)만
+        # 보는데, scope_id 는 hash=sha256(text) 라 임베딩과 무관하다. 모델명·차원이 그대로면
+        # 벡터만 바뀐 이 전환은 키가 충돌해 옛 fallback 컬렉션이 재사용된다(retriever.py
+        # "남는 구멍" 주석 참고). 명시적 reset 으로 새 벡터가 실제 upsert 되게 한다.
+        if reembedded_count:
+            reset_retriever_cache()
         # 컬렉션 준비·증분 삭제·upsert를 공통 retriever에 위임한다. 뒤이어 도는
         # Eval/Serve가 같은 청크로 get_retriever를 부르면 이 적재 결과를 그대로 쓴다.
         # 재생성 플래그는 config를 통해 ensure_collection까지 전달된다.
@@ -1121,6 +1302,7 @@ def _run(
                 "documents": len(seen_documents),
                 "chunks": len(all_chunks),
                 "reused_embeddings": reused_count,
+                "reembedded_fallback": reembedded_count,
                 "chunk_strategy": chunk_strategy,
                 "embedding_model": config["embedding_model"],
                 "embedding_dimension": vector_dim,
