@@ -56,7 +56,6 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # (1) 지난 처방 판정 + (나빴으면) 롤백/블랙리스트
         judged_item, verdict, rollback_baseline_report = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
-        rollback_reindex_required = bool(state.reindex_required) if rolled_back else False
 
         # (2) 새 처방 선택. 저비용 사전검증에서 baseline이 이기면 현재 처방을
         # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
