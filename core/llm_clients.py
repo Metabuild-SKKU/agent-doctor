@@ -15,6 +15,12 @@ from core.llm_usage import log_usage
 
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 
+# 출력 토큰 기본 상한. 상한이 없으면 모델이 같은 문장을 반복 생성하며 최대치(64K)까지
+# 달려도 아무도 막지 않는다 — 실제로 한 번 일어났고(응답 65,521 토큰, 그 1회로 $0.10),
+# 잘린 응답이 JSON 파싱에 실패해 호출부가 조용히 휴리스틱으로 폴백하면서 쓰레기 Probe 를
+# 만들어냈다. 상한은 비용 방어이자 "잘림"을 조기에 드러내는 장치다.
+DEFAULT_MAX_OUTPUT_TOKENS = 2048
+
 
 def openai_chat(
     system: str,
@@ -24,6 +30,7 @@ def openai_chat(
     json_mode: bool = False,
     api_key: str | None = None,
     base_url: str | None = None,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     tag: str = "LLM",
 ) -> str:
     """OpenAI 호환 chat 1회 호출(temperature=0) → 응답 텍스트("" 가능).
@@ -41,6 +48,7 @@ def openai_chat(
     resp = client.chat.completions.create(
         model=model,
         temperature=0,
+        max_tokens=max_output_tokens,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -58,13 +66,21 @@ def gemini_chat(
     model: str,
     *,
     json_mode: bool = False,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     tag: str = "LLM",
 ) -> str:
-    """Gemini chat 1회 호출(temperature=0, google-genai SDK) → 응답 텍스트("" 가능)."""
+    """Gemini chat 1회 호출(temperature=0, google-genai SDK) → 응답 텍스트("" 가능).
+
+    주의: 추론 모델은 내부 사고(thoughts)도 이 상한을 함께 소진한다. JSON 구조가 온전해야
+    하는 호출(Probe 합성 등)은 호출부에서 상한을 넉넉히 주는 게 안전하다."""
     from google import genai
 
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    config: dict = {"temperature": 0, "system_instruction": system}
+    config: dict = {
+        "temperature": 0,
+        "system_instruction": system,
+        "max_output_tokens": max_output_tokens,
+    }
     if json_mode:
         config["response_mime_type"] = "application/json"
     resp = client.models.generate_content(model=model, contents=user, config=config)

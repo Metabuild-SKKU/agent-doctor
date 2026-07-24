@@ -42,6 +42,16 @@ _PAGE_NUMBER_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+# 줄 "끝"에 꼬리처럼 붙은 페이지 마커: "전자공시시스템 dart.fss.or.kr Page 522".
+# _PAGE_NUMBER_RE 는 줄 전체가 페이지 번호일 때만 매치하므로(^...$) 앞에 텍스트가 붙은
+# 이런 꼬리말은 못 잡는다. 실제 DART 사업보고서에서 이 푸터가 그대로 청크에 남아
+# Probe 의 주제 문구로 쓰였다 — "dart.fss.or.kr Page 522 의 관계를 설명해줘" 같은
+# 답할 수 없는 질문이 만들어졌다. 줄을 통째로 지우지 않고 꼬리만 잘라 본문을 지킨다.
+_TRAILING_PAGE_MARKER_RE = re.compile(
+    r"\s*(?:page|p\.|페이지)\s*\d+\s*$",
+    re.IGNORECASE,
+)
+
 # 줄 끝 하이픈 + 줄바꿈 = 조판상 단어가 잘린 것. 영문 PDF 에서 흔하다.
 # 앞뒤가 모두 알파벳일 때만 붙인다("- 항목" 같은 목록 기호나 숫자 범위는 건드리지 않음).
 _HYPHEN_BREAK_RE = re.compile(r"([A-Za-z])[-­]\n([a-z])")
@@ -107,6 +117,12 @@ def _normalize_line(line: str) -> str:
 
 # 머리말/꼬리말로 인정할 위치. 페이지의 첫 줄이거나 마지막 줄 — "위에서 두 번째"까지
 # 넓히면 본문 첫 문장이 휩쓸려 나간다.
+#
+# [실측] 이 범위를 위아래 2줄로 넓히고 반복 비율을 0.4 로 낮춰봤다가 되돌렸다. 위에서 두
+# 번째 줄의 본문(80자 미만이라 길이 제한도 통과)이 통째로 지워지면서
+# test_repeated_body_text_is_not_stripped 가 깨졌다. 푸터가 가장자리 밖으로 밀리는 문제는
+# 범위를 넓혀서가 아니라 _TRAILING_PAGE_MARKER_RE(페이지 마커가 붙은 줄은 위치 무관 처리)로
+# 푼다 — 본문 손실 위험이 없는 쪽.
 def _edge_lines(page: str) -> tuple[str | None, str | None]:
     """페이지의 (첫 내용 줄, 마지막 내용 줄). 내용이 없으면 (None, None)."""
     lines = [ln.strip() for ln in page.splitlines() if ln.strip()]
@@ -166,8 +182,25 @@ def _strip_page_furniture(page: str, repeated: set[str]) -> tuple[str, list[str]
         if _PAGE_NUMBER_RE.match(stripped):
             removed.append(stripped)
             continue
-        if is_edge and _normalize_line(stripped) in repeated:
+        # 반복 판정은 "자르기 전" 원본 줄로 해야 한다 — 꼬리를 먼저 자르면
+        # "...dart.fss.or.kr Page 501" 이 "...dart.fss.or.kr" 이 되면서 반복 키와
+        # 어긋나 되레 살아남는다.
+        is_repeated = _normalize_line(stripped) in repeated
+        # 페이지 마커가 꼬리에 붙은 줄은 그 자체가 페이지 가구(furniture)이므로,
+        # 반복으로 확인됐다면 가장자리가 아니어도 줄째 지운다. 표가 섞인 페이지에서
+        # 푸터가 마지막 줄 자리를 벗어나는 경우가 실제로 있었다(DART 사업보고서).
+        has_page_marker = bool(_TRAILING_PAGE_MARKER_RE.search(stripped))
+        if is_repeated and (is_edge or has_page_marker):
             removed.append(stripped)
+            continue
+        # 반복까지는 아니어도 꼬리에 페이지 마커가 붙어 있으면 그 부분만 잘라낸다.
+        # 줄 전체를 지우지 않으므로 본문 손실 위험이 없다.
+        trimmed = _TRAILING_PAGE_MARKER_RE.sub("", stripped)
+        if trimmed != stripped:
+            removed.append(stripped[len(trimmed):].strip())
+            if not trimmed:
+                continue
+            kept.append(trimmed)
             continue
         kept.append(line)
 

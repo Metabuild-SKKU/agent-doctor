@@ -52,6 +52,51 @@ class HeaderFooterStripTest(unittest.TestCase):
 
         self.assertEqual(result.content.count("제목"), 2)
 
+    def test_removes_dart_footer_at_page_edge(self):
+        # "전자공시시스템 dart.fss.or.kr Page 522" — 줄 전체가 페이지 번호가 아니라
+        # 앞에 텍스트가 붙어 있어 _PAGE_NUMBER_RE 로는 안 잡히는 모양.
+        pages = [
+            f"본문 {marker} 내용입니다. 충분히 긴 서술 문장.\n"
+            f"전자공시시스템 dart.fss.or.kr Page {500 + i}"
+            for i, marker in enumerate("가나다라마")
+        ]
+        result = preprocess_pages(pages)
+
+        self.assertNotIn("dart.fss.or.kr", result.content)
+        self.assertNotIn("Page 502", result.content)
+        self.assertIn("본문 다 내용입니다.", result.content)
+
+    def test_removes_dart_footer_displaced_from_edge(self):
+        # 표가 섞인 페이지에서는 푸터가 마지막 줄 자리를 벗어난다. 가장자리 고정
+        # 반복 판정만으로는 놓치므로, 페이지 마커가 붙은 반복 줄은 위치와 무관하게 지운다.
+        # 이 잔여물이 Probe 주제로 쓰여 "dart.fss.or.kr Page 522의 관계를 설명해줘" 같은
+        # 답할 수 없는 질문을 만들어냈다(실측).
+        bodies = [
+            "반도체 사업부는 메모리와 시스템 반도체로 구성되어 있습니다.",
+            "당사는 청주와 이천에 주요 생산기지를 운영하고 있습니다.",
+            "연구개발비는 전년 대비 증가하였으며 무형자산으로 일부 계상됩니다.",
+            "특수관계자와의 거래는 공정거래법 규정에 따라 공시하고 있습니다.",
+            "이사회는 사외이사 과반수로 구성되어 독립성을 확보하고 있습니다.",
+        ]
+        pages = [
+            f"{body}\n전자공시시스템 dart.fss.or.kr Page {500 + i}"
+            + ("\n| 항목 | 금액 |" if i % 2 else "")
+            for i, body in enumerate(bodies)
+        ]
+        result = preprocess_pages(pages)
+
+        self.assertNotIn("dart.fss.or.kr", result.content)
+        for body in bodies:
+            self.assertIn(body, result.content)
+
+    def test_trailing_page_marker_trimmed_without_losing_body(self):
+        # 반복으로 확인되지 않은 줄은 꼬리(페이지 마커)만 자르고 본문은 남긴다.
+        pages = ["가나다라마 본문입니다 Page 7", "다른 페이지", "또 다른 페이지"]
+        result = preprocess_pages(pages)
+
+        self.assertIn("가나다라마 본문입니다", result.content)
+        self.assertNotIn("Page 7", result.content)
+
     def test_repeated_body_text_is_not_stripped(self):
         # 가장자리가 아닌 본문 중간에 반복되는 문장은 살아남아야 한다.
         long_line = "이 문장은 본문 한가운데에서 반복되는 충분히 긴 서술형 문장입니다."
