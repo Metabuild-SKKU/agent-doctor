@@ -29,18 +29,187 @@ Optimize 노드의 진입점(오케스트레이션 계층).
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
+from typing import Any
 
 from core.state import AgentDoctorState
 from core.schema import DiagnosticReport
 from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate
 from agents.optimize.schemas import (
+    ConfigDiff,
     OptimizationHistoryItem,
     OptimizationRequest,
     OptimizationResult,
     OptimizeDecision,
     Verdict,
 )
+
+
+def _fmt_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _fmt_score(value: float | None) -> str:
+    return "None" if value is None else f"{value:.2f}"
+
+
+def _fmt_composite(report: DiagnosticReport | None) -> str:
+    if report is None or not isinstance(report.composite_score, dict):
+        return "-"
+    total = report.composite_score.get("total")
+    if not isinstance(total, (int, float)):
+        return "-"
+    return f"{float(total):.1f}"
+
+
+def _fmt_findings_summary(report: DiagnosticReport | None) -> str:
+    if report is None or not report.findings:
+        return "없음"
+
+    labels = Counter(
+        finding.label
+        for finding in report.findings
+        if finding.confirmed and finding.label
+    )
+
+    if not labels:
+        return "없음"
+
+    return ", ".join(f"{label} {count}건" for label, count in labels.items())
+
+
+def _fmt_config_values(config: dict[str, Any], keys: list[str]) -> str:
+    if not keys:
+        return "변경 없음"
+    return ", ".join(f"{key}={config.get(key)!r}" for key in keys)
+
+
+def _diff_visible_keys(diff: ConfigDiff) -> list[str]:
+    seen: set[str] = set()
+    keys: list[str] = []
+    for key in [*diff.changed_keys, *diff.added_keys, *diff.removed_keys]:
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
+def _config_change_next_step(needs_reindex: bool) -> str:
+    if needs_reindex:
+        return "Index 재색인 후 Eval 재실행"
+    return "Index 경유(물리 재색인 생략) 후 Eval 재실행"
+
+
+def _log_eval_line(report: DiagnosticReport | None) -> None:
+    pass_result = gate.passes_report(report) if report is not None else False
+    print(
+        f"[Optimize] Eval 결과: overall={_fmt_score(getattr(report, 'overall_score', None))}, "
+        f"composite={_fmt_composite(report)}, pass={_fmt_bool(pass_result)}"
+    )
+
+
+def _log_optimize_transition(
+    state: AgentDoctorState,
+    *,
+    label: str | None,
+    prescription_id: str | None,
+    before_config: dict[str, Any],
+    after_config: dict[str, Any],
+    changed_keys: list[str],
+    reindex_required: bool,
+    next_step: str,
+    include_eval_header: bool = True,
+    include_reindex: bool = True,
+    include_next_step: bool = True,
+) -> None:
+    if include_eval_header:
+        print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations}")
+        _log_eval_line(state.report)
+        print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(state.report)}")
+    print(f"[Optimize] 선택한 라벨: {label or '-'}")
+    print(f"[Optimize] 선택한 처방: {prescription_id or '-'}")
+    print(f"[Optimize] 변경 전 config: {_fmt_config_values(before_config, changed_keys)}")
+    print(f"[Optimize] 변경 후 config: {_fmt_config_values(after_config, changed_keys)}")
+    if include_reindex:
+        print(f"[Optimize] reindex_required={_fmt_bool(reindex_required)}")
+    if include_next_step:
+        print(f"[Optimize] 다음 단계: {next_step}")
+
+
+def _log_optimize_application(
+    state: AgentDoctorState,
+    request: OptimizationRequest,
+    result: OptimizationResult,
+    before_config: dict[str, Any],
+    after_config: dict[str, Any],
+    changed_keys: list[str],
+    prescription_id: str | None,
+) -> None:
+    _log_optimize_transition(
+        state,
+        label=request.failure_label,
+        prescription_id=prescription_id,
+        before_config=before_config,
+        after_config=after_config,
+        changed_keys=changed_keys,
+        reindex_required=bool(state.reindex_required),
+        next_step=_config_change_next_step(bool(state.reindex_required)),
+    )
+
+
+def _log_optimize_verdict(
+    state: AgentDoctorState,
+    item: OptimizationHistoryItem,
+    verdict: Verdict,
+    *,
+    next_step: str | None = None,
+) -> None:
+    if verdict.keep:
+        before_config = item.before_config
+        after_config = item.after_config
+        reindex_required = False
+    else:
+        before_config = item.after_config
+        after_config = dict(state.index_config)
+        reindex_required = bool(state.reindex_required)
+    diff = config_mapper.build_config_diff(before_config, after_config)
+    _log_optimize_transition(
+        state,
+        label=item.failure_labels[0] if item.failure_labels else None,
+        prescription_id=item.selected_prescription_id,
+        before_config=before_config,
+        after_config=after_config,
+        changed_keys=_diff_visible_keys(diff),
+        reindex_required=reindex_required,
+        next_step=next_step or _config_change_next_step(reindex_required),
+        include_eval_header=False,
+        include_reindex=next_step is not None,
+        include_next_step=next_step is not None,
+    )
+    print(
+        f"[Optimize] 판정 결과: keep={_fmt_bool(verdict.keep)}, "
+        f"before={_fmt_score(verdict.before_score)}, after={_fmt_score(verdict.after_score)}"
+    )
+
+
+def _log_optimize_decision(
+    state: AgentDoctorState,
+    decision: OptimizeDecision,
+) -> None:
+    next_step = "Serve 이동" if decision.next_route == "serve" else decision.next_route
+
+    _log_optimize_transition(
+        state,
+        label=None,
+        prescription_id=None,
+        before_config={},
+        after_config={},
+        changed_keys=[],
+        reindex_required=bool(state.reindex_required),
+        next_step=f"{next_step} ({decision.status})",
+        include_reindex=False,
+    )
 
 
 def run(state: AgentDoctorState) -> AgentDoctorState:
@@ -63,6 +232,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             request, decision = planner.plan(state, blacklist=state.blacklist)
             if decision.mode != "apply_optimize" or request is None:
                 state.status = "rolled_back" if rolled_back else decision.status
+                if judged_item is not None:
+                    _log_optimize_verdict(state, judged_item, verdict)
+                else:
+                    _log_optimize_decision(state, decision)
                 # 롤백이 있었으면 그게 headline, 아니면 흐름 결정(수동/유지)을 보고.
                 state.optimization_report = (
                     reporter.build_trial_report(judged_item, verdict)
@@ -77,6 +250,29 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             )
             if starts_new_label and state.iteration >= state.max_iterations:
                 state.status = "rolled_back" if rolled_back else "verified"
+                if judged_item is not None:
+                    verdict_next_step = (
+                        _config_change_next_step(bool(state.reindex_required))
+                        if rolled_back
+                        else "Serve 이동 (verified, 반복 예산 소진)"
+                    )
+                    _log_optimize_verdict(
+                        state,
+                        judged_item,
+                        verdict,
+                        next_step=verdict_next_step,
+                    )
+                else:
+                    _log_optimize_decision(
+                        state,
+                        OptimizeDecision(
+                            mode="use_current",
+                            status=state.status,
+                            requires_user_confirmation=False,
+                            next_route="serve",
+                            reason="반복 예산 소진",
+                        ),
+                    )
                 if judged_item is not None:
                     state.optimization_report = reporter.build_trial_report(
                         judged_item, verdict
@@ -99,9 +295,22 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             rejection = (request.failure_label, prescription_id)
             if not prescription_id or rejection in state.blacklist:
                 state.status = "rolled_back" if rolled_back else "skipped"
+                if judged_item is not None:
+                    _log_optimize_verdict(state, judged_item, verdict)
                 if rolled_back:
                     state.optimization_report = reporter.build_trial_report(
                         judged_item, verdict
+                    )
+                elif judged_item is None:
+                    _log_optimize_decision(
+                        state,
+                        OptimizeDecision(
+                            mode="use_current",
+                            status="skipped",
+                            requires_user_confirmation=False,
+                            next_route="serve",
+                            reason="적용 가능한 처방 없음",
+                        ),
                     )
                 return state
             state.blacklist.add(rejection)
@@ -113,7 +322,21 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 state.error = result.error or result.message
             # 롤백만 리포트로 남긴다. 적용 실패 자체는 status/error 로 전달(MVP 한계).
             if rolled_back:
+                _log_optimize_verdict(state, judged_item, verdict)
                 state.optimization_report = reporter.build_trial_report(judged_item, verdict)
+            elif judged_item is not None:
+                _log_optimize_verdict(state, judged_item, verdict)
+            else:
+                _log_optimize_decision(
+                    state,
+                    OptimizeDecision(
+                        mode="use_current",
+                        status=result.status,
+                        requires_user_confirmation=False,
+                        next_route="serve",
+                        reason=result.error or result.message,
+                    ),
+                )
             return state
 
         # 적용 직전 스냅샷(롤백이 있었다면 이미 되돌려진 config 가 before 가 된다)
@@ -127,8 +350,11 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # 인덱스는 아직 열화 상태라 이 재색인이 반드시 일어나야 한다.
         rollback_reindex_required = state.reindex_required if rolled_back else False
 
+        if judged_item is not None:
+            _log_optimize_verdict(state, judged_item, verdict)
+
         # 검증된 처방을 실제 index_config 에 반영(canonical→flat 변환은 mapper 담당)
-        config_mapper.apply_config_patch(state.index_config, result.config_patch)
+        config_diff = config_mapper.apply_config_patch(state.index_config, result.config_patch)
         # 새 처방의 재색인 필요 여부와 '롤백이 요구한 재색인'을 OR 로 합친다. 검색시점
         # 처방(needs_reindex=False)이 롤백의 재색인 요구를 덮어써, baseline 청킹이 인덱스에
         # 복원되지 않고 열화된 인덱스가 그대로 재사용되던 버그(config/인덱스 불일치)를 막는다.
@@ -155,6 +381,16 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.optimization_history.append(item)
         if starts_new_label:
             state.iteration += 1
+
+        _log_optimize_application(
+            state,
+            request,
+            result,
+            before_config,
+            dict(state.index_config),
+            _diff_visible_keys(config_diff),
+            prescription_id,
+        )
 
         # 여러 top_k 후보의 첫 적용이면 같은 이력 항목을 active study로 사용한다.
         # 후보별 결과는 다음 방문마다 metadata.trial_results에 누적한다.
@@ -231,11 +467,21 @@ def _continue_internal_study(
         and result.config_patch is not None
         and result.metadata.get("adapter_status") == "needs_evaluation"
     ):
-        config_mapper.apply_config_patch(state.index_config, result.config_patch)
+        before_config = dict(state.index_config)
+        config_diff = config_mapper.apply_config_patch(state.index_config, result.config_patch)
         state.reindex_required = bool(result.needs_reindex)
         item.metadata["current_candidate"] = dict(result.config_patch.changes)
         item.after_config = dict(state.index_config)
         state.status = "applied"
+        _log_optimize_application(
+            state,
+            resumed_request,
+            result,
+            before_config,
+            dict(state.index_config),
+            _diff_visible_keys(config_diff),
+            item.selected_prescription_id,
+        )
         decision = item.metadata.get("study_decision")
         if isinstance(decision, OptimizeDecision):
             state.optimization_report = reporter.build_report(decision, resumed_request)
@@ -258,6 +504,7 @@ def _finish_internal_study(
     result: OptimizationResult,
 ) -> AgentDoctorState:
     """모든 후보 평가 뒤 best를 적용하거나 study baseline을 복원한다."""
+    before_config_for_log = dict(state.index_config)
     before_score = _report_score(item.metadata.get("before_report"))
     best_score = result.metadata.get("best_score")
     after_score = float(best_score) if isinstance(best_score, (int, float)) else before_score
@@ -356,6 +603,22 @@ def _finish_internal_study(
     )
     item.metadata.pop("before_report", None)
     state.optimization_report = reporter.build_trial_report(item, verdict)
+    diff = config_mapper.build_config_diff(before_config_for_log, state.index_config)
+    next_step = (
+        _config_change_next_step(bool(state.reindex_required))
+        if state.status in ("applied", "rolled_back")
+        else f"Serve 이동 ({state.status})"
+    )
+    _log_optimize_transition(
+        state,
+        label=item.failure_labels[0] if item.failure_labels else None,
+        prescription_id=item.selected_prescription_id,
+        before_config=before_config_for_log,
+        after_config=dict(state.index_config),
+        changed_keys=_diff_visible_keys(diff),
+        reindex_required=bool(state.reindex_required),
+        next_step=next_step,
+    )
     return state
 
 
@@ -367,6 +630,7 @@ def _fail_active_study(
     retryable: bool = False,
 ) -> AgentDoctorState:
     """study 오류 시 baseline으로 복원하고 재시도 가능 여부를 구분한다."""
+    before_config_for_log = dict(state.index_config)
     changed = state.index_config != item.before_config
     state.index_config = dict(item.before_config)
     item.status = "failed"
@@ -398,6 +662,22 @@ def _fail_active_study(
     state.status = "rolled_back" if changed else "error"
     state.reindex_required = bool(item.metadata.get("reindex_required", True))
     state.error = None if changed else reason
+    diff = config_mapper.build_config_diff(before_config_for_log, state.index_config)
+    next_step = (
+        _config_change_next_step(bool(state.reindex_required))
+        if state.status == "rolled_back"
+        else f"Serve 이동 ({state.status})"
+    )
+    _log_optimize_transition(
+        state,
+        label=label,
+        prescription_id=prescription_id,
+        before_config=before_config_for_log,
+        after_config=dict(state.index_config),
+        changed_keys=_diff_visible_keys(diff),
+        reindex_required=bool(state.reindex_required),
+        next_step=next_step,
+    )
     return state
 
 

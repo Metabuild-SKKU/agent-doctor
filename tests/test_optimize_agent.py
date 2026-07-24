@@ -9,6 +9,8 @@ Eval 이 report 를 갱신하는 것을 손으로 흉내 내 검증한다.
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -29,15 +31,55 @@ except ImportError:  # pragma: no cover
         "qdrant_client.models",
         "qdrant_client.http",
         "qdrant_client.http.models",
+        "requests",
         "sentence_transformers",
     ):
         sys.modules.setdefault(_n, _AnyModule(_n))
+
+try:  # pragma: no cover
+    import requests  # noqa: F401
+except ImportError:  # pragma: no cover
+    import types
+    sys.modules.setdefault("requests", types.ModuleType("requests"))
+
+try:  # pragma: no cover
+    import langgraph.graph  # noqa: F401
+except ImportError:  # pragma: no cover
+    import types
+
+    _langgraph = types.ModuleType("langgraph")
+    _langgraph_graph = types.ModuleType("langgraph.graph")
+
+    class _StateGraph:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_node(self, *args, **kwargs):
+            pass
+
+        def set_entry_point(self, *args, **kwargs):
+            pass
+
+        def add_edge(self, *args, **kwargs):
+            pass
+
+        def add_conditional_edges(self, *args, **kwargs):
+            pass
+
+        def compile(self):
+            return self
+
+    _langgraph_graph.StateGraph = _StateGraph
+    _langgraph_graph.END = "__end__"
+    sys.modules.setdefault("langgraph", _langgraph)
+    sys.modules.setdefault("langgraph.graph", _langgraph_graph)
 
 import graph
 from core.schema import DiagnosticReport, Finding
 from core.state import AgentDoctorState
 from agents.optimize import agent, history
 from agents.optimize.schemas import (
+    ConfigPatch,
     OptimizationHistoryItem,
     OptimizationResult,
     Verdict,
@@ -79,10 +121,60 @@ class OptimizeAgentForwardTest(unittest.TestCase):
     def test_manual_label_makes_no_change(self):
         state = make_state(label="corpus_gap")
         before = dict(state.index_config)
-        state = agent.run(state)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)
         self.assertEqual(state.status, "manual_required")
         self.assertEqual(state.iteration, 0)  # 수동 경로는 iteration 미소비
         self.assertEqual(state.index_config, before)
+        out = buf.getvalue()
+        self.assertIn("[Optimize] 반복 횟수: 0/3", out)
+        self.assertIn("다음 단계: Serve 이동 (manual_required)", out)
+        self.assertNotIn("reindex_required=", out)
+
+    def test_apply_log_matches_index_eval_route_without_physical_reindex(self):
+        state = make_state(overall=0.42)
+        state.report.composite_score = {"total": 40.0}
+        state.report.findings_summary = {
+            "confirmed_labels": {"too_long_context": 0.333}
+        }
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)
+
+        out = buf.getvalue()
+        self.assertIn("[Optimize] 반복 횟수: 1/3", out)
+        self.assertIn("Eval 결과: overall=0.42, composite=40.0, pass=false", out)
+        self.assertIn("발견된 문제: too_long_context 1건", out)
+        self.assertIn("다음 단계: Index 경유(물리 재색인 생략) 후 Eval 재실행", out)
+        self.assertEqual(graph.route_after_optimize(state), "index")
+
+    def test_apply_log_includes_added_config_keys(self):
+        state = make_state(overall=0.42)
+        request, decision = agent.planner.plan(state)
+        result = OptimizationResult(
+            request_id=request.request_id,
+            status="proposed",
+            optimizer="rules",
+            selected_candidate=request.candidates[0],
+            config_patch=ConfigPatch(
+                changes={"embedding.model": "BAAI/bge-m3"},
+                reindex_required=True,
+            ),
+            needs_reindex=True,
+        )
+
+        buf = StringIO()
+        with patch("agents.optimize.agent.planner.plan", return_value=(request, decision)), patch(
+            "agents.optimize.agent.optimizer.run", return_value=result
+        ), redirect_stdout(buf):
+            state = agent.run(state)
+
+        out = buf.getvalue()
+        self.assertEqual(state.index_config["embedding_model"], "BAAI/bge-m3")
+        self.assertIn("변경 전 config: embedding_model=None", out)
+        self.assertIn("변경 후 config: embedding_model='BAAI/bge-m3'", out)
 
     def test_prescreener_baseline_selection_tries_the_next_prescription(self):
         state = make_state(label="chunking_context_mismatch", chunk_size=400)
@@ -178,6 +270,53 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
 
+    def test_rollback_then_followup_application_logs_both_prescriptions(self):
+        state = agent.run(make_state(overall=60.0))
+        state.report = make_report(40.0, label="retrieval_semantic_mismatch")
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)
+
+        out = buf.getvalue()
+        self.assertEqual(state.optimization_history[0].status, "failed")
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "shrink_chunk_size",
+        )
+        self.assertIn("decrease_top_k", out)
+        self.assertIn("shrink_chunk_size", out)
+        self.assertIn("판정 결과: keep=false, before=60.00, after=40.00", out)
+        verdict_block = out[:out.index("판정 결과: keep=false")]
+        self.assertNotIn("Eval 결과:", verdict_block)
+        self.assertNotIn("발견된 문제:", verdict_block)
+        self.assertNotIn("reindex_required=", verdict_block)
+        self.assertNotIn("다음 단계:", verdict_block)
+        self.assertLess(out.index("decrease_top_k"), out.index("shrink_chunk_size"))
+
+    def test_keep_then_followup_application_logs_previous_verdict(self):
+        state = agent.run(make_state(overall=60.0))
+        state.report = make_report(75.0, label="retrieval_semantic_mismatch")
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)
+
+        out = buf.getvalue()
+        self.assertEqual(state.optimization_history[0].status, "applied")
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "shrink_chunk_size",
+        )
+        self.assertIn("선택한 처방: decrease_top_k", out)
+        self.assertIn("판정 결과: keep=true, before=60.00, after=75.00", out)
+        self.assertIn("선택한 처방: shrink_chunk_size", out)
+        verdict_block = out[:out.index("판정 결과: keep=true")]
+        self.assertNotIn("Eval 결과:", verdict_block)
+        self.assertNotIn("발견된 문제:", verdict_block)
+        self.assertNotIn("다음 단계:", verdict_block)
+        self.assertLess(out.index("decrease_top_k"), out.index("shrink_chunk_size"))
+
     def test_unjudgeable_rollback_does_not_blacklist(self):
         # 측정이 없어(before_report None) 판정 불가한 경우: config 는 안전하게 복원하되,
         # '나빴다는 증거'가 아니므로 블랙리스트엔 넣지 않는다(리뷰 #36). 같은 시나리오라도
@@ -204,9 +343,19 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
 
         # 방문2: 악화 + 검색시점 라벨 → 롤백(재색인 요구) 후 dynamic_top_k(재색인 불필요) 적용
         state.report = make_report(50.0, label="retrieval_incomplete_enumeration")
-        state = agent.run(state)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)
         self.assertEqual(state.status, "applied")
         self.assertTrue(state.reindex_required)   # 롤백 재색인 요구가 보존됨
+        out = buf.getvalue()
+        self.assertIn("선택한 처방: shrink_chunk_size", out)
+        self.assertIn("판정 결과: keep=false, before=60.00, after=50.00", out)
+        self.assertIn("선택한 처방: dynamic_top_k", out)
+        verdict_block = out[:out.index("판정 결과: keep=false")]
+        self.assertNotIn("다음 단계:", verdict_block)
+        self.assertIn("reindex_required=true", out[out.rindex("dynamic_top_k"):])
+        self.assertIn("다음 단계: Index 재색인 후 Eval 재실행", out[out.rindex("dynamic_top_k"):])
 
     def test_budget_exhausted_allows_same_label_without_increment(self):
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
@@ -334,19 +483,25 @@ class OptimizeTopKSweepTest(unittest.TestCase):
         self.assertEqual((state.index_config["top_k"], state.iteration), (7, 1))
 
         state.report = self._report(55.0)
-        state = agent.run(state)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)
         self.assertEqual((state.index_config["top_k"], state.iteration), (9, 1))
+        self.assertIn("선택한 처방: increase_top_k", buf.getvalue())
 
         state.report = self._report(70.0)
         state = agent.run(state)
         self.assertEqual((state.index_config["top_k"], state.iteration), (11, 1))
 
         state.report = self._report(65.0)
-        state = agent.run(state)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)
         self.assertEqual(state.index_config["top_k"], 9)
         self.assertEqual(state.iteration, 1)
         self.assertIsNone(history.find_pending(state.optimization_history))
         self.assertEqual(len(state.optimization_history[0].metadata["trial_results"]), 4)
+        self.assertIn("다음 단계: Index 경유(물리 재색인 생략) 후 Eval 재실행", buf.getvalue())
 
     def test_baseline_is_restored_only_after_all_candidates(self):
         state = self._state()
@@ -439,21 +594,35 @@ class OptimizeReportWiringTest(unittest.TestCase):
     def test_keep_stores_applied_trial_report(self):
         # 방문2가 '판정만' 하도록 예산을 소진시킨다(예산이 남으면 새 처방 적용이 headline).
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
+        self.assertEqual(state.optimization_history[-1].selected_prescription_id, "decrease_top_k")
         state.report = make_report(75.0, label="retrieval_missing_gold")  # 개선 + 다음 라벨
-        state = agent.run(state)                             # 방문2: 예산소진 → 유지 판정만
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)                         # 방문2: 예산소진 → 유지 판정만
         report = state.optimization_report
         self.assertEqual(report.status, "applied")
         self.assertIn("유지", report.summary)
+        out = buf.getvalue()
+        self.assertIn("선택한 라벨: too_long_context", out)
+        self.assertIn("선택한 처방: decrease_top_k", out)
+        self.assertIn("판정 결과: keep=true, before=60.00, after=75.00", out)
+        self.assertIn("다음 단계: Serve 이동 (verified, 반복 예산 소진)", out)
+        self.assertNotIn("선택한 처방: -", out)
 
     def test_rollback_stores_failed_trial_report(self):
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
         state.report = make_report(50.0, label="retrieval_missing_gold")  # 악화 + 다음 라벨
-        state = agent.run(state)                             # 방문2: 예산소진 → 판정만(롤백)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            state = agent.run(state)                         # 방문2: 예산소진 → 판정만(롤백)
         report = state.optimization_report
         self.assertEqual(report.status, "failed")
         self.assertIn("되돌렸", report.summary)
         self.assertGreater(len(report.metadata.get("floor_violations", [])) +
                            int("점수" in report.summary), 0)  # 롤백 사유가 실림
+        out = buf.getvalue()
+        self.assertIn("선택한 처방:", out)
+        self.assertIn("다음 단계: Index 경유(물리 재색인 생략) 후 Eval 재실행", out)
 
     def test_rollback_baseline_carries_restored_score_not_degraded(self):
         """#2 회귀: 롤백 후 같은 방문에서 이어 제안되는 처방의 비교 기준(before_report)은
@@ -492,31 +661,36 @@ class GraphRoutingTest(unittest.TestCase):
         item.metadata["pending"] = True
         return item
 
+    @staticmethod
+    def _route(fn, state):
+        with redirect_stdout(StringIO()):
+            return fn(state)
+
     def test_route_after_optimize(self):
-        self.assertEqual(graph.route_after_optimize(AgentDoctorState(status="applied")), "index")
-        self.assertEqual(graph.route_after_optimize(AgentDoctorState(status="rolled_back")), "index")
-        self.assertEqual(graph.route_after_optimize(AgentDoctorState(status="skipped")), "serve")
-        self.assertEqual(graph.route_after_optimize(AgentDoctorState(status="manual_required")), "serve")
-        self.assertEqual(graph.route_after_optimize(AgentDoctorState(status="verified")), "serve")
+        self.assertEqual(self._route(graph.route_after_optimize, AgentDoctorState(status="applied")), "index")
+        self.assertEqual(self._route(graph.route_after_optimize, AgentDoctorState(status="rolled_back")), "index")
+        self.assertEqual(self._route(graph.route_after_optimize, AgentDoctorState(status="skipped")), "serve")
+        self.assertEqual(self._route(graph.route_after_optimize, AgentDoctorState(status="manual_required")), "serve")
+        self.assertEqual(self._route(graph.route_after_optimize, AgentDoctorState(status="verified")), "serve")
 
     def test_route_after_eval_pass_goes_serve(self):
         state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
                                  iteration=1, max_iterations=3)
-        self.assertEqual(graph.route_after_eval(state), "serve")
+        self.assertEqual(self._route(graph.route_after_eval, state), "serve")
 
     def test_route_after_eval_budget_left_goes_optimize(self):
         state = AgentDoctorState(report=make_report(50.0), iteration=1, max_iterations=3)
-        self.assertEqual(graph.route_after_eval(state), "optimize")
+        self.assertEqual(self._route(graph.route_after_eval, state), "optimize")
 
     def test_route_after_eval_exhausted_with_pending_goes_optimize(self):
         state = AgentDoctorState(report=make_report(50.0), iteration=3, max_iterations=3,
                                  optimization_history=[self._pending()])
-        self.assertEqual(graph.route_after_eval(state), "optimize")
+        self.assertEqual(self._route(graph.route_after_eval, state), "optimize")
 
     def test_route_after_eval_exhausted_without_pending_goes_serve(self):
         state = AgentDoctorState(report=make_report(50.0), iteration=3, max_iterations=3,
                                  optimization_history=[])
-        self.assertEqual(graph.route_after_eval(state), "serve")
+        self.assertEqual(self._route(graph.route_after_eval, state), "serve")
 
 
 if __name__ == "__main__":

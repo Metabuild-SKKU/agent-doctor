@@ -487,10 +487,9 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 # ── probe 1개 평가 (STEP2 → STEP3 → STEP4) ───────────────────────
 
-def _clip(text: str, n: int = 50) -> str:
-    """로그용 한 줄 축약(줄바꿈 제거 + n자 컷)."""
-    t = " ".join((text or "").split())
-    return t if len(t) <= n else t[:n] + "…"
+def _full_log_text(text: str | None) -> str:
+    """QAR 로그용 전체 텍스트. 줄바꿈만 접고 길이는 자르지 않는다."""
+    return " ".join((text or "").split()) or "-"
 
 
 def _fmt_metric(v, applicable: bool = True) -> str:
@@ -518,9 +517,9 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
     gold = ", ".join(_short_cid(c) for c in p.gold_chunk_ids)
 
     print(f"[{idx}/{total}] {p.probe_id}  ({meta})")
-    print(f"Q: {_clip(p.question, 80)}")
-    print(f"A: {_clip(p.ground_truth, 80) if p.ground_truth else '-'}")
-    print(f"R: {_clip(rec.generated_answer, 80) if rec.generated_answer else '-'}")
+    print(f"Q: {_full_log_text(p.question)}")
+    print(f"A: {_full_log_text(p.ground_truth)}")
+    print(f"R: {_full_log_text(rec.generated_answer)}")
     print(f"검색: [{retrieved}]")
     print(f"골드: [{gold}]")
     print(f"메트릭 결과: recall@k={recall}  f1={f1}  oracle_f1={oracle}")
