@@ -41,11 +41,20 @@ sys.path.insert(0, str(REPO_ROOT))
 from core.console import force_utf8_stdio
 force_utf8_stdio()   # cp949 콘솔에서 '—' 등이 UnicodeEncodeError 를 내지 않도록(로깅과 독립)
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(override=True)
-except ImportError:
-    pass
+def _load_env() -> None:
+    """.env 로드. import 시점이 아니라 main() 에서만 부른다.
+
+    override=True 로 .env 를 프로세스 전역에 밀어넣기 때문에, import 만 해도 환경이
+    바뀐다 — tests/test_run_corpus.py 가 이 모듈을 import 하면 EVAL_TESTSET_SIZE 같은
+    값이 같은 프로세스의 다른 테스트에까지 새어 들어가 결과를 바꾼다(실측: Probe 개수가
+    10→30 이 되면서 gold_spans 없는 no_answer Probe 가 섞여 무관한 테스트가 깨졌다).
+    """
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+    except ImportError:
+        pass
+
 
 CORPUS_ROOT = Path(__file__).resolve().parent / "corpus"
 REPORT_TEMPLATE = REPO_ROOT / "web" / "prototype" / "report.html"
@@ -265,6 +274,8 @@ def main():
     parser.add_argument("--loop", action="store_true",
                         help="품질 미달 시 Optimize→재색인→재평가 반복(기본은 1회)")
     args = parser.parse_args()
+
+    _load_env()   # 실제 실행할 때만 .env 를 적용한다(import 부작용 방지)
 
     # 로깅은 파이프라인 import 보다 먼저 설치한다 — 모델 로딩 경고처럼 import 시점에
     # 나오는 출력까지 로그에 담기게. (setup 이전 출력은 콘솔에만 남는다.)
