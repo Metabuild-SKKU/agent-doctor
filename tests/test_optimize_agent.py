@@ -127,7 +127,10 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertEqual(state.status, "manual_required")
         self.assertEqual(state.iteration, 0)  # 수동 경로는 iteration 미소비
         self.assertEqual(state.index_config, before)
-        self.assertIn("[Optimize] 반복 횟수: 0/3", buf.getvalue())
+        out = buf.getvalue()
+        self.assertIn("[Optimize] 반복 횟수: 0/3", out)
+        self.assertIn("다음 단계: Serve 이동 (manual_required)", out)
+        self.assertNotIn("reindex_required=", out)
 
     def test_apply_log_matches_index_eval_route_without_physical_reindex(self):
         state = make_state(overall=0.42)
@@ -284,6 +287,11 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertIn("decrease_top_k", out)
         self.assertIn("shrink_chunk_size", out)
         self.assertIn("판정 결과: keep=false, before=60.00, after=40.00", out)
+        verdict_block = out[:out.index("판정 결과: keep=false")]
+        self.assertNotIn("Eval 결과:", verdict_block)
+        self.assertNotIn("발견된 문제:", verdict_block)
+        self.assertNotIn("reindex_required=", verdict_block)
+        self.assertNotIn("다음 단계:", verdict_block)
         self.assertLess(out.index("decrease_top_k"), out.index("shrink_chunk_size"))
 
     def test_keep_then_followup_application_logs_previous_verdict(self):
@@ -303,6 +311,10 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertIn("선택한 처방: decrease_top_k", out)
         self.assertIn("판정 결과: keep=true, before=60.00, after=75.00", out)
         self.assertIn("선택한 처방: shrink_chunk_size", out)
+        verdict_block = out[:out.index("판정 결과: keep=true")]
+        self.assertNotIn("Eval 결과:", verdict_block)
+        self.assertNotIn("발견된 문제:", verdict_block)
+        self.assertNotIn("다음 단계:", verdict_block)
         self.assertLess(out.index("decrease_top_k"), out.index("shrink_chunk_size"))
 
     def test_unjudgeable_rollback_does_not_blacklist(self):
@@ -340,6 +352,8 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertIn("선택한 처방: shrink_chunk_size", out)
         self.assertIn("판정 결과: keep=false, before=60.00, after=50.00", out)
         self.assertIn("선택한 처방: dynamic_top_k", out)
+        verdict_block = out[:out.index("판정 결과: keep=false")]
+        self.assertNotIn("다음 단계:", verdict_block)
         self.assertIn("reindex_required=true", out[out.rindex("dynamic_top_k"):])
         self.assertIn("다음 단계: Index 재색인 후 Eval 재실행", out[out.rindex("dynamic_top_k"):])
 

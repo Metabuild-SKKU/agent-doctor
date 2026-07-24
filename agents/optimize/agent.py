@@ -119,16 +119,22 @@ def _log_optimize_transition(
     changed_keys: list[str],
     reindex_required: bool,
     next_step: str,
+    include_eval_header: bool = True,
+    include_reindex: bool = True,
+    include_next_step: bool = True,
 ) -> None:
-    print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations}")
-    _log_eval_line(state.report)
-    print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(state.report)}")
+    if include_eval_header:
+        print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations}")
+        _log_eval_line(state.report)
+        print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(state.report)}")
     print(f"[Optimize] 선택한 라벨: {label or '-'}")
     print(f"[Optimize] 선택한 처방: {prescription_id or '-'}")
     print(f"[Optimize] 변경 전 config: {_fmt_config_values(before_config, changed_keys)}")
     print(f"[Optimize] 변경 후 config: {_fmt_config_values(after_config, changed_keys)}")
-    print(f"[Optimize] reindex_required={_fmt_bool(reindex_required)}")
-    print(f"[Optimize] 다음 단계: {next_step}")
+    if include_reindex:
+        print(f"[Optimize] reindex_required={_fmt_bool(reindex_required)}")
+    if include_next_step:
+        print(f"[Optimize] 다음 단계: {next_step}")
 
 
 def _log_optimize_application(
@@ -177,6 +183,9 @@ def _log_optimize_verdict(
         changed_keys=_diff_visible_keys(diff),
         reindex_required=reindex_required,
         next_step=next_step or _config_change_next_step(reindex_required),
+        include_eval_header=False,
+        include_reindex=next_step is not None,
+        include_next_step=next_step is not None,
     )
     print(
         f"[Optimize] 판정 결과: keep={_fmt_bool(verdict.keep)}, "
@@ -197,8 +206,9 @@ def _log_optimize_decision(
         before_config={},
         after_config={},
         changed_keys=[],
-        reindex_required=False,
+        reindex_required=bool(state.reindex_required),
         next_step=f"{next_step} ({decision.status})",
+        include_reindex=False,
     )
 
 
