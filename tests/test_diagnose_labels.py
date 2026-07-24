@@ -190,6 +190,21 @@ class RetrievalMismatchTest(_DiagnoseTestBase):
         self.assertIsNone(diagnose.retrieval_lexical_mismatch(rec))
         self.assertIsNone(diagnose.retrieval_semantic_mismatch(rec))
 
+    def test_lexical_silent_when_dense_wide_search_also_has_gold(self):
+        """BM25 로 잡혀도 dense wide-N 후보에 있으면(순위만 낮음) low_rank 영역 — lexical 아님."""
+        self._with(retrieve=["g_a", "x", "y", "g_b"], keyword=["g_b"])   # g_b 는 dense 4위 + BM25
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertIsNone(diagnose.retrieval_lexical_mismatch(rec))
+        self.assertTrue(diagnose.retrieval_low_rank(rec).confirmed)      # 배타 상대는 low_rank
+
+    def test_semantic_preliminary_when_corpus_membership_unknown(self):
+        """BM25 는 놓쳤으나 코퍼스 멤버십 미측정(None) → 확정 못 하고 예비(missing_gold 와 동일)."""
+        metrics_common.set_context(chunks=[], keyword_fn=_FakeKeyword(["zzz"]))   # corpus_ids 빔 → None
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        finding = diagnose.retrieval_semantic_mismatch(rec)
+        self.assertIsNotNone(finding)
+        self.assertFalse(finding.confirmed)
+
 
 class RetrievalMissingGoldTest(_DiagnoseTestBase):
     def test_confirmed_when_gold_in_corpus(self):

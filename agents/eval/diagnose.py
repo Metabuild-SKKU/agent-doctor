@@ -133,29 +133,46 @@ def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
 def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
     dense는 놓쳤으나 BM25로 잡히는 단어 불일치.
-    확정: BM25 가 gold 를 잡음(tier2).
+    확정: BM25 가 gold 를 잡음 + dense wide-N 재검색은 그 gold 를 못 잡음(tier2).
+
+    dense wide-N 후보에 gold 가 있으면(순위만 낮음) low_rank 영역이라 여기서 뺀다 —
+    _RETRIEVAL_CAUSE 튜플 순서(low_rank 선행)에 기대지 않고 함수 자체로 배타를 세운다.
+    ranks 는 low_rank 와 memoize 를 공유하므로 재확인 비용은 0이다.
+    (retrieve_fn 미주입으로 dense 순위를 못 재면 배타 판정을 생략하고 BM25 신호만으로 확정.)
     """
-    if _bm25_hits_gold(record) is True:
-        return _finding(
-            record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True,
-            reason=f"bm25_hits_gold=True, recall@k={_v(record.recall_at_k)}",
-        )
-    return None
+    if _bm25_hits_gold(record) is not True:
+        return None
+    ranks = _gold_ranks(record) or {}
+    if any(ranks.get(g) is not None for g in _missed_gold_ids(record)):
+        return None                      # dense wide-N 후보에 있음 → low_rank
+    return _finding(
+        record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True,
+        reason=f"bm25_hits_gold=True, dense_missed=True, recall@k={_v(record.recall_at_k)}",
+    )
 
 
 def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
     dense·BM25 모두 놓친 의미 연결 실패. (단 gold 가 코퍼스엔 있을 때만 — 없으면 corpus_gap)
     확정: BM25 도 gold 를 못 잡음 + gold 는 코퍼스에 존재(tier2).
+
+    코퍼스 멤버십 미측정(None)은 corpus_gap 과 구분할 수 없으므로 예비로만 남긴다
+    (바로 아래 retrieval_missing_gold 의 None 처리와 동일 기준).
     """
+    if _bm25_hits_gold(record) is not False:
+        return None
     in_corpus = _gold_in_corpus(record)
-    if _bm25_hits_gold(record) is False and in_corpus is not False:
+    if in_corpus is True:
         return _finding(
             record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=True,
-            reason=f"bm25_hits_gold=False, gold_in_corpus={_v(in_corpus)}, "
-                   f"recall@k={_v(record.recall_at_k)}",
+            reason=f"bm25_hits_gold=False, gold_in_corpus=True, recall@k={_v(record.recall_at_k)}",
         )
-    return None
+    if in_corpus is None:
+        return _finding(
+            record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=False,
+            reason=f"bm25_hits_gold=False, gold_in_corpus=-, recall@k={_v(record.recall_at_k)}",
+        )
+    return None                          # in_corpus is False → corpus_gap 영역
 
 
 def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
