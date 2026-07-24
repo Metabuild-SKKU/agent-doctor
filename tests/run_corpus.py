@@ -38,6 +38,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from core.console import force_utf8_stdio
+force_utf8_stdio()   # cp949 콘솔에서 '—' 등이 UnicodeEncodeError 를 내지 않도록(로깅과 독립)
+
 try:
     from dotenv import load_dotenv
     load_dotenv(override=True)

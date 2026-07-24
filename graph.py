@@ -23,6 +23,12 @@ try:
 except ImportError:
     pass
 
+# 콘솔 인코딩 고정도 다른 import 보다 먼저 — import 시점에 찍히는 출력까지 보호한다.
+# (한글 Windows 기본 cp949 에서 '—' 같은 문자를 print 하면 UnicodeEncodeError 가 나고,
+#  그게 Eval 의 포괄 except 에 잡혀 정상 완료된 STEP 을 error 로 뒤집는다.)
+from core.console import force_utf8_stdio
+force_utf8_stdio()
+
 from langgraph.graph import StateGraph, END
 
 from core.llm_usage import print_agent_table
