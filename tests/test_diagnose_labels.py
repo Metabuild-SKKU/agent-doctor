@@ -770,6 +770,64 @@ class ContextLabelTest(_DiagnoseTestBase):
         picked = diagnose._pick(rec, diagnose._CONTEXT_CAUSE)
         self.assertEqual(picked.label, "context_noise_interference")
 
+    def _chunky(self, *, span_len, chunk_len=100, precision=0.1, reranked=False):
+        """gold 청크 하나 안에 span_len 만큼만 근거가 있는 record. 밀도 = span_len/chunk_len."""
+        chunks = [Chunk("g_a", "d1", "본문", char_span=(0, chunk_len))]
+        metrics_common.set_context(chunks=chunks)
+        rec = _record(("g_a",), ("g_a",), recall=1.0, oracle_f1=1.0, f1=0.1,
+                      gold_spans=[{"doc_id": "d1", "start": 0, "end": span_len}])
+        rec.ragas = {"context_precision": precision, "faithfulness": 0.9}
+        rec.ragas_done = True
+        rec.retrieval_details = {"reranked": reranked}
+        return rec
+
+    def test_underchunking_preliminary_when_evidence_buried_in_big_chunk(self):
+        """근거가 청크의 10% 뿐 + precision 낮음 → 청크가 근거보다 큼."""
+        rec = self._chunky(span_len=10)
+        finding = diagnose.chunking_underchunking(rec)
+        self.assertIsNotNone(finding)
+        self.assertFalse(finding.confirmed)                 # 축소 회복 검증은 optimize 위임
+        self.assertEqual(finding.metadata["group"], "A")    # 청킹은 전부 A그룹
+
+    def test_underchunking_silent_when_evidence_dense(self):
+        rec = self._chunky(span_len=80)                     # 밀도 0.8
+        self.assertIsNone(diagnose.chunking_underchunking(rec))
+
+    def test_underchunking_silent_when_precision_ok(self):
+        rec = self._chunky(span_len=10, precision=0.9)
+        self.assertIsNone(diagnose.chunking_underchunking(rec))
+
+    def test_underchunking_beats_noise_interference(self):
+        """노이즈가 청크 '안'이면 청크 '사이' 라벨은 양보한다."""
+        rec = self._chunky(span_len=10)
+        self.assertIsNone(diagnose.context_noise_interference(rec))
+        picked = diagnose._pick(rec, diagnose._CONTEXT_CAUSE)
+        self.assertEqual(picked.label, "chunking_underchunking")
+
+    def test_reranker_low_precision_preliminary_when_reranked_and_imprecise(self):
+        rec = self._chunky(span_len=80, reranked=True)      # 밀도는 높음(청크 안 문제 아님)
+        finding = diagnose.reranker_low_precision(rec)
+        self.assertIsNotNone(finding)
+        self.assertFalse(finding.confirmed)                 # 전/후 순위 비교 불가 → 예비
+        self.assertEqual(finding.metadata["group"], "A")
+
+    def test_reranker_silent_when_not_reranked(self):
+        rec = self._chunky(span_len=80, reranked=False)
+        self.assertIsNone(diagnose.reranker_low_precision(rec))
+
+    def test_reranker_yields_to_underchunking_when_noise_inside_chunk(self):
+        rec = self._chunky(span_len=10, reranked=True)      # 밀도 낮음 → 청크 안 문제
+        self.assertIsNone(diagnose.reranker_low_precision(rec))
+        picked = diagnose._pick(rec, diagnose._CONTEXT_CAUSE)
+        self.assertEqual(picked.label, "chunking_underchunking")
+
+    def test_new_labels_silent_below_deep(self):
+        """context_precision 은 tier3 — DEEP 미만에선 둘 다 침묵."""
+        metrics_common.set_mode(Mode.STANDARD)
+        rec = self._chunky(span_len=10, reranked=True)
+        self.assertIsNone(diagnose.chunking_underchunking(rec))
+        self.assertIsNone(diagnose.reranker_low_precision(rec))
+
     def test_bad_gold_answer_confirmed_when_oracle_also_fails(self):
         """oracle 이 못 맞힌 경우에만 '정답셋 오류' 주장이 성립한다."""
         rec = _record(recall=1.0, oracle_f1=0.1, f1=0.1, faith=0.8, rel=0.9)

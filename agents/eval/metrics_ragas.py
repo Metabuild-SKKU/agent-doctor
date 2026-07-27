@@ -801,6 +801,15 @@ def _correctness_counts_oracle(record: EvalRecord):
     return (d["answer_correctness_tp"], d["answer_correctness_fp"], d["answer_correctness_fn"])
 
 
+def _ctx_precision(record: EvalRecord):
+    """context_precision(검색 컨텍스트 유용성) — 실제 트랙. tier3, DEEP+ / 미측정 None.
+    지금까지 소비처가 리포트 평균뿐이라, 라벨이 읽어도 LLM 추가 호출은 없다."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "real")
+    return record.ragas.get("context_precision")
+
+
 def _rel(record: EvalRecord):
     """response_relevancy(관련성) 값 — 실제 트랙. tier3, DEEP+ / 미측정 None."""
     if active_mode() < Mode.DEEP:

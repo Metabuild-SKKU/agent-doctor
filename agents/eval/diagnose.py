@@ -32,19 +32,20 @@ from typing import Optional
 from core.schema import Finding
 from agents.eval.types import (
     DEFAULT_TOP_K, EvalRecord, Mode, resolve_mode,
-    F1_PASS_THRESHOLD, ANSWER_CORRECTNESS_MIN,
-    RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
+    F1_PASS_THRESHOLD, ANSWER_CORRECTNESS_MIN, EVIDENCE_DENSITY_MIN,
+    RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN, RAGAS_CONTEXT_PRECISION_MIN,
 )
 from agents.eval.metrics_common import set_mode, set_context, _missed_gold_ids
 from agents.eval.metrics_basic import (            # tier1
     is_abstention, _compute_metrics, _gold_span_boundary_analysis,
+    _gold_chunk_evidence_density,
 )
 from agents.eval.metrics_search import (           # tier2
     _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
 )
 from agents.eval.metrics_ragas import (            # tier3
     _compute_ragas_real, _compute_ragas_oracle, _abstention_judged, _reasoning_mode_oracle,
-    _correctness_counts_oracle, _faith, _faith_oracle, _rel, _rel_oracle,
+    _correctness_counts_oracle, _faith, _faith_oracle, _rel, _rel_oracle, _ctx_precision,
 )
 
 
@@ -550,6 +551,60 @@ def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
     return None
 
 
+def _chunk_noise_heavy(record: EvalRecord) -> bool:
+    """청크 '안'이 노이즈로 채워졌나 — 근거 밀도가 낮고 context_precision 도 낮음.
+    청크 '사이' 노이즈(비-gold 청크)와 가르는 신호다."""
+    density = _gold_chunk_evidence_density(record)
+    precision = _ctx_precision(record)
+    return (density is not None and density < EVIDENCE_DENSITY_MIN
+            and precision is not None and precision < RAGAS_CONTEXT_PRECISION_MIN)
+
+
+def chunking_underchunking(record: EvalRecord) -> Optional[Finding]:
+    """
+    청크가 근거보다 훨씬 커서 무관한 내용까지 함께 딸려옴.
+    예비: C 전제 + gold 청크 내부 근거 밀도 낮음 + context_precision 낮음.
+
+    청크 '사이' 노이즈(context_noise_interference)가 아니라 청크 '안'의 노이즈다 —
+    gold 를 담은 청크만 분모로 삼아 재므로 top_k·리랭커 문제와 섞이지 않는다.
+    확정은 청크 축소 재청킹으로 회복되는지 봐야 하고 optimize 가 위임받는다 → 예비.
+    """
+    if not _context_failed(record) or not _chunk_noise_heavy(record):
+        return None
+    return _finding(
+        record, "chunking_underchunking", "retrieval_failure", confirmed=False,
+        reason=f"evidence_density={_v(_gold_chunk_evidence_density(record))}<{EVIDENCE_DENSITY_MIN}, "
+               f"context_precision={_v(_ctx_precision(record))}<{RAGAS_CONTEXT_PRECISION_MIN}, "
+               f"recall@k={_v(record.recall_at_k)}",
+    )
+
+
+def reranker_low_precision(record: EvalRecord) -> Optional[Finding]:
+    """
+    리랭커가 무관한 청크를 상위로 올림.
+    예비: C 전제 + 리랭크가 실제 적용됨 + context_precision 낮음 + 청크 안 노이즈는 아님.
+
+    확정하려면 리랭크 전/후 순위를 대조해야 하는데 retriever 가 리랭크 전 후보를 남기지 않는다
+    (search_with_details 가 results 를 덮어씀) — 그 기록 추가는 별도 PR.
+    그래서 여기서는 '리랭크를 거친 결과의 정밀도가 낮다'까지만 말한다(리랭커가 원인이라는
+    증거는 아니다 — 원래 검색이 나빴을 수도 있다).
+    """
+    if not _context_failed(record):
+        return None
+    if not record.retrieval_details.get("reranked"):
+        return None
+    if _chunk_noise_heavy(record):
+        return None                      # 노이즈가 청크 안 → underchunking 영역
+    precision = _ctx_precision(record)
+    if precision is None or precision >= RAGAS_CONTEXT_PRECISION_MIN:
+        return None
+    return _finding(
+        record, "reranker_low_precision", "retrieval_failure", confirmed=False,
+        reason=f"reranked=True, context_precision={_v(precision)}<{RAGAS_CONTEXT_PRECISION_MIN}, "
+               f"recall@k={_v(record.recall_at_k)}",
+    )
+
+
 def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     """
     비-gold 청크의 상충 정보에 이끌림.
@@ -563,6 +618,8 @@ def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     """
     if not _context_failed(record):
         return None
+    if _chunk_noise_heavy(record):
+        return None                      # 노이즈가 청크 안 → chunking_underchunking 영역
     faith = _faith(record)
     if faith is None or faith < RAGAS_FAITHFULNESS_MIN:
         return None
@@ -681,8 +738,11 @@ _GENERATION_CAUSE = (
 # chunking_context_mismatch 는 A·C 양쪽에 등록한다 — 경계 분할은 '검색이 gold 를 통째로
 # 못 가져옴'(A)으로도, '검색은 됐는데 잘린 근거로 답이 틀림'(C)으로도 나타난다.
 # A 슬롯에만 두면 recall=1 인 경계 분할 실패에서 도달 자체가 불가능하다(_dedup 이 중복 제거).
+# 노이즈가 '청크 안'이면 underchunking, '청크 사이'면 reranker/noise_interference —
+# _chunk_noise_heavy 로 배타가 서서 순서에 기대지 않는다.
 _CONTEXT_CAUSE = (
     bad_gold_answer, chunking_context_mismatch,
+    chunking_underchunking, reranker_low_precision,
     too_long_context, lost_in_the_middle, context_noise_interference,
     context_failure
 )
@@ -731,7 +791,7 @@ def _group_of(label: str, ftype: str) -> str:
     """label·ftype 에서 그룹(A/B/C/D)을 파생 — 처방 순서 정렬용."""
     if ftype == "gap":
         return "D"
-    if label == "chunking_context_mismatch":
+    if label.startswith("chunking_") or label.startswith("reranker_"):
         return "A"
     if label.startswith("retrieval_"):
         return "A"

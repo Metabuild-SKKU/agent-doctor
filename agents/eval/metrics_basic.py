@@ -404,3 +404,44 @@ def _gold_span_boundary_analysis(record: EvalRecord):
         }
 
     return _cache(record, "gold_span_boundary_analysis", compute)
+
+
+def _gold_chunk_evidence_density(record: EvalRecord):
+    """검색된 gold 청크 안에서 실제 근거(span)가 차지하는 비율. 낮을수록 청크가 근거보다 크다.
+
+    청크 '사이' 노이즈(비-gold 청크)가 아니라 청크 '안'의 노이즈를 잰다 —
+    chunking_underchunking 과 context_noise_interference 를 가르는 신호다.
+    gold 를 안 담은 청크는 분모에서 뺀다(그건 top_k·리랭커 문제지 청크 크기 문제가 아니다).
+    반환: 0~1 / 좌표·span 없으면 None.
+    """
+    if not _ctx.chunks:
+        return None
+
+    def compute():
+        spans = _exact_probe_gold_spans(record)
+        if not spans:
+            return None
+        by_doc: dict[str, list[tuple[int, int]]] = {}
+        for span in spans:
+            by_doc.setdefault(span["doc_id"], []).append((span["start"], span["end"]))
+
+        retrieved = set(record.retrieved_chunk_ids)
+        evidence = 0
+        total = 0
+        for chunk in _ctx.chunks:
+            if getattr(chunk, "chunk_id", None) not in retrieved:
+                continue
+            position = _chunk_char_span(chunk)
+            doc_id = getattr(chunk, "doc_id", None)
+            if position is None or doc_id not in by_doc:
+                continue
+            c_start, c_end = position
+            covered = sum(max(0, min(c_end, s_end) - max(c_start, s_start))
+                          for s_start, s_end in by_doc[doc_id])
+            if covered <= 0:
+                continue                      # gold 를 안 담은 청크 → 분모 제외
+            evidence += covered
+            total += c_end - c_start
+        return evidence / total if total > 0 else None
+
+    return _cache(record, "gold_chunk_evidence_density", compute)
