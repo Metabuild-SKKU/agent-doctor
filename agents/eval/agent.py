@@ -54,7 +54,7 @@ from agents.rag.generator import generate_answer
 from agents.rag.retriever import Retriever, get_retriever
 from agents.eval.metrics_ragas import (
     evaluate_real_track, evaluate_oracle_track, evaluate_abstention,
-    evaluate_contradiction_oracle, _judge as _ragas_judge,
+    evaluate_reasoning_mode, _judge as _ragas_judge,
 )
 from agents.eval.metrics_common import set_context as set_diag_context
 from agents.eval.metrics_basic import _compute_metrics
@@ -303,8 +303,8 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
             return evaluate_oracle_track(record, judge) if record.oracle_answer is not None else {}
         if track == "abstention":
             return evaluate_abstention(record, judge)
-        if track == "contradiction_oracle":
-            return evaluate_contradiction_oracle(record, judge) if record.oracle_answer is not None else {}
+        if track == "reasoning_mode":
+            return evaluate_reasoning_mode(record, judge) if record.oracle_answer is not None else {}
         return evaluate_real_track(record, judge)
     except Exception as e:
         print(f"[Eval] RAGAS({track}) 실패({e}) → 폴백")

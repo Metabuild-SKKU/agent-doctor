@@ -43,7 +43,7 @@ from agents.eval.metrics_search import (           # tier2
     _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
 )
 from agents.eval.metrics_ragas import (            # tier3
-    _compute_ragas_real, _compute_ragas_oracle, _abstention_judged, _contradiction_oracle,
+    _compute_ragas_real, _compute_ragas_oracle, _abstention_judged, _reasoning_mode_oracle,
     _correctness_counts_oracle, _faith, _faith_oracle, _rel, _rel_oracle,
 )
 
@@ -350,9 +350,29 @@ def _generation_failed(record: EvalRecord) -> bool:
     return False
 
 
-def _contradicts_oracle(record: EvalRecord) -> bool:
-    """오라클 답변이 gold context 와 모순(AspectCritic, DEEP+). 미측정은 False."""
-    return _contradiction_oracle(record) is True
+def _reasoning_mode(record: EvalRecord) -> Optional[str]:
+    """오라클 답변의 추론 실패 모드(LLM 단일분류, DEEP+). 미측정이면 None.
+
+    '근거는 있는데 답이 틀린'(faithfulness 문턱 이상) 경우에만 부른다 — 근거 자체가 없으면
+    hallucination 이 이미 결정하므로 분류기를 부를 이유가 없다(LLM 1회 절약).
+    """
+    faith = _faith_oracle(record)
+    if faith is None or faith < RAGAS_FAITHFULNESS_MIN:
+        return None
+    return _reasoning_mode_oracle(record)
+
+
+# 분류기가 지목하는 모드 → 라벨. hop_binding·other 는 여기 없다(각자 전용 경로).
+_REASONING_LABELS = {
+    "contradiction": "generation_contradiction",
+    "numerical_error": "generation_numerical_error",
+    "misinterpretation": "generation_misinterpretation",
+}
+
+
+def _reasoning_failure_identified(record: EvalRecord) -> bool:
+    """분류기가 구체적 추론 실패를 지목했나 — bad_gold_answer 등 경쟁 주장을 반증한다."""
+    return _reasoning_mode(record) in _REASONING_LABELS
 
 
 def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
@@ -388,9 +408,8 @@ def generation_parametric_overreliance(record: EvalRecord) -> Optional[Finding]:
 def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
     """
     정답 context가 있는데 지어냄.
-    확정: faithfulness 낮음, 또는 문턱 이상이어도 gold context 와 모순되는 문장 존재(AspectCritic).
-    faithfulness 는 비율이라 일부 문장만 모순이면 문턱을 넘길 수 있다 — 그 구멍을 모순 판정이 메운다.
-    (faithfulness 로 이미 확정되면 AspectCritic 을 부르지 않는다 — LLM 1회 절약.)
+    확정: faithfulness 낮음(= 답변이 gold context 어디에도 근거 없음).
+    문턱 이상인데 답이 틀린 경우는 근거는 있으나 잘못 쓴 것이라 generation_reasoning_failure 소관.
     """
     faith = _faith_oracle(record)
     if faith is not None and faith < RAGAS_FAITHFULNESS_MIN:
@@ -398,28 +417,53 @@ def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
             record, "generation_hallucination", "generation_failure", confirmed=True,
             reason=f"faithfulness={_v(faith)}<{RAGAS_FAITHFULNESS_MIN}, oracle_f1={_v(record.oracle_f1)}",
         )
-    if _contradicts_oracle(record):
-        return _finding(
-            record, "generation_hallucination", "generation_failure", confirmed=True,
-            reason=f"contradiction=True, faithfulness={_v(faith)}, oracle_f1={_v(record.oracle_f1)}",
-        )
     return None
+
+
+def generation_reasoning_failure(record: EvalRecord) -> Optional[Finding]:
+    """
+    근거는 있으나 답이 틀린 세 원인(모순/수치/해석)을 LLM 단일분류 1회로 가른다.
+    확정: 분류기가 셋 중 하나를 지목(tier3).
+
+    함수 하나에 라벨 셋을 두는 건 '라벨마다 함수 1개' 원칙의 의도적 예외다 — 측정이 하나뿐이고
+    분류기가 한 값만 돌려줘 셋이 구조적으로 배타라, 함수를 쪼개면 순서에 의미가 없는 항목만
+    셋으로 늘고 '독립 신호 3개'라는 잘못된 인상을 준다.
+    """
+    label = _REASONING_LABELS.get(_reasoning_mode(record))
+    if label is None:
+        return None
+    return _finding(
+        record, label, "generation_failure", confirmed=True,
+        reason=f"reasoning_mode={_reasoning_mode(record)}, "
+               f"faithfulness={_v(_faith_oracle(record))}(근거는 있음), "
+               f"oracle_f1={_v(record.oracle_f1)}",
+    )
 
 def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
     """
     멀티홉: 각 hop 사실은 맞으나 결합이 틀림.
-    확정: 멀티홉 + 누락 없음(FN=0) + 근거 없는 주장 있음(FP>0) + faithfulness 높음 + 모순 없음.
+    확정: 멀티홉 + faithfulness 높음 + (분류기가 hop_binding 지목, 또는 미측정 시 FN=0 & FP>0).
 
-    FN=0 이 '결합' 신호다 — 필요한 gold 요소가 다 있고 근거도 있고 모순도 없는데 답이 틀렸다면,
-    남는 설명은 요소를 잘못 엮었다는 것뿐이다(그 잘못 엮은 주장이 FP 로 잡힌다).
-    FN>0 이면 요소 누락이라 partial_answer 영역 — 카운트로 배타가 서서 튜플 순서에 안 기댄다.
-    카운트 미측정이면 faithfulness 만으론 결합을 특정 못 해 예비.
+    분류기가 다른 모드를 지목하면 양보한다. 미측정이면 카운트로 판정 — FN=0 이 '결합' 신호다
+    (필요한 gold 요소가 다 있는데 답이 틀렸으면 남는 설명은 잘못 엮었다는 것뿐이고, 그 주장이 FP).
+    FN>0 이면 요소 누락이라 partial_answer 영역 — 순서에 안 기대는 배타.
+    멀티홉 전제는 싼 결정적 필터라 분류기보다 앞에 둔다(단일홉이면 호출 자체를 생략).
     """
-    if not _is_multi_hop(record) or _contradicts_oracle(record):
+    if not _is_multi_hop(record):
         return None
     faith = _faith_oracle(record)
     if faith is None or faith < RAGAS_FAITHFULNESS_MIN:
         return None                      # 근거 자체가 약함 → hallucination 영역
+
+    mode = _reasoning_mode(record)
+    if mode == "hop_binding":
+        return _finding(
+            record, "generation_hop_binding_error", "generation_failure", confirmed=True,
+            reason=f"reasoning_mode=hop_binding, faithfulness={_v(faith)}, "
+                   f"qtype={record.probe.qtype}, oracle_f1={_v(record.oracle_f1)}",
+        )
+    if mode is not None:
+        return None                      # 분류기가 다른 원인 지목 → 양보
 
     counts = _correctness_counts_oracle(record)
     if counts is None:
@@ -574,9 +618,10 @@ def bad_gold_answer_oracle(record: EvalRecord) -> Optional[Finding]:
     bad_gold_answer 의 오라클 트랙 버전
     생성 실패 계열 (B 그룹에 함께 있음)
     라벨은 동일('bad_gold_answer').
-    gold context 와 모순되면 '답은 맞는데 정답셋이 틀렸다'가 반증된다 → hallucination 에 양보.
+    분류기가 구체적 추론 실패(모순/수치/해석)를 지목하면 '답은 맞는데 정답셋이 틀렸다'가
+    반증된다 → 그쪽에 양보.
     """
-    if _contradicts_oracle(record):
+    if _reasoning_failure_identified(record):
         return None
     faith, rel = _faith_oracle(record), _rel_oracle(record)
     if (faith is not None and faith >= RAGAS_FAITHFULNESS_MIN
@@ -632,6 +677,8 @@ _RETRIEVAL_CAUSE = (
 # parametric_overreliance 는 여기 없다 — 슬롯 밖 additive(diagnose 참조).
 _GENERATION_CAUSE = (
     generation_abstention_failure, bad_gold_answer_oracle, generation_hop_binding_error,
+    # reasoning_failure 는 라벨 3개(contradiction/numerical_error/misinterpretation)를 한 함수로 낸다.
+    generation_reasoning_failure,
     generation_hallucination, generation_partial_answer,
     generation_failure,
 )
@@ -702,6 +749,7 @@ def _group_of(label: str, ftype: str) -> str:
 _CRITICAL_LABELS = {
     "retrieval_semantic_mismatch", "retrieval_missing_gold",
     "generation_hallucination", "generation_abstention_failure",   # 답 없는 질문에 지어냄 = 환각
+    "generation_contradiction",                                    # 문맥과 정면 충돌 = 사실 오류
     "corpus_gap", "corpus_gap_partial_hop",
 }
 def _severity_of(label: str) -> str:
