@@ -40,7 +40,7 @@ from typing import Any, Callable
 
 from agents.eval import llm_provider
 from agents.eval.types import Mode, EvalRecord
-from agents.eval.metrics_common import _ctx, active_mode
+from agents.eval.metrics_common import _ctx, _cache, active_mode
 from core.parallel import parallel_map
 
 
@@ -194,6 +194,9 @@ _ASPECT_INSTRUCTION_TMPL = (
 # 커스텀 criteria (RAGAS AspectCritic definition 슬롯에 주입)
 _ASPECT_CONTRADICTION = ("Does the response contain information that contradicts the "
                          "retrieved context?")
+_ASPECT_ABSTENTION = ("Does the response decline to answer — stating that it does not know, "
+                      "that the information is unavailable, or that the question cannot be "
+                      "answered from the given context — instead of asserting a substantive answer?")
 
 # ── Answer Correctness: TP/FP/FN 분류 (CorrectnessClassifierPrompt) ──
 #   ragas/metrics/collections/answer_correctness (0.4.3) 소스와 일치.
@@ -362,6 +365,16 @@ def evaluate_aspect_critics(record: EvalRecord, judge) -> dict:
     ctx = record.retrieved_context
     return {
         "contradiction": _aspect_critic(judge, _ASPECT_CONTRADICTION, q, ans, ctx),
+    }
+
+
+def evaluate_abstention(record: EvalRecord, judge) -> dict:
+    """기권 여부 이진 판정(AspectCritic). generation_no_abstention 의 DEEP+ 경로."""
+    return {
+        "abstention": _aspect_critic(
+            judge, _ASPECT_ABSTENTION, record.probe.question,
+            record.generated_answer, record.retrieved_context,
+        ),
     }
 
 
@@ -669,6 +682,18 @@ def _ensure_ragas(record: EvalRecord, track: str):
     elif not record.ragas_done:
         record.ragas_done = True
         record.ragas = _ctx.ragas_fn(record, "real") or {}
+
+
+def _abstention_judged(record: EvalRecord):
+    """AspectCritic 기권 판정. tier3, DEEP+ / 미측정·자원없음 None(→ 마커 휴리스틱 폴백)."""
+    if active_mode() < Mode.DEEP or _ctx.ragas_fn is None:
+        return None
+
+    def compute():
+        verdict = (_ctx.ragas_fn(record, "abstention") or {}).get("abstention")
+        return None if verdict is None else bool(verdict)
+
+    return _cache(record, "abstention_judged", compute)
 
 
 def _faith(record: EvalRecord):

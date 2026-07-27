@@ -43,7 +43,7 @@ from agents.eval.metrics_search import (           # tier2
     _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
 )
 from agents.eval.metrics_ragas import (            # tier3
-    _compute_ragas_real, _compute_ragas_oracle,
+    _compute_ragas_real, _compute_ragas_oracle, _abstention_judged,
     _faith, _faith_oracle, _rel, _rel_oracle,
 )
 
@@ -82,6 +82,16 @@ def _oracle_ok(record: EvalRecord) -> bool:
         return True
     return ac >= ANSWER_CORRECTNESS_MIN
 
+def _abstained(record: EvalRecord) -> bool:
+    """기권 판정 — DEEP+ 는 AspectCritic, 미만·미측정은 마커 휴리스틱(tier1).
+    빈 답변은 판정 대상이 아니라 휴리스틱으로 넘긴다(LLM 호출 낭비 방지)."""
+    if record.generated_answer and record.generated_answer.strip():
+        judged = _abstention_judged(record)
+        if judged is not None:
+            return judged
+    return is_abstention(record.generated_answer)
+
+
 def _is_success(record: EvalRecord) -> Optional[bool]:
     """probe 단위 성공/실패 판정 — recall + answer_match(tier1) + RAGAS answer_correctness(tier3).
 
@@ -93,7 +103,7 @@ def _is_success(record: EvalRecord) -> Optional[bool]:
     recall_at_k = -1 이므로, 앞에서 recall 을 보면 올바른 기권까지 실패가 된다.
     """
     if record.probe.answer_exists is False:
-        return is_abstention(record.generated_answer)   # 무응답 기대 → 올바른 기권이 성공(recall 무관)
+        return _abstained(record)                       # 무응답 기대 → 올바른 기권이 성공(recall 무관)
     if not record.probe.ground_truth:
         return None                                     # 대조할 정답 없음 → 판정 불가
     # 검색 성공(recall=1) + 정답 일치(answer_match, DEEP 이면 ragas answer_correctness 로 강등)
@@ -308,7 +318,7 @@ def _generation_failed(record: EvalRecord) -> bool:
     """생성 실패 전제(B 공통): gold 컨텍스트로도 답이 틀림, 또는 무응답인데 답을 지어냄."""
     if record.oracle_answer is not None and not _oracle_ok(record):
         return True
-    if record.probe.answer_exists is False and not is_abstention(record.generated_answer):
+    if record.probe.answer_exists is False and not _abstained(record):
         return True
     return False
 
@@ -316,12 +326,13 @@ def _generation_failed(record: EvalRecord) -> bool:
 def generation_no_abstention(record: EvalRecord) -> Optional[Finding]:
     """
     무응답 기대(answer_exists=False) probe인데 기권하지 않고 답을 지어냄.
-    확정: answer_exists=False + is_abstention 아님.
+    확정: answer_exists=False + 기권 아님(DEEP+ AspectCritic / 미만은 마커 휴리스틱).
     """
-    if record.probe.answer_exists is False and not is_abstention(record.generated_answer):
+    if record.probe.answer_exists is False and not _abstained(record):
+        judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
         return _finding(
             record, "generation_no_abstention", "generation_failure", confirmed=True,
-            reason=f"answer_exists=False, 기권 아님(f1={_v(record.f1_score)})",
+            reason=f"answer_exists=False, 기권 아님({judge})",
         )
     return None
 
@@ -577,7 +588,8 @@ def _group_of(label: str, ftype: str) -> str:
 # !!!!!!!!!!!!!!!!!!!!!!!!!!!! optimize와 논의 필요
 _CRITICAL_LABELS = {
     "retrieval_semantic_mismatch", "retrieval_missing_gold",
-    "generation_hallucination", "corpus_gap", "corpus_gap_partial_hop",
+    "generation_hallucination", "generation_no_abstention",   # 답 없는 질문에 지어냄 = 환각
+    "corpus_gap", "corpus_gap_partial_hop",
 }
 def _severity_of(label: str) -> str:
     if label in _CRITICAL_LABELS:

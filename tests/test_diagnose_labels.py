@@ -83,6 +83,18 @@ class _FakeKeyword:
         return [{"chunk_id": cid} for cid in self.hit_ids]
 
 
+class _FakeAbstentionJudge:
+    """abstention 트랙만 응답하는 가짜 ragas_fn(호출 횟수 기록)."""
+
+    def __init__(self, verdict):
+        self.verdict = verdict
+        self.calls = []
+
+    def __call__(self, record, track):
+        self.calls.append(track)
+        return {"abstention": self.verdict} if track == "abstention" else {}
+
+
 class _DiagnoseTestBase(unittest.TestCase):
     """기본은 tier2 자원 없는 STANDARD. 코퍼스에는 g_a·g_b 가 있다."""
 
@@ -98,11 +110,12 @@ class _DiagnoseTestBase(unittest.TestCase):
         metrics_common.set_context()
         metrics_common.set_mode(Mode.FAST)
 
-    def _with(self, *, retrieve=None, keyword=None):
+    def _with(self, *, retrieve=None, keyword=None, ragas=None):
         metrics_common.set_context(
             chunks=self._chunks,
             retrieve_fn=_FakeRetriever(retrieve) if retrieve is not None else None,
             keyword_fn=_FakeKeyword(keyword) if keyword is not None else None,
+            ragas_fn=ragas,
         )
 
 
@@ -388,6 +401,49 @@ class GenerationLabelTest(_DiagnoseTestBase):
         rec = _record(answer_exists=False, ground_truth=None,
                       answer="제공된 정보로는 알 수 없습니다")
         self.assertIsNone(diagnose.generation_no_abstention(rec))
+
+    def test_no_abstention_is_critical(self):
+        rec = _record(answer_exists=False, ground_truth=None, answer="지어낸 답")
+        self.assertEqual(diagnose.generation_no_abstention(rec).severity, "critical")
+
+    def test_aspect_critic_overrides_heuristic_miss_at_deep(self):
+        """마커가 없어 휴리스틱은 '기권 아님'이라 보지만, AspectCritic 이 기권으로 판정 → 침묵."""
+        judge = _FakeAbstentionJudge(1)
+        self._with(ragas=judge)
+        rec = _record(answer_exists=False, ground_truth=None,
+                      answer="그 부분은 문서에서 다루지 않습니다")   # 마커 미포함
+        self.assertTrue(diagnose.is_abstention(rec.generated_answer) is False)
+        self.assertIsNone(diagnose.generation_no_abstention(rec))
+        self.assertIn("abstention", judge.calls)
+
+    def test_aspect_critic_catches_marker_false_positive_at_deep(self):
+        """마커('알 수 없')를 품었지만 실제론 답을 지어낸 케이스 — AspectCritic 이 잡아낸다."""
+        judge = _FakeAbstentionJudge(0)
+        self._with(ragas=judge)
+        rec = _record(answer_exists=False, ground_truth=None,
+                      answer="정확히는 알 수 없지만 답은 42입니다")
+        self.assertTrue(diagnose.is_abstention(rec.generated_answer))   # 휴리스틱은 기권으로 오판
+        finding = diagnose.generation_no_abstention(rec)
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+        self.assertIn("aspect_critic", finding.metadata["reason"])
+
+    def test_heuristic_used_and_no_llm_call_below_deep(self):
+        judge = _FakeAbstentionJudge(1)
+        self._with(ragas=judge)
+        metrics_common.set_mode(Mode.STANDARD)                  # DEEP 미만 → 판정 호출 없음
+        rec = _record(answer_exists=False, ground_truth=None, answer="지어낸 답")
+        finding = diagnose.generation_no_abstention(rec)
+        self.assertTrue(finding.confirmed)
+        self.assertIn("heuristic", finding.metadata["reason"])
+        self.assertEqual(judge.calls, [])
+
+    def test_empty_answer_skips_llm_call(self):
+        judge = _FakeAbstentionJudge(0)
+        self._with(ragas=judge)
+        rec = _record(answer_exists=False, ground_truth=None, answer="")
+        self.assertIsNone(diagnose.generation_no_abstention(rec))   # 빈 답변은 휴리스틱상 기권
+        self.assertEqual(judge.calls, [])
 
     def test_hallucination_confirmed_below_faithfulness_threshold(self):
         rec = _record(oracle_f1=0.1, faith_oracle=RAGAS_FAITHFULNESS_MIN - 0.01)
