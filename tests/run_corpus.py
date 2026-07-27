@@ -22,6 +22,16 @@ Run:
 진단 깊이는 항상 EVAL_MODE=full + EVAL_ENABLE_LLM=1 로 고정한다(RAGAS·tier4 검증까지).
 LLM 을 실제로 호출하므로 비용이 든다 — 대신 findings 가 '예비'에 머물지 않고 확정된다.
 
+LangSmith 회귀평가(자동): LANGSMITH_TRACING=true 이고 LANGSMITH_API_KEY 가 있으면,
+진단서를 만든 뒤 같은 qa.json 으로 Dataset + Experiment 를 LangSmith 에 올린다
+(Datasets & Experiments 탭). 답변만 질문 수만큼 새로 생성하고(생성답변은 state 에 안
+남으므로) 검색·임베딩은 파이프라인 적재분을 캐시 재사용해 추가 비용은 답변 생성뿐이다.
+트레이싱이 꺼져 있으면 진단서 HTML 만 만든다(기존 동작). 업로드가 실패해도 진단서는
+정상 생성된다. Dataset 이름은 원본 문서명(stem) 기준이라 문서를 바꿔 돌리면 자동으로
+다른 Dataset 으로 갈린다(qa.json 은 항상 'qa' 라 코퍼스 구분이 안 되므로 문서명을 쓴다).
+같은 문서로 파라미터만 바꿔 다시 돌리면 같은 Dataset 에 Experiment 가 누적돼 UI 비교가 된다.
+REGRESSION_DATASET 로 이름을 덮어쓸 수 있다(여러 코퍼스를 한 표에 모을 때 등).
+
 QA셋은 한 번 만들어지면 계속 재사용된다(EVAL_PROBE_SOURCE=made 와 같은 계약) —
 청킹 파라미터가 바뀌어도 같은 질문으로 채점해야 최적화 전후를 비교할 수 있기 때문.
 문서를 바꿨으면 --regen-qa 로 다시 만들어야 한다.
@@ -190,6 +200,86 @@ def _run_with_loop(state):
     return state
 
 
+def _langsmith_enabled() -> bool:
+    """트레이싱이 켜져 있고 업로드할 키가 있을 때만 True.
+
+    LANGSMITH_TRACING 이 꺼져 있으면(=관측을 안 켰으면) 회귀 업로드도 하지 않는다 —
+    "트레이싱 상태를 따라간다"는 규약. 키가 없으면 langsmith_regression 과 동일하게
+    업로드가 조용히 불가능하므로 애초에 시도하지 않는다."""
+    tracing = os.getenv("LANGSMITH_TRACING", "").strip().lower() in ("1", "true", "yes")
+    return tracing and bool(os.getenv("LANGSMITH_API_KEY"))
+
+
+def _upload_langsmith(state, qa_path: Path) -> None:
+    """파이프라인이 적재해 둔 코퍼스로 LangSmith Dataset + Experiment 를 올린다.
+
+    답변만 질문 수만큼 새로 생성한다(생성답변은 state 에 안 남으므로) — 검색·임베딩은
+    get_retriever 캐시가 파이프라인 적재분을 재사용해 추가 비용이 없다. Dataset/Experiment
+    로직은 tools/langsmith_regression.py 의 검증된 함수(build_target/f1_evaluator)를 그대로
+    쓴다. 이 함수는 state 를 읽기만 한다 — 파이프라인 상태를 건드리지 않는다.
+
+    Dataset 이름은 원본 문서명(stem) 기준 — tools/langsmith_regression.py 도 같은 규약이라
+    두 진입점이 같은 코퍼스를 같은 Dataset 에 올린다(한 표에서 비교됨). 같은 문서로
+    파라미터만 바꿔 다시 돌리면 같은 Dataset 에 Experiment 가 누적돼 before/after 비교가
+    된다. REGRESSION_DATASET 으로 덮어쓸 수 있다."""
+    from agents.rag.retriever import get_retriever
+    from tools.langsmith_regression import build_target, f1_evaluator, load_probes
+    from langsmith import Client, evaluate
+
+    if not qa_path.exists():
+        print(f"  [LangSmith] qa.json 이 없어 업로드를 건너뜁니다: {qa_path}")
+        return
+
+    # load_probes 는 모듈 전역 PROBES_FILE 을 읽는다 — 이 코퍼스의 qa.json 을 보게 바꾼다.
+    import tools.langsmith_regression as reg
+    reg.PROBES_FILE = str(qa_path)
+    probes = load_probes()
+    if not probes:
+        print("  [LangSmith] ground_truth 있는 probe 가 없어 업로드를 건너뜁니다")
+        return
+
+    # Dataset 이름 = 원본 문서명(stem). run_corpus 는 QA 파일명이 항상 'qa.json' 이라
+    # qa_path.stem 을 쓰면 코퍼스를 바꿔도 이름이 'qa' 로 겹쳐 한 Dataset 에 섞인다.
+    # 그래서 '무엇을 채점했나'를 가르는 문서명으로 갈라 자동 분리한다.
+    # REGRESSION_DATASET 으로 언제든 덮어쓸 수 있다(예: 두 코퍼스를 한 표에 모으고 싶을 때).
+    doc_stem = Path(state.source_url).stem if state.source_url else qa_path.stem
+    dataset_name = os.getenv("REGRESSION_DATASET") or doc_stem
+    use_reranker = bool(state.index_config.get("use_reranker"))
+    label = "reranker=on" if use_reranker else "reranker=off"
+
+    # 파이프라인이 이미 적재한 청크로 retriever 를 재구성(캐시 hit → 재적재 없음).
+    retriever = get_retriever(state.chunks, state.index_config)
+    target = build_target(retriever, state.index_config)
+
+    client = Client()
+    if client.has_dataset(dataset_name=dataset_name):
+        ds = client.read_dataset(dataset_name=dataset_name)
+        print(f"  [LangSmith] 기존 Dataset '{dataset_name}' 재사용 (id={ds.id})")
+    else:
+        ds = client.create_dataset(dataset_name=dataset_name,
+                                   description="Agent Doctor 고정 QA 회귀평가 시험지")
+        client.create_examples(
+            dataset_id=ds.id,
+            examples=[
+                {"inputs": {"question": p["question"]},
+                 "outputs": {"ground_truth": p["ground_truth"]}}
+                for p in probes
+            ],
+        )
+        print(f"  [LangSmith] Dataset '{dataset_name}' 생성 + {len(probes)}문항 업로드")
+
+    print(f"  [LangSmith] Experiment 실행 중... ({label}, 답변 {len(probes)}건 생성)")
+    evaluate(
+        target,
+        data=dataset_name,
+        evaluators=[f1_evaluator],
+        experiment_prefix=label,
+        metadata={"use_reranker": use_reranker, "index_config": state.index_config,
+                  "source": "run_corpus"},
+    )
+    print("  [LangSmith] 완료 → Datasets & Experiments 탭에서 확인하세요")
+
+
 def write_report(state, corpus_dir: Path) -> tuple[Path, dict]:
     """build_report_view 결과를 report.html 템플릿에 심어 단독 실행 가능한 진단서로 저장."""
     from agents.serve.report_view import build_report_view
@@ -289,6 +379,17 @@ def main():
         state = run_pipeline_for(CORPUS_ROOT, regen_qa=args.regen_qa, loop=args.loop)
         html_path, view = write_report(state, CORPUS_ROOT)
         print_summary(state, view, html_path)
+        # 트레이싱이 켜져 있으면(관측을 켰으면) 같은 qa.json 으로 회귀평가까지 올린다.
+        # 답변만 질문 수만큼 새로 생성한다(추가 LLM 호출) — 검색·임베딩은 캐시 재사용.
+        if _langsmith_enabled():
+            print("\n" + "=" * 56)
+            print("  LangSmith 회귀평가 업로드 (LANGSMITH_TRACING=on)")
+            print("=" * 56)
+            try:
+                _upload_langsmith(state, CORPUS_ROOT / QA_FILENAME)
+            except Exception as e:
+                # 업로드 실패가 진단서 산출까지 무르게 하지 않는다 — HTML 은 이미 나왔다.
+                print(f"  [LangSmith] 업로드 실패(진단서는 정상 생성됨): {e}")
     except BaseException:
         # 실패해도 로그 파일 위치는 알려준다 — 콘솔이 길어 앞부분이 밀려도 찾을 수 있게.
         # 트레이스백은 stderr 로 나가고 Tee 가 같은 파일에 받아 적는다.

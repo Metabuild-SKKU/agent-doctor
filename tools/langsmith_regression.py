@@ -64,18 +64,18 @@ from pathlib import Path
 _DOC_SUFFIXES = (".pdf", ".md", ".txt")
 
 
-def _dataset_name_for(qa_path: str) -> str:
-    """Dataset 이름을 'QA 파일명(stem)' 기준으로 만든다 — QA셋이 다르면 Dataset 도 갈린다.
+def _dataset_name_for(corpus_path: str) -> str:
+    """Dataset 이름을 '원본 문서명(stem)' 기준으로 만든다 — tests/run_corpus.py 와 동일 규약.
 
-    회귀평가의 분리 기준은 '시험지(QA셋)'다. 코퍼스나 폴더가 아니라 QA 파일이 이름표 —
-    그래야 '같은 코퍼스 + 다른 QA셋'(예: qa.json vs qa_hard.json)도 서로 다른 Dataset 으로
-    갈려 한 표에 섞이지 않는다. REGRESSION_DATASET 으로 언제든 덮어쓸 수 있다.
-    (단, run_corpus 규약상 코퍼스마다 QA 파일명이 다 'qa.json' 이면 이름이 겹칠 수 있으므로,
-     그럴 땐 폴더를 나누고 REGRESSION_DATASET 으로 구분하거나 QA 파일명을 달리 둘 것.)"""
+    두 진입점(run_corpus.py / 이 러너)이 같은 코퍼스를 같은 Dataset 에 올려야 한 표에서
+    비교가 된다. run_corpus 는 QA 파일명이 항상 'qa.json' 이라 QA stem 을 쓰면 모든 코퍼스가
+    'qa' 로 겹친다 — 그래서 '무엇을 채점했나'를 실제로 가르는 문서명으로 통일했다.
+    '같은 코퍼스 + 다른 QA셋'(qa.json vs qa_hard.json)까지 나누고 싶으면 REGRESSION_DATASET
+    으로 이름을 지정할 것."""
     override = os.getenv("REGRESSION_DATASET")
     if override:
         return override
-    return Path(qa_path).stem
+    return Path(corpus_path).stem
 
 
 def _resolve_corpus() -> tuple[str, str, str]:
@@ -94,10 +94,10 @@ def _resolve_corpus() -> tuple[str, str, str]:
         if not docs:
             raise SystemExit(f"코퍼스 문서가 없습니다: {base}/*{_DOC_SUFFIXES}")
         qa = os.getenv("REGRESSION_QA") or str(base / "qa.json")
-        return str(docs[0]), qa, _dataset_name_for(qa)
+        return str(docs[0]), qa, _dataset_name_for(str(docs[0]))
     corpus = os.getenv("REGRESSION_CORPUS", "sample_docs/hr_policy.md")
     qa = os.getenv("REGRESSION_QA", "eval_probes.json")
-    return corpus, qa, _dataset_name_for(qa)
+    return corpus, qa, _dataset_name_for(corpus)
 
 
 CORPUS_URL, PROBES_FILE, DATASET_NAME = _resolve_corpus()
