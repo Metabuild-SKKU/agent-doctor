@@ -85,11 +85,16 @@ def _oracle_ok(record: EvalRecord) -> bool:
 
 def _abstained(record: EvalRecord) -> bool:
     """기권 판정 — DEEP+ 는 AspectCritic, 미만·미측정은 마커 휴리스틱(tier1).
-    빈 답변은 판정 대상이 아니라 휴리스틱으로 넘긴다(LLM 호출 낭비 방지)."""
-    if record.generated_answer and record.generated_answer.strip():
-        judged = _abstention_judged(record)
-        if judged is not None:
-            return judged
+
+    빈 답변은 기권이 아니다 — LLM 오류·타임아웃으로 아무것도 못 받은 것을 '올바른 기권'으로
+    통과시키면 _is_success 가 성공으로 집계해 생성 장애가 진단에서 사라진다.
+    (판정 대상도 아니라 LLM 호출도 생략한다.)
+    """
+    if not (record.generated_answer or "").strip():
+        return False
+    judged = _abstention_judged(record)
+    if judged is not None:
+        return judged
     return is_abstention(record.generated_answer)
 
 
@@ -163,18 +168,26 @@ def _enumeration_recoverable_by_top_k(record: EvalRecord) -> bool:
 def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
     """
     gold가 top-N 후보엔 있으나 순위가 낮아 top-k 밖.
-    확정: top-N 재검색에서 gold 발견(tier2).
+    확정: 놓친 gold 가 wide-N 재검색에서 top_k 보다 뒤 순위로 발견(tier2).
+
+    순위가 top_k 이내로 나오면 '순위가 낮아 밖'과 모순이라 제외한다 — 그건 검색 비결정성이나
+    인덱스 변경이지 순위 문제가 아니다(결정적 리트리버면 발생하지 않는다).
     """
     ranks = _gold_ranks(record)
     if ranks is None:
         return None
-    missed = _missed_gold_ids(record)
-    if missed and any(ranks.get(g) is not None for g in missed):
-        return _finding(
-            record, "retrieval_low_rank", "retrieval_failure", confirmed=True,
-            reason=f"gold_in_wider_candidates=True, recall@k={_v(record.recall_at_k)}",
-        )
-    return None
+    top_k = len(record.retrieved_chunk_ids)
+    if top_k <= 0:
+        return None                      # 검색 0건 → 순위 문제가 아니라 검색 장애
+    beyond = {g: ranks[g] for g in _missed_gold_ids(record)
+              if ranks.get(g) is not None and ranks[g] > top_k}
+    if not beyond:
+        return None
+    ranked = ", ".join(f"{g}:{r}" for g, r in sorted(beyond.items(), key=lambda kv: kv[1]))
+    return _finding(
+        record, "retrieval_low_rank", "retrieval_failure", confirmed=True,
+        reason=f"missed_gold_ranks=[{ranked}] > top_k={top_k}, recall@k={_v(record.recall_at_k)}",
+    )
 
 
 def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
@@ -182,6 +195,8 @@ def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
     dense는 놓쳤으나 BM25로 잡히는 단어 불일치.
     확정: BM25 가 gold 를 잡음 + dense wide-N 도 그 gold 를 못 잡음(tier2).
     dense wide-N 에 있으면 low_rank 영역 — 튜플 순서 대신 함수 자체로 배타(ranks memoize 공유).
+    놓친 gold 가 여럿이어도 그중 하나만 BM25 에 잡히면 probe 전체가 이 라벨이다(슬롯당 1원인).
+    남은 semantic 실패는 이번 처방 적용 후 다음 iteration 에서 다시 잡힌다.
     """
     if _bm25_hits_gold(record) is not True:
         return None
@@ -419,6 +434,8 @@ def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
     확정: answer_exists=False + 기권 아님(DEEP+ AspectCritic / 미만은 마커 휴리스틱).
     (라벨은 optimize/rules.py 의 처방 키와 일치시킨다 — generation_abstention_failure)
     """
+    if not (record.generated_answer or "").strip():
+        return None                      # 빈 답변은 지어낸 게 아니라 생성 실패 → 롤업 몫
     if record.probe.answer_exists is False and not _abstained(record):
         judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
         return _finding(

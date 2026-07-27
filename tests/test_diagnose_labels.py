@@ -195,6 +195,22 @@ class RetrievalLowRankTest(_DiagnoseTestBase):
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
         self.assertIsNone(diagnose.retrieval_low_rank(rec))
 
+    def test_silent_when_missed_gold_ranks_within_top_k(self):
+        """재검색이 top_k 이내 순위를 내면 '순위가 낮아 밖'과 모순 → 검색 비결정성이지 순위 문제 아님."""
+        self._with(retrieve=["g_a", "g_b", "x"])                # g_b 는 2위인데 top_k=3
+        rec = _record(("g_a", "g_b"), ("g_a", "x", "y"), recall=0.5)
+        self.assertIsNone(diagnose.retrieval_low_rank(rec))
+
+    def test_reason_carries_measured_ranks(self):
+        self._with(retrieve=["g_a", "x", "y", "g_b"])           # g_b 는 4위, top_k=1
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertIn("g_b:4", diagnose.retrieval_low_rank(rec).metadata["reason"])
+
+    def test_silent_when_retrieval_returned_nothing(self):
+        self._with(retrieve=["g_a", "x", "g_b"])
+        rec = _record(("g_a", "g_b"), (), recall=0.0)
+        self.assertIsNone(diagnose.retrieval_low_rank(rec))
+
 
 class RetrievalMismatchTest(_DiagnoseTestBase):
     """lexical(BM25 잡음) / semantic(BM25도 놓침) 는 배타적이며 bm25 신호로 갈린다."""
@@ -521,12 +537,23 @@ class GenerationLabelTest(_DiagnoseTestBase):
         self.assertTrue(finding.confirmed)                           # 휴리스틱 폴백으로 확정
         self.assertIn("heuristic", finding.metadata["reason"])
 
-    def test_empty_answer_skips_llm_call(self):
-        judge = _FakeAbstentionJudge(0)
+    def test_empty_answer_is_not_abstention(self):
+        """빈 답변(LLM 오류·타임아웃)을 '올바른 기권'으로 통과시키면 생성 장애가 성공으로 집계된다."""
+        judge = _FakeAbstentionJudge(1)
         self._with(ragas=judge)
         rec = _record(answer_exists=False, ground_truth=None, answer="")
-        self.assertIsNone(diagnose.generation_abstention_failure(rec))   # 빈 답변은 휴리스틱상 기권
-        self.assertEqual(judge.calls, [])
+        self.assertFalse(diagnose._abstained(rec))
+        self.assertIs(diagnose._is_success(rec), False)          # 성공으로 새지 않는다
+        self.assertTrue(diagnose._generation_failed(rec))        # B슬롯은 열린다
+        self.assertEqual(judge.calls, [])                        # 판정 대상 아님 → LLM 미호출
+
+    def test_empty_answer_not_labelled_as_fabrication(self):
+        """빈 답변은 '지어냄'이 아니다 — 라벨 대신 롤업으로 간다."""
+        rec = _record(answer_exists=False, ground_truth=None, answer="")
+        self.assertIsNone(diagnose.generation_abstention_failure(rec))
+        picked = diagnose._pick(rec, diagnose._GENERATION_CAUSE)
+        self.assertEqual(picked.label, "generation_failure")
+        self.assertFalse(picked.confirmed)
 
     def test_hallucination_confirmed_below_faithfulness_threshold(self):
         rec = _record(oracle_f1=0.1, faith_oracle=RAGAS_FAITHFULNESS_MIN - 0.01)
