@@ -9,6 +9,7 @@ env 규약(EVAL_LLM_PROVIDER vs RAG_LLM_PROVIDER), 키 부재 처리, 재시도 
 """
 from __future__ import annotations
 
+import json
 import os
 
 from core.llm_usage import log_usage
@@ -30,6 +31,26 @@ except ImportError:  # pragma: no cover - langsmith 미설치 환경 폴백
 
     def get_current_run_tree():  # langsmith 없으면 붙일 트레이스도 없다
         return None
+
+def _unwrap_json_output(outputs):
+    """@traceable 출력 후처리(표시 전용) — JSON 문자열이면 파싱해 트레이스에 객체로 싣는다.
+
+    chat 함수들은 raw 문자열을 반환한다(json_mode 여도 파싱은 호출부 담당). 그대로 두면
+    LangSmith UI 에 \\n·\\" 가 이스케이프된 한 줄 문자열로 찍혀 읽기 어렵다. 이 훅은
+    트레이스 표시에만 관여하고 함수 실제 반환값은 건드리지 않는다(호출부·파이프라인 무영향).
+    JSON 이 아니거나(일반 답변 텍스트) 파싱 실패면 원문 그대로 둔다.
+
+    langsmith 는 process_outputs 반환을 {"output": ...} 로 감싸므로, 여기선 파싱된
+    객체/원문 문자열을 그대로 돌려주면 된다. 미설치 폴백 데코레이터는 이 인자를 무시한다."""
+    if isinstance(outputs, str):
+        s = outputs.strip()
+        if s[:1] in ("{", "[") and s[-1:] in ("}", "]"):
+            try:
+                return json.loads(s)
+            except (ValueError, TypeError):
+                return outputs
+    return outputs
+
 
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 
@@ -61,7 +82,7 @@ def _attach_usage(model: str, input_tokens: int, output_tokens: int) -> None:
     run.metadata["ls_model_name"] = model  # ← 최상위(단가 매칭용). 위 dict 안이 아님.
 
 
-@traceable(run_type="llm", name="openai_chat")
+@traceable(run_type="llm", name="openai_chat", process_outputs=_unwrap_json_output)
 def openai_chat(
     system: str,
     user: str,
@@ -101,7 +122,7 @@ def openai_chat(
     return resp.choices[0].message.content or ""
 
 
-@traceable(run_type="llm", name="gemini_chat")
+@traceable(run_type="llm", name="gemini_chat", process_outputs=_unwrap_json_output)
 def gemini_chat(
     system: str,
     user: str,
