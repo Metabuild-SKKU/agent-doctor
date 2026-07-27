@@ -34,7 +34,7 @@ def _record(
     recall=1.0, f1=1.0, oracle_f1=1.0, qtype=None,
     answer_exists=None, ground_truth="정답", answer="답변", oracle_answer="오라클 답변",
     faith=None, rel=None, faith_oracle=None, rel_oracle=None,
-    gold_spans=None,
+    gold_spans=None, counts_oracle=None,
 ):
     """라벨 함수가 읽는 필드만 채운 EvalRecord. RAGAS 는 *_done 을 세워 LLM 경로를 막는다."""
     probe = Probe(
@@ -57,6 +57,11 @@ def _record(
     rec.ragas_done = True
     if faith_oracle is not None or rel_oracle is not None:
         rec.oracle_ragas = {"faithfulness": faith_oracle, "response_relevancy": rel_oracle}
+    if counts_oracle is not None:                       # (tp, fp, fn)
+        tp, fp, fn = counts_oracle
+        rec.oracle_ragas.update({"answer_correctness_tp": tp,
+                                 "answer_correctness_fp": fp,
+                                 "answer_correctness_fn": fn})
     rec.oracle_ragas_done = True
     return rec
 
@@ -562,9 +567,34 @@ class GenerationLabelTest(_DiagnoseTestBase):
         rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=1.0, rel_oracle=0.0)
         self.assertIsNotNone(diagnose.generation_hop_binding_error(rec))
 
-    def test_partial_answer_confirmed_below_relevancy_threshold(self):
+    def test_partial_answer_confirmed_when_some_gold_elements_missing(self):
+        """TP>0·FN>0 = 일부는 맞고 일부는 누락 → 정확히 '부분 답변'."""
+        rec = _record(oracle_f1=0.1, counts_oracle=(2, 0, 2))
+        finding = diagnose.generation_partial_answer(rec)
+        self.assertTrue(finding.confirmed)
+        self.assertIn("missing=2/4", finding.metadata["reason"])
+
+    def test_partial_answer_silent_when_nothing_missing(self):
+        rec = _record(oracle_f1=0.1, counts_oracle=(3, 1, 0))            # FN=0
+        self.assertIsNone(diagnose.generation_partial_answer(rec))
+
+    def test_partial_answer_silent_when_everything_missing(self):
+        """TP=0 은 전부 누락 = '부분'이 아니다 → 다른 라벨/롤업 영역."""
+        rec = _record(oracle_f1=0.1, counts_oracle=(0, 2, 3))
+        self.assertIsNone(diagnose.generation_partial_answer(rec))
+
+    def test_partial_answer_counts_win_over_relevancy(self):
+        """카운트가 있으면 relevancy 는 보지 않는다 — 누락 없으면 rel 이 낮아도 침묵."""
+        rec = _record(oracle_f1=0.1, counts_oracle=(3, 0, 0),
+                      rel_oracle=RAGAS_RESPONSE_RELEVANCY_MIN - 0.01)
+        self.assertIsNone(diagnose.generation_partial_answer(rec))
+
+    def test_partial_answer_preliminary_when_counts_unmeasured(self):
+        """degraded(카운트 없음) → relevancy 폴백이지만 확정은 못 한다."""
         rec = _record(oracle_f1=0.1, rel_oracle=RAGAS_RESPONSE_RELEVANCY_MIN - 0.01)
-        self.assertTrue(diagnose.generation_partial_answer(rec).confirmed)
+        finding = diagnose.generation_partial_answer(rec)
+        self.assertIsNotNone(finding)
+        self.assertFalse(finding.confirmed)
 
     def test_partial_answer_silent_exactly_at_threshold(self):
         rec = _record(oracle_f1=0.1, rel_oracle=RAGAS_RESPONSE_RELEVANCY_MIN)

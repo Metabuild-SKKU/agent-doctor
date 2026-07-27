@@ -44,7 +44,7 @@ from agents.eval.metrics_search import (           # tier2
 )
 from agents.eval.metrics_ragas import (            # tier3
     _compute_ragas_real, _compute_ragas_oracle, _abstention_judged, _contradiction_oracle,
-    _faith, _faith_oracle, _rel, _rel_oracle,
+    _correctness_counts_oracle, _faith, _faith_oracle, _rel, _rel_oracle,
 )
 
 
@@ -382,13 +382,26 @@ def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
 def generation_partial_answer(record: EvalRecord) -> Optional[Finding]:
     """
     정답 context가 있는데 일부 요소·조건 누락.
-    확정: relevancy 낮음.
+    확정: gold 문장 중 답변에 없는 것(FN)이 있고, 맞은 것(TP)도 있음 = 부분 답변.
+    FN=0(누락 없음)·TP=0(전부 누락, '부분'이 아님)은 침묵.
+    카운트 미측정이면 relevancy 로 폴백하되 예비 — relevancy 는 누락이 아니라 on-topic 여부를
+    재고 회피성·빈 답변에 0 을 줘서 확정 근거로 약하다.
     """
+    counts = _correctness_counts_oracle(record)
+    if counts is not None:
+        tp, _fp, fn = counts
+        if fn > 0 and tp > 0:
+            return _finding(
+                record, "generation_partial_answer", "generation_failure", confirmed=True,
+                reason=f"missing={fn}/{tp + fn}(gold 요소), tp={tp}, oracle_f1={_v(record.oracle_f1)}",
+            )
+        return None
+
     rel = _rel_oracle(record)
     if rel is not None and rel < RAGAS_RESPONSE_RELEVANCY_MIN:
         return _finding(
-            record, "generation_partial_answer", "generation_failure", confirmed=True,
-            reason=f"response_relevancy={_v(rel)}<{RAGAS_RESPONSE_RELEVANCY_MIN}, "
+            record, "generation_partial_answer", "generation_failure", confirmed=False,
+            reason=f"correctness_counts=-, response_relevancy={_v(rel)}<{RAGAS_RESPONSE_RELEVANCY_MIN}, "
                    f"oracle_f1={_v(record.oracle_f1)}",
         )
     return None

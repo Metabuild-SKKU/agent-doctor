@@ -436,6 +436,7 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
     w_f, w_s = _ANSWER_CORRECTNESS_WEIGHTS
     components: list[tuple[float, float]] = []   # (가중치, 값) — 측정에 성공한 성분만 담는다
     factual_measured = False
+    counts: dict = {}                            # TP/FP/FN — factual 성공 시에만 채운다
 
     # ① factual F1 — 답변 문장을 정답 기준 TP/FP/FN 으로 분류
     ans_stmts = _decompose_statements(judge, question, answer)
@@ -452,6 +453,11 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
         if denom > 0:
             components.append((w_f, tp / denom))
             factual_measured = True
+            # TP=맞은 요소 / FP=gold 에 없는 군더더기 / FN=gold 에만 있는 누락 요소.
+            # FN 이 generation_partial_answer 의 판별 근거다(임계 판정은 diagnose 소관).
+            counts = {"answer_correctness_tp": tp,
+                      "answer_correctness_fp": fp,
+                      "answer_correctness_fn": fn}
 
     # ② 의미 유사도 — 답변↔정답 임베딩 코사인
     try:
@@ -466,6 +472,7 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
     # 성분이 하나만 측정돼도 가중 재정규화해 0~1 스케일을 유지한다.
     score = sum(w * v for w, v in components) / sum(w for w, _ in components)
     out = {"answer_correctness": score}
+    out.update(counts)                           # factual 실패면 빈 dict = 카운트 미측정
 
     # factual(TP/FP/FN 분류)이 빠지면 유사도 단독 점수다. 이 폴백은 판정을 느슨하게 만들지
     # 않는다 — 이 지표를 보는 diagnose._f1_ok 은 이미 lexical 을 통과한 답에만 도달하므로,
@@ -735,6 +742,17 @@ def _faith_oracle(record: EvalRecord):
         return None
     _ensure_ragas(record, "oracle")
     return record.oracle_ragas.get("faithfulness")
+
+
+def _correctness_counts_oracle(record: EvalRecord):
+    """오라클 트랙 (TP, FP, FN) 카운트. tier3, DEEP+ / factual 성분 미측정(degraded)이면 None."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "oracle")
+    d = record.oracle_ragas
+    if "answer_correctness_fn" not in d:
+        return None
+    return (d["answer_correctness_tp"], d["answer_correctness_fp"], d["answer_correctness_fn"])
 
 
 def _rel(record: EvalRecord):
