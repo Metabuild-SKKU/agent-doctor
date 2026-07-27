@@ -166,7 +166,10 @@ def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     dense·BM25 모두 놓친 의미 연결 실패. (단 gold 가 코퍼스엔 있을 때만 — 없으면 corpus_gap)
     확정: BM25 도 gold 를 못 잡음 + gold 는 코퍼스에 존재(tier2).
     코퍼스 멤버십 미측정(None)은 corpus_gap 과 구분 불가라 예비(missing_gold 와 동일 기준).
+    qtype=bridge 는 bridge 의존과 구분 불가라 양보(원 질문으론 hop2 를 원래 못 찾음).
     """
+    if record.probe.qtype == "bridge":
+        return None                      # bridge 의존과 구분 불가 → bridge 에 양보
     if _bm25_hits_gold(record) is not False:
         return None
     in_corpus = _gold_in_corpus(record)
@@ -189,7 +192,10 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
     확정: 코퍼스에 gold 존재(tier2).
     [폴백] 메커니즘(순위/어휘/의미)은 못 밝히고 코퍼스 존재만 실측 — 자원 다 주입된 런타임에선
     앞 라벨들이 선점하고, 자원 빠진 구성에서만 이 라벨이 잡는다.
+    qtype=bridge 는 bridge 의존과 구분 불가라 양보(semantic 과 동일 기준).
     """
+    if record.probe.qtype == "bridge":
+        return None                      # bridge 의존과 구분 불가 → bridge 에 양보
     if not _missed_gold_ids(record):
         return None                      # 놓친 gold 청크가 없음 → 'top-k 에 없다'가 성립 안 함
     in_corpus = _gold_in_corpus(record)
@@ -242,12 +248,13 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
 
 def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]:
     """
-    멀티홉 연쇄형: 2번째 hop 근거가 1번째 hop에 의존.
-    예비: 멀티홉 + 실제 검색 실패(gold 있는데 일부 미검색, 0<=recall<1). 멀티홉이라는 것만으론
-    bridge 의존이라 단정 못 한다(low_rank·lexical 등 다른 원인일 수도). 실제 bridge 인지는
-    decompose 재검색으로 회복되는지 봐야 하고(제거된 tier4), 그 확정은 optimize 가 위임받는다 → 예비.
+    연쇄형(bridge): hop2 근거가 hop1 답에 의존해 원 질문 검색으론 못 찾음.
+    예비: 확정(decompose 재검색 회복)은 제거된 tier4 몫이라 optimize 가 위임받는다.
+    comparison/aggregation 은 hop 간 독립이라 제외(나열형은 enumeration 담당).
+    low_rank·lexical 확정은 원 질문으로 잡힌다는 실측이라 bridge 를 반증 → 그쪽이 우선.
+    처방(enable_query_decomposition)은 rules.py draft — query_rewrite/max_hops 스키마 미합의 BLOCKER.
     """
-    if not _is_multi_hop(record) or not (0 <= record.recall_at_k < 1):
+    if record.probe.qtype != "bridge" or not (0 <= record.recall_at_k < 1):
         return None
     if not _missed_gold_ids(record):
         return None                      # 놓친 hop 근거가 없음 → bridge 의존을 의심할 근거 없음

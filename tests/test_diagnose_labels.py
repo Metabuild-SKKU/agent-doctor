@@ -326,6 +326,31 @@ class RetrievalBridgeTest(_DiagnoseTestBase):
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5, qtype=None)
         self.assertIsNone(diagnose.retrieval_missing_bridge_dependency(rec))
 
+    def test_silent_for_independent_hop_types(self):
+        """comparison/aggregation 은 hop 간 독립 → bridge 의존 아님."""
+        for qtype in ("comparison", "aggregation"):
+            rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5, qtype=qtype)
+            self.assertIsNone(diagnose.retrieval_missing_bridge_dependency(rec))
+
+    def test_bridge_probe_wins_slot_over_semantic_and_missing_gold(self):
+        """bridge qtype 이면 semantic·missing_gold(양립 증거)는 양보, bridge 예비가 슬롯 채택."""
+        self._with(keyword=["zzz"])                              # BM25 도 놓침
+        rec = _record(("g_a", "g_b"), ("g_a", "x", "y", "z", "w"),   # k=5 → 개수 압박 없음
+                      recall=0.5, qtype="bridge")
+        self.assertIsNone(diagnose.retrieval_semantic_mismatch(rec))
+        self.assertIsNone(diagnose.retrieval_missing_gold(rec))
+        picked = diagnose._pick(rec, diagnose._RETRIEVAL_CAUSE)
+        self.assertEqual(picked.label, "retrieval_missing_bridge_dependency")
+
+    def test_lexical_still_beats_bridge_when_bm25_catches_gold(self):
+        """BM25 로 잡히면 원 질문으로 회복 가능 = bridge 반증 → lexical 확정이 우선."""
+        self._with(keyword=["g_b"])
+        rec = _record(("g_a", "g_b"), ("g_a", "x", "y", "z", "w"),
+                      recall=0.5, qtype="bridge")
+        picked = diagnose._pick(rec, diagnose._RETRIEVAL_CAUSE)
+        self.assertEqual(picked.label, "retrieval_lexical_mismatch")
+        self.assertTrue(picked.confirmed)
+
     def test_silent_when_recall_is_complete(self):
         rec = _record(("g_a", "g_b"), ("g_a", "g_b"), recall=1.0, qtype="bridge")
         self.assertIsNone(diagnose.retrieval_missing_bridge_dependency(rec))
@@ -489,7 +514,9 @@ class AssemblyTest(_DiagnoseTestBase):
         self.assertFalse(diagnose._is_success(_record(recall=1.0, f1=0.1)))
 
     def test_pick_prefers_confirmed_over_earlier_preliminary(self):
-        """순서가 앞서도 예비는 밀린다 — 뒤에 확정이 있으면 그쪽을 채택한다."""
+        """순서가 앞서도 예비는 밀린다 — 뒤에 확정이 있으면 그쪽을 채택한다.
+        (missing_gold 는 bridge 에 양보하게 바뀌어, bridge 를 반증하는 lexical 로 검증한다.)"""
+        self._with(keyword=["g_b"])                              # BM25 가 놓친 gold 를 잡음
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5, qtype="bridge")
         # 앞자리가 실제로 '예비'를 내는지부터 못 박는다(None 이면 우선순위 검증이 무의미).
         earlier = diagnose.retrieval_missing_bridge_dependency(rec)
@@ -498,10 +525,10 @@ class AssemblyTest(_DiagnoseTestBase):
 
         picked = diagnose._pick(rec, (
             diagnose.retrieval_missing_bridge_dependency,   # 예비 (앞)
-            diagnose.retrieval_missing_gold,                # 확정 (뒤)
+            diagnose.retrieval_lexical_mismatch,            # 확정 (뒤)
             diagnose.retrieval_failure,                     # 예비 롤업
         ))
-        self.assertEqual(picked.label, "retrieval_missing_gold")
+        self.assertEqual(picked.label, "retrieval_lexical_mismatch")
         self.assertTrue(picked.confirmed)
 
     def test_pick_falls_back_to_first_preliminary(self):
