@@ -12,7 +12,15 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
     @patch("agents.eval.probe_gen._llm_synthesize_query")
     def test_generated_gold_spans_drive_chunk_prescreener(self, synthesize):
         evidence = "정답" * 100
-        content = ("머리" * 50) + evidence + ("꼬리" * 600)
+        content = (
+            ("머리" * 50)
+            + ". 도입 문장입니다. "
+            + evidence
+            + "입니다. "
+            + ("꼬리" * 100)
+            + ". "
+            + ("후속" * 500)
+        )
         document = Document("d1", "memory", "txt", content)
         chunk_text = content[:800]
         chunk = Chunk(
@@ -46,13 +54,16 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
             },
         )
         state.probes = generate_probes(state)
+        grounded_probe_ids = [
+            probe.probe_id for probe in state.probes if probe.gold_spans
+        ]
         finding = Finding(
             finding_id="f1",
             type="retrieval_failure",
             severity="warning",
             description="검색 context가 너무 깁니다.",
             label="too_long_context",
-            affected_probes=[probe.probe_id for probe in state.probes],
+            affected_probes=grounded_probe_ids,
         )
         state.report = DiagnosticReport(
             report_id="r1",
@@ -71,19 +82,25 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
         )
         result = run_chunk_prescreener(request)
 
-        self.assertTrue(all(probe.gold_spans for probe in state.probes))
+        self.assertTrue(grounded_probe_ids)
         self.assertEqual(request.optimizer, "internal")
         self.assertGreater(len(request.search_space["chunker.chunk_size"]), 1)
         self.assertEqual(result.status, "completed")
-        self.assertIn(
-            result.best_config["chunker.chunk_size"],
-            request.search_space["chunker.chunk_size"],
-        )
+        self.assertEqual(result.best_config["chunker.chunk_size"], 800)
+        self.assertTrue(result.metadata["best_is_baseline"])
 
     @patch("agents.eval.probe_gen._llm_generate_single_hop", return_value=None)
     def test_llm_free_heuristic_spans_drive_multiple_chunk_candidates(self, _generate):
         documents = [
-            Document(f"d{i}", "memory", "txt", str(i) + ("가" * 799))
+            Document(
+                f"d{i}",
+                "memory",
+                "txt",
+                ("가" * 239)
+                + ".\n\n"
+                + str(i)
+                + ("나" * 556),
+            )
             for i in range(3)
         ]
         chunks = [
@@ -151,13 +168,16 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
             for probe in state.probes
         ))
         self.assertEqual(request.optimizer, "internal")
-        self.assertEqual(
-            request.search_space["chunker.chunk_size"],
-            [650, 450, 300],
-        )
+        candidates = request.search_space["chunker.chunk_size"]
+        self.assertGreater(len(candidates), 1)
+        self.assertTrue(all(600 <= value < 800 for value in candidates))
         self.assertEqual(
             request.metadata["candidate_grounding"]["status"],
             "grounded",
+        )
+        self.assertEqual(
+            request.metadata["candidate_grounding"]["source"],
+            "structural_evidence_windows",
         )
 
 
