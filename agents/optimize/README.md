@@ -48,6 +48,11 @@ applied / rolled_back -> index (재색인 필요)
 안 됐으면, `route_after_eval`이 마지막으로 한 번 더 optimize로 보내 판정 기회를 준다
 (그렇지 않으면 나빠진 처방이 판정 없이 그대로 서빙될 수 있었다).
 
+pending 이력에는 적용 직전의 `before_index_key`와 `before_eval_key`도 저장한다.
+Index/Eval 캐시는 이 두 키를 롤백 기준본으로 고정해, 후보를 여러 번 시험하더라도
+최대 두 슬롯 안에서 기준본과 현재 후보만 유지한다. 처방이 실패하면 config뿐 아니라
+해당 인덱스와 진단 결과를 캐시에서 바로 복원할 수 있다.
+
 ## 문제 그룹
 
 Eval에서 넘어온 finding label은 우선 다음 그룹으로 분류한다.
@@ -85,7 +90,10 @@ Planner는 최상위 failure label을 기준으로 조정 가능한 config 후�
 | `corpus_gap` | 문서 추가 요청 | config 없음 |
 | `bad_gold_answer` | 평가셋 검수 요청 | config 없음 |
 
-현재 Index Agent가 실제로 사용하는 값은 `chunk_size`, `chunk_overlap`, `embedding_model`, `use_hybrid` 중심이다. 그 외 필드는 향후 Index/Serve/Eval 연동을 위한 확장 필드로 둔다.
+현재 공통 Retriever는 `top_k`, `use_hybrid`, `use_reranker`,
+`reranker_model`, `rerank_candidates`를 Eval과 Serve에서 함께 사용한다.
+`retrieval_low_rank` 처방은 재색인 없이 reranker를 켜고 다음 Eval에서 효과를 검증한다.
+그 외 필드는 향후 Index/Serve/Eval 연동을 위한 확장 필드로 둔다.
 
 ## RAGBuilder / AutoRAG 연동 방향
 

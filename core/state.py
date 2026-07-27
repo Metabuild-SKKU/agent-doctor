@@ -7,7 +7,14 @@ LangGraph 공유 상태 정의
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
-from core.schema import Document, Chunk, Probe, DiagnosticReport
+from core.schema import (
+    Document,
+    Chunk,
+    Probe,
+    DiagnosticReport,
+    IndexSnapshot,
+    EvalSnapshot,
+)
 
 
 @dataclass
@@ -40,10 +47,21 @@ class AgentDoctorState:
         # SentenceTransformer()에 그대로 전달되어 로드가 멈출 수 있음
         "embedding_model": "BAAI/bge-m3",
         "use_hybrid": True,
+        # baseline 검색 결과를 먼저 측정한 뒤 retrieval_low_rank 처방이 켠다.
+        # 모델명과 후보 수를 상태에 명시해 Eval과 Serve가 같은 reranker 계약을 쓴다.
+        "use_reranker": False,
+        "reranker_model": "BAAI/bge-reranker-v2-m3",
+        "rerank_candidates": 20,
+        # Index가 optional 검색 모델을 실제 로드·추론해 capability를 생산한다.
+        "reranker_preflight": "eager",
         # 검색 시 가져올 청크 수. Eval(agents/eval/agent.py)이 검색에, Index가 청크
         # metadata 기록에 소비한다. 둘 다 미지정 시 5를 폴백으로 쓰고 있어 같은 값을
         # 명시해 동작을 바꾸지 않으면서 Optimize가 조정할 baseline을 드러낸다.
         "top_k": 5,
+        "chunk_strategy": "markdown_recursive",
+        "embedding_dimension": 1024,
+        "deduplicate": True,
+        "hybrid_dense_weight": 0.7,
         # gold span 길이 분포에서 chunk_size 탐색 후보를 만드는 정책.
         # Optimize가 상태를 통해 읽도록 두어 코드 하드코딩 없이 조정할 수 있다.
         "chunk_candidate_policy": {
@@ -65,13 +83,33 @@ class AgentDoctorState:
             "max_ratio": 0.40,
             "max_overlap": 300,
         },
+        "graph_enabled": True,
+        "graph_extraction": "auto",
+        "graph_llm_model": "gpt-4.1-mini",
+        "graph_similarity_threshold": 0.9,
+        "graph_output_dir": "output/index_graph",
+        "corpus_visualization_enabled": True,
+        "corpus_visualization_output_dir": "output/corpus_visualization",
+        "corpus_visualization_max_points": 500,
         # 임베딩 모델 교체로 벡터 차원이 달라졌을 때 Qdrant 컬렉션을 재생성할지 여부.
         # False(기본)면 차원 불일치 시 ensure_collection이 ValueError로 막는다.
         "recreate_collection_on_dimension_mismatch": False,
+        # 롤백 캐시는 현재/직전 버전만 유지한다. 현재 구현은 최대 2개만 지원한다.
+        "rollback_cache_enabled": True,
+        "rollback_cache_max_versions": 2,
+        # 같은 Qdrant를 여러 파이프라인이 공유하면 고유 namespace를 지정한다.
+        # 비어 있으면 Index가 문서 ID/source 조합에서 안정적으로 파생한다.
+        "qdrant_collection_namespace": "",
     })
     # 인덱싱 부산물(청크/문서 수, 그래프 파일 경로, failed_documents 등).
     # 선언 없이 동적 속성으로 쓰면 LangGraph가 노드 간 상태 복사 시 유실할 수 있다.
     index_artifacts: dict = field(default_factory=dict)
+    # Index Agent가 생산하고 Optimize가 자동 처방 가능 여부를 판단할 때 읽는다.
+    runtime_capabilities: dict = field(default_factory=dict)
+    # Index Agent 소유. 현재/직전 인덱스 스냅샷을 LRU 순서로 최대 두 개 보관한다.
+    index_cache: list[IndexSnapshot] = field(default_factory=list)
+    active_index_key: str = ""
+    index_cache_hit: bool = False
 
     # Eval Agent 결과
     probes: list[Probe] = field(default_factory=list)
@@ -80,6 +118,10 @@ class AgentDoctorState:
     # 버전(index_config+코퍼스)이 바뀌면 Eval 진입 시 무효화한다.
     diagnosis_cache: dict = field(default_factory=dict)
     diagnosis_cache_version: str = ""
+    # Eval Agent 소유. 현재/직전 완전 진단 결과를 LRU 순서로 최대 두 개 보관한다.
+    eval_cache: list[EvalSnapshot] = field(default_factory=list)
+    active_eval_key: str = ""
+    eval_cache_hit: bool = False
 
     # 반복 제어
     iteration: int = 0

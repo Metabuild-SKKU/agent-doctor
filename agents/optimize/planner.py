@@ -87,6 +87,7 @@ _DEFAULT_CURRENT: dict[str, int] = {
     "chunk_size": 512,
     "chunk_overlap": 50,
     "rerank_candidates": 20,
+    "reranker.candidate_count": 20,
 }
 
 
@@ -915,7 +916,13 @@ def _concrete_values(
     현재값이 숫자가 아니거나 없어 계산이 불가하면 None(→ 해당 키 제외).
     """
     if patch_value in ("increase", "decrease"):
-        current = baseline_config.get(key, _DEFAULT_CURRENT.get(key))
+        canonical_key = canonicalize_path(key)
+        current = get_current_value(baseline_config, canonical_key)
+        if current is None:
+            current = _DEFAULT_CURRENT.get(
+                key,
+                _DEFAULT_CURRENT.get(canonical_key),
+            )
         if isinstance(current, bool) or not isinstance(current, (int, float)):
             return None  # 현재값을 숫자로 알 수 없으면 방향 계산 불가
         if patch_value == "increase":
@@ -1109,6 +1116,13 @@ def _build_request(
         "study_baseline_config": dict(state.index_config),
         "baseline_metrics": _report_metrics(state),
         "trial_results": [],
+        # Optional 모델의 실제 준비 상태는 Index가 생산한다. Optimizer는 이
+        # 스냅샷을 보고 실행할 수 없는 처방을 config 적용 전에 건너뛴다.
+        "runtime_capabilities": {
+            name: dict(capability)
+            for name, capability in state.runtime_capabilities.items()
+            if isinstance(capability, dict)
+        },
     }
     if candidates and "candidate_grounding" in candidates[0].metadata:
         metadata["candidate_grounding"] = dict(

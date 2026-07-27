@@ -328,15 +328,16 @@ def _contradicts_oracle(record: EvalRecord) -> bool:
     return _contradiction_oracle(record) is True
 
 
-def generation_no_abstention(record: EvalRecord) -> Optional[Finding]:
+def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
     """
     무응답 기대(answer_exists=False) probe인데 기권하지 않고 답을 지어냄.
     확정: answer_exists=False + 기권 아님(DEEP+ AspectCritic / 미만은 마커 휴리스틱).
+    (라벨은 optimize/rules.py 의 처방 키와 일치시킨다 — generation_abstention_failure)
     """
     if record.probe.answer_exists is False and not _abstained(record):
         judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
         return _finding(
-            record, "generation_no_abstention", "generation_failure", confirmed=True,
+            record, "generation_abstention_failure", "generation_failure", confirmed=True,
             reason=f"answer_exists=False, 기권 아님({judge})",
         )
     return None
@@ -587,7 +588,7 @@ _RETRIEVAL_CAUSE = (
     retrieval_failure
 )
 _GENERATION_CAUSE = (
-    generation_no_abstention,bad_gold_answer_oracle, generation_hop_binding_error, 
+    generation_abstention_failure, bad_gold_answer_oracle, generation_hop_binding_error,
     generation_hallucination, generation_partial_answer,
     generation_failure,
 )
@@ -657,7 +658,7 @@ def _group_of(label: str, ftype: str) -> str:
 # !!!!!!!!!!!!!!!!!!!!!!!!!!!! optimize와 논의 필요
 _CRITICAL_LABELS = {
     "retrieval_semantic_mismatch", "retrieval_missing_gold",
-    "generation_hallucination", "generation_no_abstention",   # 답 없는 질문에 지어냄 = 환각
+    "generation_hallucination", "generation_abstention_failure",   # 답 없는 질문에 지어냄 = 환각
     "corpus_gap", "corpus_gap_partial_hop",
 }
 def _severity_of(label: str) -> str:

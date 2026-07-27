@@ -87,8 +87,9 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
         1) user_log 경로(uses_user_log) → user_log Probe (GT 없음)
         2) 아니면 → _allocate_budget 비율(RAGAS/DataMorgana/무응답)대로
            지식그래프 기반 4분면 + DataMorgana-lite + 무응답 Probe를 섞어 생성.
-           RAGAS 몫이 그래프 부족으로 비면(단일 폴백만 있는 경우) → 단일홉
-           폴백(_from_chunks)으로 전체를 대체(비중 섞기보다 최소 동작 보장 우선).
+           RAGAS 몫이 그래프 부족으로 비면 그 몫만 단일홉 폴백(_from_chunks)으로
+           채운다 — DataMorgana/무응답 예산은 유지해 answer_exists=False probe
+           (무응답 진단 경로)가 사라지지 않게 한다.
 
     user_log/auto 선택은 uses_user_log 이 EVAL_PROBE_SOURCE(auto|user_log) 스위치와
     state.user_questions 유무로 결정한다. 자동 생성 경로만 GT·gold 를 채운다.
@@ -115,14 +116,16 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
         chunks_by_id,
         documents_by_id,
     )
-    if not ragas_probes:
-        probes = _from_chunks(
+    ragas_fallback = not ragas_probes
+    if ragas_fallback:
+        # RAGAS 몫만 단일홉 폴백으로 채운다. 전체를 _from_chunks 로 대체하면 이미
+        # 배분된 무응답(no_answer) 예산까지 버려져 answer_exists=False probe 가
+        # 0개가 되고, 무응답 진단 경로가 조용히 빠진다.
+        ragas_probes = _from_chunks(
             state.chunks,
-            testset_size,
+            budget["ragas"],
             documents_by_id,
         )
-        print(f"[Eval] STEP1: llm_generated(폴백) Probe {len(probes)}개 생성")
-        return _finalize_probes(probes, state)
 
     datamorgana_probes = _generate_datamorgana_probes(
         graph,
@@ -133,9 +136,13 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
     no_answer_probes = _generate_no_answer_probes(state.chunks, graph, budget["no_answer"])
 
     probes = ragas_probes + datamorgana_probes + no_answer_probes
+    ragas_label = "ragas(단일홉 폴백)" if ragas_fallback else "ragas"
     print(f"[Eval] STEP1: llm_generated Probe {len(probes)}개 생성 "
-          f"(ragas={len(ragas_probes)}, datamorgana={len(datamorgana_probes)}, "
+          f"({ragas_label}={len(ragas_probes)}, datamorgana={len(datamorgana_probes)}, "
           f"no_answer={len(no_answer_probes)})")
+    if len(probes) < testset_size:
+        print(f"[Eval] STEP1: 요청 {testset_size}개 중 {len(probes)}개만 생성됨 "
+              f"(그래프 노드/pair 또는 사용 가능한 청크 부족)")
     return _finalize_probes(probes, state)
 
 

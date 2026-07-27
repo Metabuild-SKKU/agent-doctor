@@ -103,9 +103,44 @@ class DiagnosticReport:
     findings: list[Finding] = field(default_factory=list)
     findings_summary: dict = field(default_factory=dict)  # 확정/예비·라벨 집계(진단 모드 포함). Optimize 소비용
     ragas_scores: dict = field(default_factory=dict)
+    # Eval이 관측한 검색 runtime 실행 결과. 품질 지표와 섞지 않고 Optimize가
+    # 처방 실행 유효성을 판단할 때 사용한다.
+    runtime_summary: dict = field(default_factory=dict)
     oracle_accuracy: Optional[float] = None
     overall_score: Optional[float] = None
     composite_score: Optional[dict] = None  # 종합점수(0~100)+성분별 점수. agents/eval/scoring.py 산출
     pass_threshold: bool = False
     created_at: datetime = field(default_factory=datetime.now)
     iteration: int = 1
+
+
+@dataclass
+class IndexSnapshot:
+    """
+    롤백용 인덱스 스냅샷.
+
+    Index Agent만 생성·갱신하며, 현재 인덱스와 직전 인덱스까지 최대 두 개를
+    AgentDoctorState에 보관한다.
+    """
+    cache_key: str
+    chunks: list[Chunk] = field(default_factory=list)
+    index_artifacts: dict = field(default_factory=dict)
+    collection_name: str = ""
+    created_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class EvalSnapshot:
+    """
+    롤백용 진단 결과 스냅샷.
+
+    Eval Agent가 생성한 Probe·리포트·진단 신호를 함께 보관해, 동일한 파이프라인
+    버전으로 돌아왔을 때 답변 생성과 RAGAS 호출 없이 결과를 복원한다.
+    """
+    cache_key: str
+    index_key: str
+    probes: list[Probe] = field(default_factory=list)
+    report: Optional[DiagnosticReport] = None
+    diagnosis_cache: dict = field(default_factory=dict)
+    diagnosis_cache_version: str = ""
+    created_at: datetime = field(default_factory=datetime.now)

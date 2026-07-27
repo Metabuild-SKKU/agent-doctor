@@ -1,5 +1,7 @@
 """Eval이 라벨 단위 iteration을 소비하지 않는지 검증한다."""
+import io
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from agents.eval import agent
@@ -22,6 +24,27 @@ class EvalIterationContractTest(unittest.TestCase):
         self.assertIs(result, state)
         self.assertEqual(result.iteration, 2)
         self.assertEqual(result.status, "evaluated")
+
+    @patch("agents.eval.agent.generate_probes", return_value=[])
+    def test_iteration_log_matches_orchestrator_raw_value(self, _generate_probes):
+        # graph.py Orchestrator는 state.iteration을 가공 없이 그대로 찍는다
+        # (route_after_eval: f"...(반복 {state.iteration}/{state.max_iterations})").
+        # Eval도 같은 값을 찍어야 두 로그가 같은 방문을 같은 숫자로 가리킨다. 예전엔
+        # Eval이 +1을 더해, 같은 라벨이 이어져 iteration이 증가하지 않는 방문에서
+        # Orchestrator와 어긋난 값을 반복 표시했다(버그 D).
+        state = AgentDoctorState(
+            chunks=[Chunk(chunk_id="c1", doc_id="d1", text="충분한 길이의 테스트 청크")],
+            user_questions=["질문"],
+            iteration=2,
+            max_iterations=3,
+        )
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            agent.run(state)
+
+        self.assertIn("반복 2/3", buf.getvalue())
+        self.assertNotIn("반복 3/3", buf.getvalue())
 
     @patch("agents.eval.agent.build_report")
     @patch("agents.eval.agent._log_probe")

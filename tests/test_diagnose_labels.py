@@ -410,18 +410,18 @@ class GenerationLabelTest(_DiagnoseTestBase):
 
     def test_no_abstention_confirmed_when_model_answers_unanswerable(self):
         rec = _record(answer_exists=False, ground_truth=None, answer="지어낸 답")
-        finding = diagnose.generation_no_abstention(rec)
+        finding = diagnose.generation_abstention_failure(rec)
         self.assertIsNotNone(finding)
         self.assertTrue(finding.confirmed)
 
     def test_no_abstention_silent_when_model_correctly_abstains(self):
         rec = _record(answer_exists=False, ground_truth=None,
                       answer="제공된 정보로는 알 수 없습니다")
-        self.assertIsNone(diagnose.generation_no_abstention(rec))
+        self.assertIsNone(diagnose.generation_abstention_failure(rec))
 
     def test_no_abstention_is_critical(self):
         rec = _record(answer_exists=False, ground_truth=None, answer="지어낸 답")
-        self.assertEqual(diagnose.generation_no_abstention(rec).severity, "critical")
+        self.assertEqual(diagnose.generation_abstention_failure(rec).severity, "critical")
 
     def test_aspect_critic_overrides_heuristic_miss_at_deep(self):
         """마커가 없어 휴리스틱은 '기권 아님'이라 보지만, AspectCritic 이 기권으로 판정 → 침묵."""
@@ -430,7 +430,7 @@ class GenerationLabelTest(_DiagnoseTestBase):
         rec = _record(answer_exists=False, ground_truth=None,
                       answer="그 부분은 문서에서 다루지 않습니다")   # 마커 미포함
         self.assertTrue(diagnose.is_abstention(rec.generated_answer) is False)
-        self.assertIsNone(diagnose.generation_no_abstention(rec))
+        self.assertIsNone(diagnose.generation_abstention_failure(rec))
         self.assertIn("abstention", judge.calls)
 
     def test_aspect_critic_catches_marker_false_positive_at_deep(self):
@@ -440,7 +440,7 @@ class GenerationLabelTest(_DiagnoseTestBase):
         rec = _record(answer_exists=False, ground_truth=None,
                       answer="정확히는 알 수 없지만 답은 42입니다")
         self.assertTrue(diagnose.is_abstention(rec.generated_answer))   # 휴리스틱은 기권으로 오판
-        finding = diagnose.generation_no_abstention(rec)
+        finding = diagnose.generation_abstention_failure(rec)
         self.assertIsNotNone(finding)
         self.assertTrue(finding.confirmed)
         self.assertIn("aspect_critic", finding.metadata["reason"])
@@ -450,7 +450,7 @@ class GenerationLabelTest(_DiagnoseTestBase):
         self._with(ragas=judge)
         metrics_common.set_mode(Mode.STANDARD)                  # DEEP 미만 → 판정 호출 없음
         rec = _record(answer_exists=False, ground_truth=None, answer="지어낸 답")
-        finding = diagnose.generation_no_abstention(rec)
+        finding = diagnose.generation_abstention_failure(rec)
         self.assertTrue(finding.confirmed)
         self.assertIn("heuristic", finding.metadata["reason"])
         self.assertEqual(judge.calls, [])
@@ -462,7 +462,7 @@ class GenerationLabelTest(_DiagnoseTestBase):
         self._with(ragas=judge)
         rec = _record(answer_exists=False, ground_truth=None, answer="지어낸 답")
         for _ in range(3):
-            diagnose.generation_no_abstention(rec)
+            diagnose.generation_abstention_failure(rec)
         self.assertEqual(judge.calls.count("abstention"), 1)         # 3회 호출 → LLM 1회
         self.assertEqual(rec.aspect["abstention"], False)
         self.assertNotIn("abstention_judged", rec.signals)           # signals 오염 없음
@@ -473,7 +473,7 @@ class GenerationLabelTest(_DiagnoseTestBase):
         self._with(ragas=judge)
         rec = _record(answer_exists=False, ground_truth=None, answer="지어낸 답")
         for _ in range(3):
-            finding = diagnose.generation_no_abstention(rec)
+            finding = diagnose.generation_abstention_failure(rec)
         self.assertEqual(judge.calls.count("abstention"), 1)
         self.assertTrue(finding.confirmed)                           # 휴리스틱 폴백으로 확정
         self.assertIn("heuristic", finding.metadata["reason"])
@@ -482,7 +482,7 @@ class GenerationLabelTest(_DiagnoseTestBase):
         judge = _FakeAbstentionJudge(0)
         self._with(ragas=judge)
         rec = _record(answer_exists=False, ground_truth=None, answer="")
-        self.assertIsNone(diagnose.generation_no_abstention(rec))   # 빈 답변은 휴리스틱상 기권
+        self.assertIsNone(diagnose.generation_abstention_failure(rec))   # 빈 답변은 휴리스틱상 기권
         self.assertEqual(judge.calls, [])
 
     def test_hallucination_confirmed_below_faithfulness_threshold(self):

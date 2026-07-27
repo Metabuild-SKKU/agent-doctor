@@ -6,6 +6,7 @@ LLM 설정 X, LLM 호출 실패 시 -> 추출식 fallback 사용
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -218,6 +219,21 @@ def _has_provider(provider: str | None = None, config: dict | None = None) -> bo
     return False
 
 
+# 이미 경고한 미지원 provider 값(Eval/Optimize 가 스레드로 병렬 호출하므로 lock 으로 보호).
+_warned_providers: set[str] = set()
+_warned_providers_lock = threading.Lock()
+
+
+def _warn_unknown_provider_once(selected: str) -> None:
+    """미지원 provider 경고를 provider 값당 한 번만 출력한다."""
+    with _warned_providers_lock:
+        if selected in _warned_providers:
+            return
+        _warned_providers.add(selected)
+    print(f"[RAG] 알 수 없는 provider '{selected}' — extractive 답변으로 폴백 "
+          f"(RAG_LLM_PROVIDER: openai|gemini|github|auto)")
+
+
 # LLM provider를 선택 -> 실제 provider별 생성 함수를 호출
 # auto 모드에서는 OpenAI -> Gemini -> GitHub 순서로 사용 가능한 provider 시도
 # 모두 실패하면 None을 반환해 extractive fallback으로 넘어가기
@@ -231,6 +247,13 @@ def _llm_generate(
     max_context_chars: int = 12000,
 ) -> str | None:
     selected = _selected_provider(provider, config)
+    if selected != "auto" and selected not in {"openai", "gemini", "github", "github_models"}:
+        # 오타 등 미지원 값이면 아래 루프의 어떤 분기에도 안 걸려 로그 없이
+        # extractive 로 저하되므로, 원인을 명시하고 바로 폴백한다.
+        # 설정값 문제라 질문마다 같은 줄이 반복될 뿐이므로 provider 당 한 번만 —
+        # Eval/Optimize 병렬 실행 시 수백 줄이 로그를 덮는 것을 막는다.
+        _warn_unknown_provider_once(selected)
+        return None
     providers = ["openai", "gemini", "github"] if selected == "auto" else [selected]
     system, user = _build_prompt(question, contexts, max_context_chars=max_context_chars)
 

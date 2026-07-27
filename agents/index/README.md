@@ -24,12 +24,52 @@ state.documents
 | 크기 | 512자, overlap 50자 | `state.index_config` |
 | 임베딩 | `BAAI/bge-m3` (1024차원) | `embedding_model`, `embedding_dimension` |
 | Vector DB | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY` |
-| 검색 | Dense, top-k 5 | `top_k` |
-| Hybrid | 기본 OFF | `use_hybrid=True` |
-| Reranker | 기본 OFF | `use_reranker=True` |
+| 검색 | Dense/Hybrid, top-k 5 | `top_k` |
+| Hybrid | 기본 ON | `use_hybrid=False` |
+| Reranker | 기본 OFF, 후보 20개 | `use_reranker=True`, `rerank_candidates` |
 | Graph | NetworkX + Mermaid/PyVis | `graph_*` 설정 |
 
-Hybrid와 reranker는 baseline 결과를 먼저 측정한 뒤 Optimize가 켜는 기능이다.
+Hybrid는 Qdrant named dense/sparse vector와 RRF fusion을 우선 사용한다. 기존 dense-only
+컬렉션처럼 native sparse 검색을 쓸 수 없는 환경에서는 local dense+keyword fusion으로
+fallback한다. Reranker는 baseline 결과를 먼저 측정한 뒤 Optimize가 켜는 기능이다.
+`retrieval_low_rank`가 확정되면 Optimize가 `reranker.enabled=True`를
+`state.index_config["use_reranker"]`로 변환해 적용하고, 공통 Retriever가
+`BAAI/bge-reranker-v2-m3`로 후보를 재정렬한다. 문제가 남으면 다음 처방이
+`reranker.candidate_count`를 늘려 더 넓은 후보군을 재정렬한다. Eval은 실제
+reranker 실행 성공 횟수를 기록하며, 모델 준비 실패를 품질 무개선으로 판정하지 않는다.
+
+Index는 기본적으로 `reranker_preflight="eager"` 정책을 사용해 모델 로드와 짧은
+smoke inference를 먼저 실행한다. 결과는
+`state.runtime_capabilities["reranker"]`와 `index_artifacts`에 기록되며, 실패해도
+Index 자체는 정상 완료된다. 첫 실행에는 모델 다운로드와 초기화 비용이 들 수 있다.
+자동 확인을 원하지 않으면 `reranker_preflight="disabled"`로 설정할 수 있으며, 이때
+capability는 `unknown`이므로 Optimize가 리랭커 처방을 자동 적용하지 않는다.
+
+## 롤백 2-slot 캐시
+
+Index는 원문과 청킹·임베딩 설정의 fingerprint를 만들고, 현재 버전과 롤백
+기준 버전을 최대 두 개까지 보관한다. Qdrant 컬렉션도 코퍼스 namespace마다
+`agent_doctor_<namespace>_slot_0`, `agent_doctor_<namespace>_slot_1`
+두 개만 사용한다.
+
+- 새로운 후보는 롤백 기준본이 아닌 반대 슬롯을 교체한다.
+- 이전 fingerprint로 돌아오면 저장된 `chunks`, 임베딩, 그래프 산출물을 복원한다.
+- 같은 프로세스의 retriever 적재 캐시까지 남아 있으면 Qdrant upsert도 생략한다.
+- 적재 캐시가 유실돼도 원격 Qdrant 슬롯이 남아 있으면 upsert 없이 다시 연결한다.
+- 슬롯도 사라졌다면 저장된 임베딩으로 복구하므로 재임베딩은 하지 않는다.
+- 캐시 사용 여부와 최대 개수는 `rollback_cache_enabled`,
+  `rollback_cache_max_versions`로 전달하며 현재 상한은 2다.
+
+캐시는 프로세스 메모리의 `state.index_cache`에 있다. 따라서 프로세스 재시작을
+가로지르는 영속 롤백은 보장하지 않지만, 고정 Qdrant 슬롯 덕분에 컬렉션이
+버전 수만큼 계속 늘어나지는 않는다.
+
+같은 Qdrant에서 동일 코퍼스를 여러 프로세스가 동시에 튜닝한다면 서로 다른
+`qdrant_collection_namespace`를 지정해야 한다. 비어 있으면 입력 source URL/type
+(없으면 문서 source 목록)에서 namespace를 파생한다. 업그레이드 전에 쓰던 단일
+`agent_doctor` 컬렉션은 데이터
+안전을 위해 자동 삭제하지 않으므로, 새 슬롯 검증 후 운영 정책에 맞게 별도로
+정리한다.
 
 ## 청킹 전략 교체
 
@@ -118,6 +158,9 @@ state.index_artifacts = {
     "documents": 2,
     "chunks": 14,
     "reused_embeddings": 0,
+    "index_cache_hit": False,
+    "active_index_key": "...",
+    "qdrant_collection_name": "agent_doctor_<namespace>_slot_0",
 }
 ```
 
@@ -126,6 +169,42 @@ state.index_artifacts = {
 `embedding_model`과 검색 설정이 들어간다. Eval은 `char_span`으로 재청킹
 후에도 gold 위치를 다시 찾고, Serve API는 저장된 모델 설정으로 질문을
 동일한 벡터 공간에 임베딩한다.
+
+## Eval/RAG 검색 인터페이스
+
+Eval의 임시 `retrieval_temp.py`는 아래 호출로 대체한다.
+
+```python
+from agents.rag.retriever import get_retriever
+from agents.rag.generator import answer_text
+
+retriever = get_retriever(state.chunks, state.index_config)
+answer = answer_text(
+    probe.question,
+    retriever,
+    top_k=state.index_config.get("top_k", 5),
+    config=state.index_config,
+)
+```
+
+`get_retriever()`는 임베딩이 있으면 Qdrant dense/hybrid 검색을 준비한다.
+`use_hybrid=True`이면 Qdrant sparse vector prefetch와 dense prefetch를 RRF로 합친다.
+Qdrant 준비 실패나 임베딩 누락 시 keyword fallback으로 내려간다.
+같은 프로세스에서 같은 청크 집합을 반복 검색할 때는 적재 캐시를 사용하고,
+공유 컬렉션에 여러 코퍼스가 올라가도 현재 청크 scope로 검색 결과를 제한한다.
+`use_hybrid`, `use_reranker`, `top_k`, `embedding_model`, `embedding_dimension`은
+`state.index_config`와 Chunk metadata에서 복원된다.
+
+기존 dense-only Qdrant 컬렉션은 named dense/sparse shape가 아니므로 native hybrid로
+자동 변환하지 않는다. 이 경우 같은 컬렉션에서는 dense 검색과 keyword fallback이 유지된다.
+native hybrid를 사용하려면 컬렉션을 비워도 되는 환경에서 아래 옵션을 한 번 켠 뒤 재색인한다.
+
+```python
+state.index_config["recreate_collection_on_dimension_mismatch"] = True
+```
+
+재생성 뒤 만들어지는 컬렉션은 named vector `dense`와 sparse vector `sparse`를 가진다.
+운영 데이터가 들어 있는 공유 Qdrant에서는 별도 컬렉션/백업을 먼저 준비한다.
 
 ## Graph 추출
 

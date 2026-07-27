@@ -380,7 +380,7 @@ def evaluate_contradiction_oracle(record: EvalRecord, judge) -> dict:
 
 
 def evaluate_abstention(record: EvalRecord, judge) -> dict:
-    """기권 여부 이진 판정(AspectCritic). generation_no_abstention 의 DEEP+ 경로."""
+    """기권 여부 이진 판정(AspectCritic). generation_abstention_failure 의 DEEP+ 경로."""
     return {
         "abstention": _aspect_critic(
             judge, _ASPECT_ABSTENTION, record.probe.question,
