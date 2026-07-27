@@ -471,10 +471,24 @@ def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
 def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     """
     비-gold 청크의 상충 정보에 이끌림.
-    예비: recall=1·oracle 통과인데 실제 답만 틀림. 노이즈 제거로 회복되는지는
-    optimize 가 top_k 축소·리랭커를 적용해 재실행하며 검증한다.
+    예비: C 전제(recall=1·oracle 통과·실제 답 틀림) + 실제 답이 검색 context 에는 근거 있음
+          (real faithfulness 높음) → gold 아닌 청크에 근거했다는 뜻.
+
+    faithfulness 는 retrieved_context(gold+노이즈) 기준이라, 노이즈 청크의 정보를 가져다 쓰면
+    '근거 있음'으로 높게 나온다. 낮은 쪽은 gold·노이즈 어디에도 없는 생성측 이탈이라 다른 원인이다.
+    확정은 노이즈 제거(top_k 축소·리랭커) 재실행으로 회복되는지 봐야 하고 optimize 가 위임받는다.
+    처방(enable_noise_filter/mmr)은 rules.py draft — filtering/MMR/reranker 필드 합의 미완.
     """
-    return None
+    if not _context_failed(record):
+        return None
+    faith = _faith(record)
+    if faith is None or faith < RAGAS_FAITHFULNESS_MIN:
+        return None
+    return _finding(
+        record, "context_noise_interference", "context_failure", confirmed=False,
+        reason=f"faithfulness={_v(faith)}>={RAGAS_FAITHFULNESS_MIN}(검색 context 엔 근거 있음), "
+               f"recall@k={_v(record.recall_at_k)}, f1={_v(record.f1_score)}",
+    )
 
 def context_failure(record: EvalRecord) -> Optional[Finding]:
     """콘텍스트 실패 롤업"""
@@ -494,7 +508,15 @@ def bad_gold_answer(record: EvalRecord) -> Optional[Finding]:
     정답셋 자체 오류/모호
     콘텍스트 실패 계열 (C 그룹에 함께 있음)
     확정(자동): faith·rel 둘 다 측정 고득점(tier3). [진짜 확정은 사람 검수.]
+
+    단 oracle 이 통과했으면 침묵한다 — gold context 로는 정답을 맞혔다는 뜻이라 '정답셋이
+    틀렸다'가 반증된다. 이때 faith·rel 고득점은 '실제 답이 gold 아닌 청크에 근거했다'는
+    신호이므로 context_noise_interference 가 가져간다.
+    (C 슬롯 전제 _context_failed 가 oracle 통과를 요구하므로 이 트랙에선 사실상 발동하지 않는다.
+     오라클 실패 케이스는 B 슬롯의 bad_gold_answer_oracle 이 맡는다.)
     """
+    if _oracle_ok(record):
+        return None
     faith, rel = _faith(record), _rel(record)
     if (faith is not None and faith >= RAGAS_FAITHFULNESS_MIN
         and rel is not None and rel >= RAGAS_RESPONSE_RELEVANCY_MIN):

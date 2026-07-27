@@ -647,22 +647,53 @@ class ContextLabelTest(_DiagnoseTestBase):
         rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1)
         self.assertIsNone(diagnose.too_long_context(rec))
         self.assertIsNone(diagnose.lost_in_the_middle(rec))
+
+    def test_noise_interference_preliminary_when_answer_grounded_but_wrong(self):
+        """faithfulness 는 retrieved_context(gold+노이즈) 기준 — 근거는 있는데 답이 틀리면
+        gold 아닌 청크에 근거했다는 뜻이다."""
+        rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1, faith=0.9, rel=0.9)
+        finding = diagnose.context_noise_interference(rec)
+        self.assertIsNotNone(finding)
+        self.assertFalse(finding.confirmed)                    # 회복 검증은 optimize 위임
+        self.assertEqual(finding.metadata["group"], "C")
+
+    def test_noise_interference_silent_when_answer_ungrounded(self):
+        """faithfulness 낮음 = gold·노이즈 어디에도 근거 없음 → 노이즈에 이끌린 게 아니다."""
+        rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1,
+                      faith=RAGAS_FAITHFULNESS_MIN - 0.01, rel=0.9)
         self.assertIsNone(diagnose.context_noise_interference(rec))
 
-    def test_bad_gold_answer_confirmed_when_both_ragas_high(self):
-        rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1, faith=0.8, rel=0.9)
+    def test_noise_interference_silent_without_ragas(self):
+        metrics_common.set_mode(Mode.STANDARD)                 # DEEP 미만 → faith None
+        rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1, faith=0.9, rel=0.9)
+        self.assertIsNone(diagnose.context_noise_interference(rec))
+
+    def test_noise_interference_silent_when_context_premise_unmet(self):
+        rec = _record(recall=0.5, oracle_f1=1.0, f1=0.1, faith=0.9)   # 검색 실패는 A그룹
+        self.assertIsNone(diagnose.context_noise_interference(rec))
+
+    def test_noise_interference_wins_context_slot_over_bad_gold_answer(self):
+        """oracle 통과가 '정답셋 오류'를 반증하므로 bad_gold_answer 는 양보한다."""
+        rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1, faith=0.9, rel=0.9)
+        self.assertIsNone(diagnose.bad_gold_answer(rec))
+        picked = diagnose._pick(rec, diagnose._CONTEXT_CAUSE)
+        self.assertEqual(picked.label, "context_noise_interference")
+
+    def test_bad_gold_answer_confirmed_when_oracle_also_fails(self):
+        """oracle 이 못 맞힌 경우에만 '정답셋 오류' 주장이 성립한다."""
+        rec = _record(recall=1.0, oracle_f1=0.1, f1=0.1, faith=0.8, rel=0.9)
         finding = diagnose.bad_gold_answer(rec)
         self.assertIsNotNone(finding)
         self.assertEqual(finding.type, "gap")                  # D그룹으로 분류
         self.assertEqual(finding.metadata["group"], "D")
 
     def test_bad_gold_answer_silent_when_only_one_metric_high(self):
-        rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1, faith=0.9, rel=0.1)
+        rec = _record(recall=1.0, oracle_f1=0.1, f1=0.1, faith=0.9, rel=0.1)
         self.assertIsNone(diagnose.bad_gold_answer(rec))
 
     def test_bad_gold_answer_silent_without_ragas(self):
         metrics_common.set_mode(Mode.STANDARD)
-        rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1, faith=0.9, rel=0.9)
+        rec = _record(recall=1.0, oracle_f1=0.1, f1=0.1, faith=0.9, rel=0.9)
         self.assertIsNone(diagnose.bad_gold_answer(rec))
 
 
