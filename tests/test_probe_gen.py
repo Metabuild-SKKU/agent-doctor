@@ -248,13 +248,15 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
             with self.subTest(content=content):
                 self.assertEqual(_heuristic_evidence_of(content), expected)
 
+    @patch("agents.eval.probe_gen._heuristic_synthesize_query")
     @patch("agents.eval.probe_gen._llm_synthesize_query", return_value=None)
-    def test_multihop_heuristic_is_discarded_by_gate(self, _synthesize):
-        # LLM 실패로 멀티홉 휴리스틱 폴백이 발동하면, 그 산출물은 원문 조각을 " 그리고 " 로
-        # 이은 질문 + 같은 조각을 \n 으로 이은 정답이라 관계 서술이 없는 불량 Probe 다.
-        # 자기참조 게이트(조각 단위)가 이를 폐기하므로 Probe 는 만들어지지 않는다.
-        # (예전엔 이 폴백이 살아남아 bad_gold_answer 를 유발했다 — 단일홉 판은
-        # test_ragas_heuristic_path_is_discarded_as_self_referential 참고.)
+    def test_multihop_llm_failure_skips_without_heuristic_fallback(
+        self, _synthesize, heuristic
+    ):
+        # LLM 합성이 실패하면 멀티홉은 휴리스틱 폴백을 아예 호출하지 않고 폐기한다.
+        # 멀티홉 휴리스틱은 원문 조각을 " 그리고 " 로 이은 질문 + 같은 조각을 \n 으로 이은
+        # 정답이라 관계 서술이 없는 불량 Probe 라, 만들지 않는 게 상위 방어다.
+        # (단일홉 판은 test_ragas_heuristic_path_is_discarded_as_self_referential 참고.)
         contents = {
             "d1": "안내입니다. 첫 번째 정책의 신청 기한은 매월 마지막 영업일입니다.",
             "d2": "개요입니다. 두 번째 정책의 승인 결과는 다음 달 첫 영업일에 통지됩니다.",
@@ -282,6 +284,7 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
         )
 
         self.assertIsNone(probe)
+        heuristic.assert_not_called()
 
     @patch("agents.eval.probe_gen._llm_synthesize_query")
     def test_multihop_llm_grounds_exact_evidence_per_source(self, synthesize):

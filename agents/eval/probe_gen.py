@@ -1313,6 +1313,14 @@ def _build_ragas_probe(
     is_multi = quadrant.startswith("multi")
 
     if result is None:
+        # 멀티홉은 휴리스틱 폴백을 쓰지 않고 폐기한다. 멀티홉 휴리스틱은 원문 조각을 " 그리고 "
+        # 로 이은 질문 + 같은 조각을 \n 으로 이은 정답이라 관계 서술이 아예 없는 불량 Probe 다
+        # (자기참조 게이트가 잡아주긴 하나, 애초에 만들지 않는 게 상위 방어다 — 게이트는
+        # 조각이 정답에 문장 그대로 없는 경우를 놓칠 수 있다). 단일홉 폴백은 원문 한 조각을
+        # 그대로 쓸 뿐이라 자기참조 게이트가 확실히 걸러내므로 그대로 둔다.
+        if is_multi:
+            print("  멀티홉 Probe 폐기(휴리스틱 폴백 스킵) — LLM 합성 실패")
+            return None
         result = _heuristic_synthesize_query(nodes)
     if not result.question or not result.ground_truth:
         return None
