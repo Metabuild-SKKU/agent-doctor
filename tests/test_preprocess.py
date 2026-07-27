@@ -112,6 +112,19 @@ class HeaderFooterStripTest(unittest.TestCase):
         self.assertNotIn("전자공시시스템", result.content)
         self.assertIn("본문 첫 페이지입니다", result.content)
 
+    def test_body_reference_to_a_page_survives_whole(self):
+        # 본문 한복판의 "…페이지 12" 는 목적 페이지를 가리키는 의미 있는 참조다.
+        # 무조건 꼬리를 자르면 "페이지 12" 가 사라져 정보가 손실된다(리뷰 지적).
+        # 가장자리(푸터 자리)도 반복 푸터도 아니면 줄을 통째로 살린다.
+        pages = [
+            "회사 개요를 먼저 설명합니다.\n자세한 내용은 페이지 12\n이후 내용이 이어집니다.",
+            "둘째 페이지 본문입니다.",
+            "셋째 페이지 본문입니다.",
+        ]
+        result = preprocess_pages(pages)
+
+        self.assertIn("자세한 내용은 페이지 12", result.content)
+
     def test_body_line_citing_a_domain_survives(self):
         # 도메인이 인용된 본문 문장까지 지우면 안 된다 — 출처 표시만 버리는 게 목적이다.
         pages = [
