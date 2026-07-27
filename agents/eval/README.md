@@ -77,7 +77,16 @@ lexical 통과를 **강등**한다(부정문·`3월`↔`3일` 같은 근접 오�
 본다 — 무응답 기대 probe 는 gold 가 없어 `recall_at_k = -1` 이라, 앞에서 보면 올바른 기권까지 실패가 된다.
 
 성공/실패는 별도 필드를 두지 않는다. 이 게이트 덕에 **`findings` 가 비었으면 성공**이 규약이 아니라
-구조적 보장이 된다(`scoring.reliability_score` / `report` 가 그 규약으로 집계한다).
+구조적 보장이 된다(`_is_success()`/`diagnose()` 의 판정 자체가 그 보장이다).
+
+**주의(종합점수 통일, 2026-07-27)**: 위 보장은 여전히 참이지만, `scoring.reliability_score`가
+집계하는 값은 더 이상 "findings 유무의 이진 카운트(통과 probe 수 / 전체)"가 아니다. gold probe는
+`recall@k × max(f1_score, answer_correctness)`의 **연속값**으로 신뢰도를 매기고, 이는 `findings`와
+디커플링됐다 — 예를 들어 char-F1이 낮아 finding이 붙은 probe도 `answer_correctness`가 높으면
+신뢰도 점수는 부분점수를 받는다(긴 서술형 gold에서 char-F1이 구조적으로 저평가되는 문제의 완화책).
+무응답 기대 probe(`answer_exists=False`)만 여전히 findings 유무의 이진값(1/0)을 쓴다.
+즉 **화면에 보이는 "신뢰도" 숫자는 "findings 없는 probe의 비율"이 아니라 "probe별 soft 신뢰도의
+평균"이다.** 자세한 배경은 `agents/optimize/history.py`의 `judge`/`_read_score` 주석과 PR #47 참고.
 
 실패로 판정되면 전제별로 해당 그룹만 검사한다 — A(검색, `0 <= recall < 1`) / B(생성, `_generation_failed`)
 / C(컨텍스트, `_context_failed`). 슬롯마다 `_pick()`으로 확정(confirmed) 우선 하나씩 채택하고,
