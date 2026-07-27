@@ -11,10 +11,14 @@ LangSmith 가 "실행(Experiment) 간 비교 + 질문별 점수 변화"를 UI �
 (gold_chunk_ids 정합이 필요하므로). 코퍼스는 레포에 포함된 sample_docs 를 적재한다.
 
 사용:
-    # reranker OFF (기본)
+    # reranker OFF (기본 — sample_docs + eval_probes.json)
     python tools/langsmith_regression.py
     # reranker ON — 같은 Dataset, 다른 Experiment 로 올라가 UI 에서 비교됨
     USE_RERANKER=1 python tools/langsmith_regression.py
+
+    # tests/corpus/ 의 실제 코퍼스 + run_corpus 가 만든 qa.json 으로 회귀평가
+    # (폴더만 지정 — 한글 파일명도 파이썬이 폴더에서 직접 찾아 안전):
+    REGRESSION_CORPUS_DIR=tests/corpus python tools/langsmith_regression.py
 
 전제: .env 에 LANGSMITH_TRACING=true / LANGSMITH_API_KEY 설정.
       (키 없으면 LangSmith 업로드 없이 로컬 채점 결과만 콘솔에 찍고 끝낸다.)
@@ -41,10 +45,48 @@ from agents.rag.retriever import get_retriever
 from agents.rag.generator import answer_question
 from agents.eval.metrics_basic import char_f1
 
-PROBES_FILE = "eval_probes.json"
-DATASET_NAME = "agent-doctor-qa"
+# 기본값은 레포 포함 sample_docs + eval_probes.json. 환경변수로 다른 코퍼스/QA셋을
+# 지정하면(예: tests/corpus/ 의 실제 코퍼스 + qa.json) 그 세트로 회귀평가한다.
+#
+#   REGRESSION_CORPUS_DIR  코퍼스 폴더(run_corpus 규약: 안의 .pdf/.md/.txt + qa.json).
+#       ★ 한글 파일명 권장 방식 — 파일명을 셸/환경변수로 넘기지 않고 파이썬이 폴더에서
+#         직접 glob 으로 찾으므로 cp949 인코딩 깨짐이 없다. Dataset 이름은 폴더명에서 파생.
+#   REGRESSION_CORPUS  코퍼스 문서 경로 하나(.pdf/.md/.txt) — 영문 경로일 때만 권장.
+#   REGRESSION_QA      QA셋(정답 포함) 경로 — eval_probes.json / run_corpus 의 qa.json 동일 형식.
+#   REGRESSION_DATASET LangSmith Dataset 이름(코퍼스마다 달라야 섞이지 않음).
+import glob
+from pathlib import Path
+
+_DOC_SUFFIXES = (".pdf", ".md", ".txt")
+
+
+def _resolve_corpus() -> tuple[str, str, str]:
+    """(코퍼스 문서 경로, QA셋 경로, Dataset 이름)을 환경변수에서 해석한다.
+
+    REGRESSION_CORPUS_DIR 이 우선 — 폴더 안에서 문서/qa.json 을 파이썬이 직접 찾아
+    한글 파일명이 셸을 거치며 깨지는 문제를 피한다."""
+    corpus_dir = os.getenv("REGRESSION_CORPUS_DIR")
+    if corpus_dir:
+        base = Path(corpus_dir)
+        docs = sorted(
+            p for p in base.iterdir()
+            if p.is_file() and p.suffix.lower() in _DOC_SUFFIXES
+            and p.stem.lower() != "readme"
+        )
+        if not docs:
+            raise SystemExit(f"코퍼스 문서가 없습니다: {base}/*{_DOC_SUFFIXES}")
+        qa = os.getenv("REGRESSION_QA") or str(base / "qa.json")
+        dataset = os.getenv("REGRESSION_DATASET") or f"{base.name}-qa"
+        return str(docs[0]), qa, dataset
+    return (
+        os.getenv("REGRESSION_CORPUS", "sample_docs/hr_policy.md"),
+        os.getenv("REGRESSION_QA", "eval_probes.json"),
+        os.getenv("REGRESSION_DATASET", "agent-doctor-qa"),
+    )
+
+
+CORPUS_URL, PROBES_FILE, DATASET_NAME = _resolve_corpus()
 CORPUS_TYPE = "file"
-CORPUS_URL = "sample_docs/hr_policy.md"
 
 
 def load_probes() -> list[dict]:
@@ -124,6 +166,10 @@ def main() -> None:
     label = "reranker=on" if use_reranker else "reranker=off"
     print("=" * 60)
     print(f"[회귀평가] {label} — 코퍼스={CORPUS_URL}, 시험지={PROBES_FILE}")
+    # 어느 Dataset 에 올라가는지 미리 알린다. 같은 이름이면 같은 Dataset 에 Experiment 가
+    # 누적된다 — 'corpus' 같은 범용 폴더명을 재활용하면 서로 다른 코퍼스가 한 Dataset 에
+    # 섞이므로, 코퍼스별로 폴더를 나누거나 REGRESSION_DATASET 으로 이름을 지정할 것.
+    print(f"[회귀평가] LangSmith Dataset = '{DATASET_NAME}' (같은 이름이면 Experiment 누적)")
     print("=" * 60)
 
     probes = load_probes()
