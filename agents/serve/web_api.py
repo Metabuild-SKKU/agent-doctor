@@ -113,8 +113,11 @@ _PIPELINE_LOCK = threading.Lock()
 
 
 def _run_pipeline_background(run_id: str, file_path: Path, depth: str) -> None:
+    from core.console import force_utf8_stdio
+    force_utf8_stdio()   # 콘솔 인코딩 보정(로깅과 독립 — Tee 설치 여부와 무관하게 보호)
+
     from core.run_logger import setup_run_logging
-    setup_run_logging(prefix="web_run")  # Windows 콘솔 인코딩 문제로 print 가 예외를 던지지 않도록 보호
+    setup_run_logging(prefix="web_run")
 
     run_registry.update(run_id, status="running")
 
@@ -225,4 +228,7 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     args = parser.parse_args()
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    # access_log=False: 브라우저가 1.5초마다 폴링하는 /runs/{id}/status 요청이
+    # 매번 "INFO ... 200 OK" 한 줄로 찍혀 파이프라인 로그를 덮는 것을 막는다.
+    # 서버 시작/에러 등 다른 INFO 는 그대로 유지.
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info", access_log=False)

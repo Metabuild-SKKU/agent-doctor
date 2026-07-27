@@ -30,7 +30,7 @@ class EvalIterationContractTest(unittest.TestCase):
             stage="전체",
             since={"calls": 0},
         )
-        self.assertGreaterEqual(snapshot.call_count, 2)
+        snapshot.assert_called_once_with()
 
     @patch("agents.eval.agent.generate_probes", return_value=[])
     def test_eval_keeps_iteration_for_candidate_measurement(self, _generate_probes):

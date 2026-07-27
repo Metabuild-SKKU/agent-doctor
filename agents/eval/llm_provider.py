@@ -14,6 +14,7 @@ import json
 import os
 
 from core.llm_clients import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
     GITHUB_MODELS_BASE_URL,
     gemini_chat,
     gemini_embed,
@@ -74,28 +75,57 @@ def generate_text(system: str, user: str, model: str | None = None) -> str | Non
 
 # ── JSON 강제 채점 호출 (ragas_eval.py 가 사용) ───────────────────
 
-def chat_json(system: str, user: str, model: str | None = None) -> dict:
-    """JSON 응답 강제 chat 호출 → dict. JSON 파싱 실패 시 {} (API 예외는 호출부로 전파)."""
+def chat_json(
+    system: str,
+    user: str,
+    model: str | None = None,
+    *,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+) -> dict:
+    """JSON 응답 강제 chat 호출 → dict. 실패 시 {} (API 예외는 호출부로 전파).
+
+    빈 응답 / 파싱 실패 / 타입 불일치는 사유별 로그를 남기고 {} 를 돌려준다. Gemini 가
+    dict 를 [ {…} ] 로 감싸 반환한 경우(길이 1 리스트)는 언랩해 dict 로 돌려준다.
+    상한에 걸려 잘린 응답은 JSON 파싱에 실패해 {} 가 되므로, 구조가 큰 응답을 기대하는
+    쪽은 max_output_tokens 를 올려 잡을 것."""
     def _do():
         provider = _provider()
         if provider == "gemini":
             return _gemini_generate(
                 system, user, model or os.getenv("EVAL_JUDGE_MODEL_GEMINI", "gemini-flash-latest"),
-                json_mode=True)
+                json_mode=True, max_output_tokens=max_output_tokens)
         elif provider == "github":
             return _github_generate(
                 system, user, model or os.getenv("EVAL_JUDGE_MODEL_GITHUB", "openai/gpt-4o"),
-                json_mode=True)
+                json_mode=True, max_output_tokens=max_output_tokens)
         return _openai_generate(
             system, user, model or os.getenv("EVAL_JUDGE_MODEL", "gpt-4o"),
-            json_mode=True)
+            json_mode=True, max_output_tokens=max_output_tokens)
 
     raw = _run_with_retry(_do, "심판")
-    try:
-        obj = json.loads(raw or "{}")
-        return obj if isinstance(obj, dict) else {}
-    except json.JSONDecodeError:
+    # 실패를 전부 {} 로 뭉개면 호출부가 "빈 응답/파싱 실패/타입 불일치"를 못 가린다(예전엔
+    # 이 침묵이 Gemini 리스트 래핑을 "빈 응답"으로 오인해 쓰레기 Probe 폴백을 유발했다).
+    # 사유별로 로그만 남기고 반환은 {} 로 유지한다 — 호출부 넷이 전부 {} 를 "결측"으로
+    # 흡수하는 구조라, 예외로 바꾸면 그 넷을 다 손대야 한다.
+    if not (raw or "").strip():
+        print("[Eval] chat_json 빈 응답 → {}")
         return {}
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"[Eval] chat_json JSON 파싱 실패(앞 80자: {raw[:80]!r}) → {{}}")
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    # Gemini 는 json_mode 에서 스키마 강제 없이 mime_type 만 지정돼(core/llm_clients.py
+    # gemini_chat) dict 를 [ {…} ] 로 한 겹 감싸 반환하는 경우가 있다. 길이 1 리스트에
+    # dict 하나면 언랩한다. 길이 2+ 나 원소가 dict 가 아니면 스키마 위반이라 억지로 풀지
+    # 않는다 — 잘못된 데이터를 정상인 척 통과시키지 않기 위해서다.
+    if isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], dict):
+        return obj[0]
+    print(f"[Eval] chat_json 타입 불일치({type(obj).__name__}"
+          f"{f', len={len(obj)}' if isinstance(obj, list) else ''}) → {{}}")
+    return {}
 
 
 # ── 임베딩 (ragas_eval.py 가 사용) ────────────────────────────────
@@ -117,23 +147,38 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
 # 모델명 규약: GitHub Models 는 "<publisher>/<model>" 형식(예: openai/gpt-4o-mini).
 # Gemini 모델명/무료 티어 한도는 Google AI Studio 콘솔 참고.
 
-def _openai_generate(system: str, user: str, model: str, json_mode: bool = False) -> str:
-    return openai_chat(system, user, model, json_mode=json_mode, tag="Eval")
+def _openai_generate(
+    system: str, user: str, model: str, json_mode: bool = False,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+) -> str:
+    return openai_chat(
+        system, user, model, json_mode=json_mode,
+        max_output_tokens=max_output_tokens, tag="Eval",
+    )
 
 
 def _openai_embed(texts: list[str], model: str) -> list[list[float]]:
     return openai_embed(texts, model, tag="Eval")
 
 
-def _github_generate(system: str, user: str, model: str, json_mode: bool = False) -> str:
+def _github_generate(
+    system: str, user: str, model: str, json_mode: bool = False,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+) -> str:
     return openai_chat(
-        system, user, model, json_mode=json_mode,
+        system, user, model, json_mode=json_mode, max_output_tokens=max_output_tokens,
         api_key=os.getenv("GITHUB_TOKEN"), base_url=GITHUB_MODELS_BASE_URL, tag="Eval",
     )
 
 
-def _gemini_generate(system: str, user: str, model: str, json_mode: bool = False) -> str:
-    return gemini_chat(system, user, model, json_mode=json_mode, tag="Eval")
+def _gemini_generate(
+    system: str, user: str, model: str, json_mode: bool = False,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+) -> str:
+    return gemini_chat(
+        system, user, model, json_mode=json_mode,
+        max_output_tokens=max_output_tokens, tag="Eval",
+    )
 
 
 def _gemini_embed(texts: list[str], model: str) -> list[list[float]]:

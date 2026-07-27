@@ -35,15 +35,29 @@ class StageSummaryTest(unittest.TestCase):
         with llm_usage._lock:
             llm_usage._totals.clear()
             llm_usage._totals.update(
-                {"calls": 0, "cost": 0.0, "unpriced_calls": 0}
+                {
+                    "calls": 0,
+                    "prompt": 0,
+                    "output": 0,
+                    "cost": 0.0,
+                    "unpriced_calls": 0,
+                }
             )
+            llm_usage._by_agent.clear()
 
     def tearDown(self):
         with llm_usage._lock:
             llm_usage._totals.clear()
             llm_usage._totals.update(
-                {"calls": 0, "cost": 0.0, "unpriced_calls": 0}
+                {
+                    "calls": 0,
+                    "prompt": 0,
+                    "output": 0,
+                    "cost": 0.0,
+                    "unpriced_calls": 0,
+                }
             )
+            llm_usage._by_agent.clear()
 
     def test_individual_calls_are_silent_and_stage_summary_is_one_line(self):
         started = llm_usage.snapshot_usage()
@@ -90,8 +104,8 @@ class StageSummaryTest(unittest.TestCase):
         self.assertIn("호출 2회", line)
         self.assertIn("단가 미등록 1회", line)
         self.assertIn("누적 단가 미등록 1회", line)
-        self.assertNotIn("prompt", llm_usage.snapshot_usage())
-        self.assertNotIn("output", llm_usage.snapshot_usage())
+        self.assertEqual(llm_usage.snapshot_usage()["prompt"], 2_000)
+        self.assertEqual(llm_usage.snapshot_usage()["output"], 200)
 
 
 if __name__ == "__main__":
