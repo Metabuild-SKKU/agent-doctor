@@ -12,7 +12,8 @@ Optimize 노드의 진입점(오케스트레이션 계층).
 
 [읽는 것]  state.report, state.index_config, state.iteration, state.max_iterations,
            state.blacklist, state.optimization_history,
-           state.active_index_key, state.active_eval_key
+           state.active_index_key, state.active_eval_key,
+           state.runtime_capabilities(Planner request를 통해 소비)
 [쓰는 것]  state.index_config, state.iteration, state.status, state.error,
            state.current_agent, state.blacklist, state.optimization_history,
            state.optimization_report, state.reindex_required
@@ -312,6 +313,18 @@ def _log_optimize_decision(
     )
 
 
+def _attach_runtime_deferred(
+    report: object | None,
+    deferred: list[dict[str, Any]],
+) -> None:
+    """현재 Optimize 방문에서만 보류한 runtime 처방을 사용자 리포트에 남긴다."""
+    if report is None or not deferred:
+        return
+    metadata = getattr(report, "metadata", None)
+    if isinstance(metadata, dict):
+        metadata["runtime_deferred_prescriptions"] = list(deferred)
+
+
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Optimize 노드 진입점과 전체 실행 시간을 함께 기록한다."""
     timer = StageTimer("Optimize")
@@ -337,12 +350,30 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
         with timer.measure("이전 처방 판정"):
             judged_item, verdict, rollback_baseline_report = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
+        visit_exclusions = set(state.blacklist)
+        deferred_runtime: list[dict[str, Any]] = []
+        if (
+            judged_item is not None
+            and judged_item.metadata.get("reranker_execution_incomplete")
+        ):
+            label = judged_item.failure_labels[0] if judged_item.failure_labels else ""
+            prescription_id = judged_item.selected_prescription_id
+            if label and prescription_id:
+                visit_exclusions.add((label, prescription_id))
+                deferred_runtime.append(
+                    {
+                        "failure_label": label,
+                        "prescription_id": prescription_id,
+                        "reason": "reranker_execution_incomplete",
+                        "retryable": True,
+                    }
+                )
 
         # (2) 새 처방 선택. 저비용 사전검증에서 baseline이 이기면 현재 처방을
         # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
         while True:
             with timer.measure("처방 계획"):
-                request, decision = planner.plan(state, blacklist=state.blacklist)
+                request, decision = planner.plan(state, blacklist=visit_exclusions)
             if decision.mode != "apply_optimize" or request is None:
                 state.status = "rolled_back" if rolled_back else decision.status
                 if judged_item is not None:
@@ -354,6 +385,10 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                     reporter.build_trial_report(judged_item, verdict)
                     if rolled_back
                     else reporter.build_report(decision, request)
+                )
+                _attach_runtime_deferred(
+                    state.optimization_report,
+                    deferred_runtime,
                 )
                 return state
             _log_candidate_list(request)
@@ -409,7 +444,7 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                 else (request.candidates[0].id if request.candidates else None)
             )
             rejection = (request.failure_label, prescription_id)
-            if not prescription_id or rejection in state.blacklist:
+            if not prescription_id or rejection in visit_exclusions:
                 state.status = "rolled_back" if rolled_back else "skipped"
                 if judged_item is not None:
                     _log_optimize_verdict(state, judged_item, verdict)
@@ -429,7 +464,26 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                         ),
                     )
                 return state
-            state.blacklist.add(rejection)
+            error_code = str(result.metadata.get("error_code") or "")
+            visit_exclusions.add(rejection)
+            if error_code == "runtime_capability_unavailable":
+                capability = (
+                    request.metadata.get("runtime_capabilities", {})
+                    .get("reranker", {})
+                )
+                deferred_runtime.append(
+                    {
+                        "failure_label": request.failure_label,
+                        "prescription_id": prescription_id,
+                        "reason": capability.get(
+                            "reason",
+                            "runtime_capability_unavailable",
+                        ),
+                        "retryable": bool(capability.get("retryable", True)),
+                    }
+                )
+            else:
+                state.blacklist.add(rejection)
 
         if result.status != "proposed" or result.config_patch is None:
             # optimizer 가 적용 가능한 patch 를 못 만듦(skipped/failed)
@@ -491,6 +545,16 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                 state, request, prescription_id, before_config, before_report
             )
             item.metadata["reindex_required"] = bool(result.needs_reindex)
+            if prescription_id in {
+                "enable_reranker",
+                "widen_rerank_candidates",
+            }:
+                item.metadata["runtime_capability"] = dict(
+                    request.metadata.get("runtime_capabilities", {}).get(
+                        "reranker",
+                        {},
+                    )
+                )
             if rolled_back and judged_item is not None:
                 item.metadata["before_index_key"] = judged_item.metadata.get(
                     "before_index_key", ""
@@ -531,7 +595,32 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
             )
         state.status = "applied"
         # 새 처방을 적용함 → "적용, 다음 검증 대기" 리포트(verdict 없음).
-        state.optimization_report = reporter.build_report(decision, request)
+        state.optimization_report = reporter.build_report(
+            decision,
+            request,
+            diff=config_diff,
+        )
+        state.optimization_report.metadata.update(
+            {
+                "failure_label": request.failure_label,
+                "selected_prescription": prescription_id,
+                "reindex_required": bool(result.needs_reindex),
+            }
+        )
+        if prescription_id in {
+            "enable_reranker",
+            "widen_rerank_candidates",
+        }:
+            state.optimization_report.metadata["runtime_capability"] = dict(
+                request.metadata.get("runtime_capabilities", {}).get(
+                    "reranker",
+                    {},
+                )
+            )
+        _attach_runtime_deferred(
+            state.optimization_report,
+            deferred_runtime,
+        )
         return state
 
     except Exception as exc:  # 예외를 밖으로 전파하지 않고 state 에 기록(AGENTS.md 2절)
@@ -891,6 +980,23 @@ def _judge_pending_trial(
             keep=False, before_score=0.0, after_score=0.0,
             reason="판정 불가(리포트 없음) — 롤백", unjudgeable=True,
         )
+    elif _reranker_execution_incomplete(pending, after_report):
+        runtime = dict(
+            (after_report.runtime_summary or {}).get("reranker") or {}
+        )
+        pending.metadata["reranker_execution_incomplete"] = True
+        pending.metadata["reranker_runtime"] = runtime
+        verdict = Verdict(
+            keep=False,
+            before_score=_report_score(before_report),
+            after_score=_report_score(after_report),
+            reason=(
+                "reranker가 모든 평가 검색에서 실행되지 않아 효과를 판정할 수 없음 "
+                f"(시도 {runtime.get('attempted', 0)}, "
+                f"성공 {runtime.get('applied', 0)}) — baseline 복원"
+            ),
+            unjudgeable=True,
+        )
     else:
         verdict = history.judge(before_report, after_report)
 
@@ -916,3 +1022,24 @@ def _judge_pending_trial(
     history.finalize_item(pending, verdict, after_config, after_report)
     rollback_baseline_report = before_report if not verdict.keep else None
     return pending, verdict, rollback_baseline_report
+
+
+def _reranker_execution_incomplete(
+    pending: OptimizationHistoryItem,
+    after_report: DiagnosticReport,
+) -> bool:
+    """reranker 처방 후 Eval이 일부라도 실제 CrossEncoder 점수를 못 만들었는지 본다."""
+    if pending.selected_prescription_id not in {
+        "enable_reranker",
+        "widen_rerank_candidates",
+    }:
+        return False
+    runtime = (after_report.runtime_summary or {}).get("reranker")
+    if not isinstance(runtime, dict) or not runtime.get("enabled"):
+        return True
+    try:
+        attempted = int(runtime.get("attempted", 0))
+        applied = int(runtime.get("applied", 0))
+    except (TypeError, ValueError):
+        return True
+    return attempted == 0 or applied < attempted

@@ -36,6 +36,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 | `chunks` | Index | Eval, Serve |
 | `index_config` | Optimize (수정) | Index |
 | `index_artifacts` | Index | (그래프 산출물·통계 출력) |
+| `runtime_capabilities` | Index | Optimize |
 | `index_cache`, `active_index_key`, `index_cache_hit` | Index | Index, Eval, Optimize |
 | `probes`, `report` | Eval | Optimize, Serve, `graph.py` 분기 |
 | `diagnosis_cache`, `diagnosis_cache_version` | Eval | Eval |

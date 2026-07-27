@@ -6,6 +6,7 @@ import hashlib
 import math
 import os
 import re
+import threading
 import time
 import uuid
 from collections import Counter
@@ -62,6 +63,93 @@ _FAILED_RERANKER_RETRY_SEC = _env_float("INDEX_RERANKER_RETRY_SEC", 300.0)
 _collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, dict[str, bool]] = (
     WeakKeyDictionary()
 )
+# Serve의 동시 검색이 같은 CrossEncoder를 중복 로드하지 않도록 모델 캐시와
+# 실패 쿨다운 갱신을 한 임계구역에서 처리한다. 추론 자체는 병렬 검색을 막지 않는다.
+_reranker_lock = threading.Lock()
+
+
+def _load_reranker(model_name: str) -> tuple[Any | None, str]:
+    """reranker를 한 번만 로드하고 준비 상태를 정규화해 반환한다."""
+    with _reranker_lock:
+        model = _rerankers.get(model_name)
+        if model is not None:
+            return model, "ready"
+
+        failed_at = _failed_rerankers.get(model_name)
+        if (
+            failed_at is not None
+            and time.monotonic() - failed_at < _FAILED_RERANKER_RETRY_SEC
+        ):
+            return None, "cooldown"
+
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError as exc:
+            _failed_rerankers[model_name] = time.monotonic()
+            print(f"[Index] reranker 의존성 없음, 기존 순위 유지: {exc}")
+            return None, "dependency_missing"
+
+        try:
+            # 모델 생성까지 lock 안에서 수행해야 동시에 들어온 요청이 같은
+            # 대형 모델을 각각 메모리에 올리는 것을 막을 수 있다.
+            model = CrossEncoder(model_name)
+        except Exception as exc:
+            _failed_rerankers[model_name] = time.monotonic()
+            print(
+                f"[Index] reranker 로드 실패, 기존 순위 유지 "
+                f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
+            )
+            return None, "model_load_failed"
+
+        _rerankers[model_name] = model
+        _failed_rerankers.pop(model_name, None)
+        return model, "ready"
+
+
+def probe_reranker_capability(
+    model_name: str = DEFAULT_RERANKER_MODEL,
+    *,
+    smoke_test: bool = True,
+) -> dict[str, Any]:
+    """Index가 Optimize에 전달할 reranker 실행 가능성을 실제 모델로 확인한다."""
+    resolved_name = str(model_name or DEFAULT_RERANKER_MODEL)
+    model, load_status = _load_reranker(resolved_name)
+    if model is None:
+        return {
+            "status": "unavailable",
+            "model": resolved_name,
+            "checked_at": time.time(),
+            "retryable": load_status not in {"dependency_missing"},
+            "reason": load_status,
+        }
+
+    if smoke_test:
+        try:
+            scores = list(model.predict([("질문", "문서")]))
+            if len(scores) != 1:
+                raise ValueError(f"smoke 점수 개수 불일치: {len(scores)} != 1")
+            float(scores[0])
+        except Exception as exc:
+            with _reranker_lock:
+                if _rerankers.get(resolved_name) is model:
+                    _rerankers.pop(resolved_name, None)
+                _failed_rerankers[resolved_name] = time.monotonic()
+            print(f"[Index] reranker smoke inference 실패: {exc}")
+            return {
+                "status": "unavailable",
+                "model": resolved_name,
+                "checked_at": time.time(),
+                "retryable": True,
+                "reason": "inference_failed",
+            }
+
+    return {
+        "status": "verified",
+        "model": resolved_name,
+        "checked_at": time.time(),
+        "retryable": False,
+        "reason": None,
+    }
 
 
 # 테스트에서는 in-memory, 운영에서는 실제 Qdrant endpoint로 붙는다.
@@ -602,37 +690,18 @@ def _native_hybrid_search(
     return [_hit_to_result(hit) for hit in hits]
 
 
-def rerank(
+def rerank_with_status(
     query: str,
     results: list[dict],
     model_name: str = DEFAULT_RERANKER_MODEL,
     top_k: int = 5,
-) -> list[dict]:
-    # reranker가 있으면 한 번 더 정렬하고, 없으면 기존 순서를 유지한다.
+) -> tuple[list[dict], str]:
+    """재정렬 결과와 실제 실행 상태를 함께 반환한다."""
     if not results:
-        return []
-    if model_name not in _rerankers:
-        failed_at = _failed_rerankers.get(model_name)
-        in_cooldown = (
-            failed_at is not None
-            and time.monotonic() - failed_at < _FAILED_RERANKER_RETRY_SEC
-        )
-        if not in_cooldown:
-            try:
-                from sentence_transformers import CrossEncoder
-
-                _rerankers[model_name] = CrossEncoder(model_name)
-                _failed_rerankers.pop(model_name, None)
-            except Exception as exc:
-                _failed_rerankers[model_name] = time.monotonic()
-                print(
-                    f"[Index] reranker 로드 실패, 기존 순위 유지 "
-                    f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
-                )
-
-    model = _rerankers.get(model_name)
+        return [], "not_attempted"
+    model, load_status = _load_reranker(model_name)
     if model is None:
-        return results[:top_k]
+        return results[:top_k], load_status
 
     try:
         scores = list(
@@ -644,19 +713,38 @@ def rerank(
             )
     except Exception as exc:
         # 깨진 모델 객체로 매 요청마다 같은 실패를 반복하지 않고 쿨다운 후 다시 로드한다.
-        _rerankers.pop(model_name, None)
-        _failed_rerankers[model_name] = time.monotonic()
+        with _reranker_lock:
+            # 다른 요청이 이미 새 모델을 넣었다면 그 객체까지 지우지 않는다.
+            if _rerankers.get(model_name) is model:
+                _rerankers.pop(model_name, None)
+            _failed_rerankers[model_name] = time.monotonic()
         print(
             f"[Index] reranker 추론 실패, 기존 순위 유지 "
             f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
         )
-        return results[:top_k]
+        return results[:top_k], "inference_failed"
     reranked = [
         {**item, "retrieval_score": item.get("score", 0.0), "score": float(score)}
         for item, score in zip(results, scores)
     ]
     reranked.sort(key=lambda item: item["score"], reverse=True)
-    return reranked[:top_k]
+    return reranked[:top_k], "applied"
+
+
+def rerank(
+    query: str,
+    results: list[dict],
+    model_name: str = DEFAULT_RERANKER_MODEL,
+    top_k: int = 5,
+) -> list[dict]:
+    """기존 호출자를 위해 결과 리스트만 반환하는 호환 API."""
+    reranked, _status = rerank_with_status(
+        query,
+        results,
+        model_name=model_name,
+        top_k=top_k,
+    )
+    return reranked
 
 
 # 모델 가중치를 못 받는 환경에서도 테스트가 흔들리지 않게 결정적으로 만든다.

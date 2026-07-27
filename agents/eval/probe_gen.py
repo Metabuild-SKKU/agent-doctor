@@ -101,7 +101,7 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
 
     if uses_user_log(state):
         probes = _from_user_questions(state.user_questions)
-        print(f"[Eval] STEP1: user_log Probe {len(probes)}개 생성")
+        print(f"  user_log Probe {len(probes)}개 생성")
         return _finalize_probes(probes, state)
 
     graph = knowledge_graph.build_graph(state.chunks, state.index_config)
@@ -137,11 +137,11 @@ def generate_probes(state: AgentDoctorState) -> list[Probe]:
 
     probes = ragas_probes + datamorgana_probes + no_answer_probes
     ragas_label = "ragas(단일홉 폴백)" if ragas_fallback else "ragas"
-    print(f"[Eval] STEP1: llm_generated Probe {len(probes)}개 생성 "
+    print(f"  llm_generated Probe {len(probes)}개 생성 "
           f"({ragas_label}={len(ragas_probes)}, datamorgana={len(datamorgana_probes)}, "
           f"no_answer={len(no_answer_probes)})")
     if len(probes) < testset_size:
-        print(f"[Eval] STEP1: 요청 {testset_size}개 중 {len(probes)}개만 생성됨 "
+        print(f"  요청 {testset_size}개 중 {len(probes)}개만 생성됨 "
               f"(그래프 노드/pair 또는 사용 가능한 청크 부족)")
     return _finalize_probes(probes, state)
 
@@ -183,7 +183,7 @@ def _from_taxonomy(state: AgentDoctorState) -> list[Probe]:
                                   max_docs=korquad_max_docs())
     probes = _resync_gold_chunk_ids(probes, state.chunks, state.documents)
     matched = sum(1 for p in probes if p.gold_chunk_ids)
-    print(f"[Eval] STEP1: taxonomy Probe {len(probes)}개 로드 "
+    print(f"  taxonomy Probe {len(probes)}개 로드 "
           f"(gold 매칭 {matched}/{len(probes)})")
     return probes
 
@@ -221,6 +221,134 @@ _SENT_SPLIT = re.compile(r"(?<=[.!?。？！])[ \t]+|\r?\n+")
 _HEURISTIC_EVIDENCE_MIN_CHARS = 20
 _HEURISTIC_EVIDENCE_MAX_CHARS = 240
 
+# Probe 합성 호출의 출력 상한. 공용 기본값(2048)보다 넉넉하게 잡는다 — 멀티홉 정답 +
+# evidence 배열은 길어질 수 있고, Gemini 추론 모델은 내부 사고(thoughts)까지 이 상한을
+# 함께 소진한다. 여기서 잘리면 JSON 파싱이 실패해 휴리스틱 폴백으로 떨어진다.
+_SYNTHESIS_MAX_OUTPUT_TOKENS = 4096
+
+
+# ── Probe 품질 게이트 ─────────────────────────────────────────────
+#
+# 휴리스틱 폴백(_heuristic_synthesize_query)은 원문 조각을 그대로 질문·정답으로 쓴다.
+# 그 조각이 표 행이나 페이지 푸터면 "질문 = 정답 = 숫자 나열" 같은 Probe 가 나오고,
+# Eval 은 이걸 채점하다 bad_gold_answer 를 무더기로 찍는다(실측: Finding 의 44%).
+# 진단 점수 자체를 믿을 수 없게 만들므로 조립 단계에서 걸러낸다.
+
+# 휴리스틱이 붙이는 템플릿 어미. 자기참조 판정 전에 떼어내야 질문의 알맹이만 남는다.
+_TEMPLATE_SUFFIXES = ("에 대해 설명해줘.", "의 관계를 설명해줘.")
+
+# 문서 가구(furniture) — 전처리가 놓친 페이지 푸터·머리말 잔여물. Probe 의 주제가
+# 이런 조각이면 애초에 답할 수 있는 질문이 아니다. preprocess 의 2차 방어선.
+_FURNITURE_RE = re.compile(
+    r"(?:https?://|www\.)\S+"           # URL
+    r"|\b[\w.-]+\.(?:or|co|com|go|net)\.?kr\b"  # dart.fss.or.kr 등 국내 도메인
+    r"|\b(?:page|p\.)\s*\d+\b"          # Page 522
+    r"|전자공시시스템",
+    re.IGNORECASE,
+)
+
+# 표 행("50,466 23,886 111.3%") 판정. 예전엔 "숫자·구분자 문자 비율"로 쟀는데, 그러면
+# "185명"(0.75)·"1,234억 원"(0.75)처럼 숫자 자체가 정답인 멀쩡한 사실형 정답까지 오탐해
+# 폐기했다. 표 행의 특징은 문자 비율이 아니라 "숫자 열이 여러 개 나열"된다는 것이므로,
+# 공백으로 끊은 토큰 중 통째로 숫자·구분자인 토큰("50,466" 등)의 개수로 가른다.
+# 단일 숫자 답("185명" 0개 — '명'이 붙어 순수 숫자 토큰이 아님, "3.5%" 1개)은 통과하고,
+# 표 행("총점 185 190" 2개, "50,466 23,886 111.3%" 3개)만 걸린다.
+_MIN_NUMERIC_COLUMNS = 2
+
+# 순수 숫자 열 토큰: 숫자와 숫자용 구분자(,.%()~-/)로만 이루어진 토큰. "185명"·"원"처럼
+# 한글 단위가 붙으면 매치되지 않아 사실형 정답으로 산다.
+_NUMERIC_COLUMN_RE = re.compile(r"^[\d,.%()~/\-]+$")
+
+# 길이 하한. 한국어는 조사가 붙어 같은 뜻을 영어보다 짧게 쓴다 — "연차는 며칠이야?"(9자),
+# "성과급은 언제 나와?"(11자) 처럼 멀쩡한 실사용 질문이 10자 안팎이다(run_local_pipeline
+# 의 샘플 질문도 9~14자). 예전 값 15자는 이런 질문을 전부 폐기해, 사용자가 넣은 질문이
+# 조용히 사라지고 Probe 0개가 되는 일이 있었다.
+_MIN_QUESTION_CHARS = 7
+
+# 질문다움 판별. 길이만으로는 쓰레기와 짧은 질문을 못 가른다 — 걸러야 할 표 조각
+# ("총점 185 190" 10자)이 살려야 할 질문("연차는 며칠이야?" 9자)보다 길기 때문이다.
+# 길이 대신 "묻는 형식인가"를 본다: 물음표 · 의문사 · 의문형 어미 · 명령형 요청 어미.
+# (휴리스틱 템플릿의 "…에 대해 설명해줘." 같은 명령형도 정상 Probe 라 함께 통과시킨다.)
+_QUESTION_FORM_RE = re.compile(
+    r"[?？]\s*$"                                            # 물음표로 끝남
+    r"|(?:무엇|뭐|어디|언제|누가|누구|어떻게|어떤|왜|몇|얼마)"      # 의문사
+    r"|(?:인가요|나요|까요|습니까|는가|은가)"                     # 의문형 어미
+    # 요청·명령형 어미. 동사를 일일이 세지 않고 "…하십시오/하시오/하세요/해줘/해라" 류의
+    # 어미로 끝나는지를 본다 — 실측에서 "설명하십시오." "설명하시오." 같은 격식체가 나왔다.
+    r"|(?:십시오|시오|세요|보세요|바랍니다|부탁\w*)\s*[.]?\s*$"
+    r"|(?:해줘|해 줘|해라|알려줘|설명해|정리해|확인해|보고해|요약해|분석해)"
+)
+
+
+# 게이트 폐기분을 메우려고 추가로 합성할 비율. 실측(30개 중 5개 폐기 ≈ 17%)에 여유를
+# 둔 값이다. 너무 키우면 폐기되지 않을 Probe 까지 LLM 을 호출해 비용만 늘어난다.
+_PROBE_SURPLUS_RATIO = 0.25
+
+
+def _probe_surplus_count(target: int) -> int:
+    """목표 개수에 대해 추가로 합성해둘 여유분 개수(최소 1개, target 0 이면 0)."""
+    if target <= 0:
+        return 0
+    return max(1, round(target * _PROBE_SURPLUS_RATIO))
+
+
+def _strip_template_suffix(question: str) -> str:
+    """휴리스틱 템플릿 어미를 떼어 질문의 알맹이(주제 문구)만 남긴다."""
+    text = (question or "").strip()
+    for suffix in _TEMPLATE_SUFFIXES:
+        if text.endswith(suffix):
+            return text[: -len(suffix)].strip()
+    return text
+
+
+def _numeric_column_count(text: str) -> int:
+    """공백으로 끊은 토큰 중 통째로 숫자·구분자인 열의 개수. 표 행일수록 커진다.
+
+    "185명"·"1,234억 원" 처럼 숫자에 한글 단위가 붙은 사실형 정답은 순수 숫자 토큰이
+    없어 0이고, "50,466 23,886 111.3%" 같은 표 행은 3이다.
+    """
+    return sum(
+        1
+        for token in (text or "").split()
+        if _NUMERIC_COLUMN_RE.match(token) and any(ch.isdigit() for ch in token)
+    )
+
+
+def probe_quality_issue(question: str, ground_truth: str) -> str | None:
+    """Probe 로 쓰기에 부적합하면 사유 문자열, 쓸 만하면 None.
+
+    조립 단계에서 호출하는 순수 함수 — LLM 합성 결과든 휴리스틱 폴백이든 동일하게 통과시킨다.
+    """
+    asked = (question or "").strip()
+    topic = _strip_template_suffix(question)
+    answer = (ground_truth or "").strip()
+
+    # 길이·형식은 원문(asked)으로 본다. topic 은 "…에 대해 설명해줘." 같은 어미를 떼어낸
+    # 뒤라 명사구만 남는데("연차 규정" 5자), 그걸 재면 멀쩡한 템플릿 질문이 짧다고 폐기된다.
+    # topic 은 아래 자기참조 판정에만 쓴다(질문의 알맹이가 정답과 겹치는지).
+    if len(asked) < _MIN_QUESTION_CHARS:
+        return "질문이 너무 짧음"
+    if not _QUESTION_FORM_RE.search(asked):
+        return "질문 형식이 아님(표 조각·라벨)"
+    if _FURNITURE_RE.search(question or "") or _FURNITURE_RE.search(answer):
+        return "페이지 푸터·URL 조각"
+    if _numeric_column_count(answer) >= _MIN_NUMERIC_COLUMNS:
+        return "정답이 표 행(숫자 나열)"
+    # 자기참조: 질문의 알맹이가 정답에 그대로 들어 있으면 답을 묻는 게 아니라 되풀이하는 것.
+    # 멀티홉 휴리스틱 질문은 "A 그리고 B의 관계를 설명해줘." 라 topic 전체("A 그리고 B")로는
+    # 정답에 통째로 안 들어가 빠져나간다. 어미를 뗀 뒤 " 그리고 " 로 나눈 각 조각이 정답에
+    # 들어 있는지 본다(연결어는 _heuristic_synthesize_query 의 리터럴 " 그리고 " 와 동일).
+    # 단일홉은 조각이 하나뿐이라 기존 동작 그대로다.
+    #
+    # 단, 짧은 조각은 검사하지 않는다 — 불량 폴백의 조각은 원문 문장 통째(_heuristic_evidence_of
+    # 가 뽑는 20자+)라 정답에 그대로 박히지만, 정상 멀티홉 질문의 조각은 주제 명사구("재고자산
+    # 평가손실")라 정답에 부분적으로 등장하는 게 자연스럽다. 명사구 수준까지 substring 으로
+    # 잡으면 멀쩡한 멀티홉 Probe 를 자기참조로 오판한다. 하한은 evidence 최소 길이와 맞춘다.
+    for fragment in (frag.strip() for frag in topic.split(" 그리고 ")):
+        if len(fragment) >= _HEURISTIC_EVIDENCE_MIN_CHARS and fragment in answer:
+            return "질문이 정답을 그대로 포함(자기참조)"
+    return None
+
 
 def _from_chunks(
     chunks: list[Chunk],
@@ -232,16 +360,18 @@ def _from_chunks(
     각 청크에 대해 LLM 생성을 시도하고, 실패/미설정 시 휴리스틱 추출로 대체한다.
     """
     probes: list[Probe] = []
-    # 너무 짧은 청크는 스킵, 앞에서부터 size 개 사용
+    # 너무 짧은 청크는 스킵. 품질 게이트 폐기분을 감안해 여유분까지 후보로 잡는다.
     usable = [c for c in chunks if c.text and len(c.text.strip()) >= 20]
-    targets = usable[:size]
+    targets = usable[: size + _probe_surplus_count(size)]
     # LLM 합성만 병렬로 실행하고, 결과 조립과 gold span 계산은 입력 순서대로 처리한다.
     results = parallel_map(
         lambda chunk: _llm_generate_single_hop(chunk.text),
         targets,
         resolve_llm_concurrency(),
     )
-    for i, (chunk, generated) in enumerate(zip(targets, results)):
+    for chunk, generated in zip(targets, results):
+        if len(probes) >= size:
+            break
         heuristic_quote: str | None = None
         if generated is None:
             question, ground_truth = _heuristic_single_hop(chunk.text)
@@ -250,8 +380,12 @@ def _from_chunks(
         else:
             question, ground_truth = generated
             gen_method = "llm_single_hop"
+        issue = probe_quality_issue(question, ground_truth)
+        if issue:
+            print(f"  Probe 폐기({issue}) — {question[:40]}")
+            continue
         probe = Probe(
-            probe_id=f"probe_gen_{i:03d}",
+            probe_id=f"probe_gen_{len(probes):03d}",
             question=question,
             source="llm_generated",
             expected_difficulty="medium",
@@ -357,14 +491,18 @@ def _llm_generate_single_hop(chunk_text: str) -> tuple[str, str] | None:
                     "정답은 컨텍스트에 있는 사실에서 벗어나면 안 된다. "
                     "반드시 {\"question\": str, \"ground_truth\": str} 형태의 JSON으로만 답하라."),
             user=f"[컨텍스트]\n{chunk_text}",
+            max_output_tokens=_SYNTHESIS_MAX_OUTPUT_TOKENS,
         )
         question = (data.get("question") or "").strip()
         ground_truth = (data.get("ground_truth") or "").strip()
         if not question or not ground_truth:
+            # chat_json 은 JSON 파싱 실패도 {} 로 돌려주므로 여기서 "빈 응답"과 "잘린 응답"이
+            # 같은 모양이 된다. 로그가 없으면 휴리스틱 폴백이 조용히 일어나 원인 추적이 불가능하다.
+            print("  Probe LLM 생성 실패(빈 응답/JSON 파싱) → 휴리스틱 폴백")
             return None
         return question, ground_truth
     except Exception as e:
-        print(f"[Eval] STEP1: Probe LLM 생성 실패({e}) → 휴리스틱 폴백")
+        print(f"  Probe LLM 생성 실패({e}) → 휴리스틱 폴백")
         return None
 
 
@@ -902,12 +1040,25 @@ def _generate_ragas_probes(
     pairs = knowledge_graph.connected_pairs(graph, n=2)
     quadrants = _allocate_ragas_quadrants(n, has_multihop_edges=bool(pairs))
 
-    remaining_pairs = list(pairs)
+    # 강한 쌍부터 소비한다(레버 C). 예전엔 후보에서 random.pop 이라 cos 0.51 노이즈 쌍과
+    # cos 0.76 강한 쌍이 동일 확률로 뽑혔다 — top-k 로 후보를 좁혀도 그 안에서 약한 쌍이
+    # 뽑히면 억지 멀티홉이 남는다. graph.edges 에 이미 담긴 가중치로 내림차순 정렬해,
+    # 예산이 후보보다 적을 때 가장 관련 강한 쌍부터 쓰도록 한다(가중치 동률은 결정적 tie-break).
+    pair_weight = {
+        tuple(sorted((cid, nid))): w
+        for cid, neigh in graph.edges.items()
+        for nid, w in neigh
+    }
+    remaining_pairs = sorted(
+        pairs,
+        key=lambda pair: (pair_weight.get(tuple(sorted(pair)), 0.0), tuple(sorted(pair))),
+        reverse=True,
+    )
 
     def _next_pair() -> list[str] | None:
         if not remaining_pairs:
             return None
-        return remaining_pairs.pop(random.randrange(len(remaining_pairs)))
+        return remaining_pairs.pop(0)
 
     plan: list[tuple[str, str | None]] = (
         [("single_specific", None)] * quadrants["single_specific"]
@@ -921,6 +1072,14 @@ def _generate_ragas_probes(
             _round_robin(MULTIHOP_SUBTYPES, quadrants["multi_abstract"]),
         ))
     )
+    # 품질 게이트에 걸려 폐기되는 몫을 미리 얹어둔다(여유분). 조립 단계에서 목표 n 개를
+    # 채우면 남은 여유분은 버린다 — probe 개수가 회차마다 들쭉날쭉하면 Optimize 의
+    # 회차 간 점수 비교가 흔들리기 때문이다. 4분면 구성비를 유지하려고 plan 을 그대로
+    # 앞에서부터 되풀이한다(무작위 추가가 아니라 결정적 반복).
+    target = len(plan)
+    if plan:
+        surplus = [plan[i % target] for i in range(_probe_surplus_count(target))]
+        plan = plan + surplus
 
     # plan 단계(순차): 노드 선택·pair 소비·시나리오 샘플링 등 random 소비를 전부
     # 여기서 확정한다 — 병렬화가 RNG 소비 순서/공유 리스트(remaining_pairs)에
@@ -942,6 +1101,8 @@ def _generate_ragas_probes(
     # 조립 단계(순차, plan 순서): probe_id 번호(성공분만 카운트) 규칙 보존
     probes: list[Probe] = []
     for spec, result in zip(specs, results):
+        if len(probes) >= target:
+            break  # 목표를 채웠으면 남은 여유분은 조립하지 않는다
         probe = _build_ragas_probe(
             spec,
             result,
@@ -951,6 +1112,10 @@ def _generate_ragas_probes(
         )
         if probe is not None:
             probes.append(probe)
+    if len(probes) < target:
+        # 여유분까지 소진하고도 모자란 경우. 쓰레기로 채우면 지금 상태와 같으므로
+        # 부족한 대로 두되, 조용히 넘어가지는 않는다.
+        print(f"  RAGAS Probe {len(probes)}/{target}개 — 품질 게이트 통과분 부족")
     return probes
 
 
@@ -972,8 +1137,9 @@ def _generate_datamorgana_probes(
         return []
     usable = [node for node in graph.nodes.values() if node.text and len(node.text.strip()) >= 20]
     # plan(순차): 노드·페르소나 샘플링 확정 → 합성(병렬) → 조립(순차, 번호 규칙 보존)
+    # RAGAS 경로와 같은 이유로 여유분을 얹는다(품질 게이트 폐기분 보충).
     specs: list[dict] = []
-    for i in range(n):
+    for i in range(n + _probe_surplus_count(n)):
         if not usable:
             break
         specs.append({"index": i, "node": random.choice(usable),
@@ -988,13 +1154,20 @@ def _generate_datamorgana_probes(
 
     probes: list[Probe] = []
     for spec, result in zip(specs, results):
+        if len(probes) >= n:
+            break
         node = spec["node"]
         if result is None:
             result = _heuristic_synthesize_query([node])
         if not result.question or not result.ground_truth:
             continue
+        issue = probe_quality_issue(result.question, result.ground_truth)
+        if issue:
+            print(f"  Probe 폐기({issue}) — {result.question[:40]}")
+            continue
         probe = Probe(
-            probe_id=f"probe_datamorgana_{spec['index']:03d}",
+            # 폐기가 생겨도 번호가 비지 않도록 조립 순번(len(probes))을 쓴다.
+            probe_id=f"probe_datamorgana_{len(probes):03d}",
             question=result.question,
             source="llm_generated",
             expected_difficulty="medium",
@@ -1018,6 +1191,8 @@ def _generate_datamorgana_probes(
             exact_span_count=exact_count,
             fallback_span_count=fallback_count,
         ))
+    if len(probes) < n:
+        print(f"  DataMorgana Probe {len(probes)}/{n}개 — 품질 게이트 통과분 부족")
     return probes
 
 
@@ -1124,7 +1299,7 @@ def _false_premise_question(chunk_text: str) -> str | None:
             if question:
                 return question
         except Exception as e:
-            print(f"[Eval] STEP1: False Premise 질문 생성 실패({e}) → 휴리스틱 폴백")
+            print(f"  False Premise 질문 생성 실패({e}) → 휴리스틱 폴백")
     topic = _topic_of(chunk_text)
     return f"{topic}과 관련된 특별 예외 규정은 정확히 몇 조 몇 항에 명시되어 있나요?"
 
@@ -1163,8 +1338,20 @@ def _build_ragas_probe(
     is_multi = quadrant.startswith("multi")
 
     if result is None:
+        # 멀티홉은 휴리스틱 폴백을 쓰지 않고 폐기한다. 멀티홉 휴리스틱은 원문 조각을 " 그리고 "
+        # 로 이은 질문 + 같은 조각을 \n 으로 이은 정답이라 관계 서술이 아예 없는 불량 Probe 다
+        # (자기참조 게이트가 잡아주긴 하나, 애초에 만들지 않는 게 상위 방어다 — 게이트는
+        # 조각이 정답에 문장 그대로 없는 경우를 놓칠 수 있다). 단일홉 폴백은 원문 한 조각을
+        # 그대로 쓸 뿐이라 자기참조 게이트가 확실히 걸러내므로 그대로 둔다.
+        if is_multi:
+            print("  멀티홉 Probe 폐기(휴리스틱 폴백 스킵) — LLM 합성 실패")
+            return None
         result = _heuristic_synthesize_query(nodes)
     if not result.question or not result.ground_truth:
+        return None
+    issue = probe_quality_issue(result.question, result.ground_truth)
+    if issue:
+        print(f"  Probe 폐기({issue}) — {result.question[:40]}")
         return None
 
     gen_method = f"ragas_{quadrant}_{subtype}" if is_multi else f"ragas_{quadrant}"
@@ -1290,10 +1477,14 @@ def _llm_synthesize_query(
                      "\"evidence\": [{\"source_index\": int, \"quote\": str}]} "
                      "형태의 JSON으로만 답하라."),
             user=f"[컨텍스트]\n{_format_sources_for_llm(nodes)}",
+            max_output_tokens=_SYNTHESIS_MAX_OUTPUT_TOKENS,
         )
         question = (data.get("question") or "").strip()
         ground_truth = (data.get("ground_truth") or "").strip()
         if not question or not ground_truth:
+            # 위 _llm_generate_single_hop 과 같은 이유로 로그를 남긴다 — 이 침묵이
+            # 쓰레기 Probe 대량 생성의 원인이었다.
+            print("  RAGAS Probe 합성 실패(빈 응답/JSON 파싱) → 휴리스틱 폴백")
             return None
         return _SynthesizedProbe(
             question=question,
@@ -1301,7 +1492,7 @@ def _llm_synthesize_query(
             evidence=_parse_evidence(data.get("evidence")),
         )
     except Exception as e:
-        print(f"[Eval] STEP1: RAGAS Probe 합성 실패({e}) -> 휴리스틱 폴백")
+        print(f"  RAGAS Probe 합성 실패({e}) -> 휴리스틱 폴백")
         return None
 
 

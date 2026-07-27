@@ -1,14 +1,31 @@
+import os
 import unittest
 from unittest.mock import patch
 
-from agents.eval.probe_gen import _SynthesizedProbe, _from_chunks, generate_probes
+from agents.eval.probe_gen import _SynthesizedProbe, generate_probes
 from agents.optimize import planner
 from agents.optimize.adapters.chunk_prescreener import run as run_chunk_prescreener
-from core.schema import Chunk, DiagnosticReport, Document, Finding
+from core.schema import Chunk, DiagnosticReport, Document, Finding, Probe
 from core.state import AgentDoctorState
 
 
 class ChunkGroundingIntegrationTest(unittest.TestCase):
+    def setUp(self):
+        # 생성 개수를 고정한다. 같은 프로세스의 다른 테스트가 graph.py 를 import 하면
+        # load_dotenv(override=True) 로 .env 의 EVAL_TESTSET_SIZE 가 프로세스에 들어오고,
+        # Probe 개수가 달라지면서 gold_spans 없는 no_answer Probe 가 섞여 아래 단언이
+        # 실행 순서에 따라 깨진다. 이 테스트의 관심사는 개수가 아니라 span 그라운딩이다.
+        self._env = {k: os.environ.get(k) for k in ("EVAL_TESTSET_SIZE", "EVAL_PROBE_SOURCE")}
+        os.environ["EVAL_TESTSET_SIZE"] = "3"
+        os.environ.pop("EVAL_PROBE_SOURCE", None)
+
+    def tearDown(self):
+        for key, value in self._env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
     @patch("agents.eval.probe_gen._llm_synthesize_query")
     def test_generated_gold_spans_drive_chunk_prescreener(self, synthesize):
         evidence = "정답" * 100
@@ -89,8 +106,7 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
         self.assertEqual(result.best_config["chunker.chunk_size"], 800)
         self.assertTrue(result.metadata["best_is_baseline"])
 
-    @patch("agents.eval.probe_gen._llm_generate_single_hop", return_value=None)
-    def test_llm_free_heuristic_spans_drive_multiple_chunk_candidates(self, _generate):
+    def test_structural_spans_drive_multiple_chunk_candidates(self):
         documents = [
             Document(
                 f"d{i}",
@@ -130,11 +146,24 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
                 },
             },
         )
-        state.probes = _from_chunks(
-            chunks,
-            3,
-            {document.doc_id: document for document in documents},
-        )
+        state.probes = [
+            Probe(
+                probe_id=f"probe_{i}",
+                question=f"문서 {i}의 첫 문단은 무엇인가요?",
+                source="taxonomy",
+                answer_exists=True,
+                ground_truth=document.content[:240],
+                gold_chunk_ids=[chunks[i].chunk_id],
+                gold_spans=[{"doc_id": document.doc_id, "start": 0, "end": 240}],
+                metadata={
+                    "span_grounding": {
+                        "status": "exact",
+                        "span_qualities": ["exact"],
+                    }
+                },
+            )
+            for i, document in enumerate(documents)
+        ]
         finding = Finding(
             finding_id="f1",
             type="retrieval_failure",

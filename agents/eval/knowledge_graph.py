@@ -34,7 +34,11 @@ from dataclasses import dataclass, field
 
 from core.schema import Chunk
 from agents.index.qdrant_store import resolve_embedding_device
-from agents.eval.types import KG_EMBEDDING_SIM_MIN, KG_ENTITY_OVERLAP_MIN
+from agents.eval.types import (
+    KG_EMBEDDING_SIM_MIN,
+    KG_ENTITY_OVERLAP_MIN,
+    KG_TOP_K_NEIGHBORS,
+)
 
 _TOP_K_KEYWORDS = 8
 _PUNCT = re.compile(r"[^\w가-힣]+")
@@ -60,14 +64,33 @@ class KGraph:
 
 # ── 그래프 구축 ───────────────────────────────────────────────────
 
-def build_graph(chunks: list[Chunk], config: dict | None = None) -> KGraph:
+def build_graph(
+    chunks: list[Chunk],
+    config: dict | int | None = None,
+    *,
+    top_k: int | None = None,
+) -> KGraph:
     """
     청크 리스트로 KG를 만든다. 전량 휴리스틱(무료) — LLM 호출 없음.
     임베딩 후보는 GPU/CPU 블록 행렬곱으로 청크별 top-k만 고르고, 키워드 후보는
     역색인으로 좁힌다. 두 후보 중 하나라도 임계값을 넘으면 연결한다.
+
+    ``config`` 기반 GPU 설정과 기존 ``top_k`` 호출을 모두 지원한다. 후보 쌍은
+    블록 연산과 키워드 역색인으로 좁힌 뒤, 최종 가중치 기준 노드별 top-k만 남긴다.
     """
-    config = config or {}
-    top_k = _positive_int(config.get("eval_graph_top_k", 12), "eval_graph_top_k")
+    if isinstance(config, int) and not isinstance(config, bool):
+        if top_k is not None:
+            raise ValueError("top_k를 중복 지정할 수 없습니다.")
+        top_k = config
+        config = {}
+    elif config is None:
+        config = {}
+    elif not isinstance(config, dict):
+        raise ValueError("그래프 설정은 dict여야 합니다.")
+    resolved_top_k = _positive_int(
+        top_k if top_k is not None else config.get("eval_graph_top_k", KG_TOP_K_NEIGHBORS),
+        "eval_graph_top_k",
+    )
     batch_size = _positive_int(
         config.get("eval_graph_batch_size", 512),
         "eval_graph_batch_size",
@@ -93,15 +116,15 @@ def build_graph(chunks: list[Chunk], config: dict | None = None) -> KGraph:
     semantic_pairs, actual_device = _embedding_candidate_pairs(
         embeddings,
         requested_device,
-        top_k,
+        resolved_top_k,
         batch_size,
     )
     keyword_pairs = _keyword_candidate_pairs(
         [nodes[chunk_id] for chunk_id in ids],
-        top_k,
+        resolved_top_k,
     )
 
-    edges: dict[str, list[tuple[str, float]]] = {cid: [] for cid in ids}
+    candidates: dict[str, list[tuple[str, float]]] = {cid: [] for cid in ids}
     for left_index, right_index in set(semantic_pairs) | keyword_pairs:
         left_id, right_id = ids[left_index], ids[right_index]
         cosine = semantic_pairs.get((left_index, right_index))
@@ -116,15 +139,28 @@ def build_graph(chunks: list[Chunk], config: dict | None = None) -> KGraph:
         )
         if weight is None:
             continue
-        edges[left_id].append((right_id, weight))
-        edges[right_id].append((left_id, weight))
+        candidates[left_id].append((right_id, weight))
+        candidates[right_id].append((left_id, weight))
 
+    # 2) 각 노드에서 상위 k개만 엣지로 승격한다(top-k). a→b 또는 b→a 어느 방향이든
+    #    상위에 들면 엣지를 남긴다(상호 최근접이 아니어도 연결 — 후보가 지나치게
+    #    좁아지는 것을 막는다). 무방향 엣지라 양쪽 인접 리스트에 같은 가중치로 넣는다.
+    kept: dict[tuple[str, str], float] = {}
+    for cid, cand in candidates.items():
+        cand.sort(key=lambda pair: pair[1], reverse=True)
+        for nid, w in cand[:resolved_top_k]:
+            kept[tuple(sorted((cid, nid)))] = w
+
+    edges: dict[str, list[tuple[str, float]]] = {cid: [] for cid in nodes}
+    for (a_id, b_id), w in kept.items():
+        edges[a_id].append((b_id, w))
+        edges[b_id].append((a_id, w))
     for cid in edges:
         edges[cid].sort(key=lambda pair: pair[1], reverse=True)
     edge_count = sum(len(neighbors) for neighbors in edges.values()) // 2
     print(
         f"[Eval] STEP1 KG: 노드 {len(ids)}개, 엣지 {edge_count}개, "
-        f"device={actual_device}, top_k={top_k}, block={batch_size}, "
+        f"device={actual_device}, top_k={resolved_top_k}, block={batch_size}, "
         f"{time.perf_counter() - started:.3f}초"
     )
     return KGraph(nodes=nodes, edges=edges)

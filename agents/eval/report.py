@@ -20,10 +20,11 @@ graph.route_after_eval() 이 report.pass_threshold 로 Serve/Optimize 분기를 
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 
 from core.schema import DiagnosticReport
 from agents.eval.types import (
-    EvalRecord, RAGAS_WEIGHTS, PASS_SCORE_THRESHOLD, F1_PASS_THRESHOLD,
+    EvalRecord, RAGAS_WEIGHTS, PASS_SCORE_THRESHOLD,
     resolve_mode,
 )
 from agents.eval.scoring import compute_composite, format_composite
@@ -52,6 +53,7 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
 
     scores = {**rule_means}
     scores.update(ragas_means)                          # RAGAS 평균(있으면)
+    reranker_runtime = _reranker_runtime(records)
     # 브랜치 제거 → findings 유무로 결과 분포(진단됨/정상)
     n_diag = sum(1 for r in records if r.findings)
     scores["outcome_distribution"] = {"diagnosed": n_diag, "ok": len(records) - n_diag}
@@ -81,6 +83,7 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
         findings=findings,
         findings_summary=_findings_summary(records, mode),
         ragas_scores=scores,
+        runtime_summary={"reranker": reranker_runtime},
         oracle_accuracy=oracle_acc,
         overall_score=overall_val,
         composite_score=compute_composite(records).as_dict(),   # 종합점수(0~100) — scoring 모듈
@@ -141,6 +144,37 @@ def _degraded_correctness_count(records: list[EvalRecord]) -> int:
         if r.ragas.get("answer_correctness_degraded")
         or r.oracle_ragas.get("answer_correctness_degraded")
     )
+
+
+def _reranker_runtime(records: list[EvalRecord]) -> dict:
+    """이번 Eval에서 reranker가 실제 점수를 만든 횟수를 운영 신호로 집계한다."""
+    enabled_probes = sum(
+        1 for record in records
+        if record.retrieval_details.get("reranker_enabled")
+    )
+    attempted = sum(
+        1
+        for record in records
+        if record.retrieval_details.get("reranker_attempted")
+    )
+    applied = sum(
+        1
+        for record in records
+        if record.retrieval_details.get("reranker_status") == "applied"
+        or record.retrieval_details.get("reranked")
+    )
+    status_counts = Counter(
+        str(record.retrieval_details.get("reranker_status", "disabled"))
+        for record in records
+    )
+    return {
+        "enabled": enabled_probes > 0,
+        "enabled_probes": enabled_probes,
+        "attempted": attempted,
+        "applied": applied,
+        "failed": max(0, attempted - applied),
+        "status_counts": dict(status_counts),
+    }
 
 
 def _ragas_means(records: list[EvalRecord]) -> dict:
@@ -212,17 +246,17 @@ def _oracle_accuracy(records: list[EvalRecord]) -> float | None:
 # ── 로그 요약 ─────────────────────────────────────────────────────
 
 def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
-    n = len(records)
-    fail = sum(1 for r in records if r.findings)
+    # 들여쓰기 2칸: agents/eval/agent.py 의 STEP5 스텝 블록 본문으로 출력된다
+    # (스텝 헤더가 이미 'Eval STEP5' 를 말하므로 줄마다 접두사를 다시 붙이지 않는다).
     fs = report.findings_summary
-    print(f"[Eval] STEP5: 리포트 생성 - probe {n}개, 실패 {fail}개, "
-          f"overall={report.overall_score}, pass={report.pass_threshold} (모드 {fs.get('mode')})")
-    print(f"[Eval]        종합점수: {format_composite(report.composite_score)}")
+    pass_mark = "✓" if report.pass_threshold else "✗"
+    print(f"  종합점수 {format_composite(report.composite_score)}"
+          f" · overall {report.overall_score} · pass {pass_mark}")
     rs = report.ragas_scores
     if "mean_f1" in rs:   # KorQuAD식 관측 지표: F1 과 EM 을 나란히
-        print(f"[Eval]        정답매칭(관측): F1={rs['mean_f1']:.3f}  EM={rs.get('mean_exact_match', 0.0):.3f}")
+        print(f"  정답매칭(관측) F1={rs['mean_f1']:.3f}  EM={rs.get('mean_exact_match', 0.0):.3f}")
     if rs.get("answer_correctness_degraded"):
-        print(f"[Eval]        ⚠ 정답 판정 degrade {rs['answer_correctness_degraded']}건 — "
+        print(f"  ⚠ 정답 판정 degrade {rs['answer_correctness_degraded']}건 — "
               f"판정기(TP/FP/FN 분류) 실패로 의미유사도 단독 계산. 근접 오답을 못 걸렀을 수 있음")
     if report.findings:
         # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
@@ -239,9 +273,8 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
         for src in (fs.get("confirmed_labels", {}), fs.get("preliminary_labels", {})):
             for label, w in src.items():
                 by_label[label] = round(by_label.get(label, 0.0) + w, 3)
-        print(f"[Eval]        Finding {len(report.findings)}개 "
-              f"(확정 {fs.get('confirmed', 0)} / 예비 {fs.get('preliminary', 0)}), "
-              f"가중 타입분포 {by_type}")
-        print(f"[Eval]        가중 라벨분포 {dict(sorted(by_label.items(), key=lambda kv: -kv[1]))}")
+        # Finding 개수(확정/예비)는 STEP4 마감줄이 이미 보고했다 — 여기선 분포만.
+        print(f"  가중 타입분포 {by_type}")
+        print(f"  가중 라벨분포 {dict(sorted(by_label.items(), key=lambda kv: -kv[1]))}")
         if fs.get("preliminary"):
-            print(f"[Eval]        예비 {fs['preliminary']}개는 더 깊은 모드(EVAL_MODE=deep/full)에서 확정 가능")
+            print(f"  예비 {fs['preliminary']}개는 더 깊은 모드(EVAL_MODE=deep/full)에서 확정 가능")

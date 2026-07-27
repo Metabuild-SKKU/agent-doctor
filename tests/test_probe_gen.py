@@ -185,13 +185,14 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
         )
 
     @patch("agents.eval.probe_gen._llm_synthesize_query", return_value=None)
-    def test_ragas_heuristic_path_uses_short_exact_evidence(self, _synthesize):
+    def test_ragas_heuristic_path_is_discarded_as_self_referential(self, _synthesize):
+        """LLM 합성이 실패하면 휴리스틱이 원문 문장을 질문·정답에 그대로 쓴다 —
+        '질문=정답' 형태라 품질 게이트가 폐기한다(None 반환)."""
         content = (
             "소개입니다. "
             "정책 신청은 전날 오후 여섯 시까지 제출해야 합니다. "
             "이후 요청은 다음 날 처리됩니다."
         )
-        evidence = "정책 신청은 전날 오후 여섯 시까지 제출해야 합니다."
         document = Document("d1", "memory", "txt", content)
         chunk = Chunk("c1", "d1", content, char_span=(0, len(content)))
         node = KGNode("c1", "d1", content)
@@ -205,14 +206,7 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
             {"d1": document},
         )
 
-        start = content.index(evidence)
-        self.assertEqual(probe.gold_spans, [{
-            "doc_id": "d1",
-            "start": start,
-            "end": start + len(evidence),
-        }])
-        self.assertEqual(probe.ground_truth, evidence)
-        self.assertEqual(probe.metadata["span_grounding"]["status"], "exact")
+        self.assertIsNone(probe)
 
     def test_heuristic_caps_unpunctuated_long_evidence(self):
         content = "근거내용" * 200
@@ -254,8 +248,15 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
             with self.subTest(content=content):
                 self.assertEqual(_heuristic_evidence_of(content), expected)
 
+    @patch("agents.eval.probe_gen._heuristic_synthesize_query")
     @patch("agents.eval.probe_gen._llm_synthesize_query", return_value=None)
-    def test_multihop_heuristic_uses_exact_evidence_per_source(self, _synthesize):
+    def test_multihop_llm_failure_skips_without_heuristic_fallback(
+        self, _synthesize, heuristic
+    ):
+        # LLM 합성이 실패하면 멀티홉은 휴리스틱 폴백을 아예 호출하지 않고 폐기한다.
+        # 멀티홉 휴리스틱은 원문 조각을 " 그리고 " 로 이은 질문 + 같은 조각을 \n 으로 이은
+        # 정답이라 관계 서술이 없는 불량 Probe 라, 만들지 않는 게 상위 방어다.
+        # (단일홉 판은 test_ragas_heuristic_path_is_discarded_as_self_referential 참고.)
         contents = {
             "d1": "안내입니다. 첫 번째 정책의 신청 기한은 매월 마지막 영업일입니다.",
             "d2": "개요입니다. 두 번째 정책의 승인 결과는 다음 달 첫 영업일에 통지됩니다.",
@@ -272,6 +273,49 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
             KGNode("c1", "d1", contents["d1"]),
             KGNode("c2", "d2", contents["d2"]),
         ]
+
+        probe = _make_ragas_probe(
+            nodes,
+            "multi_specific",
+            "shared_entity",
+            0,
+            chunks,
+            documents,
+        )
+
+        self.assertIsNone(probe)
+        heuristic.assert_not_called()
+
+    @patch("agents.eval.probe_gen._llm_synthesize_query")
+    def test_multihop_llm_grounds_exact_evidence_per_source(self, synthesize):
+        # 멀티홉 evidence 당 exact span 그라운딩은 LLM 합성 성공 경로에서 검증한다
+        # (휴리스틱 폴백은 이제 게이트가 폐기하므로 이 성질을 거기서 확인할 수 없다).
+        # 질문·정답은 원문을 되풀이하지 않아 게이트를 통과하고, evidence quote 만 원문
+        # 부분 문자열이라 좌표를 정확히 찾을 수 있다.
+        contents = {
+            "d1": "안내입니다. 첫 번째 정책의 신청 기한은 매월 마지막 영업일입니다.",
+            "d2": "개요입니다. 두 번째 정책의 승인 결과는 다음 달 첫 영업일에 통지됩니다.",
+        }
+        documents = {
+            doc_id: Document(doc_id, "memory", "txt", content)
+            for doc_id, content in contents.items()
+        }
+        chunks = {
+            "c1": Chunk("c1", "d1", contents["d1"], char_span=(0, len(contents["d1"]))),
+            "c2": Chunk("c2", "d2", contents["d2"], char_span=(0, len(contents["d2"]))),
+        }
+        nodes = [
+            KGNode("c1", "d1", contents["d1"]),
+            KGNode("c2", "d2", contents["d2"]),
+        ]
+        synthesize.return_value = _SynthesizedProbe(
+            question="두 정책의 신청·승인 일정은 어떻게 연결되나요?",
+            ground_truth="첫 정책 신청 마감 직후 둘째 정책 승인 결과가 통지되는 구조입니다.",
+            evidence=[
+                {"source_index": 0, "quote": "첫 번째 정책의 신청 기한은 매월 마지막 영업일입니다."},
+                {"source_index": 1, "quote": "두 번째 정책의 승인 결과는 다음 달 첫 영업일에 통지됩니다."},
+            ],
+        )
 
         probe = _make_ragas_probe(
             nodes,
@@ -318,7 +362,9 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
 
     @patch(
         "agents.eval.probe_gen._llm_generate_single_hop",
-        return_value=("레거시 청크 질문", "레거시 청크 정답"),
+        # 이 테스트의 관심사는 span 그라운딩이므로, 품질 게이트는 통과하는
+        # (의문형 + 정답을 되풀이하지 않는) 질문을 준다.
+        return_value=("레거시 청크의 위치는 어디인가요?", "레거시 청크 정답"),
     )
     def test_chunk_fallback_locates_legacy_chunk_without_char_span(self, _generate):
         chunk_text = "레거시 청크도 원문에서 위치를 다시 찾을 수 있어야 합니다."
@@ -337,22 +383,41 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
         self.assertEqual(probes[0].gold_spans[0]["start"], content.index(chunk_text))
 
     @patch("agents.eval.probe_gen._llm_generate_single_hop", return_value=None)
-    def test_chunk_heuristic_locates_selected_sentence_exactly(self, _generate):
+    def test_chunk_heuristic_probe_is_discarded_as_self_referential(self, _generate):
+        """휴리스틱 폴백은 원문 조각을 질문·정답에 그대로 써서 '질문=정답' Probe 를
+        만든다. 품질 게이트가 노리는 바로 그 형태이므로 조립 단계에서 폐기돼야 한다
+        (이 경로로 만든 Probe 가 살아남으면 bad_gold_answer 가 무더기로 찍힌다)."""
         chunk_text = "제목입니다. 실제 근거로 사용할 충분히 구체적인 문장입니다. 마무리입니다."
-        evidence = "실제 근거로 사용할 충분히 구체적인 문장입니다."
         document = Document("d1", "memory", "txt", chunk_text)
         chunk = Chunk("c1", "d1", chunk_text, char_span=(0, len(chunk_text)))
 
         probes = _from_chunks([chunk], 1, {"d1": document})
 
-        start = chunk_text.index(evidence)
+        self.assertEqual(probes, [])
+
+    @patch("agents.eval.probe_gen._llm_generate_single_hop")
+    def test_chunk_llm_probe_survives_gate_and_anchors_to_chunk(self, generate):
+        """게이트를 통과하는 LLM 합성 Probe 는 살아남고, gold_span 이 원문에 앵커된다.
+
+        단일홉 LLM 경로는 evidence 인용을 따로 받지 않아 청크 전체를 span 으로 잡는다
+        (chunk_fallback). 문장 단위 정밀 앵커는 evidence 를 주는 RAGAS 경로의 몫이다.
+        """
+        evidence = "실제 근거로 사용할 충분히 구체적인 문장입니다."
+        chunk_text = f"제목입니다. {evidence} 마무리입니다."
+        generate.return_value = ("근거 문장은 무엇인가요?", evidence)
+        document = Document("d1", "memory", "txt", chunk_text)
+        chunk = Chunk("c1", "d1", chunk_text, char_span=(0, len(chunk_text)))
+
+        probes = _from_chunks([chunk], 1, {"d1": document})
+
+        self.assertEqual(len(probes), 1)
         self.assertEqual(probes[0].gold_spans, [{
             "doc_id": "d1",
-            "start": start,
-            "end": start + len(evidence),
+            "start": 0,
+            "end": len(chunk_text),
         }])
-        self.assertEqual(probes[0].metadata["span_grounding"]["status"], "exact")
-        self.assertEqual(probes[0].metadata["gen_method"], "heuristic_evidence")
+        self.assertEqual(probes[0].metadata["span_grounding"]["status"], "chunk_fallback")
+        self.assertEqual(probes[0].metadata["gen_method"], "llm_single_hop")
 
     def test_resync_replaces_gold_chunk_ids_after_rechunking(self):
         content = "가" * 100 + "정답근거" + "나" * 100
