@@ -364,17 +364,33 @@ def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
 
 def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
     """
-    멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음).
-    확정: faithfulness 높음 + gold context 와 모순 없음.
-    모순이면 hop 사실 자체가 틀린 것이라 결합 오류가 아니다 → hallucination 에 양보.
+    멀티홉: 각 hop 사실은 맞으나 결합이 틀림.
+    확정: 멀티홉 + 누락 없음(FN=0) + 근거 없는 주장 있음(FP>0) + faithfulness 높음 + 모순 없음.
+
+    FN=0 이 '결합' 신호다 — 필요한 gold 요소가 다 있고 근거도 있고 모순도 없는데 답이 틀렸다면,
+    남는 설명은 요소를 잘못 엮었다는 것뿐이다(그 잘못 엮은 주장이 FP 로 잡힌다).
+    FN>0 이면 요소 누락이라 partial_answer 영역 — 카운트로 배타가 서서 튜플 순서에 안 기댄다.
+    카운트 미측정이면 faithfulness 만으론 결합을 특정 못 해 예비.
     """
-    if _contradicts_oracle(record):
+    if not _is_multi_hop(record) or _contradicts_oracle(record):
         return None
     faith = _faith_oracle(record)
-    if _is_multi_hop(record) and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN:
+    if faith is None or faith < RAGAS_FAITHFULNESS_MIN:
+        return None                      # 근거 자체가 약함 → hallucination 영역
+
+    counts = _correctness_counts_oracle(record)
+    if counts is None:
+        return _finding(
+            record, "generation_hop_binding_error", "generation_failure", confirmed=False,
+            reason=f"correctness_counts=-, faithfulness={_v(faith)}>={RAGAS_FAITHFULNESS_MIN}, "
+                   f"qtype={record.probe.qtype}, oracle_f1={_v(record.oracle_f1)}",
+        )
+    tp, fp, fn = counts
+    if fn == 0 and fp > 0:
         return _finding(
             record, "generation_hop_binding_error", "generation_failure", confirmed=True,
-            reason=f"faithfulness={_v(faith)}>={RAGAS_FAITHFULNESS_MIN}, qtype={record.probe.qtype}, "
+            reason=f"missing=0(요소 누락 없음), unsupported={fp}, tp={tp}, "
+                   f"faithfulness={_v(faith)}, qtype={record.probe.qtype}, "
                    f"oracle_f1={_v(record.oracle_f1)}",
         )
     return None
