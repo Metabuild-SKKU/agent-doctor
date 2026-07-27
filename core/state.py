@@ -52,6 +52,8 @@ class AgentDoctorState:
         "use_reranker": False,
         "reranker_model": "BAAI/bge-reranker-v2-m3",
         "rerank_candidates": 20,
+        # Index가 optional 검색 모델을 실제 로드·추론해 capability를 생산한다.
+        "reranker_preflight": "eager",
         # 검색 시 가져올 청크 수. Eval(agents/eval/agent.py)이 검색에, Index가 청크
         # metadata 기록에 소비한다. 둘 다 미지정 시 5를 폴백으로 쓰고 있어 같은 값을
         # 명시해 동작을 바꾸지 않으면서 Optimize가 조정할 baseline을 드러낸다.
@@ -60,8 +62,6 @@ class AgentDoctorState:
         "embedding_dimension": 1024,
         "deduplicate": True,
         "hybrid_dense_weight": 0.7,
-        "use_reranker": False,
-        "reranker_model": "BAAI/bge-reranker-v2-m3",
         # gold span 길이 분포에서 chunk_size 탐색 후보를 만드는 정책.
         # Optimize가 상태를 통해 읽도록 두어 코드 하드코딩 없이 조정할 수 있다.
         "chunk_candidate_policy": {
@@ -104,6 +104,8 @@ class AgentDoctorState:
     # 인덱싱 부산물(청크/문서 수, 그래프 파일 경로, failed_documents 등).
     # 선언 없이 동적 속성으로 쓰면 LangGraph가 노드 간 상태 복사 시 유실할 수 있다.
     index_artifacts: dict = field(default_factory=dict)
+    # Index Agent가 생산하고 Optimize가 자동 처방 가능 여부를 판단할 때 읽는다.
+    runtime_capabilities: dict = field(default_factory=dict)
     # Index Agent 소유. 현재/직전 인덱스 스냅샷을 LRU 순서로 최대 두 개 보관한다.
     index_cache: list[IndexSnapshot] = field(default_factory=list)
     active_index_key: str = ""

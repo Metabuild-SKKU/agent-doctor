@@ -4,7 +4,7 @@
 #         state.optimization_history, state.active_index_key, state.index_cache
 # - write: state.chunks, state.index_artifacts, state.reindex_required,
 #          state.index_cache, state.active_index_key, state.index_cache_hit,
-#          state.status, state.error, state.current_agent
+#          state.runtime_capabilities, state.status, state.error, state.current_agent
 from __future__ import annotations
 
 import hashlib
@@ -28,8 +28,12 @@ from agents.index.qdrant_store import (
     embed,
     embed_batch,
     embedding_is_fallback,
+    probe_reranker_capability,
 )
-from agents.rag.retriever import get_retriever, reset_retriever_cache
+from agents.rag.retriever import (
+    get_retriever,
+    reset_retriever_cache,
+)
 from core.schema import Chunk, Document, IndexSnapshot
 from core.state import AgentDoctorState
 
@@ -65,6 +69,9 @@ class IndexTools:
     # 모델 로드 실패로 만든 해시 fallback 벡터를 청크에 표시하고, 복구 후 강제
     # 재임베딩할지 판단하는 데 쓴다. default 로 둬 기존 주입 코드 호환.
     embedding_is_fallback: Callable[..., bool] | None = None
+    # optional runtime 모델의 실제 실행 가능성을 Index 경계에서 확인한다.
+    # 테스트용 도구 묶음은 주입하지 않아도 기존 동작을 유지한다.
+    probe_reranker_capability: Callable[..., dict[str, Any]] | None = None
 
 
 # Ingest가 넘겨준 Document도 Index 경계에서 한 번 더 확인한다.
@@ -372,6 +379,7 @@ def _default_tools() -> IndexTools:
         build_graph_artifacts=build_graph_artifacts,
         embed_batch=embed_batch,
         embedding_is_fallback=embedding_is_fallback,
+        probe_reranker_capability=probe_reranker_capability,
     )
 
 
@@ -588,6 +596,69 @@ def _store_index_snapshot(
         state.index_cache = state.index_cache[-limit:]
 
 
+def _positive_int(
+    value: Any,
+    default: int,
+    maximum: int | None = None,
+) -> int:
+    """설정값을 양의 정수로 정규화하고 None·오타는 안전한 기본값으로 되돌린다."""
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return min(parsed, maximum) if maximum is not None else parsed
+
+
+def _refresh_runtime_capabilities(
+    state: AgentDoctorState,
+    config: dict,
+    tools: IndexTools,
+) -> None:
+    """Index가 소유한 optional runtime capability를 실패와 무관하게 갱신한다."""
+    policy = str(config.get("reranker_preflight", "eager")).strip().lower()
+    model_name = str(
+        config.get("reranker_model") or DEFAULT_RERANKER_MODEL
+    )
+    if policy == "disabled" or tools.probe_reranker_capability is None:
+        capability = {
+            "status": "unknown",
+            "model": model_name,
+            "checked_at": None,
+            "retryable": True,
+            "reason": (
+                "preflight_disabled"
+                if policy == "disabled"
+                else "probe_not_injected"
+            ),
+        }
+    else:
+        try:
+            capability = dict(
+                tools.probe_reranker_capability(
+                    model_name,
+                    smoke_test=policy != "dependency_only",
+                )
+            )
+        except Exception as exc:
+            # optional 모델 확인 때문에 Index 전체를 실패시키지 않는다.
+            print(f"[Index] reranker capability 확인 실패: {exc}")
+            capability = {
+                "status": "unavailable",
+                "model": model_name,
+                "checked_at": None,
+                "retryable": True,
+                "reason": "capability_probe_failed",
+            }
+    state.runtime_capabilities = {
+        **state.runtime_capabilities,
+        "reranker": capability,
+    }
+
+
 def _refresh_runtime_metadata(
     chunks: list[Chunk],
     config: dict,
@@ -604,8 +675,11 @@ def _refresh_runtime_metadata(
             "reranker_model": (
                 config.get("reranker_model") or DEFAULT_RERANKER_MODEL
             ),
-            "rerank_candidates": int(config.get("rerank_candidates", 20)),
-            "top_k": int(config.get("top_k", 5)),
+            "rerank_candidates": _positive_int(
+                config.get("rerank_candidates"),
+                20,
+            ),
+            "top_k": _positive_int(config.get("top_k"), 5),
             "qdrant_collection_name": config.get(
                 "qdrant_collection_name"
             ),
@@ -703,8 +777,11 @@ def _chunk_metadata(
         "reranker_model": (
             config.get("reranker_model") or DEFAULT_RERANKER_MODEL
         ),
-        "rerank_candidates": int(config.get("rerank_candidates", 20)),
-        "top_k": int(config.get("top_k", 5)),
+        "rerank_candidates": _positive_int(
+            config.get("rerank_candidates"),
+            20,
+        ),
+        "top_k": _positive_int(config.get("top_k"), 5),
         "qdrant_collection_name": config.get("qdrant_collection_name"),
         "index_cache_key": config.get("index_cache_key"),
     }
@@ -1046,15 +1123,22 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
         state.error = "문서가 없습니다. Ingest Agent 완료 여부를 확인하세요."
         return state
 
+    normalized_rerank_candidates = _positive_int(
+        state.index_config.get("rerank_candidates"),
+        20,
+    )
+    state.index_config["rerank_candidates"] = normalized_rerank_candidates
     config = {
         "chunk_size": state.index_config.get("chunk_size", 600),
         "chunk_overlap": state.index_config.get("chunk_overlap", 80),
         "embedding_model": state.index_config.get("embedding_model", DEFAULT_EMBEDDING_MODEL),
         "embedding_dimension": state.index_config.get("embedding_dimension", 1024),
+        "rerank_candidates": normalized_rerank_candidates,
         **state.index_config,
     }
     try:
         _validate_config(config)
+        _refresh_runtime_capabilities(state, config, tools)
         collection_slots = _collection_slots(state, config)
         target_key = _index_cache_key(state.documents, config)
         config["index_cache_key"] = target_key
@@ -1120,6 +1204,7 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
             **state.index_artifacts,
             "reindex_skipped": True,
             "index_cache_hit": False,
+            "runtime_capabilities": deepcopy(state.runtime_capabilities),
             "active_index_key": target_key,
             "qdrant_collection_name": collection_name,
             "qdrant_collection_namespace": config[
@@ -1145,6 +1230,7 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
         restored_artifacts = {
             **deepcopy(snapshot.index_artifacts),
             "index_cache_hit": True,
+            "runtime_capabilities": deepcopy(state.runtime_capabilities),
             "active_index_key": target_key,
             "qdrant_collection_name": snapshot.collection_name,
             "qdrant_collection_namespace": config[
@@ -1281,6 +1367,7 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
                 "embedding_dimension": vector_dim,
                 "failed_documents": failed_documents,
                 "index_cache_hit": False,
+                "runtime_capabilities": deepcopy(state.runtime_capabilities),
                 "active_index_key": target_key,
                 "qdrant_collection_name": collection_name,
                 "qdrant_collection_namespace": config[

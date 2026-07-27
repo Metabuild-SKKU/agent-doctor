@@ -236,6 +236,14 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                 "rerank_candidates": 20,
             },
             iteration=0, max_iterations=3,
+            runtime_capabilities={
+                "reranker": {
+                    "status": "verified",
+                    "model": "BAAI/bge-reranker-v2-m3",
+                    "retryable": False,
+                    "reason": None,
+                }
+            },
         )
         out = agent.run(state)
         self.assertEqual(out.status, "applied")
@@ -246,6 +254,93 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertEqual(
             out.optimization_history[-1].failure_labels,
             ["retrieval_low_rank"],
+        )
+
+    def test_enabled_reranker_widens_candidate_count(self):
+        """reranker가 이미 켜져 있으면 다음 처방이 후보 수를 실제 config에 반영한다."""
+        state = make_state(overall=30.0, label="retrieval_low_rank")
+        state.index_config.update(
+            {
+                "use_reranker": True,
+                "reranker_model": "BAAI/bge-reranker-v2-m3",
+                "rerank_candidates": 20,
+            }
+        )
+        state.runtime_capabilities = {
+            "reranker": {
+                "status": "verified",
+                "model": "BAAI/bge-reranker-v2-m3",
+                "retryable": False,
+                "reason": None,
+            }
+        }
+
+        out = agent.run(state)
+
+        self.assertEqual(out.status, "applied")
+        self.assertEqual(out.index_config["rerank_candidates"], 40)
+        self.assertFalse(out.reindex_required)
+        self.assertEqual(
+            out.optimization_history[-1].selected_prescription_id,
+            "widen_rerank_candidates",
+        )
+
+    def test_inapplicable_prescription_falls_through_to_next(self):
+        """issue #26: 미지원 처방이 최우선이어도 다음 actionable finding을 적용한다."""
+        def _finding(pid, label, **metadata):
+            return Finding(
+                finding_id=f"{pid}:{label}",
+                type="retrieval_failure",
+                severity="warning",
+                description=label,
+                label=label,
+                confirmed=True,
+                affected_probes=[pid],
+                metadata=metadata,
+            )
+
+        findings = (
+            [
+                _finding(
+                    f"lm{i}",
+                    "retrieval_lexical_mismatch",
+                )
+                for i in range(12)
+            ]
+            + [
+                _finding(f"mg{i}", "retrieval_missing_gold")
+                for i in range(3)
+            ]
+        )
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="r",
+                findings=findings,
+                overall_score=30.0,
+                ragas_scores={"context_recall": 0.4},
+                pass_threshold=False,
+            ),
+            index_config={
+                "top_k": 5,
+                "chunk_size": 512,
+                "chunk_overlap": 50,
+                "embedding_model": "BAAI/bge-m3",
+            },
+            iteration=0,
+            max_iterations=3,
+        )
+
+        out = agent.run(state)
+
+        self.assertIn(
+            ("retrieval_lexical_mismatch", "enable_hybrid"),
+            out.blacklist,
+        )
+        self.assertEqual(out.status, "applied")
+        self.assertEqual(out.index_config["top_k"], 10)
+        self.assertEqual(
+            out.optimization_history[-1].failure_labels,
+            ["retrieval_missing_gold"],
         )
 
     def test_always_returns_state_even_without_report(self):

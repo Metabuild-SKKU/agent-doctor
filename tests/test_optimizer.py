@@ -206,6 +206,58 @@ class OptimizerExecutionTest(unittest.TestCase):
         )
         self.assertFalse(result.needs_reindex)
 
+    def test_unavailable_runtime_reranker_is_skipped(self):
+        candidate = self.make_candidate(
+            prescription_id="enable_reranker",
+            search_space={"reranker.enabled": [True]},
+            reindex=False,
+        )
+        request = self.make_request(
+            baseline_config={"use_reranker": False},
+            candidates=[candidate],
+            metadata={
+                "runtime_capabilities": {
+                    "reranker": {
+                        "status": "unavailable",
+                        "reason": "model_load_failed",
+                        "retryable": True,
+                    }
+                }
+            },
+        )
+
+        result = run(request)
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(
+            result.metadata["error_code"],
+            "runtime_capability_unavailable",
+        )
+        self.assertEqual(
+            result.metadata["skipped_candidates"][0]["prescription_id"],
+            "enable_reranker",
+        )
+
+    def test_unknown_runtime_reranker_is_skipped(self):
+        candidate = self.make_candidate(
+            prescription_id="enable_reranker",
+            search_space={"reranker.enabled": [True]},
+            reindex=False,
+        )
+        request = self.make_request(
+            baseline_config={"use_reranker": False},
+            candidates=[candidate],
+            metadata={"runtime_capabilities": {}},
+        )
+
+        result = run(request)
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(
+            result.metadata["error_code"],
+            "runtime_capability_unavailable",
+        )
+
     def test_missing_search_space_is_skipped_without_symbolic_interpretation(self):
         request = self.make_request(
             candidates=[self.make_candidate(search_space={})],

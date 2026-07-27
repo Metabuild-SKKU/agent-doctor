@@ -64,8 +64,16 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "reindex": False,
                 "cost": None, # 숫자 튜닝 필요
             },
+            {
+                # 이미 reranker가 켜져 있는데도 low-rank가 남으면 더 넓은
+                # 1차 후보군을 재정렬해 gold가 reranker 입력에 들어올 기회를 늘린다.
+                "id": "widen_rerank_candidates",
+                "patch": {"reranker.candidate_count": "increase"},
+                "reindex": False,
+                "cost": None,
+            },
         ],
-        # NOTE: baseline reranker=off 전제. 리랭커를 켜는 것이 유일 처방.
+        # NOTE: baseline에서는 먼저 켜고, 문제가 남으면 후보 수를 한 단계 넓힌다.
     },
 
     "retrieval_lexical_mismatch": {

@@ -31,7 +31,7 @@ from agents.index.qdrant_store import (
     ensure_collection,
     hybrid_search,
     keyword_search,
-    rerank,
+    rerank_with_status,
     search as dense_search,
     upsert_chunks,
 )
@@ -286,7 +286,7 @@ class Retriever:
     """
     1) 빈 query -> 빈 결과
     2) top_k 결정
-    3) reranker 쓰면 후보를 top_k * 4개 가져옴
+    3) reranker 쓰면 설정된 rerank_candidates만큼 후보를 가져옴
     4) Qdrant client -> dense/hybrid 검색
     5) 실패 or 결과 X -> keyword fallback
     6) reranker = True면 재정렬
@@ -297,7 +297,16 @@ class Retriever:
             return {
                 "query": query,
                 "search_mode": "none",
+                "reranker_enabled": self.settings.use_reranker,
+                "reranker_attempted": False,
                 "reranked": False,
+                "reranker_status": (
+                    "not_attempted"
+                    if self.settings.use_reranker
+                    else "disabled"
+                ),
+                "reranker_fallback_used": False,
+                "search_fallback_used": False,
                 "fallback_used": False,
                 "results": [],
             }
@@ -354,24 +363,35 @@ class Retriever:
             fallback_used = True
             results = keyword_search(self.chunks, query, top_k=candidate_k)
 
+        reranker_attempted = bool(self.settings.use_reranker and results)
         reranked = False
-        if self.settings.use_reranker and results:
-            results = rerank(
+        reranker_status = (
+            "not_attempted"
+            if self.settings.use_reranker
+            else "disabled"
+        )
+        if reranker_attempted:
+            results, reranker_status = rerank_with_status(
                 query,
                 results,
                 model_name=self.settings.reranker_model,
                 top_k=requested_top_k,
             )
-            # 모델 로드/추론 실패 시 rerank()는 원래 순위를 돌려준다.
-            # retrieval_score는 CrossEncoder가 실제 점수를 만들었을 때만 붙는다.
-            reranked = any("retrieval_score" in item for item in results)
+            reranked = reranker_status == "applied"
         else:
             results = results[:requested_top_k]
 
         return {
             "query": query,
             "search_mode": mode,
+            "reranker_enabled": self.settings.use_reranker,
+            "reranker_attempted": reranker_attempted,
             "reranked": reranked,
+            "reranker_status": reranker_status,
+            "reranker_fallback_used": (
+                reranker_attempted and reranker_status != "applied"
+            ),
+            "search_fallback_used": fallback_used,
             "fallback_used": fallback_used,
             "results": results,
         }
