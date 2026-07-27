@@ -28,6 +28,9 @@ try:
 except ImportError:
     pass   # python-dotenv 없으면 셸/OS 환경변수로만 동작(graph.py 와 동일)
 
+from core.console import force_utf8_stdio
+force_utf8_stdio()   # cp949 콘솔에서 '—' 등이 UnicodeEncodeError 를 내지 않도록(로깅과 독립)
+
 from core.run_logger import setup_run_logging
 setup_run_logging(prefix="local_pipeline")  # 이후 모든 print 를 콘솔+로그파일에 동시 출력
 

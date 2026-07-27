@@ -5,7 +5,11 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from agents.ingest.preprocess import PAGE_SEPARATOR, preprocess_pages
+from agents.ingest.preprocess import (
+    PAGE_SEPARATOR,
+    _strip_page_furniture,
+    preprocess_pages,
+)
 
 
 class HeaderFooterStripTest(unittest.TestCase):
@@ -51,6 +55,102 @@ class HeaderFooterStripTest(unittest.TestCase):
         result = preprocess_pages(pages)
 
         self.assertEqual(result.content.count("제목"), 2)
+
+    def test_removes_dart_footer_at_page_edge(self):
+        # "전자공시시스템 dart.fss.or.kr Page 522" — 줄 전체가 페이지 번호가 아니라
+        # 앞에 텍스트가 붙어 있어 _PAGE_NUMBER_RE 로는 안 잡히는 모양.
+        pages = [
+            f"본문 {marker} 내용입니다. 충분히 긴 서술 문장.\n"
+            f"전자공시시스템 dart.fss.or.kr Page {500 + i}"
+            for i, marker in enumerate("가나다라마")
+        ]
+        result = preprocess_pages(pages)
+
+        self.assertNotIn("dart.fss.or.kr", result.content)
+        self.assertNotIn("Page 502", result.content)
+        self.assertIn("본문 다 내용입니다.", result.content)
+
+    def test_removes_dart_footer_displaced_from_edge(self):
+        # 표가 섞인 페이지에서는 푸터가 마지막 줄 자리를 벗어난다. 가장자리 고정
+        # 반복 판정만으로는 놓치므로, 페이지 마커가 붙은 반복 줄은 위치와 무관하게 지운다.
+        # 이 잔여물이 Probe 주제로 쓰여 "dart.fss.or.kr Page 522의 관계를 설명해줘" 같은
+        # 답할 수 없는 질문을 만들어냈다(실측).
+        bodies = [
+            "반도체 사업부는 메모리와 시스템 반도체로 구성되어 있습니다.",
+            "당사는 청주와 이천에 주요 생산기지를 운영하고 있습니다.",
+            "연구개발비는 전년 대비 증가하였으며 무형자산으로 일부 계상됩니다.",
+            "특수관계자와의 거래는 공정거래법 규정에 따라 공시하고 있습니다.",
+            "이사회는 사외이사 과반수로 구성되어 독립성을 확보하고 있습니다.",
+        ]
+        pages = [
+            f"{body}\n전자공시시스템 dart.fss.or.kr Page {500 + i}"
+            + ("\n| 항목 | 금액 |" if i % 2 else "")
+            for i, body in enumerate(bodies)
+        ]
+        result = preprocess_pages(pages)
+
+        self.assertNotIn("dart.fss.or.kr", result.content)
+        for body in bodies:
+            self.assertIn(body, result.content)
+
+    def test_non_footer_line_with_marker_survives_whole(self):
+        # 반복 푸터도 출처 잔여물도 아닌 줄은 꼬리 마커째 통째로 살린다.
+        # 문맥 없이(비반복) 마커를 자르면 "자세한 내용은 페이지 12" 같은 본문 상호참조가
+        # 손실된다는 리뷰 지적을 따른다 — "…본문입니다 Page 7" 도 같은 부류라 보존한다.
+        # (실전에서 걸러야 할 DART 푸터는 출처 잔여물이라 아래 test 들이 따로 지운다.)
+        pages = ["가나다라마 본문입니다 Page 7", "다른 페이지", "또 다른 페이지"]
+        result = preprocess_pages(pages)
+
+        self.assertIn("가나다라마 본문입니다 Page 7", result.content)
+
+    def test_source_only_footer_residue_is_removed(self):
+        # 마커를 뗀 나머지가 출처 표시뿐이면 줄째 버린다. 남겨두면 그 잔여물이
+        # 청크가 되어 Probe 주제로 뽑히고 "dart.fss.or.kr 의 관계를 설명해줘" 같은
+        # 답할 수 없는 질문이 만들어진다(실측: web_run_20260723_180513, 30개 중 3개).
+        pages = [
+            "본문 첫 페이지입니다.\n전자공시시스템 dart.fss.or.kr Page 522",
+            "본문 둘째 페이지입니다.\n전자공시시스템 dart.fss.or.kr Page 523",
+            "본문 셋째 페이지입니다.\n전자공시시스템 dart.fss.or.kr Page 524",
+        ]
+        result = preprocess_pages(pages)
+
+        self.assertNotIn("dart.fss.or.kr", result.content)
+        self.assertNotIn("전자공시시스템", result.content)
+        self.assertIn("본문 첫 페이지입니다", result.content)
+
+    def test_body_reference_to_a_page_survives_whole(self):
+        # 본문 한복판의 "…페이지 12" 는 목적 페이지를 가리키는 의미 있는 참조다.
+        # 무조건 꼬리를 자르면 "페이지 12" 가 사라져 정보가 손실된다(리뷰 지적).
+        # 가장자리(푸터 자리)도 반복 푸터도 아니면 줄을 통째로 살린다.
+        pages = [
+            "회사 개요를 먼저 설명합니다.\n자세한 내용은 페이지 12\n이후 내용이 이어집니다.",
+            "둘째 페이지 본문입니다.",
+            "셋째 페이지 본문입니다.",
+        ]
+        result = preprocess_pages(pages)
+
+        self.assertIn("자세한 내용은 페이지 12", result.content)
+
+    def test_strip_furniture_keeps_isolated_body_reference(self):
+        # 리뷰 지적 그대로: 문맥(repeated) 없는 격리 호출에서 본문 상호참조를 자르면 안 된다.
+        # _strip_page_furniture("자세한 내용은 페이지 12", set()) 가 본문 "자세한 내용은" 과
+        # 제거 목록 "페이지 12" 로 분리되던 버그. 이제 줄을 통째로 보존한다.
+        kept, removed = _strip_page_furniture("자세한 내용은 페이지 12", set())
+        self.assertEqual(kept, "자세한 내용은 페이지 12")
+        self.assertEqual(removed, [])
+
+    def test_body_line_citing_a_domain_survives(self):
+        # 도메인이 인용된 본문 문장은 출처 잔여물이 아니므로(문장이 길어 _SOURCE_ONLY_LINE_RE
+        # 에 안 걸림) 꼬리 마커째 통째로 살린다 — 출처 표시만 버리는 게 목적이지 본문 문장은
+        # 건드리지 않는다.
+        pages = [
+            "공시는 dart.fss.or.kr 에서 확인할 수 있습니다 Page 5",
+            "다른 페이지",
+            "또 다른 페이지",
+        ]
+        result = preprocess_pages(pages)
+
+        self.assertIn("공시는 dart.fss.or.kr 에서 확인할 수 있습니다", result.content)
 
     def test_repeated_body_text_is_not_stripped(self):
         # 가장자리가 아닌 본문 중간에 반복되는 문장은 살아남아야 한다.
