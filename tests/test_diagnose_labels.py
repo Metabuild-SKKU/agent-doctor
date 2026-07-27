@@ -438,6 +438,29 @@ class GenerationLabelTest(_DiagnoseTestBase):
         self.assertIn("heuristic", finding.metadata["reason"])
         self.assertEqual(judge.calls, [])
 
+    def test_aspect_critic_is_memoized_per_run_not_in_signals(self):
+        """판정은 answer 의존이라 record.aspect(실행 단위)에 memoize — signals 로 새면
+        index_config 가 그대로인 재실행에서 옛 답변의 판정을 재사용하게 된다."""
+        judge = _FakeAbstentionJudge(0)
+        self._with(ragas=judge)
+        rec = _record(answer_exists=False, ground_truth=None, answer="지어낸 답")
+        for _ in range(3):
+            diagnose.generation_no_abstention(rec)
+        self.assertEqual(judge.calls.count("abstention"), 1)         # 3회 호출 → LLM 1회
+        self.assertEqual(rec.aspect["abstention"], False)
+        self.assertNotIn("abstention_judged", rec.signals)           # signals 오염 없음
+
+    def test_aspect_critic_failure_is_not_retried(self):
+        """ragas_fn 이 {} 폴백이어도 같은 실행에선 재호출하지 않고 휴리스틱으로 간다."""
+        judge = _FakeAbstentionJudge(None)                           # {"abstention": None}
+        self._with(ragas=judge)
+        rec = _record(answer_exists=False, ground_truth=None, answer="지어낸 답")
+        for _ in range(3):
+            finding = diagnose.generation_no_abstention(rec)
+        self.assertEqual(judge.calls.count("abstention"), 1)
+        self.assertTrue(finding.confirmed)                           # 휴리스틱 폴백으로 확정
+        self.assertIn("heuristic", finding.metadata["reason"])
+
     def test_empty_answer_skips_llm_call(self):
         judge = _FakeAbstentionJudge(0)
         self._with(ragas=judge)

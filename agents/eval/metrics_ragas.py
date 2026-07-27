@@ -40,7 +40,7 @@ from typing import Any, Callable
 
 from agents.eval import llm_provider
 from agents.eval.types import Mode, EvalRecord
-from agents.eval.metrics_common import _ctx, _cache, active_mode
+from agents.eval.metrics_common import _ctx, active_mode
 from core.parallel import parallel_map
 
 
@@ -685,15 +685,18 @@ def _ensure_ragas(record: EvalRecord, track: str):
 
 
 def _abstention_judged(record: EvalRecord):
-    """AspectCritic 기권 판정. tier3, DEEP+ / 미측정·자원없음 None(→ 마커 휴리스틱 폴백)."""
+    """AspectCritic 기권 판정. tier3, DEEP+ / 미측정·자원없음 None(→ 마커 휴리스틱 폴백).
+
+    memoize 는 record.aspect(실행 단위) — signals(=diagnosis_cache)는 index_config·코퍼스
+    버전으로만 무효화돼서, 매 실행 새로 생성되는 generated_answer 에 물린 판정엔 못 쓴다.
+    실패({})도 None 으로 남겨 같은 실행에서 재호출을 막는다(ragas_done 과 같은 규약).
+    """
     if active_mode() < Mode.DEEP or _ctx.ragas_fn is None:
         return None
-
-    def compute():
+    if "abstention" not in record.aspect:
         verdict = (_ctx.ragas_fn(record, "abstention") or {}).get("abstention")
-        return None if verdict is None else bool(verdict)
-
-    return _cache(record, "abstention_judged", compute)
+        record.aspect["abstention"] = None if verdict is None else bool(verdict)
+    return record.aspect["abstention"]
 
 
 def _faith(record: EvalRecord):
