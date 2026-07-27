@@ -14,6 +14,8 @@ Agent Doctor v2 메인 LangGraph 그래프
 
 from __future__ import annotations
 
+import os
+
 # .env 를 '다른 모든 import 보다 먼저' 로드한다 — 아래 모듈들이 import 시점에 읽는 최상위 env
 # (metrics_ragas.EVAL_RELEVANCY_STRICTNESS, serve.AGENT_DOCTOR_API_* 등)까지 .env 값이 반영되도록.
 # override=True: 셸/OS 에 이미 있는 값보다 .env 를 우선(수정한 .env 가 항상 반영되게).
@@ -129,6 +131,11 @@ def run_pipeline(
     print("=" * 60)
     print("Agent Doctor v2 시작")
     print(f"  소스: {source_url} ({source_type})")
+    # LangSmith 트레이싱 상태 안내(선택). .env 의 LANGSMITH_TRACING 이 이미 로드돼 있으면
+    # langsmith SDK 가 자동으로 트레이스를 전송한다 — 여기선 켜졌는지만 알린다.
+    if os.getenv("LANGSMITH_TRACING", "").strip().lower() in ("1", "true", "yes"):
+        project = os.getenv("LANGSMITH_PROJECT", "(default)")
+        print(f"  LangSmith 트레이싱: ON (project={project})")
     print("=" * 60)
 
     final_state = graph.invoke(initial_state)
@@ -149,8 +156,6 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
-    import os
-
     # 소스는 env 로 받는다(run_local_pipeline.py 와 동일 계약: SOURCE_TYPE / SOURCE_URL).
     #   SOURCE_TYPE=file    SOURCE_URL=sample_docs/hr_policy.md python graph.py   # 기본
     #   SOURCE_TYPE=korquad SOURCE_URL=data/corpus.jsonl python graph.py

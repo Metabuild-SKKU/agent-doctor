@@ -2,6 +2,9 @@
 langgraph
 python-dotenv
 pyyaml
+langsmith               # 관측/트레이싱(선택). LANGSMITH_TRACING 미설정 시 완전 no-op —
+                        # 키 없이도 파이프라인이 폴백 동작한다는 규약을 유지한다.
+                        # (버전 미고정: 이미 다른 패키지가 transitive 로 끌고 오므로 충돌 방지)
 
 # Ingest Agent
 notion-client          # Notion connector

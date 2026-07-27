@@ -13,9 +13,25 @@ import os
 
 from core.llm_usage import log_usage
 
+# LangSmith 트레이싱(선택). @traceable 은 LANGSMITH_TRACING 이 꺼져 있으면 스스로 no-op 이라
+# 무조건 붙여도 켜지 않는 한 오버헤드가 없다. langsmith 패키지가 없을 때만 대비해
+# 아무것도 안 하는 데코레이터로 폴백한다 — "키/패키지 없어도 파이프라인이 폴백 동작"
+# 규약을 여기서도 지킨다.
+try:
+    from langsmith import traceable
+except ImportError:  # pragma: no cover - langsmith 미설치 환경 폴백
+    def traceable(*d_args, **d_kwargs):
+        def _decorator(fn):
+            return fn
+        # @traceable (인자 없이) / @traceable(run_type=...) 두 형태 모두 지원
+        if len(d_args) == 1 and callable(d_args[0]) and not d_kwargs:
+            return d_args[0]
+        return _decorator
+
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 
 
+@traceable(run_type="llm", name="openai_chat")
 def openai_chat(
     system: str,
     user: str,
@@ -52,6 +68,7 @@ def openai_chat(
     return resp.choices[0].message.content or ""
 
 
+@traceable(run_type="llm", name="gemini_chat")
 def gemini_chat(
     system: str,
     user: str,
@@ -77,6 +94,9 @@ def gemini_chat(
     return resp.text or ""
 
 
+# NOTE: embed 함수에는 @traceable 을 붙이지 않는다 — 반환값이 1024차원 float 벡터 × N개라
+# 트레이스 페이로드가 수 MB로 폭증해 전송이 끊기고(ConnectionAborted), 관측 가치도 낮다.
+# 1단계 목적(LLM 프롬프트/응답/토큰/비용)은 chat 트레이스만으로 충분하다.
 def openai_embed(texts: list[str], model: str, *, tag: str = "LLM") -> list[list[float]]:
     """OpenAI embeddings 1회 호출 → 벡터 리스트(입력 순서 유지)."""
     from openai import OpenAI
