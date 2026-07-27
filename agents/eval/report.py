@@ -20,10 +20,11 @@ graph.route_after_eval() 이 report.pass_threshold 로 Serve/Optimize 분기를 
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 
 from core.schema import DiagnosticReport
 from agents.eval.types import (
-    EvalRecord, RAGAS_WEIGHTS, PASS_SCORE_THRESHOLD, F1_PASS_THRESHOLD,
+    EvalRecord, RAGAS_WEIGHTS, PASS_SCORE_THRESHOLD,
     resolve_mode,
 )
 from agents.eval.scoring import compute_composite, format_composite
@@ -52,6 +53,7 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
 
     scores = {**rule_means}
     scores.update(ragas_means)                          # RAGAS 평균(있으면)
+    reranker_runtime = _reranker_runtime(records)
     # 브랜치 제거 → findings 유무로 결과 분포(진단됨/정상)
     n_diag = sum(1 for r in records if r.findings)
     scores["outcome_distribution"] = {"diagnosed": n_diag, "ok": len(records) - n_diag}
@@ -81,6 +83,7 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
         findings=findings,
         findings_summary=_findings_summary(records, mode),
         ragas_scores=scores,
+        runtime_summary={"reranker": reranker_runtime},
         oracle_accuracy=oracle_acc,
         overall_score=overall_val,
         composite_score=compute_composite(records).as_dict(),   # 종합점수(0~100) — scoring 모듈
@@ -141,6 +144,37 @@ def _degraded_correctness_count(records: list[EvalRecord]) -> int:
         if r.ragas.get("answer_correctness_degraded")
         or r.oracle_ragas.get("answer_correctness_degraded")
     )
+
+
+def _reranker_runtime(records: list[EvalRecord]) -> dict:
+    """이번 Eval에서 reranker가 실제 점수를 만든 횟수를 운영 신호로 집계한다."""
+    enabled_probes = sum(
+        1 for record in records
+        if record.retrieval_details.get("reranker_enabled")
+    )
+    attempted = sum(
+        1
+        for record in records
+        if record.retrieval_details.get("reranker_attempted")
+    )
+    applied = sum(
+        1
+        for record in records
+        if record.retrieval_details.get("reranker_status") == "applied"
+        or record.retrieval_details.get("reranked")
+    )
+    status_counts = Counter(
+        str(record.retrieval_details.get("reranker_status", "disabled"))
+        for record in records
+    )
+    return {
+        "enabled": enabled_probes > 0,
+        "enabled_probes": enabled_probes,
+        "attempted": attempted,
+        "applied": applied,
+        "failed": max(0, attempted - applied),
+        "status_counts": dict(status_counts),
+    }
 
 
 def _ragas_means(records: list[EvalRecord]) -> dict:

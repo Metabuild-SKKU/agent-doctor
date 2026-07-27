@@ -197,6 +197,9 @@ class EvalRecord:
     retrieved: list[dict] = field(default_factory=list)          # search() 원본 결과
     retrieved_context: list[str] = field(default_factory=list)   # 청크 텍스트만
     retrieved_chunk_ids: list[str] = field(default_factory=list)
+    # 검색 구현의 실행 상태. reranker가 실제로 호출·성공했는지 Eval 리포트에
+    # 집계해 Optimize가 "미실행"을 "효과 없음"으로 오판하지 않게 한다.
+    retrieval_details: dict = field(default_factory=dict)
     generated_answer: str = ""
     oracle_answer: Optional[str] = None                          # gold context로 생성한 답
     oracle_context: list[str] = field(default_factory=list)      # gold context 텍스트 (oracle 트랙 RAGAS용)

@@ -29,6 +29,7 @@ eval_probes.json
 # 결과물
 results/
 output/
+lib/
 uploads/
 # 테스트 코퍼스 실행 산출물 — 진단서 HTML 은 *.json 규칙에 안 걸려 따로 제외한다
 tests/corpus/out/
