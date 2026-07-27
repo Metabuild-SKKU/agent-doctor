@@ -368,6 +368,17 @@ def evaluate_aspect_critics(record: EvalRecord, judge) -> dict:
     }
 
 
+def evaluate_contradiction_oracle(record: EvalRecord, judge) -> dict:
+    """오라클 답변이 gold context 와 모순되나(AspectCritic). generation_hallucination 보강 증거.
+    real 트랙 contradiction(evaluate_aspect_critics)과는 답변·컨텍스트가 달라 별도 키를 쓴다."""
+    return {
+        "contradiction_oracle": _aspect_critic(
+            judge, _ASPECT_CONTRADICTION, record.probe.question,
+            record.oracle_answer or "", record.oracle_context or record.retrieved_context,
+        ),
+    }
+
+
 def evaluate_abstention(record: EvalRecord, judge) -> dict:
     """기권 여부 이진 판정(AspectCritic). generation_no_abstention 의 DEEP+ 경로."""
     return {
@@ -697,6 +708,17 @@ def _abstention_judged(record: EvalRecord):
         verdict = (_ctx.ragas_fn(record, "abstention") or {}).get("abstention")
         record.aspect["abstention"] = None if verdict is None else bool(verdict)
     return record.aspect["abstention"]
+
+
+def _contradiction_oracle(record: EvalRecord):
+    """오라클 답변↔gold context 모순 판정. tier3, DEEP+ / 오라클 답·자원 없으면 None.
+    memoize 는 _abstention_judged 와 같은 이유로 record.aspect(실행 단위)."""
+    if active_mode() < Mode.DEEP or _ctx.ragas_fn is None or record.oracle_answer is None:
+        return None
+    if "contradiction_oracle" not in record.aspect:
+        verdict = (_ctx.ragas_fn(record, "contradiction_oracle") or {}).get("contradiction_oracle")
+        record.aspect["contradiction_oracle"] = None if verdict is None else bool(verdict)
+    return record.aspect["contradiction_oracle"]
 
 
 def _faith(record: EvalRecord):

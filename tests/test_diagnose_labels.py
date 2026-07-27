@@ -95,6 +95,18 @@ class _FakeAbstentionJudge:
         return {"abstention": self.verdict} if track == "abstention" else {}
 
 
+class _FakeContradictionJudge:
+    """contradiction_oracle 트랙만 응답하는 가짜 ragas_fn(호출 횟수 기록)."""
+
+    def __init__(self, verdict):
+        self.verdict = verdict
+        self.calls = []
+
+    def __call__(self, record, track):
+        self.calls.append(track)
+        return {"contradiction_oracle": self.verdict} if track == "contradiction_oracle" else {}
+
+
 class _DiagnoseTestBase(unittest.TestCase):
     """기본은 tier2 자원 없는 STANDARD. 코퍼스에는 g_a·g_b 가 있다."""
 
@@ -482,6 +494,58 @@ class GenerationLabelTest(_DiagnoseTestBase):
         metrics_common.set_mode(Mode.STANDARD)      # DEEP 미만 → faith None
         rec = _record(oracle_f1=0.1, faith_oracle=0.1)
         self.assertIsNone(diagnose.generation_hallucination(rec))
+
+    def test_contradiction_confirms_hallucination_above_faith_threshold(self):
+        """faithfulness 는 비율이라 일부 문장만 모순이면 문턱을 넘긴다 — AspectCritic 이 그 구멍을 메운다."""
+        judge = _FakeContradictionJudge(1)
+        self._with(ragas=judge)
+        rec = _record(oracle_f1=0.1, faith_oracle=0.9, rel_oracle=0.9)
+        finding = diagnose.generation_hallucination(rec)
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+        self.assertIn("contradiction=True", finding.metadata["reason"])
+
+    def test_contradiction_not_called_when_faithfulness_already_confirms(self):
+        """faith 로 이미 확정이면 AspectCritic 호출 안 함(LLM 1회 절약)."""
+        judge = _FakeContradictionJudge(1)
+        self._with(ragas=judge)
+        rec = _record(oracle_f1=0.1, faith_oracle=RAGAS_FAITHFULNESS_MIN - 0.01)
+        self.assertTrue(diagnose.generation_hallucination(rec).confirmed)
+        self.assertEqual(judge.calls, [])
+
+    def test_contradiction_beats_bad_gold_answer_in_slot(self):
+        """모순이면 '정답셋이 틀렸다'가 반증됨 → bad_gold_answer 대신 hallucination."""
+        judge = _FakeContradictionJudge(1)
+        self._with(ragas=judge)
+        rec = _record(oracle_f1=0.1, faith_oracle=0.9, rel_oracle=0.9)
+        self.assertIsNone(diagnose.bad_gold_answer_oracle(rec))
+        picked = diagnose._pick(rec, diagnose._GENERATION_CAUSE)
+        self.assertEqual(picked.label, "generation_hallucination")
+
+    def test_contradiction_beats_hop_binding_for_multi_hop(self):
+        """모순이면 hop 사실 자체가 틀린 것 → 결합 오류가 아니라 환각."""
+        judge = _FakeContradictionJudge(1)
+        self._with(ragas=judge)
+        rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9)
+        self.assertIsNone(diagnose.generation_hop_binding_error(rec))
+        picked = diagnose._pick(rec, diagnose._GENERATION_CAUSE)
+        self.assertEqual(picked.label, "generation_hallucination")
+
+    def test_no_contradiction_keeps_bad_gold_answer(self):
+        """모순 없음(0) 이면 기존 판정 유지 — 게이트가 과잉 발동하지 않는다."""
+        judge = _FakeContradictionJudge(0)
+        self._with(ragas=judge)
+        rec = _record(oracle_f1=0.1, faith_oracle=0.9, rel_oracle=0.9)
+        self.assertIsNotNone(diagnose.bad_gold_answer_oracle(rec))
+        self.assertIsNone(diagnose.generation_hallucination(rec))
+
+    def test_contradiction_memoized_once(self):
+        judge = _FakeContradictionJudge(1)
+        self._with(ragas=judge)
+        rec = _record(oracle_f1=0.1, faith_oracle=0.9, rel_oracle=0.9)
+        for _ in range(3):
+            diagnose._pick(rec, diagnose._GENERATION_CAUSE)
+        self.assertEqual(judge.calls.count("contradiction_oracle"), 1)
 
     def test_hop_binding_confirmed_for_multi_hop_with_high_faithfulness(self):
         rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9)

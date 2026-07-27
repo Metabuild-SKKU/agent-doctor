@@ -43,7 +43,7 @@ from agents.eval.metrics_search import (           # tier2
     _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
 )
 from agents.eval.metrics_ragas import (            # tier3
-    _compute_ragas_real, _compute_ragas_oracle, _abstention_judged,
+    _compute_ragas_real, _compute_ragas_oracle, _abstention_judged, _contradiction_oracle,
     _faith, _faith_oracle, _rel, _rel_oracle,
 )
 
@@ -323,6 +323,11 @@ def _generation_failed(record: EvalRecord) -> bool:
     return False
 
 
+def _contradicts_oracle(record: EvalRecord) -> bool:
+    """오라클 답변이 gold context 와 모순(AspectCritic, DEEP+). 미측정은 False."""
+    return _contradiction_oracle(record) is True
+
+
 def generation_no_abstention(record: EvalRecord) -> Optional[Finding]:
     """
     무응답 기대(answer_exists=False) probe인데 기권하지 않고 답을 지어냄.
@@ -340,7 +345,9 @@ def generation_no_abstention(record: EvalRecord) -> Optional[Finding]:
 def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
     """
     정답 context가 있는데 지어냄.
-    확정: faithfulness 낮음.
+    확정: faithfulness 낮음, 또는 문턱 이상이어도 gold context 와 모순되는 문장 존재(AspectCritic).
+    faithfulness 는 비율이라 일부 문장만 모순이면 문턱을 넘길 수 있다 — 그 구멍을 모순 판정이 메운다.
+    (faithfulness 로 이미 확정되면 AspectCritic 을 부르지 않는다 — LLM 1회 절약.)
     """
     faith = _faith_oracle(record)
     if faith is not None and faith < RAGAS_FAITHFULNESS_MIN:
@@ -348,13 +355,21 @@ def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
             record, "generation_hallucination", "generation_failure", confirmed=True,
             reason=f"faithfulness={_v(faith)}<{RAGAS_FAITHFULNESS_MIN}, oracle_f1={_v(record.oracle_f1)}",
         )
+    if _contradicts_oracle(record):
+        return _finding(
+            record, "generation_hallucination", "generation_failure", confirmed=True,
+            reason=f"contradiction=True, faithfulness={_v(faith)}, oracle_f1={_v(record.oracle_f1)}",
+        )
     return None
 
 def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
     """
     멀티홉: 각 hop 사실은 맞으나 결합이 틀림(faithfulness 높음).
-    확정: faithfulness 높음.
+    확정: faithfulness 높음 + gold context 와 모순 없음.
+    모순이면 hop 사실 자체가 틀린 것이라 결합 오류가 아니다 → hallucination 에 양보.
     """
+    if _contradicts_oracle(record):
+        return None
     faith = _faith_oracle(record)
     if _is_multi_hop(record) and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN:
         return _finding(
@@ -465,7 +480,10 @@ def bad_gold_answer_oracle(record: EvalRecord) -> Optional[Finding]:
     bad_gold_answer 의 오라클 트랙 버전
     생성 실패 계열 (B 그룹에 함께 있음)
     라벨은 동일('bad_gold_answer').
+    gold context 와 모순되면 '답은 맞는데 정답셋이 틀렸다'가 반증된다 → hallucination 에 양보.
     """
+    if _contradicts_oracle(record):
+        return None
     faith, rel = _faith_oracle(record), _rel_oracle(record)
     if (faith is not None and faith >= RAGAS_FAITHFULNESS_MIN
         and rel is not None and rel >= RAGAS_RESPONSE_RELEVANCY_MIN):
