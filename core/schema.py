@@ -103,6 +103,9 @@ class DiagnosticReport:
     findings: list[Finding] = field(default_factory=list)
     findings_summary: dict = field(default_factory=dict)  # 확정/예비·라벨 집계(진단 모드 포함). Optimize 소비용
     ragas_scores: dict = field(default_factory=dict)
+    # Eval이 관측한 검색 runtime 실행 결과. 품질 지표와 섞지 않고 Optimize가
+    # 처방 실행 유효성을 판단할 때 사용한다.
+    runtime_summary: dict = field(default_factory=dict)
     oracle_accuracy: Optional[float] = None
     overall_score: Optional[float] = None
     composite_score: Optional[dict] = None  # 종합점수(0~100)+성분별 점수. agents/eval/scoring.py 산출

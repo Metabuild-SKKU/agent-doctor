@@ -27,10 +27,8 @@ from __future__ import annotations
 # manual      : config로 못 고침, 사람 개입 필요 (D그룹)
 
 # ── config 키 주의 ────────────────────────────────────────────────
-# 현재 state.index_config 에 존재하는 키: chunk_size, chunk_overlap,
-#   embedding_model, use_hybrid  (core/state.py 기준)
-# use_reranker, top_k, rerank_candidates 등은 index_config에 아직 없음
-#   → Index 팀과 합의해 키 추가 필요.  # TODO(index-합의)
+# 현재 state.index_config 에는 chunk/embedding/search 설정과 reranker 기본값이 있다.
+# Optimize 내부 patch는 flat key 대신 canonical path를 사용하고 config_mapper를 거친다.
 #
 # ⚠️ 더 큰 블로커: generation_config 필드 자체가 core/state.py의
 #   AgentDoctorState 에 아예 없음 (index_config만 존재). B그룹 처방은
@@ -62,12 +60,20 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "prescriptions": [
             {
                 "id": "enable_reranker",
-                "patch": {"use_reranker": True},
+                "patch": {"reranker.enabled": True},
                 "reindex": False,
                 "cost": None, # 숫자 튜닝 필요
             },
+            {
+                # 이미 reranker가 켜져 있는데도 low-rank가 남으면 더 넓은
+                # 1차 후보군을 재정렬해 gold가 reranker 입력에 들어올 기회를 늘린다.
+                "id": "widen_rerank_candidates",
+                "patch": {"reranker.candidate_count": "increase"},
+                "reindex": False,
+                "cost": None,
+            },
         ],
-        # NOTE: baseline reranker=off 전제. 리랭커를 켜는 것이 유일 처방.
+        # NOTE: baseline에서는 먼저 켜고, 문제가 남으면 후보 수를 한 단계 넓힌다.
     },
 
     "retrieval_lexical_mismatch": {
@@ -321,7 +327,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     "reranker_low_recall": {
         "group": "A",
         "assigned": "권성우",
-        "status": "draft",              # reranker 필드가 아직 index_config에 없음
+        "status": "draft",              # 이 튜닝 라벨과 threshold 소비 경로는 아직 없음
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 재랭커가 걸러낸 gold를 다시 살림
         "prescriptions": [
@@ -338,13 +344,13 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: reranker 관련 config 필드와 실제 reranker 단계가 아직 없음.
+        # BLOCKER: Eval 라벨 생성과 reranker_threshold 소비 경로가 아직 없음.
     },
 
     "reranker_low_precision": {
         "group": "A",
         "assigned": "권성우",
-        "status": "draft",              # reranker 필드가 아직 index_config에 없음
+        "status": "draft",              # 모델 교체 후보와 threshold 소비 경로는 아직 없음
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_precision"],  # 재랭커가 상위로 올린 무관 청크 억제
         "prescriptions": [
@@ -361,7 +367,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: reranker 관련 config 필드와 실제 reranker 단계가 아직 없음.
+        # BLOCKER: Eval 라벨 생성, 모델 교체 후보, threshold 소비 경로가 아직 없음.
     },
 
 

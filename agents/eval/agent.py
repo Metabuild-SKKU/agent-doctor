@@ -205,6 +205,19 @@ def _store_eval_snapshot(
     """성공한 Eval 결과만 저장하고 현재/직전 두 버전만 남긴다."""
     limit = _eval_cache_limit(state)
     state.active_eval_key = cache_key
+    if _reranker_evaluation_incomplete(state.report):
+        # 같은 config로 즉시 재시도할 때 실패 리포트가 cache hit로 복원되면
+        # CrossEncoder는 영원히 다시 실행되지 않는다. 진단 신호도 실패 검색 결과에
+        # 의존할 수 있으므로 함께 비워 다음 Eval이 처음부터 다시 측정하게 한다.
+        state.eval_cache = [
+            snapshot
+            for snapshot in state.eval_cache
+            if snapshot.cache_key != cache_key
+        ]
+        state.diagnosis_cache = {}
+        state.diagnosis_cache_version = ""
+        print("[Eval] reranker 실행 불완전 → 진단 캐시를 저장하지 않고 재시도 허용")
+        return
     if limit == 0 or state.report is None:
         if limit == 0:
             state.eval_cache = []
@@ -243,6 +256,21 @@ def _store_eval_snapshot(
         state.eval_cache = [pinned, current]
     else:
         state.eval_cache = state.eval_cache[-limit:]
+
+
+def _reranker_evaluation_incomplete(report) -> bool:
+    """reranker가 켜졌지만 대상 검색 중 하나라도 실제 재정렬되지 않았는지 확인한다."""
+    if report is None:
+        return False
+    runtime = (report.runtime_summary or {}).get("reranker")
+    if not isinstance(runtime, dict) or not runtime.get("enabled"):
+        return False
+    try:
+        attempted = int(runtime.get("attempted", 0))
+        applied = int(runtime.get("applied", 0))
+    except (TypeError, ValueError):
+        return True
+    return attempted == 0 or applied < attempted
 
 
 def _pending_baseline_eval_key(state: AgentDoctorState) -> str:
@@ -529,6 +557,14 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
     print(f"R: {_full_log_text(rec.generated_answer)}")
     print(f"검색: [{retrieved}]")
     print(f"골드: [{gold}]")
+    if rec.retrieval_details:
+        print(
+            "검색 실행: "
+            f"mode={rec.retrieval_details.get('search_mode', '-')}, "
+            "search_fallback="
+            f"{str(bool(rec.retrieval_details.get('search_fallback_used'))).lower()}, "
+            f"reranker={rec.retrieval_details.get('reranker_status', 'disabled')}"
+        )
     print(f"메트릭 결과: recall@k={recall}  f1={f1}  oracle_f1={oracle}")
     print(f"-Findings({len(rec.findings)})-")
     if rec.findings:
@@ -581,7 +617,22 @@ def _prepare_record(
     rec = EvalRecord(probe=probe, signals=sig_cache)
 
     # STEP2: 공통 RAG retriever로 검색
-    hits = retriever.search(probe.question, top_k=top_k)
+    detailed_search = getattr(retriever, "search_with_details", None)
+    retrieval = (
+        detailed_search(probe.question, top_k=top_k)
+        if callable(detailed_search)
+        else None
+    )
+    if isinstance(retrieval, dict) and isinstance(retrieval.get("results"), list):
+        hits = list(retrieval["results"])
+        rec.retrieval_details = {
+            key: value
+            for key, value in retrieval.items()
+            if key != "results"
+        }
+    else:
+        # 테스트·외부 주입 retriever가 기존 search() 계약만 구현해도 동작을 유지한다.
+        hits = retriever.search(probe.question, top_k=top_k)
     rec.retrieved = hits
     rec.retrieved_context = [h.get("text", "") for h in hits]
     rec.retrieved_chunk_ids = [h.get("chunk_id", "") for h in hits]
