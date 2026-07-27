@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from agents.index.corpus_visualization import build_corpus_visualization_artifacts
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
     DEFAULT_EMBEDDING_MODEL,
@@ -1250,7 +1251,7 @@ def _run(
             except Exception as exc:
                 doc_id = str(getattr(document, "doc_id", "<unknown>"))
                 failed_documents.append({"doc_id": doc_id, "error": str(exc)})
-                print(f"[Index] 문서 처리 실패(건너뜀): {doc_id} — {exc}")
+                print(f"[Index] 문서 처리 실패(건너뜀): {doc_id} - {exc}")
                 continue
 
             # 성공한 문서만 공유 상태에 반영한다. 실패 문서의 doc_id가 seen_doc_ids에
@@ -1274,7 +1275,7 @@ def _run(
 
         if failed_documents:
             print(
-                f"[Index] 경고: 문서 {len(failed_documents)}개 처리 실패 — "
+                f"[Index] 경고: 문서 {len(failed_documents)}개 처리 실패 - "
                 f"나머지 {len(seen_doc_ids)}개는 정상 인덱싱 "
                 f"(상세: index_artifacts['failed_documents'])"
             )
@@ -1304,6 +1305,16 @@ def _run(
                 state.index_artifacts = tools.build_graph_artifacts(all_chunks, config)
         else:
             state.index_artifacts = {}
+
+        if config.get("corpus_visualization_enabled", True):
+            try:
+                state.index_artifacts["corpus_visualization"] = (
+                    build_corpus_visualization_artifacts(all_chunks, config)
+                )
+            except Exception as exc:
+                state.index_artifacts["corpus_visualization"] = {"error": str(exc)}
+                print(f"[Index] corpus visualization skipped: {exc}")
+
         state.index_artifacts.update(
             {
                 "documents": len(seen_documents),
