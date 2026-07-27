@@ -84,34 +84,30 @@ def search_docs(query: str) -> str:
 
 
 @mcp.tool()
-def ask_docs(question: str) -> str:
-    """Answer a question using the indexed documents."""
+def ask_docs(query: str) -> str:
+    """문서 검색 결과를 근거로 답변을 생성합니다."""
     try:
-        resp = requests.get(
-            f"{API_URL}/answer",
-            params={"query": question, "top_k": 3},
-            timeout=30,
-        )
+        resp = requests.get(f"{API_URL}/answer", params={"query": query, "top_k": 5}, timeout=30)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        return f"Answer generation failed: {e}"
+        return f"답변 생성 실패: {e}"
 
     answer = data.get("answer", "")
     citations = data.get("citations", [])
     if not answer:
-        return "No answer could be generated from the indexed documents."
+        return "관련 내용을 찾을 수 없습니다."
 
-    sources = []
-    for citation in citations:
-        title = citation.get("title") or citation.get("doc_id", "")
+    source_lines = []
+    for citation in citations[:3]:
+        title = citation.get("title") or citation.get("doc_id") or ""
         chunk_id = citation.get("chunk_id", "")
         if title or chunk_id:
-            sources.append(f"- {title} ({chunk_id})")
+            source_lines.append(f"- {title} ({chunk_id})")
 
-    if sources:
-        return answer + "\n\nSources:\n" + "\n".join(sources)
-    return answer
+    if not source_lines:
+        return answer
+    return answer + "\n\n근거:\n" + "\n".join(source_lines)
 
 
 @mcp.tool()
