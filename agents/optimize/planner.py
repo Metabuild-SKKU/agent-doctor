@@ -45,6 +45,10 @@ from core.schema import Finding
 from agents.optimize import rules
 from agents.optimize import gate
 from agents.optimize.config_mapper import canonicalize_path, get_current_value
+from agents.optimize.evidence_window import (
+    DEFAULT_EVIDENCE_WINDOW_POLICY,
+    build_evidence_windows,
+)
 from agents.optimize.schemas import (
     ConfigPatch,
     OptimizationRequest,
@@ -507,6 +511,9 @@ def _chunk_candidate_policy(
     path_fractions = policy.get("path_fractions")
     candidate_count = policy.get("candidate_count")
     min_span_count = policy.get("min_span_count")
+    max_step_ratio = policy.get("max_step_ratio", 0.25)
+    min_chunk_size = policy.get("min_chunk_size", 200)
+    max_chunk_size = policy.get("max_chunk_size", 1500)
     valid = (
         isinstance(target_quantile, (int, float))
         and not isinstance(target_quantile, bool)
@@ -531,6 +538,15 @@ def _chunk_candidate_policy(
         and isinstance(min_span_count, int)
         and not isinstance(min_span_count, bool)
         and min_span_count > 0
+        and isinstance(max_step_ratio, (int, float))
+        and not isinstance(max_step_ratio, bool)
+        and 0 < max_step_ratio <= 0.50
+        and isinstance(min_chunk_size, int)
+        and not isinstance(min_chunk_size, bool)
+        and min_chunk_size > 0
+        and isinstance(max_chunk_size, int)
+        and not isinstance(max_chunk_size, bool)
+        and max_chunk_size >= min_chunk_size
     )
     if not valid:
         return None, "chunk_candidate_policy 값이 유효하지 않음"
@@ -541,7 +557,46 @@ def _chunk_candidate_policy(
         "path_fractions": [float(value) for value in path_fractions],
         "candidate_count": candidate_count,
         "min_span_count": min_span_count,
+        "max_step_ratio": float(max_step_ratio),
+        "min_chunk_size": min_chunk_size,
+        "max_chunk_size": max_chunk_size,
     }, None
+
+
+def _evidence_windows(
+    state: AgentDoctorState,
+    findings: list[Finding],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """영향받은 probe의 gold span을 구조 기반 evidence window로 확장한다."""
+
+    spans = _valid_gold_spans(state, findings)
+    if not spans:
+        return [], {"status": "missing_gold_spans"}
+    configured_policy = state.index_config.get("evidence_window_policy")
+    policy = {
+        **DEFAULT_EVIDENCE_WINDOW_POLICY,
+        **(configured_policy if isinstance(configured_policy, dict) else {}),
+    }
+    try:
+        windows = build_evidence_windows(state.documents, spans, policy)
+    except ValueError as exc:
+        return [], {
+            "status": "invalid_evidence_window_policy",
+            "reason": str(exc),
+        }
+    if not windows:
+        return [], {"status": "missing_evidence_windows"}
+    kinds: dict[str, int] = {}
+    for window in windows:
+        kind = str(window.get("kind", "unknown"))
+        kinds[kind] = kinds.get(kind, 0) + 1
+    return windows, {
+        "status": "grounded",
+        "source": "structural_evidence_windows",
+        "gold_span_count": len(spans),
+        "evidence_window_count": len(windows),
+        "evidence_window_kinds": kinds,
+    }
 
 
 def _chunk_overlap_candidate_policy(
@@ -607,11 +662,11 @@ def _ground_chunk_size_candidates(
     state: AgentDoctorState,
     direction: Any,
 ) -> tuple[list[int] | None, dict[str, Any]]:
-    """gold span 길이 P85와 현재값 사이에서 chunk_size 후보를 만든다."""
+    """구조 기반 evidence window 길이와 현재값 사이에서 후보 범위를 만든다."""
 
-    spans = _valid_gold_spans(state, findings)
-    if not spans:
-        return None, {"status": "missing_gold_spans"}
+    windows, evidence_metadata = _evidence_windows(state, findings)
+    if not windows:
+        return None, evidence_metadata or {"status": "missing_evidence_windows"}
 
     policy, error = _chunk_candidate_policy(state)
     if policy is None:
@@ -623,11 +678,11 @@ def _ground_chunk_size_candidates(
     if direction not in {"increase", "decrease"}:
         return None, {"status": "unsupported_direction", "direction": direction}
 
-    lengths = [span["end"] - span["start"] for span in spans]
+    lengths = [window["end"] - window["start"] for window in windows]
     if len(lengths) < policy["min_span_count"]:
         return None, {
             "status": "insufficient_spans",
-            "source": "gold_spans",
+            "source": "structural_evidence_windows",
             "span_count": len(lengths),
             "min_span_count": policy["min_span_count"],
         }
@@ -637,12 +692,29 @@ def _ground_chunk_size_candidates(
     target_span = _percentile_nearest_rank(lengths, policy["target_quantile"])
     raw_target = target_span * (1 + policy["margin_ratio"])
     step = policy["rounding_step"]
-    target = max(step, int(math.ceil(raw_target / step) * step))
+    evidence_target = max(step, int(math.ceil(raw_target / step) * step))
     current_int = int(round(current))
+    lower_limit = max(
+        policy["min_chunk_size"],
+        int(math.ceil(
+            current_int * (1 - policy["max_step_ratio"]) / step
+        ) * step),
+    )
+    upper_limit = min(
+        policy["max_chunk_size"],
+        int(math.floor(
+            current_int * (1 + policy["max_step_ratio"]) / step
+        ) * step),
+    )
+    target = (
+        max(evidence_target, lower_limit)
+        if direction == "decrease"
+        else min(evidence_target, upper_limit)
+    )
 
     metadata: dict[str, Any] = {
         "status": "grounded",
-        "source": "gold_spans",
+        "source": "structural_evidence_windows",
         "span_count": len(lengths),
         "min": min(lengths),
         "p50": p50,
@@ -652,11 +724,16 @@ def _ground_chunk_size_candidates(
         "target_quantile": policy["target_quantile"],
         "margin_ratio": policy["margin_ratio"],
         "current_chunk_size": current_int,
+        "evidence_target_chunk_size": evidence_target,
         "target_chunk_size": target,
+        "candidate_lower_limit": lower_limit,
+        "candidate_upper_limit": upper_limit,
+        "max_step_ratio": policy["max_step_ratio"],
         "direction": direction,
+        **(evidence_metadata or {}),
     }
-    if (direction == "decrease" and target >= current_int) or (
-        direction == "increase" and target <= current_int
+    if (direction == "decrease" and evidence_target >= current_int) or (
+        direction == "increase" and evidence_target <= current_int
     ):
         metadata["status"] = "direction_conflict"
         return None, metadata
@@ -871,6 +948,9 @@ def _ground_chunk_overlap_candidates(
 #   리랭커(rules.py enable_reranker)다. top_k 증가는 노이즈(too_long/lost_in_middle)를
 #   키우는 열등한 차선책이라 rules.py 도 top_k 를 처방하지 않는다.
 _GROUNDED_VALUES: dict[str, dict[str, Any]] = {
+    "retrieval_semantic_mismatch": {
+        "chunk_size": _ground_chunk_size_candidates,
+    },
     "retrieval_incomplete_enumeration": {"top_k": _ground_top_k_from_gold},
     "retrieval_missing_gold": {
         "top_k": _ground_top_k_from_gold,
@@ -1013,9 +1093,12 @@ def _finding_search_space(
             ]
         label = findings[0].label if findings else ""
         blocks_symbolic_fallback = (
-            label == "chunking_context_mismatch"
-            and path == "chunker.chunk_overlap"
+            path in {"chunker.chunk_size", "chunker.chunk_overlap"}
             and isinstance(grounding_metadata, dict)
+            and grounding_metadata.get("source") in {
+                "structural_evidence_windows",
+                "gold_span_boundary_geometry",
+            }
             and grounding_metadata.get("status") != "grounded"
         )
         if values:
@@ -1133,7 +1216,11 @@ def _build_request(
         "chunker.chunk_size",
         "chunker.chunk_overlap",
     }:
-        metadata["chunk_precheck_context"] = _chunk_precheck_context(state, findings)
+        metadata["chunk_precheck_context"] = _chunk_precheck_context(
+            state,
+            findings,
+            path=_space_path(selected_space),
+        )
     return OptimizationRequest(
         request_id=str(uuid.uuid4()),
         iteration=state.iteration,
@@ -1186,13 +1273,22 @@ def _report_metrics(state: AgentDoctorState) -> dict[str, Any]:
 def _chunk_precheck_context(
     state: AgentDoctorState,
     findings: list[Finding],
+    *,
+    path: str | None,
 ) -> dict[str, Any]:
-    """Chunk 사전검증에 필요한 원문과 이미 준비된 gold span만 전달한다."""
+    """Chunk 사전검증에 원문과 축에 맞는 evidence 좌표를 전달한다."""
 
     gold_spans = _valid_gold_spans(state, findings)
+    measured_spans = gold_spans
+    span_source = "gold_spans"
+    if path == "chunker.chunk_size":
+        evidence_windows, _metadata = _evidence_windows(state, findings)
+        if evidence_windows:
+            measured_spans = evidence_windows
+            span_source = "evidence_windows"
     affected_doc_ids = {
         span.get("doc_id")
-        for span in gold_spans
+        for span in measured_spans
         if isinstance(span.get("doc_id"), str)
     }
     documents = [
@@ -1202,7 +1298,10 @@ def _chunk_precheck_context(
     ]
     return {
         "documents": documents,
-        "gold_spans": gold_spans,
+        # prescreener의 기존 계약 이름을 유지하되 chunk_size 축에서는
+        # gold 문자열이 아니라 확장된 evidence window 좌표를 전달한다.
+        "gold_spans": measured_spans,
+        "span_source": span_source,
         "chunk_strategy": state.index_config.get(
             "chunk_strategy",
             state.index_config.get("chunk_stage", "markdown_recursive"),
