@@ -514,12 +514,26 @@ class GenerationLabelTest(_DiagnoseTestBase):
             self.assertEqual(finding.label, label)
             self.assertTrue(finding.confirmed)
 
-    def test_reasoning_failure_silent_for_hop_binding_and_other(self):
-        """hop_binding·other 는 전용 경로가 있어 이 함수가 라벨을 내지 않는다."""
-        for mode in ("hop_binding", "other"):
-            self._with(ragas=_FakeReasoningJudge(mode))
-            rec = _record(oracle_f1=0.1, faith_oracle=0.9, rel_oracle=0.9)
-            self.assertIsNone(diagnose.generation_reasoning_failure(rec), mode)
+    def test_hop_binding_mode_maps_to_its_label_for_multi_hop(self):
+        self._with(ragas=_FakeReasoningJudge("hop_binding"))
+        rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, rel_oracle=0.9)
+        finding = diagnose.generation_reasoning_failure(rec)
+        self.assertEqual(finding.label, "generation_hop_binding_error")
+        self.assertTrue(finding.confirmed)
+
+    def test_single_hop_binding_absorbed_into_misinterpretation(self):
+        """단일홉엔 엮을 hop 이 없다 — 롤업으로 버리지 않고 관계 오독으로 흡수한다."""
+        self._with(ragas=_FakeReasoningJudge("hop_binding"))
+        rec = _record(oracle_f1=0.1, qtype=None, faith_oracle=0.9, rel_oracle=0.9)
+        finding = diagnose.generation_reasoning_failure(rec)
+        self.assertEqual(finding.label, "generation_misinterpretation")
+        self.assertTrue(finding.confirmed)
+
+    def test_reasoning_failure_silent_for_other(self):
+        """'other'는 구체적 원인 지목이 아니라 롤업 몫."""
+        self._with(ragas=_FakeReasoningJudge("other"))
+        rec = _record(oracle_f1=0.1, faith_oracle=0.9, rel_oracle=0.9)
+        self.assertIsNone(diagnose.generation_reasoning_failure(rec))
 
     def test_classifier_not_called_when_faithfulness_already_confirms(self):
         """faith 낮으면 hallucination 이 결정 — 분류기 호출 안 함(LLM 1회 절약)."""
@@ -539,20 +553,19 @@ class GenerationLabelTest(_DiagnoseTestBase):
         self.assertEqual(picked.label, "generation_contradiction")
         self.assertEqual(picked.severity, "critical")
 
-    def test_classifier_overrides_hop_binding_for_multi_hop(self):
-        """멀티홉이어도 분류기가 다른 모드를 지목하면 결합 오류가 아니다."""
+    def test_classifier_overrides_count_based_hop_binding(self):
+        """카운트상 결합 오류 조건이어도 분류기 지목이 우선한다(폴백은 미측정 때만)."""
         self._with(ragas=_FakeReasoningJudge("numerical_error"))
         rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9,
                       counts_oracle=(3, 2, 0))            # 카운트상으론 hop_binding 조건
-        self.assertIsNone(diagnose.generation_hop_binding_error(rec))
-        picked = diagnose._pick(rec, diagnose._GENERATION_CAUSE)
-        self.assertEqual(picked.label, "generation_numerical_error")
+        self.assertEqual(diagnose.generation_reasoning_failure(rec).label,
+                         "generation_numerical_error")
 
     def test_classifier_confirms_hop_binding_without_counts(self):
         """분류기가 hop_binding 을 지목하면 카운트 없이도 확정된다."""
         self._with(ragas=_FakeReasoningJudge("hop_binding"))
         rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9)
-        finding = diagnose.generation_hop_binding_error(rec)
+        finding = diagnose.generation_reasoning_failure(rec)
         self.assertTrue(finding.confirmed)
         self.assertIn("reasoning_mode=hop_binding", finding.metadata["reason"])
 
@@ -581,23 +594,23 @@ class GenerationLabelTest(_DiagnoseTestBase):
         """근거가 약하면(faith<문턱) 결합 오류가 아니라 hallucination 영역."""
         rec = _record(oracle_f1=0.1, qtype="bridge",
                       faith_oracle=RAGAS_FAITHFULNESS_MIN - 0.01, counts_oracle=(3, 2, 0))
-        self.assertIsNone(diagnose.generation_hop_binding_error(rec))
+        self.assertIsNone(diagnose.generation_reasoning_failure(rec))
 
     def test_hop_binding_silent_for_single_hop(self):
         rec = _record(oracle_f1=0.1, qtype=None, faith_oracle=0.9, counts_oracle=(3, 2, 0))
-        self.assertIsNone(diagnose.generation_hop_binding_error(rec))
+        self.assertIsNone(diagnose.generation_reasoning_failure(rec))
 
     def test_hop_binding_confirmed_when_nothing_missing_but_unsupported_claim(self):
         """FN=0(요소 다 있음) + FP>0(근거 없는 주장) = 잘못 엮음 → 결합 오류."""
         rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, counts_oracle=(3, 2, 0))
-        finding = diagnose.generation_hop_binding_error(rec)
+        finding = diagnose.generation_reasoning_failure(rec)
         self.assertTrue(finding.confirmed)
         self.assertIn("missing=0", finding.metadata["reason"])
 
     def test_hop_binding_yields_to_partial_answer_when_elements_missing(self):
         """FN>0 은 요소 누락 → 결합 오류가 아니라 부분 답변. 카운트로 배타(순서 비의존)."""
         rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, counts_oracle=(2, 1, 2))
-        self.assertIsNone(diagnose.generation_hop_binding_error(rec))
+        self.assertIsNone(diagnose.generation_reasoning_failure(rec))
         picked = diagnose._pick(rec, diagnose._GENERATION_CAUSE)
         self.assertEqual(picked.label, "generation_partial_answer")   # 멀티홉도 이제 도달 가능
         self.assertTrue(picked.confirmed)
@@ -605,12 +618,12 @@ class GenerationLabelTest(_DiagnoseTestBase):
     def test_hop_binding_silent_when_no_unsupported_claim(self):
         """FN=0·FP=0 이면 잘못 엮었다는 근거가 없다 → 침묵."""
         rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, counts_oracle=(3, 0, 0))
-        self.assertIsNone(diagnose.generation_hop_binding_error(rec))
+        self.assertIsNone(diagnose.generation_reasoning_failure(rec))
 
     def test_hop_binding_preliminary_when_counts_unmeasured(self):
         """카운트 없으면 faithfulness 만으론 '결합'을 특정 못 한다 → 예비."""
         rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=1.0, rel_oracle=0.0)
-        finding = diagnose.generation_hop_binding_error(rec)
+        finding = diagnose.generation_reasoning_failure(rec)
         self.assertIsNotNone(finding)
         self.assertFalse(finding.confirmed)
 

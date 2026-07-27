@@ -355,18 +355,24 @@ def _reasoning_mode(record: EvalRecord) -> Optional[str]:
 
     '근거는 있는데 답이 틀린'(faithfulness 문턱 이상) 경우에만 부른다 — 근거 자체가 없으면
     hallucination 이 이미 결정하므로 분류기를 부를 이유가 없다(LLM 1회 절약).
+    단일홉의 hop_binding 은 misinterpretation 으로 흡수한다 — 엮을 hop 이 없으니 결합 오류가
+    성립하지 않고, 실제로는 관계·조건을 잘못 읽은 것이다(안 그러면 롤업으로 버려진다).
     """
     faith = _faith_oracle(record)
     if faith is None or faith < RAGAS_FAITHFULNESS_MIN:
         return None
-    return _reasoning_mode_oracle(record)
+    mode = _reasoning_mode_oracle(record)
+    if mode == "hop_binding" and not _is_multi_hop(record):
+        return "misinterpretation"
+    return mode
 
 
-# 분류기가 지목하는 모드 → 라벨. hop_binding·other 는 여기 없다(각자 전용 경로).
+# 분류기가 지목하는 모드 → 라벨. 'other'만 여기 없다(구체적 원인 지목이 아님).
 _REASONING_LABELS = {
     "contradiction": "generation_contradiction",
     "numerical_error": "generation_numerical_error",
     "misinterpretation": "generation_misinterpretation",
+    "hop_binding": "generation_hop_binding_error",
 }
 
 
@@ -422,65 +428,54 @@ def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
 
 def generation_reasoning_failure(record: EvalRecord) -> Optional[Finding]:
     """
-    근거는 있으나 답이 틀린 세 원인(모순/수치/해석)을 LLM 단일분류 1회로 가른다.
-    확정: 분류기가 셋 중 하나를 지목(tier3).
+    근거는 있으나 답이 틀린 네 원인(모순/수치/해석/결합)을 LLM 단일분류 1회로 가른다.
+    확정: 분류기가 넷 중 하나를 지목(tier3, DEEP+ 전용).
+    분류기 미측정이면 결합 오류만 카운트로 폴백(_hop_binding_from_counts) — 나머지 셋은
+    카운트로 구분이 안 된다. 'other'는 구체적 지목이 아니라 침묵(롤업 몫).
 
-    함수 하나에 라벨 셋을 두는 건 '라벨마다 함수 1개' 원칙의 의도적 예외다 — 측정이 하나뿐이고
-    분류기가 한 값만 돌려줘 셋이 구조적으로 배타라, 함수를 쪼개면 순서에 의미가 없는 항목만
-    셋으로 늘고 '독립 신호 3개'라는 잘못된 인상을 준다.
+    함수 하나에 라벨 넷을 두는 건 '라벨마다 함수 1개' 원칙의 의도적 예외다 — 측정이 하나뿐이고
+    분류기가 한 값만 돌려줘 넷이 구조적으로 배타라, 함수를 쪼개면 순서에 의미가 없는 항목만
+    늘고 '독립 신호 여러 개'라는 잘못된 인상을 준다.
     """
-    label = _REASONING_LABELS.get(_reasoning_mode(record))
+    faith = _faith_oracle(record)
+    if faith is None or faith < RAGAS_FAITHFULNESS_MIN:
+        return None                      # 근거 자체가 없음 → hallucination 영역
+    mode = _reasoning_mode(record)
+    if mode is None:
+        return _hop_binding_from_counts(record, faith)
+    label = _REASONING_LABELS.get(mode)
     if label is None:
-        return None
+        return None                      # 'other'
     return _finding(
         record, label, "generation_failure", confirmed=True,
-        reason=f"reasoning_mode={_reasoning_mode(record)}, "
-               f"faithfulness={_v(_faith_oracle(record))}(근거는 있음), "
-               f"oracle_f1={_v(record.oracle_f1)}",
+        reason=f"reasoning_mode={mode}, faithfulness={_v(faith)}(근거는 있음), "
+               f"qtype={record.probe.qtype}, oracle_f1={_v(record.oracle_f1)}",
     )
 
-def generation_hop_binding_error(record: EvalRecord) -> Optional[Finding]:
-    """
-    멀티홉: 각 hop 사실은 맞으나 결합이 틀림.
-    확정: 멀티홉 + faithfulness 높음 + (분류기가 hop_binding 지목, 또는 미측정 시 FN=0 & FP>0).
+def _hop_binding_from_counts(record: EvalRecord, faith) -> Optional[Finding]:
+    """분류기 미측정 시의 안전망 — 카운트로 결합 오류만 판정한다.
 
-    분류기가 다른 모드를 지목하면 양보한다. 미측정이면 카운트로 판정 — FN=0 이 '결합' 신호다
-    (필요한 gold 요소가 다 있는데 답이 틀렸으면 남는 설명은 잘못 엮었다는 것뿐이고, 그 주장이 FP).
-    FN>0 이면 요소 누락이라 partial_answer 영역 — 순서에 안 기대는 배타.
-    멀티홉 전제는 싼 결정적 필터라 분류기보다 앞에 둔다(단일홉이면 호출 자체를 생략).
+    FN=0 이 '결합' 신호다(필요한 gold 요소가 다 있는데 답이 틀렸으면 남는 설명은 잘못 엮었다는
+    것뿐이고, 그 주장이 FP 로 잡힌다). 나머지 셋(모순/수치/해석)은 카운트로 구분할 수 없다.
     """
     if not _is_multi_hop(record):
         return None
-    faith = _faith_oracle(record)
-    if faith is None or faith < RAGAS_FAITHFULNESS_MIN:
-        return None                      # 근거 자체가 약함 → hallucination 영역
-
-    mode = _reasoning_mode(record)
-    if mode == "hop_binding":
-        return _finding(
-            record, "generation_hop_binding_error", "generation_failure", confirmed=True,
-            reason=f"reasoning_mode=hop_binding, faithfulness={_v(faith)}, "
-                   f"qtype={record.probe.qtype}, oracle_f1={_v(record.oracle_f1)}",
-        )
-    if mode is not None:
-        return None                      # 분류기가 다른 원인 지목 → 양보
-
     counts = _correctness_counts_oracle(record)
     if counts is None:
         return _finding(
             record, "generation_hop_binding_error", "generation_failure", confirmed=False,
-            reason=f"correctness_counts=-, faithfulness={_v(faith)}>={RAGAS_FAITHFULNESS_MIN}, "
+            reason=f"reasoning_mode=-, correctness_counts=-, faithfulness={_v(faith)}, "
                    f"qtype={record.probe.qtype}, oracle_f1={_v(record.oracle_f1)}",
         )
     tp, fp, fn = counts
     if fn == 0 and fp > 0:
         return _finding(
             record, "generation_hop_binding_error", "generation_failure", confirmed=True,
-            reason=f"missing=0(요소 누락 없음), unsupported={fp}, tp={tp}, "
+            reason=f"reasoning_mode=-, missing=0(요소 누락 없음), unsupported={fp}, tp={tp}, "
                    f"faithfulness={_v(faith)}, qtype={record.probe.qtype}, "
                    f"oracle_f1={_v(record.oracle_f1)}",
         )
-    return None
+    return None                          # FN>0 이면 요소 누락 → partial_answer 영역
 
 def generation_partial_answer(record: EvalRecord) -> Optional[Finding]:
     """
@@ -676,8 +671,9 @@ _RETRIEVAL_CAUSE = (
 )
 # parametric_overreliance 는 여기 없다 — 슬롯 밖 additive(diagnose 참조).
 _GENERATION_CAUSE = (
-    generation_abstention_failure, bad_gold_answer_oracle, generation_hop_binding_error,
-    # reasoning_failure 는 라벨 3개(contradiction/numerical_error/misinterpretation)를 한 함수로 낸다.
+    generation_abstention_failure, bad_gold_answer_oracle,
+    # reasoning_failure 한 함수가 라벨 4개를 낸다
+    # (contradiction/numerical_error/misinterpretation/hop_binding_error).
     generation_reasoning_failure,
     generation_hallucination, generation_partial_answer,
     generation_failure,
