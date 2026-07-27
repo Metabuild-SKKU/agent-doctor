@@ -33,22 +33,24 @@ class EstimateCostUsdTest(unittest.TestCase):
 class StageSummaryTest(unittest.TestCase):
     def setUp(self):
         with llm_usage._lock:
+            llm_usage._totals.clear()
             llm_usage._totals.update(
-                {"calls": 0, "prompt": 0, "output": 0, "cost": 0.0}
+                {"calls": 0, "cost": 0.0, "unpriced_calls": 0}
             )
 
     def tearDown(self):
         with llm_usage._lock:
+            llm_usage._totals.clear()
             llm_usage._totals.update(
-                {"calls": 0, "prompt": 0, "output": 0, "cost": 0.0}
+                {"calls": 0, "cost": 0.0, "unpriced_calls": 0}
             )
 
     def test_individual_calls_are_silent_and_stage_summary_is_one_line(self):
         started = llm_usage.snapshot_usage()
         buf = StringIO()
         with redirect_stdout(buf):
-            llm_usage.log_usage("gpt-4o-mini", 1_000, 100, tag="Eval")
-            llm_usage.log_usage("gpt-4o-mini", 2_000, 200, tag="Eval")
+            llm_usage.log_usage("gpt-4o-mini", 1_000, 100)
+            llm_usage.log_usage("gpt-4o-mini", 2_000, 200)
             llm_usage.print_summary(
                 tag="Eval",
                 stage="STEP2 답변 생성",
@@ -74,6 +76,22 @@ class StageSummaryTest(unittest.TestCase):
         line = buf.getvalue()
         self.assertIn("RAGAS: 호출 1회", line)
         self.assertIn("누적 호출 2회", line)
+
+    def test_unregistered_model_is_distinguished_from_free_model(self):
+        started = llm_usage.snapshot_usage()
+        llm_usage.log_usage("some-unlisted-model", 1_000, 100)
+        llm_usage.log_usage("openai/gpt-4o-mini", 1_000, 100)
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            llm_usage.print_summary(tag="Eval", stage="STEP2 답변 생성", since=started)
+
+        line = buf.getvalue()
+        self.assertIn("호출 2회", line)
+        self.assertIn("단가 미등록 1회", line)
+        self.assertIn("누적 단가 미등록 1회", line)
+        self.assertNotIn("prompt", llm_usage.snapshot_usage())
+        self.assertNotIn("output", llm_usage.snapshot_usage())
 
 
 if __name__ == "__main__":

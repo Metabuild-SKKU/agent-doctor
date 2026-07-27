@@ -52,7 +52,7 @@ def _llm_entities(text: str, model: str) -> tuple[list[str], list[dict]]:
         ],
     )
     if response.usage:
-        log_usage(model, response.usage.prompt_tokens, response.usage.completion_tokens, tag="Index")
+        log_usage(model, response.usage.prompt_tokens, response.usage.completion_tokens)
     data = json.loads(response.choices[0].message.content or "{}")
     entities = [str(item).strip() for item in data.get("entities", []) if str(item).strip()]
     relations = [

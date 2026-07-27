@@ -16,7 +16,8 @@ import threading
 
 # USD per 1M tokens (input, output). 유료 티어 텍스트 기준, 2026-07 요금표.
 # 출처: ai.google.dev/gemini-api/docs/pricing, openai.com/api/pricing
-# 미등록 모델은 토큰만 찍힌다. "publisher/model" 형식(GitHub Models)은 무료로 취급.
+# 미등록 모델은 비용을 계산하지 않고 호출 수를 별도로 표시한다.
+# "publisher/model" 형식(GitHub Models)은 단가가 0인 무료 모델로 취급한다.
 _PRICES_USD_PER_1M = {
     "gemini-3.5-flash": (1.50, 9.00),
     "gemini-3.1-flash-lite": (0.25, 1.50),
@@ -31,7 +32,7 @@ _PRICES_USD_PER_1M = {
     "text-embedding-3-small": (0.02, 0.0),
 }
 
-_totals = {"calls": 0, "prompt": 0, "output": 0, "cost": 0.0}
+_totals = {"calls": 0, "cost": 0.0, "unpriced_calls": 0}
 # 병렬 LLM 호출(core/parallel.py) 시 누적 갱신 경쟁·로그 줄 섞임을 막는 락.
 _lock = threading.Lock()
 
@@ -62,7 +63,7 @@ def snapshot_usage() -> dict[str, int | float]:
         return dict(_totals)
 
 
-def log_usage(model: str, prompt_tokens, output_tokens, tag: str = "LLM") -> None:
+def log_usage(model: str, prompt_tokens, output_tokens) -> None:
     """호출 1건의 사용량을 집계한다. 출력은 단계 종료 시 ``print_summary``가 담당한다."""
     if not _enabled():
         return
@@ -70,9 +71,9 @@ def log_usage(model: str, prompt_tokens, output_tokens, tag: str = "LLM") -> Non
     cost = _estimate_cost_usd(model, p, o)
     with _lock:
         _totals["calls"] += 1
-        _totals["prompt"] += p
-        _totals["output"] += o
-        if cost is not None:
+        if cost is None:
+            _totals["unpriced_calls"] += 1
+        else:
             _totals["cost"] += cost
 
 
@@ -86,13 +87,19 @@ def print_summary(
     if not _enabled():
         return
     with _lock:
-        baseline = since or {"calls": 0, "cost": 0.0}
+        baseline = since or {"calls": 0, "cost": 0.0, "unpriced_calls": 0}
         stage_calls = int(_totals["calls"]) - int(baseline.get("calls", 0))
         stage_cost = float(_totals["cost"]) - float(baseline.get("cost", 0.0))
+        stage_unpriced = int(_totals["unpriced_calls"]) - int(
+            baseline.get("unpriced_calls", 0)
+        )
         if stage_calls <= 0:
             return
         print(
             f"[{tag}] LLM 사용 | {stage}: "
-            f"호출 {stage_calls}회, 비용 ≈ {_fmt_usd(stage_cost)} | "
-            f"누적 호출 {_totals['calls']}회, 누적 비용 ≈ {_fmt_usd(_totals['cost'])}"
+            f"호출 {stage_calls}회, 비용 ≈ {_fmt_usd(stage_cost)}, "
+            f"단가 미등록 {stage_unpriced}회 | "
+            f"누적 호출 {_totals['calls']}회, "
+            f"누적 비용 ≈ {_fmt_usd(_totals['cost'])}, "
+            f"누적 단가 미등록 {_totals['unpriced_calls']}회"
         )

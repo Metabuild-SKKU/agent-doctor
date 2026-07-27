@@ -355,6 +355,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     # Probe 캐시는 원문 문서에 의존한다. top_k뿐 아니라 chunk_size가 바뀌어도 같은
     # 질문/gold_spans를 유지하고, 불러온 뒤 현재 청크 기준 gold_chunk_ids만 재동기화한다.
+    run_usage = snapshot_usage()
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
         step1_usage = snapshot_usage()
@@ -516,6 +517,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.status = "error"
         state.error = f"평가 실패: {e}"
         print(f"[Eval] 오류: {e}")
+    finally:
+        print_summary(tag="Eval", stage="전체", since=run_usage)
 
     return state
 

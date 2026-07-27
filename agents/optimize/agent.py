@@ -169,12 +169,11 @@ def _log_candidate_review(
 
     selected = result.selected_candidate
     if result.status == "skipped":
-        prescription_id = (
-            selected.id
-            if selected is not None
-            else (request.candidates[0].id if request.candidates else "-")
-        )
         reason = result.metadata.get("error_code") or result.error or result.message
+        if selected is None:
+            print(f"[Optimize] 요청 SKIP: reason={reason or 'unknown'}")
+            return
+        prescription_id = selected.id
         print(
             f"[Optimize] 후보 SKIP: id={prescription_id}, "
             f"reason={reason or 'unknown'}"
@@ -187,7 +186,6 @@ def _log_candidate_review(
 
 
 def _log_optimize_transition(
-    state: AgentDoctorState,
     *,
     label: str | None,
     prescription_id: str | None,
@@ -196,14 +194,9 @@ def _log_optimize_transition(
     changed_keys: list[str],
     reindex_required: bool,
     next_step: str,
-    include_eval_header: bool = False,
     include_reindex: bool = True,
     include_next_step: bool = True,
 ) -> None:
-    if include_eval_header:
-        print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations}")
-        _log_eval_line(state.report)
-        print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(state.report)}")
     print(f"[Optimize] 선택한 라벨: {label or '-'}")
     print(f"[Optimize] 선택한 처방: {prescription_id or '-'}")
     print(f"[Optimize] 변경 전 config: {_fmt_config_values(before_config, changed_keys)}")
@@ -236,7 +229,6 @@ def _log_optimize_application(
         if selected.tradeoffs:
             print(f"[Optimize] 예상 부작용: {', '.join(selected.tradeoffs)}")
     _log_optimize_transition(
-        state,
         label=request.failure_label,
         prescription_id=prescription_id,
         before_config=before_config,
@@ -272,7 +264,6 @@ def _log_optimize_verdict(
     )
     print(f"[Optimize] 판정 근거: {verdict.reason or '-'}")
     _log_optimize_transition(
-        state,
         label=item.failure_labels[0] if item.failure_labels else None,
         prescription_id=item.selected_prescription_id,
         before_config=before_config,
@@ -280,7 +271,6 @@ def _log_optimize_verdict(
         changed_keys=_diff_visible_keys(diff),
         reindex_required=reindex_required,
         next_step=next_step or _config_change_next_step(reindex_required),
-        include_eval_header=False,
         include_reindex=next_step is not None,
         include_next_step=next_step is not None,
     )
@@ -300,7 +290,6 @@ def _log_optimize_decision(
     print(f"[Optimize] 행동 결정: {action}, reason={decision.reason or '-'}")
 
     _log_optimize_transition(
-        state,
         label=None,
         prescription_id=None,
         before_config={},
@@ -807,7 +796,6 @@ def _finish_internal_study(
         else f"Serve 이동 ({state.status})"
     )
     _log_optimize_transition(
-        state,
         label=item.failure_labels[0] if item.failure_labels else None,
         prescription_id=item.selected_prescription_id,
         before_config=before_config_for_log,
@@ -866,7 +854,6 @@ def _fail_active_study(
         else f"Serve 이동 ({state.status})"
     )
     _log_optimize_transition(
-        state,
         label=label,
         prescription_id=prescription_id,
         before_config=before_config_for_log,

@@ -48,7 +48,7 @@ def openai_chat(
         **kwargs,
     )
     if resp.usage:
-        log_usage(model, resp.usage.prompt_tokens, resp.usage.completion_tokens, tag=tag)
+        log_usage(model, resp.usage.prompt_tokens, resp.usage.completion_tokens)
     return resp.choices[0].message.content or ""
 
 
@@ -73,7 +73,7 @@ def gemini_chat(
         # 과금되는 출력 = 답변(candidates) + 내부 사고(thoughts). 추론 모델(3.5-flash 등)은
         # thoughts 가 답변보다 클 수 있어 candidates 만 세면 비용이 절반 이하로 과소집계된다.
         out = (usage.candidates_token_count or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
-        log_usage(model, usage.prompt_token_count, out, tag=tag)
+        log_usage(model, usage.prompt_token_count, out)
     return resp.text or ""
 
 
@@ -83,7 +83,7 @@ def openai_embed(texts: list[str], model: str, *, tag: str = "LLM") -> list[list
 
     resp = OpenAI().embeddings.create(model=model, input=texts)
     if resp.usage:
-        log_usage(model, resp.usage.prompt_tokens, 0, tag=tag)
+        log_usage(model, resp.usage.prompt_tokens, 0)
     return [d.embedding for d in resp.data]
 
 

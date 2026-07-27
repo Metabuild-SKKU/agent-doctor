@@ -81,7 +81,9 @@ from agents.optimize import agent, history
 from agents.optimize.schemas import (
     ConfigPatch,
     OptimizationHistoryItem,
+    OptimizationRequest,
     OptimizationResult,
+    PrescriptionCandidate,
     Verdict,
 )
 
@@ -97,6 +99,47 @@ def make_report(overall, pass_threshold=False, label="too_long_context"):
         ragas_scores={"context_recall": 0.7, "faithfulness": 0.7, "noise_sensitivity": 0.2},
         pass_threshold=pass_threshold,
     )
+
+
+class OptimizeCandidateLogTest(unittest.TestCase):
+    def test_request_skip_does_not_reassign_reason_to_first_candidate(self):
+        candidates = [
+            PrescriptionCandidate("a", "too_long_context", "C", "ready"),
+            PrescriptionCandidate("b", "too_long_context", "C", "ready"),
+        ]
+        request = OptimizationRequest(
+            request_id="req-1",
+            iteration=1,
+            baseline_config={},
+            failure_label="too_long_context",
+            candidates=candidates,
+        )
+        result = OptimizationResult(
+            request_id="req-1",
+            status="skipped",
+            optimizer="rules",
+            metadata={
+                "error_code": "missing_search_space",
+                "skipped_candidates": [
+                    {"prescription_id": "a", "reason": "not_ready"},
+                    {"prescription_id": "b", "reason": "empty_search_space"},
+                ],
+            },
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_candidate_review(request, result)
+
+        lines = buf.getvalue().splitlines()
+        self.assertEqual(
+            lines,
+            [
+                "[Optimize] 후보 SKIP: id=a, reason=not_ready",
+                "[Optimize] 후보 SKIP: id=b, reason=empty_search_space",
+                "[Optimize] 요청 SKIP: reason=missing_search_space",
+            ],
+        )
 
 
 def make_state(overall=60.0, chunk_size=512, iteration=0, max_iterations=3,
