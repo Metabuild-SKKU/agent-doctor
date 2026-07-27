@@ -323,8 +323,18 @@ def probe_quality_issue(question: str, ground_truth: str) -> str | None:
     if _numeric_ratio(answer) >= _NUMERIC_GROUND_TRUTH_RATIO:
         return "정답이 표 행(숫자 나열)"
     # 자기참조: 질문의 알맹이가 정답에 그대로 들어 있으면 답을 묻는 게 아니라 되풀이하는 것.
-    if topic and topic in answer:
-        return "질문이 정답을 그대로 포함(자기참조)"
+    # 멀티홉 휴리스틱 질문은 "A 그리고 B의 관계를 설명해줘." 라 topic 전체("A 그리고 B")로는
+    # 정답에 통째로 안 들어가 빠져나간다. 어미를 뗀 뒤 " 그리고 " 로 나눈 각 조각이 정답에
+    # 들어 있는지 본다(연결어는 _heuristic_synthesize_query 의 리터럴 " 그리고 " 와 동일).
+    # 단일홉은 조각이 하나뿐이라 기존 동작 그대로다.
+    #
+    # 단, 짧은 조각은 검사하지 않는다 — 불량 폴백의 조각은 원문 문장 통째(_heuristic_evidence_of
+    # 가 뽑는 20자+)라 정답에 그대로 박히지만, 정상 멀티홉 질문의 조각은 주제 명사구("재고자산
+    # 평가손실")라 정답에 부분적으로 등장하는 게 자연스럽다. 명사구 수준까지 substring 으로
+    # 잡으면 멀쩡한 멀티홉 Probe 를 자기참조로 오판한다. 하한은 evidence 최소 길이와 맞춘다.
+    for fragment in (frag.strip() for frag in topic.split(" 그리고 ")):
+        if len(fragment) >= _HEURISTIC_EVIDENCE_MIN_CHARS and fragment in answer:
+            return "질문이 정답을 그대로 포함(자기참조)"
     return None
 
 

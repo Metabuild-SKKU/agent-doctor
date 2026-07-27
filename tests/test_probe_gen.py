@@ -249,7 +249,12 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
                 self.assertEqual(_heuristic_evidence_of(content), expected)
 
     @patch("agents.eval.probe_gen._llm_synthesize_query", return_value=None)
-    def test_multihop_heuristic_uses_exact_evidence_per_source(self, _synthesize):
+    def test_multihop_heuristic_is_discarded_by_gate(self, _synthesize):
+        # LLM 실패로 멀티홉 휴리스틱 폴백이 발동하면, 그 산출물은 원문 조각을 " 그리고 " 로
+        # 이은 질문 + 같은 조각을 \n 으로 이은 정답이라 관계 서술이 없는 불량 Probe 다.
+        # 자기참조 게이트(조각 단위)가 이를 폐기하므로 Probe 는 만들어지지 않는다.
+        # (예전엔 이 폴백이 살아남아 bad_gold_answer 를 유발했다 — 단일홉 판은
+        # test_ragas_heuristic_path_is_discarded_as_self_referential 참고.)
         contents = {
             "d1": "안내입니다. 첫 번째 정책의 신청 기한은 매월 마지막 영업일입니다.",
             "d2": "개요입니다. 두 번째 정책의 승인 결과는 다음 달 첫 영업일에 통지됩니다.",
@@ -266,6 +271,48 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
             KGNode("c1", "d1", contents["d1"]),
             KGNode("c2", "d2", contents["d2"]),
         ]
+
+        probe = _make_ragas_probe(
+            nodes,
+            "multi_specific",
+            "shared_entity",
+            0,
+            chunks,
+            documents,
+        )
+
+        self.assertIsNone(probe)
+
+    @patch("agents.eval.probe_gen._llm_synthesize_query")
+    def test_multihop_llm_grounds_exact_evidence_per_source(self, synthesize):
+        # 멀티홉 evidence 당 exact span 그라운딩은 LLM 합성 성공 경로에서 검증한다
+        # (휴리스틱 폴백은 이제 게이트가 폐기하므로 이 성질을 거기서 확인할 수 없다).
+        # 질문·정답은 원문을 되풀이하지 않아 게이트를 통과하고, evidence quote 만 원문
+        # 부분 문자열이라 좌표를 정확히 찾을 수 있다.
+        contents = {
+            "d1": "안내입니다. 첫 번째 정책의 신청 기한은 매월 마지막 영업일입니다.",
+            "d2": "개요입니다. 두 번째 정책의 승인 결과는 다음 달 첫 영업일에 통지됩니다.",
+        }
+        documents = {
+            doc_id: Document(doc_id, "memory", "txt", content)
+            for doc_id, content in contents.items()
+        }
+        chunks = {
+            "c1": Chunk("c1", "d1", contents["d1"], char_span=(0, len(contents["d1"]))),
+            "c2": Chunk("c2", "d2", contents["d2"], char_span=(0, len(contents["d2"]))),
+        }
+        nodes = [
+            KGNode("c1", "d1", contents["d1"]),
+            KGNode("c2", "d2", contents["d2"]),
+        ]
+        synthesize.return_value = _SynthesizedProbe(
+            question="두 정책의 신청·승인 일정은 어떻게 연결되나요?",
+            ground_truth="첫 정책 신청 마감 직후 둘째 정책 승인 결과가 통지되는 구조입니다.",
+            evidence=[
+                {"source_index": 0, "quote": "첫 번째 정책의 신청 기한은 매월 마지막 영업일입니다."},
+                {"source_index": 1, "quote": "두 번째 정책의 승인 결과는 다음 달 첫 영업일에 통지됩니다."},
+            ],
+        )
 
         probe = _make_ragas_probe(
             nodes,

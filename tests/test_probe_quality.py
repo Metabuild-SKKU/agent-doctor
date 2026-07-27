@@ -50,6 +50,26 @@ class ProbeQualityGateTest(unittest.TestCase):
         )
         self.assertEqual(issue, "질문이 정답을 그대로 포함(자기참조)")
 
+    def test_rejects_multihop_self_reference_by_fragment(self):
+        # 멀티홉 휴리스틱 질문("A 그리고 B의 관계를 설명해줘.")은 topic 전체("A 그리고 B")로는
+        # 정답에 통째로 안 들어가 예전 검사를 빠져나갔다. 어미를 떼고 " 그리고 " 로 나눈 각
+        # 조각이 정답에 그대로 있으면 자기참조로 잡아야 한다.
+        issue = probe_quality_issue(
+            "첫 번째 정책의 신청 기한은 매월 마지막 영업일입니다. "
+            "그리고 두 번째 정책의 승인 결과는 다음 달 첫 영업일에 통지됩니다.의 관계를 설명해줘.",
+            "첫 번째 정책의 신청 기한은 매월 마지막 영업일입니다.\n"
+            "두 번째 정책의 승인 결과는 다음 달 첫 영업일에 통지됩니다.",
+        )
+        self.assertEqual(issue, "질문이 정답을 그대로 포함(자기참조)")
+
+    def test_accepts_multihop_with_relation_prose(self):
+        # 관계를 실제로 서술한 정상 멀티홉 정답은 통과해야 한다 — 조각 검사가 과하게 잡으면
+        # LLM 이 만든 멀쩡한 멀티홉 Probe 까지 고갈된다.
+        self.assertIsNone(probe_quality_issue(
+            "재고자산 평가손실 그리고 매출원가율 상승은 어떤 관계인지 설명해줘.",
+            "재고자산 평가손실이 매출원가에 반영되면서 매출원가율이 3%p 상승했습니다.",
+        ))
+
     def test_rejects_too_short_question(self):
         self.assertIsNotNone(probe_quality_issue("금액은?", "1,234억 원입니다."))
 
