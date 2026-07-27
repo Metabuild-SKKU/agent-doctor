@@ -50,14 +50,32 @@ from agents.eval.metrics_basic import char_f1
 #
 #   REGRESSION_CORPUS_DIR  코퍼스 폴더(run_corpus 규약: 안의 .pdf/.md/.txt + qa.json).
 #       ★ 한글 파일명 권장 방식 — 파일명을 셸/환경변수로 넘기지 않고 파이썬이 폴더에서
-#         직접 glob 으로 찾으므로 cp949 인코딩 깨짐이 없다. Dataset 이름은 폴더명에서 파생.
+#         직접 glob 으로 찾으므로 cp949 인코딩 깨짐이 없다.
 #   REGRESSION_CORPUS  코퍼스 문서 경로 하나(.pdf/.md/.txt) — 영문 경로일 때만 권장.
 #   REGRESSION_QA      QA셋(정답 포함) 경로 — eval_probes.json / run_corpus 의 qa.json 동일 형식.
-#   REGRESSION_DATASET LangSmith Dataset 이름(코퍼스마다 달라야 섞이지 않음).
+#   REGRESSION_DATASET LangSmith Dataset 이름 명시(기본은 QA 파일명 stem — 아래 참고).
+#
+# Dataset 이름 기본 규칙 = QA 파일명(stem). 회귀평가 분리 기준은 '시험지(QA셋)'이므로,
+# QA 파일이 다르면 Dataset 도 갈린다("같은 코퍼스 + 다른 QA"까지 분리). 예:
+#   qa.json → 'qa', qa_hard.json → 'qa_hard', eval_probes.json → 'eval_probes'.
 import glob
 from pathlib import Path
 
 _DOC_SUFFIXES = (".pdf", ".md", ".txt")
+
+
+def _dataset_name_for(qa_path: str) -> str:
+    """Dataset 이름을 'QA 파일명(stem)' 기준으로 만든다 — QA셋이 다르면 Dataset 도 갈린다.
+
+    회귀평가의 분리 기준은 '시험지(QA셋)'다. 코퍼스나 폴더가 아니라 QA 파일이 이름표 —
+    그래야 '같은 코퍼스 + 다른 QA셋'(예: qa.json vs qa_hard.json)도 서로 다른 Dataset 으로
+    갈려 한 표에 섞이지 않는다. REGRESSION_DATASET 으로 언제든 덮어쓸 수 있다.
+    (단, run_corpus 규약상 코퍼스마다 QA 파일명이 다 'qa.json' 이면 이름이 겹칠 수 있으므로,
+     그럴 땐 폴더를 나누고 REGRESSION_DATASET 으로 구분하거나 QA 파일명을 달리 둘 것.)"""
+    override = os.getenv("REGRESSION_DATASET")
+    if override:
+        return override
+    return Path(qa_path).stem
 
 
 def _resolve_corpus() -> tuple[str, str, str]:
@@ -76,13 +94,10 @@ def _resolve_corpus() -> tuple[str, str, str]:
         if not docs:
             raise SystemExit(f"코퍼스 문서가 없습니다: {base}/*{_DOC_SUFFIXES}")
         qa = os.getenv("REGRESSION_QA") or str(base / "qa.json")
-        dataset = os.getenv("REGRESSION_DATASET") or f"{base.name}-qa"
-        return str(docs[0]), qa, dataset
-    return (
-        os.getenv("REGRESSION_CORPUS", "sample_docs/hr_policy.md"),
-        os.getenv("REGRESSION_QA", "eval_probes.json"),
-        os.getenv("REGRESSION_DATASET", "agent-doctor-qa"),
-    )
+        return str(docs[0]), qa, _dataset_name_for(qa)
+    corpus = os.getenv("REGRESSION_CORPUS", "sample_docs/hr_policy.md")
+    qa = os.getenv("REGRESSION_QA", "eval_probes.json")
+    return corpus, qa, _dataset_name_for(qa)
 
 
 CORPUS_URL, PROBES_FILE, DATASET_NAME = _resolve_corpus()
