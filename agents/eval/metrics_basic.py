@@ -445,3 +445,36 @@ def _gold_chunk_evidence_density(record: EvalRecord):
         return evidence / total if total > 0 else None
 
     return _cache(record, "gold_chunk_evidence_density", compute)
+
+
+def _oversized_gold_spans(record: EvalRecord):
+    """현재 청크로는 한 청크에 담길 수 없는 gold span 통계.
+
+    span 길이가 최장 청크보다 길면 겹침을 아무리 늘려도 한 청크에 담기지 않는다 —
+    청크 i 가 [i·(c-o), i·(c-o)+c) 를 덮으므로 담김 가능 조건이 L <= c 이기 때문이다(기하 사실).
+    그래서 처방이 overlap 이 아니라 chunk_size 증가다 — chunking_overchunking 판별.
+    반환: {"oversized_count", "max_chunk_len", "max_span_len"} / 재료 없으면 None.
+    """
+    if not _ctx.chunks:
+        return None
+
+    def compute():
+        spans = _exact_probe_gold_spans(record)
+        if not spans:
+            return None
+        chunk_lengths = []
+        for chunk in _ctx.chunks:
+            position = _chunk_char_span(chunk)
+            if position is not None:
+                chunk_lengths.append(position[1] - position[0])
+        if not chunk_lengths:
+            return None
+        max_chunk = max(chunk_lengths)
+        span_lengths = [span["end"] - span["start"] for span in spans]
+        return {
+            "oversized_count": sum(1 for length in span_lengths if length > max_chunk),
+            "max_chunk_len": max_chunk,
+            "max_span_len": max(span_lengths),
+        }
+
+    return _cache(record, "oversized_gold_spans", compute)

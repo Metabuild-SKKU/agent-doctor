@@ -325,6 +325,47 @@ class RetrievalEnumerationTest(_DiagnoseTestBase):
         self.assertIsNone(diagnose.retrieval_incomplete_enumeration(rec))
 
 
+class ChunkingOverchunkingTest(_DiagnoseTestBase):
+    """span 이 최장 청크보다 길면 겹침으로는 절대 못 담는다 — overlap 처방이 무효인 구간."""
+
+    def _rec(self, span_len, chunk_len=100):
+        chunks = [Chunk(f"g_{i}", "d1", "본문", char_span=(i * chunk_len, (i + 1) * chunk_len))
+                  for i in range(4)]
+        metrics_common.set_context(chunks=chunks)
+        return _record(("g_0", "g_1"), ("g_0",), recall=0.5,
+                       gold_spans=[{"doc_id": "d1", "start": 0, "end": span_len}])
+
+    def test_confirmed_when_span_longer_than_any_chunk(self):
+        finding = diagnose.chunking_overchunking(self._rec(span_len=250))   # 청크 100
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)                  # 기하 사실이라 확정
+        self.assertEqual(finding.metadata["group"], "A")
+        self.assertEqual(finding.metadata["oversized_analysis"]["oversized_count"], 1)
+
+    def test_silent_when_span_fits_in_a_chunk(self):
+        self.assertIsNone(diagnose.chunking_overchunking(self._rec(span_len=60)))
+
+    def test_context_mismatch_yields_to_overchunking(self):
+        """겹침으로 못 담는 길이면 overlap 처방 라벨은 양보한다.
+        (_RETRIEVAL_CAUSE 전체로는 실측된 다른 검색 원인이 먼저 채택되므로 — 설계대로 —
+         두 chunking 라벨만 놓고 배타를 확인한다.)"""
+        rec = self._rec(span_len=250)
+        self.assertIsNone(diagnose.chunking_context_mismatch(rec))
+        picked = diagnose._pick(rec, (diagnose.chunking_overchunking,
+                                      diagnose.chunking_context_mismatch))
+        self.assertEqual(picked.label, "chunking_overchunking")
+
+    def test_context_mismatch_still_owns_recoverable_split(self):
+        """청크에 담기는 길이의 경계 분할은 그대로 chunking_context_mismatch."""
+        chunks = [Chunk(f"g_{i}", "d1", "본문", char_span=(i * 100, (i + 1) * 100))
+                  for i in range(4)]
+        metrics_common.set_context(chunks=chunks)
+        rec = _record(("g_0", "g_1"), ("g_0",), recall=0.5,
+                      gold_spans=[{"doc_id": "d1", "start": 80, "end": 120}])   # 40자, 경계 걸침
+        self.assertIsNone(diagnose.chunking_overchunking(rec))
+        self.assertTrue(diagnose.chunking_context_mismatch(rec).confirmed)
+
+
 class ChunkingGateTest(_DiagnoseTestBase):
     """chunking 은 enumeration 과 반대 게이트로 배타 — span 압박이면 나열형에 양보.
     base 청크 좌표: g_a(0,100)·g_b(100,200)·g_c(200,300) in d1."""

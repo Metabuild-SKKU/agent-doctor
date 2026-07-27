@@ -295,7 +295,9 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     "chunking_overchunking": {
         "group": "A",
         "assigned": "권성우",
-        "status": "draft",
+        # Eval 이 기하(span 길이 > 최장 청크)로 확정하고 planner 가 span 길이로 chunk_size 를
+        # 근거화하므로 실행 가능한 라벨로 승격한다(chunking_context_mismatch 와 같은 기준).
+        "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 과편화된 청크 → 완전한 gold 맥락 확보
         "prescriptions": [

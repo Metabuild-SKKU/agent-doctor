@@ -38,7 +38,7 @@ from agents.eval.types import (
 from agents.eval.metrics_common import set_mode, set_context, _missed_gold_ids
 from agents.eval.metrics_basic import (            # tier1
     is_abstention, _compute_metrics, _gold_span_boundary_analysis,
-    _gold_chunk_evidence_density,
+    _gold_chunk_evidence_density, _oversized_gold_spans,
 )
 from agents.eval.metrics_search import (           # tier2
     _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
@@ -246,6 +246,35 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
         return None
 
 
+def _has_oversized_gold_span(record: EvalRecord) -> bool:
+    """gold span 이 최장 청크보다 길다 = 겹침으로는 원리적으로 한 청크에 못 담는다."""
+    analysis = _oversized_gold_spans(record)
+    return bool(analysis and analysis.get("oversized_count", 0) > 0)
+
+
+def chunking_overchunking(record: EvalRecord) -> Optional[Finding]:
+    """
+    청크가 근거보다 작아 gold span 이 한 청크에 담기지 못함.
+    확정: gold span 길이 > 최장 청크 길이(tier1 기하).
+
+    담김 가능 조건이 L <= chunk_size 라, L 이 그보다 크면 겹침을 늘려도 절대 담기지 않는다.
+    그래서 처방이 overlap 이 아니라 chunk_size 증가이고, chunking_context_mismatch 와 배타다
+    (그쪽은 겹침으로 회복 가능한 경계 분할 — 회복 가능성은 optimize 가 시뮬레이션으로 판정).
+    """
+    if not _has_oversized_gold_span(record):
+        return None
+    if _recall_ok(record) and not _context_failed(record):
+        return None
+    analysis = _oversized_gold_spans(record)
+    finding = _finding(
+        record, "chunking_overchunking", "retrieval_failure", confirmed=True,
+        reason=f"max_span={analysis['max_span_len']}>max_chunk={analysis['max_chunk_len']}, "
+               f"oversized={analysis['oversized_count']}, recall@k={_v(record.recall_at_k)}",
+    )
+    finding.metadata["oversized_analysis"] = dict(analysis)
+    return finding
+
+
 def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     """정답 근거가 현재 청크 경계에 나뉘어 한 청크에 온전히 없음을 판정한다.
 
@@ -261,6 +290,8 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     있으면 그쪽이 먼저 채택되고, 경계 분할은 달리 설명이 없을 때 채택된다.
     """
 
+    if _has_oversized_gold_span(record):
+        return None                      # 겹침으로 못 담는 길이 → overchunking 영역
     analysis = _gold_span_boundary_analysis(record)
     if not isinstance(analysis, dict) or analysis.get("boundary_split_count", 0) <= 0:
         return None
@@ -723,7 +754,7 @@ _RETRIEVAL_CAUSE = (
     retrieval_incomplete_enumeration, retrieval_missing_bridge_dependency,
     retrieval_low_rank, retrieval_lexical_mismatch, retrieval_semantic_mismatch, retrieval_missing_gold,
     # chunking 은 확정이지만 맨 뒤 — 실측된 다른 검색 원인이 있으면 그쪽을 먼저 채택한다.
-    chunking_context_mismatch,
+    chunking_overchunking, chunking_context_mismatch,
     retrieval_failure
 )
 # parametric_overreliance 는 여기 없다 — 슬롯 밖 additive(diagnose 참조).
@@ -741,7 +772,7 @@ _GENERATION_CAUSE = (
 # 노이즈가 '청크 안'이면 underchunking, '청크 사이'면 reranker/noise_interference —
 # _chunk_noise_heavy 로 배타가 서서 순서에 기대지 않는다.
 _CONTEXT_CAUSE = (
-    bad_gold_answer, chunking_context_mismatch,
+    bad_gold_answer, chunking_overchunking, chunking_context_mismatch,
     chunking_underchunking, reranker_low_precision,
     too_long_context, lost_in_the_middle, context_noise_interference,
     context_failure
