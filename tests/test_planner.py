@@ -317,7 +317,9 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertEqual(request.search_space, {"chunker.chunk_size": [400, 600]})
         context = request.metadata["chunk_precheck_context"]
         self.assertEqual(context["documents"][0].doc_id, "d1")
-        self.assertEqual(context["gold_spans"][0]["start"], 100)
+        self.assertEqual(context["span_source"], "evidence_windows")
+        self.assertEqual(context["gold_spans"][0]["start"], 0)
+        self.assertEqual(context["gold_spans"][0]["end"], 1000)
 
     @staticmethod
     def _chunk_blacklist():
@@ -328,7 +330,7 @@ class PlannerCandidateListTest(unittest.TestCase):
             ("too_long_context", "context_compression"),
         }
 
-    def test_chunk_size_candidates_are_grounded_in_affected_gold_spans(self):
+    def test_chunk_size_does_not_shrink_below_undelimited_evidence(self):
         finding = make_finding("p1", "too_long_context")
         state = AgentDoctorState(
             report=_report(finding),
@@ -372,19 +374,12 @@ class PlannerCandidateListTest(unittest.TestCase):
 
         request, _decision = planner.plan(state, blacklist=self._chunk_blacklist())
 
-        self.assertEqual(
-            request.search_space,
-            {"chunker.chunk_size": [700, 600, 500]},
-        )
-        self.assertEqual(request.optimizer, "internal")
+        self.assertEqual(request.search_space, {})
         grounding = request.metadata["candidate_grounding"]
-        self.assertEqual(grounding["status"], "grounded")
-        self.assertEqual(grounding["p85"], 400)
-        self.assertEqual(grounding["span_count"], 3)
-        context = request.metadata["chunk_precheck_context"]
-        self.assertEqual(len(context["gold_spans"]), 3)
+        self.assertEqual(grounding["status"], "insufficient_spans")
+        self.assertEqual(grounding["source"], "structural_evidence_windows")
 
-    def test_exact_spans_win_over_chunk_fallback_spans(self):
+    def test_exact_spans_expand_before_candidate_calculation(self):
         finding = make_finding("p1", "too_long_context")
         finding.affected_probes = ["p1", "p2"]
         state = AgentDoctorState(
@@ -431,18 +426,12 @@ class PlannerCandidateListTest(unittest.TestCase):
 
         request, _decision = planner.plan(state, blacklist=self._chunk_blacklist())
 
-        self.assertEqual(
-            request.search_space,
-            {"chunker.chunk_size": [650, 550, 400]},
-        )
-        self.assertEqual(request.metadata["candidate_grounding"]["p85"], 300)
-        self.assertEqual(request.metadata["candidate_grounding"]["span_count"], 3)
-        self.assertEqual(
-            len(request.metadata["chunk_precheck_context"]["gold_spans"]),
-            3,
-        )
+        self.assertEqual(request.search_space, {})
+        grounding = request.metadata["candidate_grounding"]
+        self.assertEqual(grounding["status"], "insufficient_spans")
+        self.assertEqual(grounding["source"], "structural_evidence_windows")
 
-    def test_too_few_spans_fall_back_to_single_rule_value(self):
+    def test_too_few_evidence_windows_do_not_trigger_blind_halving(self):
         finding = make_finding("p1", "too_long_context")
         state = AgentDoctorState(
             report=_report(finding),
@@ -476,17 +465,11 @@ class PlannerCandidateListTest(unittest.TestCase):
 
         request, _decision = planner.plan(state, blacklist=self._chunk_blacklist())
 
-        self.assertEqual(request.search_space, {"chunker.chunk_size": [400]})
+        self.assertEqual(request.search_space, {})
         self.assertEqual(request.optimizer, "rules")
-        self.assertEqual(
-            request.metadata["candidate_grounding"],
-            {
-                "status": "insufficient_spans",
-                "source": "gold_spans",
-                "span_count": 2,
-                "min_span_count": 3,
-            },
-        )
+        grounding = request.metadata["candidate_grounding"]
+        self.assertEqual(grounding["status"], "insufficient_spans")
+        self.assertEqual(grounding["source"], "structural_evidence_windows")
 
     def test_invalid_chunk_policy_falls_back_to_single_rule_value(self):
         finding = make_finding("p1", "too_long_context")
