@@ -654,15 +654,26 @@ class GenerationLabelTest(_DiagnoseTestBase):
         rec = _record(recall=1.0, f1=1.0, oracle_f1=1.0,
                       faith=RAGAS_FAITHFULNESS_MIN - 0.01)
         self.assertIs(diagnose._is_success(rec), False)
-        self.assertTrue(diagnose._generation_failed(rec))      # B슬롯도 열려야 함
+        self.assertFalse(diagnose._generation_failed(rec))     # 경쟁 원인 아님 → 슬롯은 안 연다
 
     def test_diagnose_emits_finding_for_ungrounded_correct_answer(self):
-        """성공게이트만 바꾸면 어느 슬롯도 안 켜져 findings 가 비고, 규약상 도로 성공이 된다.
-        _generation_failed 까지 열려 있어야 실제 라벨이 나온다."""
-        rec = _record(recall=1.0, f1=1.0, oracle_f1=1.0,
+        """성공게이트만 바꾸고 발동 경로가 없으면 findings 가 비어 규약상 도로 성공이 된다.
+        슬롯 밖 additive 로 붙어 실제 라벨이 나와야 한다.
+        (diagnose 는 _compute_metrics 로 f1 을 답변 문자열에서 다시 계산하므로 문자열을 맞춘다.)"""
+        rec = _record(answer="정답", oracle_answer="정답",
                       faith=RAGAS_FAITHFULNESS_MIN - 0.01)
         findings = diagnose.diagnose(rec, Mode.DEEP)
         self.assertEqual([f.label for f in findings], ["generation_parametric_overreliance"])
+
+    def test_parametric_does_not_mask_oracle_generation_failure(self):
+        """실제 답은 기억으로 맞히고 오라클 답은 깨진 probe — 두 원인이 다 남아야 한다.
+        (_GENERATION_CAUSE 에 넣으면 _pick 이 하나만 뽑아 오라클 실패가 가려진다.)"""
+        rec = _record(answer="정답", oracle_answer="전혀 다른 소리",
+                      faith=RAGAS_FAITHFULNESS_MIN - 0.01,
+                      faith_oracle=RAGAS_FAITHFULNESS_MIN - 0.01)
+        labels = {f.label for f in diagnose.diagnose(rec, Mode.DEEP)}
+        self.assertIn("generation_parametric_overreliance", labels)
+        self.assertIn("generation_hallucination", labels)
 
     def test_generation_failed_premise_requires_oracle_miss(self):
         self.assertTrue(diagnose._generation_failed(_record(oracle_f1=0.1)))

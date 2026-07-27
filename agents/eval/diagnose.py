@@ -337,13 +337,15 @@ def retrieval_failure(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def _generation_failed(record: EvalRecord) -> bool:
-    """생성 실패 전제(B 공통): gold 컨텍스트로도 답이 틀림, 무응답인데 답을 지어냄,
-    또는 정답이지만 context 근거 없이 파라미터 기억으로 맞힘."""
+    """생성 실패 전제(B 공통): gold 컨텍스트로도 답이 틀림, 또는 무응답인데 답을 지어냄.
+
+    parametric_overreliance 는 여기 넣지 않는다 — 전제가 '답이 맞음'이라 다른 B 원인과 경쟁
+    관계가 아니고, _pick 에 섞으면 확정으로 먼저 뽑혀 같은 probe 의 오라클 생성 실패를 가린다.
+    corpus_gap 처럼 슬롯 밖 additive 로 붙인다.
+    """
     if record.oracle_answer is not None and not _oracle_ok(record):
         return True
     if record.probe.answer_exists is False and not _abstained(record):
-        return True
-    if _parametric_overreliance(record):
         return True
     return False
 
@@ -627,10 +629,9 @@ _RETRIEVAL_CAUSE = (
     chunking_context_mismatch,
     retrieval_failure
 )
+# parametric_overreliance 는 여기 없다 — 슬롯 밖 additive(diagnose 참조).
 _GENERATION_CAUSE = (
-    # 앞 둘은 전제가 특수해(무응답 기대 / 정답인데 근거 없음) 나머지와 모집단이 겹치지 않는다.
-    generation_abstention_failure, generation_parametric_overreliance,
-    bad_gold_answer_oracle, generation_hop_binding_error,
+    generation_abstention_failure, bad_gold_answer_oracle, generation_hop_binding_error,
     generation_hallucination, generation_partial_answer,
     generation_failure,
 )
@@ -783,6 +784,8 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
         findings.append(_pick(record, _GENERATION_CAUSE))
     if _context_failed(record):                         # C: context 구조
         findings.append(_pick(record, _CONTEXT_CAUSE))
+    # B: 정답이지만 근거 없음 (additive) — 전제가 '답이 맞음'이라 위 원인들과 경쟁하지 않는다.
+    findings.append(generation_parametric_overreliance(record))
 
     findings = _dedup(_collect(*findings))
     findings.sort(key=lambda f: (
