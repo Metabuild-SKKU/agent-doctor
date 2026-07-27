@@ -207,25 +207,26 @@ def _strip_page_furniture(page: str, repeated: set[str]) -> tuple[str, list[str]
         if is_repeated and (is_edge or has_page_marker):
             removed.append(stripped)
             continue
-        # 꼬리에 페이지 마커가 붙어 있어도, 그 줄이 푸터라는 근거가 있을 때만 잘라낸다.
-        # 무조건 자르면 "자세한 내용은 페이지 12" 같은 본문 참조에서 "페이지 12" 가 사라져
-        # 목적 페이지 정보가 손실된다(리뷰 지적). 마커를 뗀 나머지가 (1)비었거나 (2)출처
-        # 표시뿐이거나 (3)이 줄이 페이지 가장자리(푸터 자리)일 때만 furniture 로 본다.
-        # 그 외(본문 문장 끝에 마커가 붙은 경우)는 줄을 통째로 살린다.
+        # 꼬리에 페이지 마커가 붙어 있어도, 그 줄이 푸터라는 근거가 있을 때만 지운다.
+        # 무조건 자르면 "자세한 내용은 페이지 12" 같은 본문 상호참조에서 "페이지 12" 가
+        # 사라져 목적 페이지 정보가 손실된다(리뷰 지적). 반복 푸터(is_repeated+마커)는 이미
+        # 위에서 줄째 지웠고, 여기 남는 건 비반복 줄이다. 비반복 줄에서는 마커를 뗀 나머지가
+        # "출처 표시뿐/빈 줄"(= 그 줄 전체가 푸터)일 때만 furniture 로 보고 버린다.
+        #
+        # 가장자리(is_edge)를 근거로 삼지 않는다 — 단일 줄 페이지에선 본문 한 줄도 곧
+        # 가장자리라, 리뷰가 지적한 "자세한 내용은 페이지 12"(그 줄이 곧 first==last)가
+        # 통째로 잘린다. 실전에서 걸러야 할 DART 푸터는 출처 잔여물로 잡히므로 손실 없다.
         trimmed = _TRAILING_PAGE_MARKER_RE.sub("", stripped)
         if trimmed != stripped:
             is_source_residue = not trimmed or bool(_SOURCE_ONLY_LINE_RE.match(trimmed))
-            if is_source_residue or is_edge:
-                removed.append(stripped[len(trimmed):].strip())
+            if is_source_residue:
                 # 마커를 뗀 나머지가 출처 표시뿐이면 본문이 아니라 푸터의 일부다.
                 # 남겨두면 "전자공시시스템 dart.fss.or.kr" 이 청크가 되어 Probe 주제로 쓰인다.
-                if is_source_residue:
-                    if trimmed:
-                        removed.append(trimmed)
-                    continue
-                # 가장자리지만 나머지가 멀쩡한 본문이면 마커만 떼고 본문은 살린다.
-                kept.append(trimmed)
+                removed.append(stripped[len(trimmed):].strip())
+                if trimmed:
+                    removed.append(trimmed)
                 continue
+            # 나머지가 멀쩡한 본문이면(본문 상호참조 등) 마커째 통째로 살린다.
         kept.append(line)
 
     return "\n".join(kept), removed

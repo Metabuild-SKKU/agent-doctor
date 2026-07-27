@@ -5,7 +5,11 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from agents.ingest.preprocess import PAGE_SEPARATOR, preprocess_pages
+from agents.ingest.preprocess import (
+    PAGE_SEPARATOR,
+    _strip_page_furniture,
+    preprocess_pages,
+)
 
 
 class HeaderFooterStripTest(unittest.TestCase):
@@ -89,13 +93,15 @@ class HeaderFooterStripTest(unittest.TestCase):
         for body in bodies:
             self.assertIn(body, result.content)
 
-    def test_trailing_page_marker_trimmed_without_losing_body(self):
-        # 반복으로 확인되지 않은 줄은 꼬리(페이지 마커)만 자르고 본문은 남긴다.
+    def test_non_footer_line_with_marker_survives_whole(self):
+        # 반복 푸터도 출처 잔여물도 아닌 줄은 꼬리 마커째 통째로 살린다.
+        # 문맥 없이(비반복) 마커를 자르면 "자세한 내용은 페이지 12" 같은 본문 상호참조가
+        # 손실된다는 리뷰 지적을 따른다 — "…본문입니다 Page 7" 도 같은 부류라 보존한다.
+        # (실전에서 걸러야 할 DART 푸터는 출처 잔여물이라 아래 test 들이 따로 지운다.)
         pages = ["가나다라마 본문입니다 Page 7", "다른 페이지", "또 다른 페이지"]
         result = preprocess_pages(pages)
 
-        self.assertIn("가나다라마 본문입니다", result.content)
-        self.assertNotIn("Page 7", result.content)
+        self.assertIn("가나다라마 본문입니다 Page 7", result.content)
 
     def test_source_only_footer_residue_is_removed(self):
         # 마커를 뗀 나머지가 출처 표시뿐이면 줄째 버린다. 남겨두면 그 잔여물이
@@ -125,8 +131,18 @@ class HeaderFooterStripTest(unittest.TestCase):
 
         self.assertIn("자세한 내용은 페이지 12", result.content)
 
+    def test_strip_furniture_keeps_isolated_body_reference(self):
+        # 리뷰 지적 그대로: 문맥(repeated) 없는 격리 호출에서 본문 상호참조를 자르면 안 된다.
+        # _strip_page_furniture("자세한 내용은 페이지 12", set()) 가 본문 "자세한 내용은" 과
+        # 제거 목록 "페이지 12" 로 분리되던 버그. 이제 줄을 통째로 보존한다.
+        kept, removed = _strip_page_furniture("자세한 내용은 페이지 12", set())
+        self.assertEqual(kept, "자세한 내용은 페이지 12")
+        self.assertEqual(removed, [])
+
     def test_body_line_citing_a_domain_survives(self):
-        # 도메인이 인용된 본문 문장까지 지우면 안 된다 — 출처 표시만 버리는 게 목적이다.
+        # 도메인이 인용된 본문 문장은 출처 잔여물이 아니므로(문장이 길어 _SOURCE_ONLY_LINE_RE
+        # 에 안 걸림) 꼬리 마커째 통째로 살린다 — 출처 표시만 버리는 게 목적이지 본문 문장은
+        # 건드리지 않는다.
         pages = [
             "공시는 dart.fss.or.kr 에서 확인할 수 있습니다 Page 5",
             "다른 페이지",
@@ -135,7 +151,6 @@ class HeaderFooterStripTest(unittest.TestCase):
         result = preprocess_pages(pages)
 
         self.assertIn("공시는 dart.fss.or.kr 에서 확인할 수 있습니다", result.content)
-        self.assertNotIn("Page 5", result.content)
 
     def test_repeated_body_text_is_not_stripped(self):
         # 가장자리가 아닌 본문 중간에 반복되는 문장은 살아남아야 한다.
