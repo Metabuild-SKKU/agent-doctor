@@ -92,6 +92,24 @@ def _abstained(record: EvalRecord) -> bool:
     return is_abstention(record.generated_answer)
 
 
+def _grounded_ok(record: EvalRecord) -> bool:
+    """실제 답이 검색 context 에 근거하나(real faithfulness). 미측정(DEEP 미만)은 통과로 본다."""
+    faith = _faith(record)
+    return faith is None or faith >= RAGAS_FAITHFULNESS_MIN
+
+
+def _parametric_overreliance(record: EvalRecord) -> bool:
+    """정답인데 검색 context 에 근거가 없음 = 모델 파라미터 기억으로 답함.
+
+    gold 가 실제로 검색된 경우(recall=1)만 본다 — 미검색이면 근거를 못 쓴 게 당연하고
+    그건 A그룹(검색 실패) 몫이다.
+    """
+    return (record.probe.answer_exists is not False
+            and bool(record.probe.ground_truth)
+            and _recall_ok(record) and _f1_ok(record)
+            and not _grounded_ok(record))
+
+
 def _is_success(record: EvalRecord) -> Optional[bool]:
     """probe 단위 성공/실패 판정 — recall + answer_match(tier1) + RAGAS answer_correctness(tier3).
 
@@ -101,13 +119,17 @@ def _is_success(record: EvalRecord) -> Optional[bool]:
 
     recall 은 정답셋이 있는 경로에서만 본다 — 무응답 기대 probe 는 gold 가 없어
     recall_at_k = -1 이므로, 앞에서 recall 을 보면 올바른 기권까지 실패가 된다.
+
+    근거성(_grounded_ok)도 본다 — 정답이어도 context 에 근거가 없으면 파라미터 기억으로 맞힌
+    것이라 검색이 검증되지 않은 상태다(generation_parametric_overreliance). DEEP 미만은
+    faithfulness 미측정이라 통과로 처리돼 기존 동작과 같다.
     """
     if record.probe.answer_exists is False:
         return _abstained(record)                       # 무응답 기대 → 올바른 기권이 성공(recall 무관)
     if not record.probe.ground_truth:
         return None                                     # 대조할 정답 없음 → 판정 불가
     # 검색 성공(recall=1) + 정답 일치(answer_match, DEEP 이면 ragas answer_correctness 로 강등)
-    return _recall_ok(record) and _f1_ok(record)
+    return _recall_ok(record) and _f1_ok(record) and _grounded_ok(record)
 
 def _is_multi_hop(record: EvalRecord) -> bool:
     """멀티홉 질문 여부(probe.qtype). bridge / hop_binding / corpus_gap_partial_hop 판별용."""
@@ -315,10 +337,13 @@ def retrieval_failure(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def _generation_failed(record: EvalRecord) -> bool:
-    """생성 실패 전제(B 공통): gold 컨텍스트로도 답이 틀림, 또는 무응답인데 답을 지어냄."""
+    """생성 실패 전제(B 공통): gold 컨텍스트로도 답이 틀림, 무응답인데 답을 지어냄,
+    또는 정답이지만 context 근거 없이 파라미터 기억으로 맞힘."""
     if record.oracle_answer is not None and not _oracle_ok(record):
         return True
     if record.probe.answer_exists is False and not _abstained(record):
+        return True
+    if _parametric_overreliance(record):
         return True
     return False
 
@@ -341,6 +366,21 @@ def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
             reason=f"answer_exists=False, 기권 아님({judge})",
         )
     return None
+
+
+def generation_parametric_overreliance(record: EvalRecord) -> Optional[Finding]:
+    """
+    정답이지만 검색 context 에 근거가 없음 — 모델 파라미터 기억에 의존.
+    확정: gold 검색됨(recall=1) + 정답 + real faithfulness 낮음(tier3).
+    답이 맞아 사용자 눈엔 성공이지만 검색이 검증되지 않은 상태라, 코퍼스가 바뀌면 조용히 깨진다.
+    """
+    if not _parametric_overreliance(record):
+        return None
+    return _finding(
+        record, "generation_parametric_overreliance", "generation_failure", confirmed=True,
+        reason=f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
+               f"f1={_v(record.f1_score)}(정답), recall@k={_v(record.recall_at_k)}",
+    )
 
 
 def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
@@ -588,7 +628,9 @@ _RETRIEVAL_CAUSE = (
     retrieval_failure
 )
 _GENERATION_CAUSE = (
-    generation_abstention_failure, bad_gold_answer_oracle, generation_hop_binding_error,
+    # 앞 둘은 전제가 특수해(무응답 기대 / 정답인데 근거 없음) 나머지와 모집단이 겹치지 않는다.
+    generation_abstention_failure, generation_parametric_overreliance,
+    bad_gold_answer_oracle, generation_hop_binding_error,
     generation_hallucination, generation_partial_answer,
     generation_failure,
 )

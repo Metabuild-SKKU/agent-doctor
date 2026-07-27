@@ -622,6 +622,48 @@ class GenerationLabelTest(_DiagnoseTestBase):
         rec = _record(oracle_f1=0.1, rel_oracle=RAGAS_RESPONSE_RELEVANCY_MIN)
         self.assertIsNone(diagnose.generation_partial_answer(rec))
 
+    def test_parametric_overreliance_confirmed_when_correct_but_ungrounded(self):
+        """정답이어도 검색 context 에 근거가 없으면 파라미터 기억으로 맞힌 것."""
+        rec = _record(recall=1.0, f1=1.0, oracle_f1=1.0,
+                      faith=RAGAS_FAITHFULNESS_MIN - 0.01)
+        finding = diagnose.generation_parametric_overreliance(rec)
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+
+    def test_parametric_overreliance_silent_when_grounded(self):
+        rec = _record(recall=1.0, f1=1.0, oracle_f1=1.0, faith=0.9)
+        self.assertIsNone(diagnose.generation_parametric_overreliance(rec))
+
+    def test_parametric_overreliance_silent_when_answer_wrong(self):
+        """답이 틀렸으면 근거 없음은 환각 쪽 — '맞았지만 근거 없음'이 이 라벨의 전제다."""
+        rec = _record(recall=1.0, f1=0.1, oracle_f1=1.0, faith=0.1)
+        self.assertIsNone(diagnose.generation_parametric_overreliance(rec))
+
+    def test_parametric_overreliance_silent_when_gold_not_retrieved(self):
+        """미검색이면 근거를 못 쓴 게 당연 → A그룹 몫."""
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5, f1=1.0, oracle_f1=1.0, faith=0.1)
+        self.assertIsNone(diagnose.generation_parametric_overreliance(rec))
+
+    def test_parametric_overreliance_silent_below_deep(self):
+        metrics_common.set_mode(Mode.STANDARD)                # faithfulness 미측정
+        rec = _record(recall=1.0, f1=1.0, oracle_f1=1.0, faith=0.1)
+        self.assertIsNone(diagnose.generation_parametric_overreliance(rec))
+        self.assertIsNot(diagnose._is_success(rec), False)     # 기존 동작 유지(성공)
+
+    def test_success_gate_fails_ungrounded_correct_answer(self):
+        rec = _record(recall=1.0, f1=1.0, oracle_f1=1.0,
+                      faith=RAGAS_FAITHFULNESS_MIN - 0.01)
+        self.assertIs(diagnose._is_success(rec), False)
+        self.assertTrue(diagnose._generation_failed(rec))      # B슬롯도 열려야 함
+
+    def test_diagnose_emits_finding_for_ungrounded_correct_answer(self):
+        """성공게이트만 바꾸면 어느 슬롯도 안 켜져 findings 가 비고, 규약상 도로 성공이 된다.
+        _generation_failed 까지 열려 있어야 실제 라벨이 나온다."""
+        rec = _record(recall=1.0, f1=1.0, oracle_f1=1.0,
+                      faith=RAGAS_FAITHFULNESS_MIN - 0.01)
+        findings = diagnose.diagnose(rec, Mode.DEEP)
+        self.assertEqual([f.label for f in findings], ["generation_parametric_overreliance"])
+
     def test_generation_failed_premise_requires_oracle_miss(self):
         self.assertTrue(diagnose._generation_failed(_record(oracle_f1=0.1)))
         self.assertFalse(diagnose._generation_failed(_record(oracle_f1=1.0)))
