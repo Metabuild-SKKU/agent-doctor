@@ -31,7 +31,7 @@ from agents.index.qdrant_store import (
     ensure_collection,
     hybrid_search,
     keyword_search,
-    rerank,
+    rerank_with_status,
     search as dense_search,
     upsert_chunks,
 )
@@ -52,6 +52,7 @@ class RetrievalSettings:
     hybrid_dense_weight: float = 0.7
     use_reranker: bool = False
     reranker_model: str = DEFAULT_RERANKER_MODEL
+    rerank_candidates: int = 20
     qdrant_url: str = ":memory:"
     qdrant_api_key: str | None = None
     collection_name: str = COLLECTION
@@ -116,6 +117,9 @@ def resolve_retrieval_settings(
         _first_embedding_dim(chunks) or VECTOR_DIM,
     )
     top_k = _as_int(pick("top_k", 5), 5) or 5
+    rerank_candidates = (
+        _as_int(pick("rerank_candidates", 20), 20) or 20
+    )
 
     return RetrievalSettings(
         embedding_model=str(pick("embedding_model", DEFAULT_EMBEDDING_MODEL)),
@@ -124,7 +128,11 @@ def resolve_retrieval_settings(
         use_hybrid=_as_bool(pick("use_hybrid", False)),
         hybrid_dense_weight=float(pick("hybrid_dense_weight", 0.7)),
         use_reranker=_as_bool(pick("use_reranker", False)),
-        reranker_model=str(pick("reranker_model", DEFAULT_RERANKER_MODEL)),
+        reranker_model=str(
+            pick("reranker_model", DEFAULT_RERANKER_MODEL)
+            or DEFAULT_RERANKER_MODEL
+        ),
+        rerank_candidates=max(1, rerank_candidates),
         qdrant_url=str(config.get("qdrant_url") or os.getenv("QDRANT_URL", ":memory:")),
         qdrant_api_key=config.get("qdrant_api_key") or os.getenv("QDRANT_API_KEY"),
         collection_name=str(pick("qdrant_collection_name", COLLECTION)),
@@ -278,7 +286,7 @@ class Retriever:
     """
     1) 빈 query -> 빈 결과
     2) top_k 결정
-    3) reranker 쓰면 후보를 top_k * 4개 가져옴
+    3) reranker 쓰면 설정된 rerank_candidates만큼 후보를 가져옴
     4) Qdrant client -> dense/hybrid 검색
     5) 실패 or 결과 X -> keyword fallback
     6) reranker = True면 재정렬
@@ -289,13 +297,26 @@ class Retriever:
             return {
                 "query": query,
                 "search_mode": "none",
+                "reranker_enabled": self.settings.use_reranker,
+                "reranker_attempted": False,
                 "reranked": False,
+                "reranker_status": (
+                    "not_attempted"
+                    if self.settings.use_reranker
+                    else "disabled"
+                ),
+                "reranker_fallback_used": False,
+                "search_fallback_used": False,
                 "fallback_used": False,
                 "results": [],
             }
 
         requested_top_k = max(1, int(top_k or self.settings.top_k))
-        candidate_k = requested_top_k * 4 if self.settings.use_reranker else requested_top_k
+        candidate_k = (
+            max(requested_top_k, self.settings.rerank_candidates)
+            if self.settings.use_reranker
+            else requested_top_k
+        )
         vector_candidate_k = self._vector_candidate_k(candidate_k)
         results: list[dict] = []
         mode = "keyword"
@@ -330,6 +351,8 @@ class Retriever:
                         collection_name=self.settings.collection_name,
                     )
                 results = self._current_results(results)
+                if self.settings.use_reranker:
+                    results = results[:candidate_k]
             except Exception as exc:
                 print(f"[Retriever] vector search failed, using keyword fallback: {exc}")
                 results = []
@@ -340,22 +363,35 @@ class Retriever:
             fallback_used = True
             results = keyword_search(self.chunks, query, top_k=candidate_k)
 
+        reranker_attempted = bool(self.settings.use_reranker and results)
         reranked = False
-        if self.settings.use_reranker and results:
-            results = rerank(
+        reranker_status = (
+            "not_attempted"
+            if self.settings.use_reranker
+            else "disabled"
+        )
+        if reranker_attempted:
+            results, reranker_status = rerank_with_status(
                 query,
                 results,
                 model_name=self.settings.reranker_model,
                 top_k=requested_top_k,
             )
-            reranked = True
+            reranked = reranker_status == "applied"
         else:
             results = results[:requested_top_k]
 
         return {
             "query": query,
             "search_mode": mode,
+            "reranker_enabled": self.settings.use_reranker,
+            "reranker_attempted": reranker_attempted,
             "reranked": reranked,
+            "reranker_status": reranker_status,
+            "reranker_fallback_used": (
+                reranker_attempted and reranker_status != "applied"
+            ),
+            "search_fallback_used": fallback_used,
             "fallback_used": fallback_used,
             "results": results,
         }

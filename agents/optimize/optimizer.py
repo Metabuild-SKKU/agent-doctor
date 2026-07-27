@@ -61,7 +61,8 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
     "hybrid_search": False,
     "chunking": True,
     "embedding_model": False,
-    "reranker": False,
+    # 공통 Retriever가 Eval과 Serve에서 같은 설정으로 CrossEncoder를 실행한다.
+    "reranker": True,
     "context_compression": False,
     "chunking_strategy": False,
 }
@@ -86,6 +87,8 @@ PATH_CAPABILITIES: dict[str, str] = {
 STATE_MAPPABLE_PATHS: set[str] = {
     "retriever.top_k",
     "retriever.search_type",
+    "reranker.enabled",
+    "reranker.candidate_count",
     "chunker.chunk_size",
     "chunker.chunk_overlap",
     "embedding.model",
@@ -238,6 +241,7 @@ def _prepare_candidate(
     """Planner가 만든 후보를 순서대로 검사해 첫 실행 가능 후보를 반환한다."""
 
     capabilities = merge_capabilities(request.metadata.get("capabilities"))
+    runtime_capabilities = request.metadata.get("runtime_capabilities")
     constraints = request.metadata.get("constraints")
     skipped: list[dict[str, Any]] = []
 
@@ -263,6 +267,7 @@ def _prepare_candidate(
                 request.baseline_config,
                 backend,
                 capabilities,
+                runtime_capabilities,
                 constraints,
             )
             if prepared:
@@ -280,6 +285,7 @@ def _prepare_candidate(
         request.baseline_config,
         backend,
         capabilities,
+        runtime_capabilities,
         constraints,
     )
     if not prepared:
@@ -292,6 +298,7 @@ def _prepare_search_space(
     baseline_config: dict[str, Any],
     backend: str,
     capabilities: dict[str, Any],
+    runtime_capabilities: dict[str, Any] | None,
     constraints: dict[str, Any] | None,
 ) -> tuple[dict[str, list[Any]], str]:
     """search space를 canonical 경로로 정규화하고 안전한 후보만 남긴다."""
@@ -324,6 +331,15 @@ def _prepare_search_space(
     supported, reason = is_capability_supported(capability, capabilities)
     if not supported:
         return {}, reason or "unsupported_capability"
+    if path.startswith("reranker.") and isinstance(
+        runtime_capabilities,
+        dict,
+    ):
+        reranker_capability = runtime_capabilities.get("reranker")
+        if not isinstance(reranker_capability, dict) or (
+            reranker_capability.get("status") != "verified"
+        ):
+            return {}, "runtime_capability_unavailable"
 
     filtered = filter_candidate_values(path, values, baseline_config, constraints)
     current_value = get_current_value(baseline_config, path)
