@@ -80,6 +80,14 @@ class ProbeQualityGateTest(unittest.TestCase):
             "미국은 22.4배로 EU 15.4배, 일본 17.9배보다 높은 가장 높은 수준입니다.",
         ))
 
+    def test_single_number_factual_answer_survives(self):
+        # 금액·인원처럼 숫자 자체가 정답인 짧은 사실형 정답은 살아남아야 한다.
+        # 예전 문자 비율 게이트는 "185명"(0.75)·"1,234억 원"(0.75)을 표 행으로 오탐했다.
+        # 표 행의 특징은 문자 비율이 아니라 "숫자 열이 여러 개 나열"된다는 것이다.
+        for answer in ("185명", "1,234억 원", "전체의 60%", "3.5% 인상되었습니다."):
+            with self.subTest(answer=answer):
+                self.assertIsNone(probe_quality_issue("직원 수는 몇 명인가요?", answer))
+
 
 class ProbeSurplusCountTest(unittest.TestCase):
     def test_surplus_scales_with_target(self):

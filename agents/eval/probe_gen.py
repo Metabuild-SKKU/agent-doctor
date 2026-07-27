@@ -247,9 +247,17 @@ _FURNITURE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 정답이 숫자·구분자로만 이루어졌는지 판정할 비율. 표 행("50,466 23,886 111.3%")은
-# 이 비중이 압도적으로 높다. 서술형 정답에 숫자가 좀 섞인 정도로는 걸리지 않는다.
-_NUMERIC_GROUND_TRUTH_RATIO = 0.6
+# 표 행("50,466 23,886 111.3%") 판정. 예전엔 "숫자·구분자 문자 비율"로 쟀는데, 그러면
+# "185명"(0.75)·"1,234억 원"(0.75)처럼 숫자 자체가 정답인 멀쩡한 사실형 정답까지 오탐해
+# 폐기했다. 표 행의 특징은 문자 비율이 아니라 "숫자 열이 여러 개 나열"된다는 것이므로,
+# 공백으로 끊은 토큰 중 통째로 숫자·구분자인 토큰("50,466" 등)의 개수로 가른다.
+# 단일 숫자 답("185명" 0개 — '명'이 붙어 순수 숫자 토큰이 아님, "3.5%" 1개)은 통과하고,
+# 표 행("총점 185 190" 2개, "50,466 23,886 111.3%" 3개)만 걸린다.
+_MIN_NUMERIC_COLUMNS = 2
+
+# 순수 숫자 열 토큰: 숫자와 숫자용 구분자(,.%()~-/)로만 이루어진 토큰. "185명"·"원"처럼
+# 한글 단위가 붙으면 매치되지 않아 사실형 정답으로 산다.
+_NUMERIC_COLUMN_RE = re.compile(r"^[\d,.%()~/\-]+$")
 
 # 길이 하한. 한국어는 조사가 붙어 같은 뜻을 영어보다 짧게 쓴다 — "연차는 며칠이야?"(9자),
 # "성과급은 언제 나와?"(11자) 처럼 멀쩡한 실사용 질문이 10자 안팎이다(run_local_pipeline
@@ -293,13 +301,17 @@ def _strip_template_suffix(question: str) -> str:
     return text
 
 
-def _numeric_ratio(text: str) -> float:
-    """문자열에서 숫자·구분자가 차지하는 비율(0~1). 빈 문자열은 0."""
-    stripped = (text or "").strip()
-    if not stripped:
-        return 0.0
-    numeric_like = sum(1 for ch in stripped if ch.isdigit() or ch in ",.%()-~ \t")
-    return numeric_like / len(stripped)
+def _numeric_column_count(text: str) -> int:
+    """공백으로 끊은 토큰 중 통째로 숫자·구분자인 열의 개수. 표 행일수록 커진다.
+
+    "185명"·"1,234억 원" 처럼 숫자에 한글 단위가 붙은 사실형 정답은 순수 숫자 토큰이
+    없어 0이고, "50,466 23,886 111.3%" 같은 표 행은 3이다.
+    """
+    return sum(
+        1
+        for token in (text or "").split()
+        if _NUMERIC_COLUMN_RE.match(token) and any(ch.isdigit() for ch in token)
+    )
 
 
 def probe_quality_issue(question: str, ground_truth: str) -> str | None:
@@ -320,7 +332,7 @@ def probe_quality_issue(question: str, ground_truth: str) -> str | None:
         return "질문 형식이 아님(표 조각·라벨)"
     if _FURNITURE_RE.search(question or "") or _FURNITURE_RE.search(answer):
         return "페이지 푸터·URL 조각"
-    if _numeric_ratio(answer) >= _NUMERIC_GROUND_TRUTH_RATIO:
+    if _numeric_column_count(answer) >= _MIN_NUMERIC_COLUMNS:
         return "정답이 표 행(숫자 나열)"
     # 자기참조: 질문의 알맹이가 정답에 그대로 들어 있으면 답을 묻는 게 아니라 되풀이하는 것.
     # 멀티홉 휴리스틱 질문은 "A 그리고 B의 관계를 설명해줘." 라 topic 전체("A 그리고 B")로는
