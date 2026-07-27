@@ -18,7 +18,7 @@ from core.llm_usage import log_usage
 # 아무것도 안 하는 데코레이터로 폴백한다 — "키/패키지 없어도 파이프라인이 폴백 동작"
 # 규약을 여기서도 지킨다.
 try:
-    from langsmith import traceable
+    from langsmith import traceable, get_current_run_tree
 except ImportError:  # pragma: no cover - langsmith 미설치 환경 폴백
     def traceable(*d_args, **d_kwargs):
         def _decorator(fn):
@@ -28,7 +28,31 @@ except ImportError:  # pragma: no cover - langsmith 미설치 환경 폴백
             return d_args[0]
         return _decorator
 
+    def get_current_run_tree():  # langsmith 없으면 붙일 트레이스도 없다
+        return None
+
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
+
+
+def _attach_usage(model: str, input_tokens: int, output_tokens: int) -> None:
+    """현재 @traceable 트레이스에 토큰 사용량을 실어 LangSmith UI 의 Tokens/Cost 를 채운다.
+
+    우리 코드는 usage 를 log_usage(콘솔)로만 흘려보내서 @traceable 이 토큰을 몰랐다 —
+    그래서 UI 의 Tokens/Cost 가 빈칸이었다. LangSmith 규약 필드로 넘겨준다:
+      - usage_metadata(토큰): Tokens 컬럼을 채운다.
+      - ls_model_name(모델명): metadata 최상위에 둬야 LangSmith 가 내장 단가표
+        (예: gemini-3.1-flash-lite BUILT-IN, $0.25/$1.50)와 매칭해 Cost 를 계산한다.
+        usage_metadata 딕셔너리 '안'에 넣으면 매칭 위치가 아니라 Cost 가 빈칸으로 남는다.
+    트레이싱 OFF/미설치면 get_current_run_tree()가 None 이라 조용히 skip(무해)."""
+    run = get_current_run_tree()
+    if run is None:
+        return
+    run.metadata["usage_metadata"] = {
+        "input_tokens": int(input_tokens or 0),
+        "output_tokens": int(output_tokens or 0),
+        "total_tokens": int((input_tokens or 0) + (output_tokens or 0)),
+    }
+    run.metadata["ls_model_name"] = model  # ← 최상위(단가 매칭용). 위 dict 안이 아님.
 
 
 @traceable(run_type="llm", name="openai_chat")
@@ -65,6 +89,7 @@ def openai_chat(
     )
     if resp.usage:
         log_usage(model, resp.usage.prompt_tokens, resp.usage.completion_tokens, tag=tag)
+        _attach_usage(model, resp.usage.prompt_tokens, resp.usage.completion_tokens)
     return resp.choices[0].message.content or ""
 
 
@@ -91,6 +116,7 @@ def gemini_chat(
         # thoughts 가 답변보다 클 수 있어 candidates 만 세면 비용이 절반 이하로 과소집계된다.
         out = (usage.candidates_token_count or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
         log_usage(model, usage.prompt_token_count, out, tag=tag)
+        _attach_usage(model, usage.prompt_token_count, out)
     return resp.text or ""
 
 
