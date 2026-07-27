@@ -57,9 +57,20 @@ RAGAS_MIX_RATIO = 0.75
 DATAMORGANA_MIX_RATIO = 0.20
 NO_ANSWER_MIX_RATIO = 0.05
 
-# STEP1 지식그래프 엣지 임계값 (이 이상이면 두 청크를 연결)
-KG_ENTITY_OVERLAP_MIN = 0.2     # 키워드/entity Jaccard 유사도
-KG_EMBEDDING_SIM_MIN = 0.5      # chunk.embedding 코사인 유사도
+# STEP1 지식그래프 엣지 임계값
+# 절대 임계값(아래 두 값)은 "관련 있음"이 아니라 "코퍼스에서 명백히 무관한 쌍"을 끊는
+# 하한 가드로만 쓴다 — 실측(HR 코퍼스 41청크, BGE-M3): 무관한 쌍끼리도 cos 중앙값이
+# 0.46 이라 같은 도메인 문서는 통째로 0.4~0.5대에 깔린다. 절대 임계값 하나로는 "관련
+# 있음"을 못 가른다. 그래서 관련도 판정은 KG_TOP_K_NEIGHBORS(각 청크 기준 상대 순위)로
+# 하고, 이 값들은 top-k 가 억지로 끌어온 먼 이웃을 끊는 바닥선 역할만 한다.
+KG_ENTITY_OVERLAP_MIN = 0.2     # 키워드/entity Jaccard 유사도(한국어 토크나이저 한계로 보조 신호)
+KG_EMBEDDING_SIM_MIN = 0.5      # chunk.embedding 코사인 유사도(무관 쌍 하한 가드)
+
+# 각 청크를 코사인 상위 이 개수의 이웃하고만 연결한다(멀티홉 후보). 절대 임계값 대신
+# 상대 순위로 판정해, 코퍼스 전체가 높/낮게 깔려도 자동 보정된다. 실측(41청크): k=2 면
+# 후보 56쌍·cos 하한 0.518 로, 절대 임계값 OR(261쌍·78%가 cos<0.6 노이즈)보다 억지
+# 멀티홉이 대폭 줄었다. 예산(멀티홉 30%)을 채우기 충분한 최소값으로 2 를 기본값으로 둔다.
+KG_TOP_K_NEIGHBORS = 2
 
 # STEP1 시나리오 샘플링 후보 (RAGAS Scenario 파라미터)
 PERSONAS = ["신입사원", "실무 담당자"]
@@ -186,6 +197,9 @@ class EvalRecord:
     retrieved: list[dict] = field(default_factory=list)          # search() 원본 결과
     retrieved_context: list[str] = field(default_factory=list)   # 청크 텍스트만
     retrieved_chunk_ids: list[str] = field(default_factory=list)
+    # 검색 구현의 실행 상태. reranker가 실제로 호출·성공했는지 Eval 리포트에
+    # 집계해 Optimize가 "미실행"을 "효과 없음"으로 오판하지 않게 한다.
+    retrieval_details: dict = field(default_factory=dict)
     generated_answer: str = ""
     oracle_answer: Optional[str] = None                          # gold context로 생성한 답
     oracle_context: list[str] = field(default_factory=list)      # gold context 텍스트 (oracle 트랙 RAGAS용)

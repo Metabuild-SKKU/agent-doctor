@@ -16,10 +16,21 @@ from agents.optimize.schemas import ConfigPatch
 
 class ConfigMapperTest(unittest.TestCase):
     def test_get_current_value_reads_flat_aliases(self):
-        current = {"top_k": 4, "use_hybrid": True, "chunk_size": 512}
+        current = {
+            "top_k": 4,
+            "use_hybrid": True,
+            "use_reranker": False,
+            "rerank_candidates": 20,
+            "chunk_size": 512,
+        }
 
         self.assertEqual(get_current_value(current, "retriever.top_k"), 4)
         self.assertEqual(get_current_value(current, "retriever.search_type"), "hybrid")
+        self.assertFalse(get_current_value(current, "reranker.enabled"))
+        self.assertEqual(
+            get_current_value(current, "reranker.candidate_count"),
+            20,
+        )
         self.assertEqual(get_current_value(current, "chunker.chunk_size"), 512)
 
     def test_map_changes_to_index_config_translates_canonical_paths(self):
@@ -27,6 +38,8 @@ class ConfigMapperTest(unittest.TestCase):
             {
                 "retriever.top_k": 8,
                 "retriever.search_type": "hybrid",
+                "reranker.enabled": True,
+                "reranker.candidate_count": 40,
                 "chunker.chunk_size": 400,
             }
         )
@@ -36,6 +49,8 @@ class ConfigMapperTest(unittest.TestCase):
             {
                 "top_k": 8,
                 "use_hybrid": True,
+                "use_reranker": True,
+                "rerank_candidates": 40,
                 "chunk_size": 400,
             },
         )
@@ -57,10 +72,15 @@ class ConfigMapperTest(unittest.TestCase):
 
         self.assertEqual(index_config["top_k"], 8)
         self.assertEqual(index_config["use_hybrid"], True)
+        self.assertEqual(index_config["use_reranker"], True)
         self.assertNotIn("reranker.enabled", index_config)
-        self.assertEqual(diff.changed_keys, ["top_k", "use_hybrid"])
-        self.assertEqual(diff.ignored_keys, ["reranker.enabled"])
-        self.assertTrue(diff.warnings)
+        self.assertEqual(
+            diff.changed_keys,
+            ["top_k", "use_hybrid"],
+        )
+        self.assertEqual(diff.added_keys, ["use_reranker"])
+        self.assertEqual(diff.ignored_keys, [])
+        self.assertFalse(diff.warnings)
         self.assertEqual(diff.metadata["source"], "test")
 
     def test_apply_best_config_can_run_without_mutation(self):

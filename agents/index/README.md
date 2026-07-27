@@ -26,12 +26,24 @@ state.documents
 | Vector DB | Qdrant | `QDRANT_URL`, `QDRANT_API_KEY` |
 | 검색 | Dense/Hybrid, top-k 5 | `top_k` |
 | Hybrid | 기본 ON | `use_hybrid=False` |
-| Reranker | 기본 OFF | `use_reranker=True` |
+| Reranker | 기본 OFF, 후보 20개 | `use_reranker=True`, `rerank_candidates` |
 | Graph | NetworkX + Mermaid/PyVis | `graph_*` 설정 |
 
 Hybrid는 Qdrant named dense/sparse vector와 RRF fusion을 우선 사용한다. 기존 dense-only
 컬렉션처럼 native sparse 검색을 쓸 수 없는 환경에서는 local dense+keyword fusion으로
 fallback한다. Reranker는 baseline 결과를 먼저 측정한 뒤 Optimize가 켜는 기능이다.
+`retrieval_low_rank`가 확정되면 Optimize가 `reranker.enabled=True`를
+`state.index_config["use_reranker"]`로 변환해 적용하고, 공통 Retriever가
+`BAAI/bge-reranker-v2-m3`로 후보를 재정렬한다. 문제가 남으면 다음 처방이
+`reranker.candidate_count`를 늘려 더 넓은 후보군을 재정렬한다. Eval은 실제
+reranker 실행 성공 횟수를 기록하며, 모델 준비 실패를 품질 무개선으로 판정하지 않는다.
+
+Index는 기본적으로 `reranker_preflight="eager"` 정책을 사용해 모델 로드와 짧은
+smoke inference를 먼저 실행한다. 결과는
+`state.runtime_capabilities["reranker"]`와 `index_artifacts`에 기록되며, 실패해도
+Index 자체는 정상 완료된다. 첫 실행에는 모델 다운로드와 초기화 비용이 들 수 있다.
+자동 확인을 원하지 않으면 `reranker_preflight="disabled"`로 설정할 수 있으며, 이때
+capability는 `unknown`이므로 Optimize가 리랭커 처방을 자동 적용하지 않는다.
 
 ## 롤백 2-slot 캐시
 
