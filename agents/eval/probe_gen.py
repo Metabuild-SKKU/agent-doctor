@@ -1028,12 +1028,25 @@ def _generate_ragas_probes(
     pairs = knowledge_graph.connected_pairs(graph, n=2)
     quadrants = _allocate_ragas_quadrants(n, has_multihop_edges=bool(pairs))
 
-    remaining_pairs = list(pairs)
+    # 강한 쌍부터 소비한다(레버 C). 예전엔 후보에서 random.pop 이라 cos 0.51 노이즈 쌍과
+    # cos 0.76 강한 쌍이 동일 확률로 뽑혔다 — top-k 로 후보를 좁혀도 그 안에서 약한 쌍이
+    # 뽑히면 억지 멀티홉이 남는다. graph.edges 에 이미 담긴 가중치로 내림차순 정렬해,
+    # 예산이 후보보다 적을 때 가장 관련 강한 쌍부터 쓰도록 한다(가중치 동률은 결정적 tie-break).
+    pair_weight = {
+        tuple(sorted((cid, nid))): w
+        for cid, neigh in graph.edges.items()
+        for nid, w in neigh
+    }
+    remaining_pairs = sorted(
+        pairs,
+        key=lambda pair: (pair_weight.get(tuple(sorted(pair)), 0.0), tuple(sorted(pair))),
+        reverse=True,
+    )
 
     def _next_pair() -> list[str] | None:
         if not remaining_pairs:
             return None
-        return remaining_pairs.pop(random.randrange(len(remaining_pairs)))
+        return remaining_pairs.pop(0)
 
     plan: list[tuple[str, str | None]] = (
         [("single_specific", None)] * quadrants["single_specific"]
