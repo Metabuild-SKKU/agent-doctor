@@ -147,6 +147,9 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertIn("[Optimize] 반복 횟수: 1/3", out)
         self.assertIn("Eval 결과: overall=0.42, composite=40.0, pass=false", out)
         self.assertIn("발견된 문제: too_long_context 1건", out)
+        self.assertIn("[Optimize] 후보 생성:", out)
+        self.assertIn("[Optimize] 후보 SELECT:", out)
+        self.assertIn("[Optimize] 처방 적용:", out)
         self.assertIn("다음 단계: Index 경유(물리 재색인 생략) 후 Eval 재실행", out)
         self.assertEqual(graph.route_after_optimize(state), "index")
 
@@ -196,10 +199,19 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                 )
             return real_optimizer_run(request)
 
-        with patch("agents.optimize.agent.optimizer.run", side_effect=select_baseline_once):
+        buf = StringIO()
+        with patch(
+            "agents.optimize.agent.optimizer.run",
+            side_effect=select_baseline_once,
+        ), redirect_stdout(buf):
             result_state = agent.run(state)
 
         self.assertEqual(len(calls), 2)
+        self.assertIn(
+            "[Optimize] 후보 SKIP: id=increase_chunk_overlap, "
+            "reason=baseline_selected",
+            buf.getvalue(),
+        )
         self.assertIn(
             ("chunking_context_mismatch", "increase_chunk_overlap"),
             result_state.blacklist,
@@ -288,11 +300,15 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertIn("shrink_chunk_size", out)
         self.assertIn("판정 결과: keep=false, before=60.00, after=40.00", out)
         verdict_block = out[:out.index("판정 결과: keep=false")]
-        self.assertNotIn("Eval 결과:", verdict_block)
-        self.assertNotIn("발견된 문제:", verdict_block)
+        self.assertIn("Eval 결과:", verdict_block)
+        self.assertIn("발견된 문제:", verdict_block)
+        self.assertIn("이전 처방 판정: ROLLBACK", verdict_block)
         self.assertNotIn("reindex_required=", verdict_block)
         self.assertNotIn("다음 단계:", verdict_block)
-        self.assertLess(out.index("decrease_top_k"), out.index("shrink_chunk_size"))
+        self.assertLess(
+            out.index("이전 처방 판정: ROLLBACK"),
+            out.index("처방 적용: id=shrink_chunk_size"),
+        )
 
     def test_keep_then_followup_application_logs_previous_verdict(self):
         state = agent.run(make_state(overall=60.0))
@@ -312,10 +328,14 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertIn("판정 결과: keep=true, before=60.00, after=75.00", out)
         self.assertIn("선택한 처방: shrink_chunk_size", out)
         verdict_block = out[:out.index("판정 결과: keep=true")]
-        self.assertNotIn("Eval 결과:", verdict_block)
-        self.assertNotIn("발견된 문제:", verdict_block)
+        self.assertIn("Eval 결과:", verdict_block)
+        self.assertIn("발견된 문제:", verdict_block)
+        self.assertIn("이전 처방 판정: KEEP", verdict_block)
         self.assertNotIn("다음 단계:", verdict_block)
-        self.assertLess(out.index("decrease_top_k"), out.index("shrink_chunk_size"))
+        self.assertLess(
+            out.index("이전 처방 판정: KEEP"),
+            out.index("처방 적용: id=shrink_chunk_size"),
+        )
 
     def test_unjudgeable_rollback_does_not_blacklist(self):
         # 측정이 없어(before_report None) 판정 불가한 경우: config 는 안전하게 복원하되,

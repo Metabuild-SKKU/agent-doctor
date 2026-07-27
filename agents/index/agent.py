@@ -29,6 +29,7 @@ from agents.index.qdrant_store import (
     embedding_is_fallback,
 )
 from agents.rag.retriever import get_retriever, reset_retriever_cache
+from core.llm_usage import print_summary, snapshot_usage
 from core.schema import Chunk, Document, IndexSnapshot
 from core.state import AgentDoctorState
 
@@ -1250,7 +1251,9 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
 
         state.chunks = all_chunks
         if config.get("graph_enabled", True):
+            graph_usage = snapshot_usage()
             state.index_artifacts = tools.build_graph_artifacts(all_chunks, config)
+            print_summary(tag="Index", stage="그래프 생성", since=graph_usage)
         else:
             state.index_artifacts = {}
 

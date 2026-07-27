@@ -33,7 +33,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from core.schema import Probe, EvalSnapshot
-from core.llm_usage import print_summary
+from core.llm_usage import print_summary, snapshot_usage
 from core.parallel import parallel_map
 from core.state import AgentDoctorState
 
@@ -329,6 +329,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     # 질문/gold_spans를 유지하고, 불러온 뒤 현재 청크 기준 gold_chunk_ids만 재동기화한다.
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
+        step1_usage = snapshot_usage()
         # user_log 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
         # 판정은 generate_probes 와 같은 술어(uses_user_log)로 한다 — state.user_questions
         # 유무만 보면 EVAL_PROBE_SOURCE=auto 일 때 실제로는 LLM 생성으로 가는데도
@@ -370,6 +371,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     state.documents,
                 )
                 print(f"[Eval] STEP1: 저장된 Probe {len(probes)}개 재사용(버전 일치)")
+        print_summary(tag="Eval", stage="STEP1 Probe 준비", since=step1_usage)
         if not probes:
             print("[Eval] 경고: Probe 0개 생성 → 평가 불가, 통과 처리")
             state.probes = []
@@ -419,6 +421,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         concurrency = resolve_llm_concurrency()
         if concurrency > 1 and len(gen_tasks) > 1:
             print(f"[Eval] STEP2: 답변 생성 {len(gen_tasks)}건 병렬 실행 (동시성 {concurrency})")
+        generation_usage = snapshot_usage()
         answers = parallel_map(lambda t: generate_answer(t[0].probe.question, t[2]),
                                gen_tasks, concurrency)
         for (rec, track, _ctx), answer in zip(gen_tasks, answers):
@@ -426,6 +429,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 rec.generated_answer = answer
             else:
                 rec.oracle_answer = answer
+        print_summary(tag="Eval", stage="STEP2 답변 생성", since=generation_usage)
 
         # Phase B2(병렬): RAGAS 선계산 — 트랙별로 필요한 probe 만 동시 실행하고 *_done
         # 플래그를 세워, Phase C 의 _compute_ragas_real/_oracle 이 캐시 히트만 하게 한다.
@@ -433,6 +437,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # 게이트는 _compute_ragas_* 와 동일(mode >= DEEP); LLM 비활성·키없음은
         # _ragas_track 이 {} 폴백이라 기존과 같은 동작으로 수렴한다.
         # 동시성 1이면 태스크 순서가 Phase C 호출 순서(probe 순)와 일치.
+        ragas_usage = snapshot_usage()
         if mode >= Mode.DEEP:
             # B2-1: 실제 트랙은 전 probe 에 필요하다 — 성공/실패 판정(_f1_ok 의 강등)과
             # 리포트 RAGAS 평균이 모두 실제 트랙을 쓴다.
@@ -457,12 +462,15 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency)
                 for rec, score in zip(failed, oracle_scores):
                     rec.oracle_ragas, rec.oracle_ragas_done = score, True
+        print_summary(tag="Eval", stage="STEP3-2 RAGAS", since=ragas_usage)
 
         # Phase C(순차): 지표·진단·로그 — diagnose 는 signals 전역·진단 캐시·tier2
         # 재검색을 쓰므로 병렬 구간 밖에서 실행한다.
+        diagnosis_usage = snapshot_usage()
         for i, rec in enumerate(records, 1):
             rec.findings = diagnose(rec, mode)
             _log_probe(i, len(records), rec)
+        print_summary(tag="Eval", stage="STEP3-4 지표·진단", since=diagnosis_usage)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
         state.probes = probes
@@ -481,7 +489,6 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.error = f"평가 실패: {e}"
         print(f"[Eval] 오류: {e}")
 
-    print_summary(tag="Eval")
     return state
 
 
