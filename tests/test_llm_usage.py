@@ -1,10 +1,13 @@
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from core import llm_usage
 from core.llm_usage import _estimate_cost_usd
 
 
@@ -25,6 +28,52 @@ class EstimateCostUsdTest(unittest.TestCase):
 
     def test_zero_tokens_known_model_is_zero_cost(self):
         self.assertEqual(_estimate_cost_usd("gpt-4o", 0, 0), 0.0)
+
+
+class StageSummaryTest(unittest.TestCase):
+    def setUp(self):
+        with llm_usage._lock:
+            llm_usage._totals.update(
+                {"calls": 0, "prompt": 0, "output": 0, "cost": 0.0}
+            )
+
+    def tearDown(self):
+        with llm_usage._lock:
+            llm_usage._totals.update(
+                {"calls": 0, "prompt": 0, "output": 0, "cost": 0.0}
+            )
+
+    def test_individual_calls_are_silent_and_stage_summary_is_one_line(self):
+        started = llm_usage.snapshot_usage()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            llm_usage.log_usage("gpt-4o-mini", 1_000, 100, tag="Eval")
+            llm_usage.log_usage("gpt-4o-mini", 2_000, 200, tag="Eval")
+            llm_usage.print_summary(
+                tag="Eval",
+                stage="STEP2 답변 생성",
+                since=started,
+            )
+
+        lines = buf.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("STEP2 답변 생성: 호출 2회", lines[0])
+        self.assertIn("누적 호출 2회", lines[0])
+        self.assertIn("비용 ≈", lines[0])
+        self.assertNotIn("토큰", lines[0])
+
+    def test_summary_reports_stage_delta_and_process_total(self):
+        llm_usage.log_usage("gpt-4o-mini", 1_000, 100)
+        started = llm_usage.snapshot_usage()
+        llm_usage.log_usage("gpt-4o-mini", 2_000, 200)
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            llm_usage.print_summary(tag="Eval", stage="RAGAS", since=started)
+
+        line = buf.getvalue()
+        self.assertIn("RAGAS: 호출 1회", line)
+        self.assertIn("누적 호출 2회", line)
 
 
 if __name__ == "__main__":
