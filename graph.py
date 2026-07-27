@@ -103,10 +103,36 @@ def build_graph():
     return graph.compile()
 
 
+def _langsmith_run_config(state: AgentDoctorState) -> dict:
+    """이번 실행의 index_config 를 LangSmith tags/metadata 로 만든다(2단계: 실행 간 비교).
+
+    graph.invoke(state, config=...) 에 넘기면 이 실행에서 생성되는 모든 하위 트레이스
+    (gemini_chat 등)에 자동 전파된다 → UI 에서 "reranker=off 태그만 필터" 같은 before/after
+    비교가 된다. 트레이싱이 꺼져 있으면 이 config 는 langsmith 가 그냥 무시하므로 무해하다.
+
+    태그는 파이프라인 시작 시점의 config 기준이다 — Optimize 가 실행 중 config 를 바꿔도
+    태그는 초기값을 유지한다. before/after 비교는 use_reranker 등을 바꿔 '따로 실행'하는
+    방식을 전제로 하므로 이 정도로 충분하다(각 실행은 처음부터 끝까지 config 고정)."""
+    cfg = state.index_config
+    # 필터에 쓰기 좋은 핵심 축만 태그로. 값은 소문자 문자열로 정규화.
+    tag_keys = ("use_reranker", "use_hybrid", "chunk_strategy", "chunk_size", "top_k")
+    short = {"use_reranker": "reranker", "use_hybrid": "hybrid",
+             "chunk_strategy": "strategy", "chunk_size": "chunk", "top_k": "topk"}
+    tags = [f"{short[k]}={str(cfg.get(k)).lower()}" for k in tag_keys if k in cfg]
+    return {
+        "tags": tags,
+        "metadata": {
+            "source_type": state.source_type,
+            "index_config": cfg,  # config 전체 — 상세에서 정확한 값 확인용
+        },
+    }
+
+
 def run_pipeline(
     source_url: str,
     source_type: str = "notion",
     user_questions: list[str] = None,
+    index_config_overrides: dict = None,
 ) -> AgentDoctorState:
     """
     Agent Doctor v2 파이프라인 실행.
@@ -115,6 +141,8 @@ def run_pipeline(
         source_url:     데이터 소스 URL
         source_type:    "notion" | "gdrive" | "file" | "slack"
         user_questions: 테스트 질문 (없으면 자동 생성)
+        index_config_overrides: 초기 index_config 에 덮어쓸 키(예: {"use_reranker": True}).
+            2단계 before/after 비교용 — 같은 소스를 config 만 바꿔 따로 실행할 때 쓴다.
     """
     from core.run_logger import setup_run_logging
     setup_run_logging(prefix="pipeline")  # 이후 모든 print 를 콘솔+로그파일에 동시 출력
@@ -127,6 +155,8 @@ def run_pipeline(
         user_questions=user_questions or [],
         status="running",
     )
+    if index_config_overrides:
+        initial_state.index_config.update(index_config_overrides)
 
     print("=" * 60)
     print("Agent Doctor v2 시작")
@@ -138,7 +168,9 @@ def run_pipeline(
         print(f"  LangSmith 트레이싱: ON (project={project})")
     print("=" * 60)
 
-    final_state = graph.invoke(initial_state)
+    # config=... : 이 실행의 index_config 를 tags/metadata 로 하위 트레이스에 전파(2단계).
+    # 트레이싱 OFF 여도 LangGraph 는 이 config 를 정상 처리하므로(langsmith 만 무시) 무해.
+    final_state = graph.invoke(initial_state, config=_langsmith_run_config(initial_state))
     # LangGraph 는 dataclass state 를 dict 로 반환한다 → 속성 접근 위해 dataclass 로 복원
     # (노드 안에서는 AgentDoctorState 객체지만 invoke() 최종 반환은 dict).
     if isinstance(final_state, dict):
@@ -186,4 +218,16 @@ if __name__ == "__main__":
             "성과급은 언제 나와?",
         ]
 
-    run_pipeline(source_url, source_type=source_type, user_questions=user_questions)
+    # USE_RERANKER=1 python graph.py → reranker ON 으로 실행(2단계 before/after 비교용).
+    #   미설정/0 이면 기본값(OFF). 같은 소스를 이 env 만 바꿔 두 번 돌리면 LangSmith 에
+    #   'reranker=false' / 'reranker=true' 태그가 붙은 LangGraph 루트 트레이스 2개가 쌓인다.
+    overrides: dict = {}
+    if os.getenv("USE_RERANKER", "").strip().lower() in ("1", "true", "yes"):
+        overrides["use_reranker"] = True
+
+    run_pipeline(
+        source_url,
+        source_type=source_type,
+        user_questions=user_questions,
+        index_config_overrides=overrides,
+    )
