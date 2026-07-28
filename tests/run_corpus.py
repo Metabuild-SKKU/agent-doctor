@@ -223,7 +223,9 @@ def _upload_langsmith(state, qa_path: Path) -> None:
     파라미터만 바꿔 다시 돌리면 같은 Dataset 에 Experiment 가 누적돼 before/after 비교가
     된다. REGRESSION_DATASET 으로 덮어쓸 수 있다."""
     from agents.rag.retriever import get_retriever
-    from tools.langsmith_regression import build_target, f1_evaluator, load_probes
+    from tools.langsmith_regression import (
+        build_target, f1_evaluator, load_probes, _experiment_metadata,
+    )
     from langsmith import Client, evaluate
 
     if not qa_path.exists():
@@ -274,8 +276,10 @@ def _upload_langsmith(state, qa_path: Path) -> None:
         data=dataset_name,
         evaluators=[f1_evaluator],
         experiment_prefix=label,
-        metadata={"use_reranker": use_reranker, "index_config": state.index_config,
-                  "source": "run_corpus"},
+        # config 핵심 축(chunk_size/use_reranker/top_k/chunk_strategy)을 최상위 키로 평탄화 →
+        # Experiment 목록에서 컬럼/필터로 뜬다. langsmith_regression 과 같은 함수를 재사용해
+        # 두 진입점의 metadata 구조를 통일한다(index_config 전체는 참고용으로 중첩 유지).
+        metadata={**_experiment_metadata(state.index_config), "source": "run_corpus"},
     )
     print("  [LangSmith] 완료 → Datasets & Experiments 탭에서 확인하세요")
 
