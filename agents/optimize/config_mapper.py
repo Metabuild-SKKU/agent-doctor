@@ -20,6 +20,7 @@ from agents.optimize.schemas import ConfigDiff, ConfigPatch
 
 CANONICAL_INDEX_CONFIG_KEYS: dict[str, str] = {
     "retriever.top_k": "top_k",
+    "retriever.mmr": "use_mmr",
     "reranker.enabled": "use_reranker",
     "reranker.candidate_count": "rerank_candidates",
     "chunker.chunk_size": "chunk_size",
@@ -35,6 +36,7 @@ CANONICAL_INDEX_CONFIG_KEYS: dict[str, str] = {
 # 예: "chunker.chunk_size"를 읽을 때 현재 state의 "chunk_size"도 함께 본다.
 CONFIG_READ_PATHS: dict[str, tuple[str, ...]] = {
     "retriever.top_k": ("retriever.top_k", "top_k"),
+    "retriever.mmr": ("retriever.mmr", "use_mmr", "mmr"),
     "retriever.search_type": ("retriever.search_type", "search_type", "use_hybrid"),
     "reranker.enabled": ("reranker.enabled", "use_reranker"),
     "reranker.candidate_count": (

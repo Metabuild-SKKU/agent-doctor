@@ -62,6 +62,8 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
     # 소비한다(Qdrant sparse+dense RRF). config_mapper가 retriever.search_type을
     # use_hybrid로 매핑하고 STATE_MAPPABLE에도 있어 소비처가 확인됨 → 허용으로 전환.
     "hybrid_search": True,
+    # 공통 Retriever가 use_mmr 로 후보풀을 MMR 재정렬한다(임베딩 코사인, 질의벡터 불필요).
+    "mmr": True,
     "chunking": True,
     "embedding_model": False,
     # 공통 Retriever가 Eval과 Serve에서 같은 설정으로 CrossEncoder를 실행한다.
@@ -78,6 +80,7 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
 # canonical config 경로가 요구하는 사용자 pipeline capability다.
 PATH_CAPABILITIES: dict[str, str] = {
     "retriever.top_k": "retriever.top_k",
+    "retriever.mmr": "mmr",
     "retriever.search_type": "hybrid_search",
     "reranker.enabled": "reranker",
     "reranker.candidate_count": "reranker",
@@ -93,6 +96,7 @@ PATH_CAPABILITIES: dict[str, str] = {
 # downstream capability가 추가되더라도 mapper 계약이 함께 갱신되기 전에는 적용하지 않는다.
 STATE_MAPPABLE_PATHS: set[str] = {
     "retriever.top_k",
+    "retriever.mmr",
     "retriever.search_type",
     "reranker.enabled",
     "reranker.candidate_count",

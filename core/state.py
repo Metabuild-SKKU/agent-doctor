@@ -52,6 +52,11 @@ class AgentDoctorState:
         "use_reranker": False,
         "reranker_model": "BAAI/bge-reranker-v2-m3",
         "rerank_candidates": 20,
+        # MMR 다양성 재정렬. 공통 Retriever가 소비한다(retriever.py). 기본 off로 두어
+        # 동작을 바꾸지 않으면서 Optimize(enable_mmr)가 조정할 baseline을 드러낸다.
+        "use_mmr": False,
+        "mmr_lambda": 0.5,
+        "mmr_candidates": 20,
         # Index가 optional 검색 모델을 실제 로드·추론해 capability를 생산한다.
         "reranker_preflight": "eager",
         # 검색 시 가져올 청크 수. Eval(agents/eval/agent.py)이 검색에, Index가 청크

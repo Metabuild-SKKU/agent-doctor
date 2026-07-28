@@ -4,7 +4,12 @@ import unittest
 from unittest.mock import patch
 
 from agents.index.qdrant_store import build_client, build_sparse_vector
-from agents.rag.retriever import build_retriever, get_retriever, reset_retriever_cache
+from agents.rag.retriever import (
+    build_retriever,
+    get_retriever,
+    reset_retriever_cache,
+    _mmr_select,
+)
 from agents.rag.generator import answer_question, answer_text, generate_answer
 from core.schema import Chunk
 
@@ -170,6 +175,38 @@ class RagGeneratorTests(unittest.TestCase):
             answer = answer_text("재택근무 며칠?", retriever, top_k=1)
 
         self.assertEqual(answer, "재택근무는 주 2일까지 가능합니다.")
+
+
+class MmrSelectTests(unittest.TestCase):
+    @staticmethod
+    def _cand(cid: str, score: float, emb: list[float]) -> dict:
+        return {"chunk_id": cid, "score": score, "embedding": emb}
+
+    def _pool(self) -> list[dict]:
+        # a,b,c 는 서로 거의 동일(중복), d,e 는 다양. score 내림차순.
+        return [
+            self._cand("a", 0.95, [1.0, 0.0, 0.0]),
+            self._cand("b", 0.94, [0.99, 0.01, 0.0]),
+            self._cand("c", 0.93, [0.98, 0.02, 0.0]),
+            self._cand("d", 0.60, [0.0, 1.0, 0.0]),
+            self._cand("e", 0.50, [0.0, 0.0, 1.0]),
+        ]
+
+    def test_balances_relevance_and_diversity(self):
+        picked = [r["chunk_id"] for r in _mmr_select(self._pool(), 3, 0.5)]
+        # 최상위 a 채택 후 중복(b,c) 대신 다양한 d,e 를 고른다.
+        self.assertEqual(picked[0], "a")
+        self.assertIn("d", picked)
+        self.assertIn("e", picked)
+        self.assertNotIn("b", picked)
+
+    def test_lambda_one_is_pure_relevance(self):
+        picked = [r["chunk_id"] for r in _mmr_select(self._pool(), 3, 1.0)]
+        self.assertEqual(picked, ["a", "b", "c"])
+
+    def test_missing_embedding_returns_none(self):
+        pool = [{"chunk_id": "x", "score": 1.0}]  # embedding 없음
+        self.assertIsNone(_mmr_select(pool, 1, 0.5))
 
 
 if __name__ == "__main__":

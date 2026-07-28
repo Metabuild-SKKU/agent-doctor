@@ -206,10 +206,11 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
             {
                 # 관련성만이 아니라 다양성까지 고려해 top-k 안 쏠림을 줄임
                 "id": "enable_mmr",
-                "patch": {"mmr": True},
+                "patch": {"retriever.mmr": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                # BLOCKER: mmr 필드가 index_config에 없음.  # TODO(index-합의)
+                # 공통 Retriever가 use_mmr로 후보풀을 MMR 재정렬해 실행 가능하다
+                # (retriever.mmr → use_mmr 매핑, mmr capability=True).
             },
             {
                 # top-k 고정 대신, 검색 도중 "더 필요한지" 판단해 반복 검색
