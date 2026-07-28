@@ -20,7 +20,7 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.schema import Probe, Chunk
-from agents.eval import metrics_common, diagnose
+from agents.eval import metrics_common, metrics_search, diagnose
 from agents.eval.types import (
     EvalRecord, Mode,
     F1_PASS_THRESHOLD, RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
@@ -250,6 +250,28 @@ class RetrievalMismatchTest(_DiagnoseTestBase):
         self.assertIsNone(diagnose.retrieval_lexical_mismatch(rec))
         self.assertTrue(diagnose.retrieval_low_rank(rec).confirmed)      # 배타 상대는 low_rank
 
+    def test_semantic_confirmed_for_mixed_corpus_gold(self):
+        """놓친 gold 가 {코퍼스 있음+없음} 혼합 — 코퍼스에 있는 몫은 검색 실패로 남아야 한다.
+        (예전엔 probe 단위 bool 이라 라벨이 통째로 소실되고 corpus_gap 만 남았다.)"""
+        self._with(keyword=["zzz"])
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0)
+        finding = diagnose.retrieval_semantic_mismatch(rec)
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+        self.assertIn("missed_gold_in_corpus=1/2", finding.metadata["reason"])
+
+    def test_semantic_silent_when_every_missed_gold_is_outside_corpus(self):
+        self._with(keyword=["zzz"])
+        rec = _record(("unknown", "unknown2"), ("x",), recall=0.0)
+        self.assertIsNone(diagnose.retrieval_semantic_mismatch(rec))
+
+    def test_bm25_target_excludes_gold_outside_corpus(self):
+        """코퍼스 밖 gold 를 BM25 가 잡는 건 lexical 근거가 아니다 — corpus_gap 몫."""
+        self._with(keyword=["unknown"])
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0)
+        self.assertIs(metrics_search._bm25_hits_gold(rec), False)
+        self.assertIsNone(diagnose.retrieval_lexical_mismatch(rec))
+
     def test_semantic_preliminary_when_corpus_membership_unknown(self):
         """BM25 는 놓쳤으나 코퍼스 멤버십 미측정(None) → 확정 못 하고 예비(missing_gold 와 동일)."""
         metrics_common.set_context(chunks=[], keyword_fn=_FakeKeyword(["zzz"]))   # corpus_ids 빔 → None
@@ -275,6 +297,17 @@ class RetrievalMissingGoldTest(_DiagnoseTestBase):
 
     def test_silent_when_gold_absent_from_corpus(self):
         rec = _record(("g_a", "unknown"), ("g_a",), recall=0.5)
+        self.assertIsNone(diagnose.retrieval_missing_gold(rec))
+
+    def test_confirmed_for_mixed_corpus_gold(self):
+        """코퍼스에 있는데 못 찾은 gold 가 하나라도 있으면 검색 실패다(나머지는 corpus_gap)."""
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0)
+        finding = diagnose.retrieval_missing_gold(rec)
+        self.assertTrue(finding.confirmed)
+        self.assertIn("missed_gold_in_corpus=1/2", finding.metadata["reason"])
+
+    def test_silent_when_every_missed_gold_is_outside_corpus(self):
+        rec = _record(("unknown", "unknown2"), ("x",), recall=0.0)
         self.assertIsNone(diagnose.retrieval_missing_gold(rec))
 
     def test_carries_gold_ranks_for_planner_when_measured(self):
@@ -947,6 +980,13 @@ class GapLabelTest(_DiagnoseTestBase):
         rec = _record(("unknown",), ("x",), recall=0.0, qtype="bridge")
         self.assertTrue(diagnose.corpus_gap_partial_hop(rec).confirmed)
         self.assertIsNone(diagnose.corpus_gap(rec))                    # 배타
+
+    def test_mixed_corpus_emits_both_retrieval_and_gap_labels(self):
+        """혼합 코퍼스 — 코퍼스에 있는 몫은 A 라벨, 없는 몫은 D 라벨로 함께 남는다."""
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0)
+        labels = {f.label for f in diagnose.diagnose(rec, Mode.STANDARD)}
+        self.assertIn("retrieval_missing_gold", labels)
+        self.assertIn("corpus_gap", labels)
 
     def test_both_silent_when_gold_present_in_corpus(self):
         rec = _record(("g_a",), ("x",), recall=0.0)
