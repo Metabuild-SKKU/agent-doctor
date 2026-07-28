@@ -213,6 +213,8 @@ class EvalRecord:
     oracle_f1: float = 0.0
     raw_f1_score: float = 0.0
     raw_oracle_f1: float = 0.0
+    best_gold_answer_f1: float = 0.0
+    best_oracle_gold_answer_f1: float = 0.0
     best_gold_answer: Optional[str] = None
     best_oracle_gold_answer: Optional[str] = None
     gold_answer_variant_count: int = 0

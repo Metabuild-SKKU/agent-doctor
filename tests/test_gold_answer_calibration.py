@@ -5,89 +5,69 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.schema import Probe
-from agents.eval.gold_answer import (
-    calibrated_answer_score,
-    gold_answer_calibrated_match,
-    gold_answer_overlap,
-)
+from agents.eval import diagnose
 from agents.eval.metrics_basic import _compute_metrics, best_answer_match, gold_answer_variants
 from agents.eval.scoring import reliability_score
-from agents.eval.types import EvalRecord, F1_PASS_THRESHOLD
-
-
-def _record(*, recall=1.0, f1=0.29, faith=1.0, rel=0.97):
-    probe = Probe(
-        probe_id="p1",
-        question="What are the asset and liability totals?",
-        source="unit",
-        gold_chunk_ids=["g_a"],
-        ground_truth="asset_total 49,157,964,024 and liability_total 32,695,236,480",
-    )
-    record = EvalRecord(
-        probe=probe,
-        retrieved_chunk_ids=["g_a"],
-        generated_answer=(
-            "The report says asset_total is 49,157,964,024 and "
-            "liability_total is 32,695,236,480."
-        ),
-    )
-    record.recall_at_k = recall
-    record.f1_score = f1
-    record.ragas = {"faithfulness": faith, "response_relevancy": rel}
-    record.ragas_done = True
-    return record
+from agents.eval.types import EvalRecord
 
 
 class GoldAnswerCalibrationTest(unittest.TestCase):
-    def test_numeric_match_lifts_low_f1_grounded_answer(self):
-        record = _record()
-        self.assertTrue(gold_answer_calibrated_match(record))
-        self.assertEqual(calibrated_answer_score(record), F1_PASS_THRESHOLD)
-        self.assertEqual(reliability_score([record]), F1_PASS_THRESHOLD)
+    def test_best_answer_match_observes_safe_gold_variants(self):
+        reference = "asset_total 49,157,964,024"
+        prediction = "asset_total is 49157964024."
 
-    def test_complete_retrieval_is_required(self):
-        record = _record(recall=0.5)
-        self.assertFalse(gold_answer_calibrated_match(record))
-        self.assertEqual(calibrated_answer_score(record), 0.29)
-
-    def test_overlap_reports_numeric_and_keyword_recall(self):
-        overlap = gold_answer_overlap(
-            "asset_total 49,157,964,024 and liability_total 32,695,236,480",
-            "liability_total is 32,695,236,480; asset_total is 49,157,964,024.",
-        )
-        self.assertEqual(overlap["numeric_recall"], 1.0)
-        self.assertGreaterEqual(overlap["keyword_recall"], 0.65)
-
-    def test_best_answer_match_uses_safe_gold_variants(self):
-        reference = "자산총계 49,157,964,024"
-        prediction = "총자산은 49157964024입니다."
         best, variant, raw, count = best_answer_match(prediction, reference)
-        self.assertGreater(best, raw)
-        self.assertNotEqual(variant, reference)
+
+        self.assertGreaterEqual(best, raw)
+        self.assertTrue(variant)
         self.assertGreaterEqual(count, 2)
 
-    def test_compute_metrics_keeps_raw_and_best_variant_f1(self):
+    def test_sentence_boilerplate_variant_is_not_added(self):
+        variants = gold_answer_variants("asset_total 49,157,964,024")
+
+        self.assertFalse(any(item.endswith("입니다.") for item in variants))
+        self.assertFalse(any(item.endswith("is.") for item in variants))
+
+    def test_compute_metrics_keeps_gate_f1_raw(self):
         record = EvalRecord(
             probe=Probe(
                 probe_id="p2",
-                question="자산총계는 얼마인가요?",
+                question="What is the asset total?",
                 source="unit",
                 gold_chunk_ids=["g_a"],
-                ground_truth="자산총계 49,157,964,024",
+                ground_truth="asset_total 49,157,964,024",
             ),
             retrieved_chunk_ids=["g_a"],
-            generated_answer="총자산은 49157964024입니다.",
-            oracle_answer="자산총계는 49,157,964,024입니다.",
+            generated_answer="asset_total is 49157964024.",
+            oracle_answer="asset_total is 49157964024.",
         )
-        _compute_metrics(record)
-        self.assertGreater(record.f1_score, record.raw_f1_score)
-        self.assertNotEqual(record.best_gold_answer, record.probe.ground_truth)
-        self.assertGreaterEqual(record.gold_answer_variant_count, 2)
 
-    def test_gold_variants_stay_specific(self):
-        variants = gold_answer_variants("자산총계 49,157,964,024")
-        self.assertNotIn("보고서에 금액이 있습니다.", variants)
-        self.assertTrue(any("49,157,964,024" in item or "49157964024" in item for item in variants))
+        _compute_metrics(record)
+
+        self.assertEqual(record.f1_score, record.raw_f1_score)
+        self.assertGreaterEqual(record.best_gold_answer_f1, record.raw_f1_score)
+        self.assertEqual(record.oracle_f1, record.raw_oracle_f1)
+        self.assertGreaterEqual(record.best_oracle_gold_answer_f1, record.raw_oracle_f1)
+
+    def test_low_f1_answer_does_not_pass_gate_by_numeric_overlap(self):
+        record = EvalRecord(
+            probe=Probe(
+                probe_id="p3",
+                question="What is the asset total?",
+                source="unit",
+                gold_chunk_ids=["g_a"],
+                ground_truth="asset_total 49,157,964,024",
+            ),
+            retrieved_chunk_ids=["g_a"],
+            generated_answer="liability_total is 49,157,964,024.",
+        )
+        record.recall_at_k = 1.0
+        record.f1_score = 0.29
+        record.ragas = {"faithfulness": 1.0, "response_relevancy": 0.97}
+        record.ragas_done = True
+
+        self.assertFalse(diagnose._f1_ok(record))
+        self.assertLess(reliability_score([record]), 0.5)
 
 
 if __name__ == "__main__":

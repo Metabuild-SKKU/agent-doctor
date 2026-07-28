@@ -167,9 +167,6 @@ def gold_answer_variants(reference: str) -> list[str]:
         if right in base:
             add(base.replace(right, left))
 
-    if _looks_like_fragment(base):
-        add(f"{base}입니다.")
-        add(f"{_strip_table_markup(base)}입니다.")
 
     # Keep the candidate set small and auditable.
     return variants[:8]
@@ -356,24 +353,28 @@ def _compute_metrics(record: EvalRecord) -> None:
     # answer_match: KorQuAD char-F1 (+짧은 정답 recall).
     if gt:
         score, best_variant, raw_score, variant_count = best_answer_match(record.generated_answer, gt)
-        record.f1_score = score
+        record.f1_score = raw_score
         record.raw_f1_score = raw_score
+        record.best_gold_answer_f1 = score
         record.best_gold_answer = best_variant
         record.gold_answer_variant_count = variant_count
     else:
         record.f1_score = 0.0
         record.raw_f1_score = 0.0
+        record.best_gold_answer_f1 = 0.0
         record.best_gold_answer = None
         record.gold_answer_variant_count = 0
 
     if gt and record.oracle_answer:
         score, best_variant, raw_score, _variant_count = best_answer_match(record.oracle_answer, gt)
-        record.oracle_f1 = score
+        record.oracle_f1 = raw_score
         record.raw_oracle_f1 = raw_score
+        record.best_oracle_gold_answer_f1 = score
         record.best_oracle_gold_answer = best_variant
     else:
         record.oracle_f1 = 0.0
         record.raw_oracle_f1 = 0.0
+        record.best_oracle_gold_answer_f1 = 0.0
         record.best_oracle_gold_answer = None
     # KorQuAD 공식 EM — 관측용으로만 남김.
     record.exact_match = exact_match(record.generated_answer, gt) if gt else False

@@ -47,7 +47,6 @@ from agents.eval.metrics_ragas import (            # tier3
     _compute_ragas_real, _compute_ragas_oracle, _abstention_judged, _reasoning_mode_oracle,
     _correctness_counts_oracle, _faith, _faith_oracle, _rel, _rel_oracle, _ctx_precision,
 )
-from agents.eval.gold_answer import gold_answer_calibrated_match, gold_answer_overlap
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -65,7 +64,7 @@ def _f1_ok(record: EvalRecord) -> bool:
     2-1. llm이 사용 가능하다면, ragas answer_correctness도 임계값 이상이어야함.
     """
     if record.f1_score < F1_PASS_THRESHOLD:
-        return gold_answer_calibrated_match(record)
+        return False
     
     ac = record.ragas_answer_correctness
     if ac is None:
@@ -705,17 +704,12 @@ def bad_gold_answer(record: EvalRecord) -> Optional[Finding]:
     """
     if _oracle_ok(record):
         return None
-    if gold_answer_calibrated_match(record):
-        return None
     faith, rel = _faith(record), _rel(record)
     if (faith is not None and faith >= RAGAS_FAITHFULNESS_MIN
         and rel is not None and rel >= RAGAS_RESPONSE_RELEVANCY_MIN):
-        overlap = gold_answer_overlap(record.probe.ground_truth or "", record.generated_answer or "")
         return _finding(
             record, "bad_gold_answer", "gap", confirmed=True,
-            reason=f"faithfulness={_v(faith)}, response_relevancy={_v(rel)}, f1={_v(record.f1_score)}, "
-                   f"numeric_recall={_v(overlap['numeric_recall'])}, "
-                   f"keyword_recall={_v(overlap['keyword_recall'])}",
+            reason=f"faithfulness={_v(faith)}, response_relevancy={_v(rel)}, f1={_v(record.f1_score)}",
         )
     return None
 

@@ -913,7 +913,7 @@ class ContextLabelTest(_DiagnoseTestBase):
         rec = _record(recall=1.0, oracle_f1=0.1, f1=0.1, faith=0.9, rel=0.9)
         self.assertIsNone(diagnose.bad_gold_answer(rec))
 
-    def test_low_f1_numeric_grounded_answer_is_calibrated(self):
+    def test_low_f1_numeric_grounded_answer_still_requires_answer_correctness(self):
         rec = _record(
             recall=1.0,
             oracle_f1=0.2,
@@ -923,8 +923,8 @@ class ContextLabelTest(_DiagnoseTestBase):
             faith=1.0,
             rel=0.97,
         )
-        self.assertTrue(diagnose._f1_ok(rec))
-        self.assertIsNone(diagnose.bad_gold_answer(rec))
+        self.assertFalse(diagnose._f1_ok(rec))
+        self.assertIsNotNone(diagnose.bad_gold_answer(rec))
 
     def test_low_f1_numeric_answer_still_bad_gold_when_not_grounded_enough(self):
         rec = _record(

@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from agents.eval.types import EvalRecord, RAGAS_WEIGHTS
-from agents.eval.gold_answer import calibrated_answer_score
 
 
 # ── 점수 성분 (component) — 각 함수는 records 를 받아 0~1 또는 None ─────────────
@@ -71,7 +70,8 @@ def _probe_reliability(record: EvalRecord) -> float:
     if record.probe.answer_exists is False:
         return 0.0 if record.findings else 1.0
     retrieval = _clamp01(record.recall_at_k)
-    answer = _clamp01(calibrated_answer_score(record))
+    ac = record.ragas_answer_correctness
+    answer = _clamp01(max(record.f1_score, ac if ac is not None else 0.0))
     return retrieval * answer
 
 
