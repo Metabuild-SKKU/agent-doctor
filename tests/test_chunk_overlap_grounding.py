@@ -43,6 +43,8 @@ class ChunkBoundaryDiagnosisTest(unittest.TestCase):
         metrics_common.set_mode(Mode.FAST)
 
     def test_split_span_does_not_override_confirmed_retrieval_cause(self):
+        # 근거 span 3개(개수 압박) + 첫 span 은 경계 분할 → 확정된 나열형이 chunking 을 우선한다.
+        # (span 1개짜리 단순 경계 분할은 chunking 이 잡는다 — ChunkingGateTest 참고.)
         chunks = _fixed_chunks("d1", 1000, 400, 50)
         metrics_common.set_context(chunks=chunks)
         probe = Probe(
@@ -51,8 +53,13 @@ class ChunkBoundaryDiagnosisTest(unittest.TestCase):
             source="taxonomy",
             answer_exists=True,
             ground_truth="정답",
-            gold_chunk_ids=[chunks[0].chunk_id, chunks[1].chunk_id],
-            gold_spans=[{"doc_id": "d1", "start": 325, "end": 450}],
+            qtype="aggregation",
+            gold_chunk_ids=[chunks[0].chunk_id, chunks[1].chunk_id, chunks[2].chunk_id],
+            gold_spans=[
+                {"doc_id": "d1", "start": 325, "end": 450},   # chunk0/1 경계 분할
+                {"doc_id": "d1", "start": 100, "end": 200},   # chunk0 내부
+                {"doc_id": "d1", "start": 800, "end": 900},   # chunk2 내부
+            ],
             metadata={"span_grounding": {"status": "exact"}},
         )
         record = EvalRecord(

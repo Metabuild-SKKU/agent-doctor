@@ -194,6 +194,49 @@ _ASPECT_INSTRUCTION_TMPL = (
 # 커스텀 criteria (RAGAS AspectCritic definition 슬롯에 주입)
 _ASPECT_CONTRADICTION = ("Does the response contain information that contradicts the "
                          "retrieved context?")
+_ASPECT_ABSTENTION = ("Does the response decline to answer — stating that it does not know, "
+                      "that the information is unavailable, or that the question cannot be "
+                      "answered from the given context — instead of asserting a substantive answer?")
+
+# ── 추론 실패 모드 다중분류 (모순/수치/해석/결합) ───────────────────
+#   셋 이상이 같은 실패를 두고 경쟁하는 설명이라, 이진 판정 여러 번 대신 단일 분류로 배타성을
+#   측정 자체에 넣는다(이진 판정을 나눠 물으면 여러 개가 동시에 참이 되어 순서가 원인을 정한다).
+_REASONING_MODE_INSTRUCTION = (
+    "The response was written from the given context but does not match the reference answer. "
+    "Identify the single most likely failure mode and return it in 'mode'. "
+    "Use exactly one of these values:\n"
+    "- 'contradiction': the response asserts something that conflicts with the context.\n"
+    "- 'numerical_error': a number, unit, date, or calculation is wrong.\n"
+    "- 'misinterpretation': the context was read but its meaning, or a condition of the question, "
+    "was misunderstood.\n"
+    "- 'hop_binding': the individual facts are each correct but were combined or related incorrectly.\n"
+    "- 'other': none of the above."
+)
+_SCHEMA_REASONING_MODE = ('{"properties": {"reason": {"type": "string"}, "mode": {"type": "string"}}, '
+                          '"required": ["reason", "mode"]}')
+_REASONING_MODE_EXAMPLES = [
+    ({"user_input": "How many employees does the company have?",
+      "response": "The company has 250 employees.",
+      "retrieved_contexts": ["The company employs 150 people across three offices."],
+      "reference": "150"},
+     {"reason": "The headcount is stated as 150 in the context but the response says 250.",
+      "mode": "numerical_error"}),
+    ({"user_input": "Who founded the lab that developed the vaccine?",
+      "response": "The vaccine was developed by Dr. Kim, who founded the lab.",
+      "retrieved_contexts": ["The lab was founded by Dr. Park.", "Dr. Kim led the vaccine project."],
+      "reference": "Dr. Park"},
+     {"reason": "Both facts are individually correct but the founder and the project lead were merged.",
+      "mode": "hop_binding"}),
+    ({"user_input": "Is the policy mandatory for part-time staff?",
+      "response": "Yes, the policy applies to all part-time staff.",
+      "retrieved_contexts": ["The policy is recommended, but not required, for part-time staff."],
+      "reference": "No, it is only recommended."},
+     {"reason": "The context says recommended, the response asserts it is required.",
+      "mode": "contradiction"}),
+]
+_REASONING_MODES = frozenset(
+    {"contradiction", "numerical_error", "misinterpretation", "hop_binding", "other"}
+)
 
 # ── Answer Correctness: TP/FP/FN 분류 (CorrectnessClassifierPrompt) ──
 #   ragas/metrics/collections/answer_correctness (0.4.3) 소스와 일치.
@@ -365,6 +408,33 @@ def evaluate_aspect_critics(record: EvalRecord, judge) -> dict:
     }
 
 
+def evaluate_reasoning_mode(record: EvalRecord, judge) -> dict:
+    """오라클 답변의 추론 실패 모드 단일 분류(모순/수치/해석/결합/기타).
+    real 트랙 contradiction(evaluate_aspect_critics)과는 답변·컨텍스트가 달라 별도 키를 쓴다."""
+    inp = {
+        "user_input": record.probe.question,
+        "response": record.oracle_answer or "",
+        "retrieved_contexts": record.oracle_context or record.retrieved_context,
+        "reference": record.probe.ground_truth or "",
+    }
+    d = _chat(judge, _ragas_prompt(_REASONING_MODE_INSTRUCTION, _SCHEMA_REASONING_MODE,
+                                   _REASONING_MODE_EXAMPLES, inp))
+    mode = d.get("mode")
+    if not isinstance(mode, str) or mode not in _REASONING_MODES:
+        return {}                                    # 미상·파싱 실패 → 미측정
+    return {"reasoning_mode": mode}
+
+
+def evaluate_abstention(record: EvalRecord, judge) -> dict:
+    """기권 여부 이진 판정(AspectCritic). generation_abstention_failure 의 DEEP+ 경로."""
+    return {
+        "abstention": _aspect_critic(
+            judge, _ASPECT_ABSTENTION, record.probe.question,
+            record.generated_answer, record.retrieved_context,
+        ),
+    }
+
+
 # ══════════════════════════════════════════════════════════════════
 #  RAGAS 지표 알고리즘 (소스와 동일)
 # ══════════════════════════════════════════════════════════════════
@@ -412,6 +482,7 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
     w_f, w_s = _ANSWER_CORRECTNESS_WEIGHTS
     components: list[tuple[float, float]] = []   # (가중치, 값) — 측정에 성공한 성분만 담는다
     factual_measured = False
+    counts: dict = {}                            # TP/FP/FN — factual 성공 시에만 채운다
 
     # ① factual F1 — 답변 문장을 정답 기준 TP/FP/FN 으로 분류
     ans_stmts = _decompose_statements(judge, question, answer)
@@ -428,6 +499,11 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
         if denom > 0:
             components.append((w_f, tp / denom))
             factual_measured = True
+            # TP=맞은 요소 / FP=gold 에 없는 군더더기 / FN=gold 에만 있는 누락 요소.
+            # FN 이 generation_partial_answer 의 판별 근거다(임계 판정은 diagnose 소관).
+            counts = {"answer_correctness_tp": tp,
+                      "answer_correctness_fp": fp,
+                      "answer_correctness_fn": fn}
 
     # ② 의미 유사도 — 답변↔정답 임베딩 코사인
     try:
@@ -442,6 +518,7 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
     # 성분이 하나만 측정돼도 가중 재정규화해 0~1 스케일을 유지한다.
     score = sum(w * v for w, v in components) / sum(w for w, _ in components)
     out = {"answer_correctness": score}
+    out.update(counts)                           # factual 실패면 빈 dict = 카운트 미측정
 
     # factual(TP/FP/FN 분류)이 빠지면 유사도 단독 점수다. 이 폴백은 판정을 느슨하게 만들지
     # 않는다 — 이 지표를 보는 diagnose._f1_ok 은 이미 lexical 을 통과한 답에만 도달하므로,
@@ -671,6 +748,32 @@ def _ensure_ragas(record: EvalRecord, track: str):
         record.ragas = _ctx.ragas_fn(record, "real") or {}
 
 
+def _abstention_judged(record: EvalRecord):
+    """AspectCritic 기권 판정. tier3, DEEP+ / 미측정·자원없음 None(→ 마커 휴리스틱 폴백).
+
+    memoize 는 record.aspect(실행 단위) — signals(=diagnosis_cache)는 index_config·코퍼스
+    버전으로만 무효화돼서, 매 실행 새로 생성되는 generated_answer 에 물린 판정엔 못 쓴다.
+    실패({})도 None 으로 남겨 같은 실행에서 재호출을 막는다(ragas_done 과 같은 규약).
+    """
+    if active_mode() < Mode.DEEP or _ctx.ragas_fn is None:
+        return None
+    if "abstention" not in record.aspect:
+        verdict = (_ctx.ragas_fn(record, "abstention") or {}).get("abstention")
+        record.aspect["abstention"] = None if verdict is None else bool(verdict)
+    return record.aspect["abstention"]
+
+
+def _reasoning_mode_oracle(record: EvalRecord):
+    """오라클 답변의 추론 실패 모드(문자열). tier3, DEEP+ / 오라클 답·자원 없거나 미상이면 None.
+    memoize 는 _abstention_judged 와 같은 이유로 record.aspect(실행 단위)."""
+    if active_mode() < Mode.DEEP or _ctx.ragas_fn is None or record.oracle_answer is None:
+        return None
+    if "reasoning_mode" not in record.aspect:
+        mode = (_ctx.ragas_fn(record, "reasoning_mode") or {}).get("reasoning_mode")
+        record.aspect["reasoning_mode"] = mode if mode in _REASONING_MODES else None
+    return record.aspect["reasoning_mode"]
+
+
 def _faith(record: EvalRecord):
     """faithfulness(충실도) 값 — 실제 트랙. tier3, DEEP+ / 미측정 None."""
     if active_mode() < Mode.DEEP:
@@ -685,6 +788,26 @@ def _faith_oracle(record: EvalRecord):
         return None
     _ensure_ragas(record, "oracle")
     return record.oracle_ragas.get("faithfulness")
+
+
+def _correctness_counts_oracle(record: EvalRecord):
+    """오라클 트랙 (TP, FP, FN) 카운트. tier3, DEEP+ / factual 성분 미측정(degraded)이면 None."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "oracle")
+    d = record.oracle_ragas
+    if "answer_correctness_fn" not in d:
+        return None
+    return (d["answer_correctness_tp"], d["answer_correctness_fp"], d["answer_correctness_fn"])
+
+
+def _ctx_precision(record: EvalRecord):
+    """context_precision(검색 컨텍스트 유용성) — 실제 트랙. tier3, DEEP+ / 미측정 None.
+    지금까지 소비처가 리포트 평균뿐이라, 라벨이 읽어도 LLM 추가 호출은 없다."""
+    if active_mode() < Mode.DEEP:
+        return None
+    _ensure_ragas(record, "real")
+    return record.ragas.get("context_precision")
 
 
 def _rel(record: EvalRecord):

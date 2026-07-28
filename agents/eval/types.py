@@ -29,6 +29,9 @@ DEFAULT_TOP_K = 5              # index_config.top_k 미지정 시 검색 개수
 # STEP3-2 RAGAS 지표 임계값 (설계 STEP4 표 기준, 낮으면 Finding 생성)
 RAGAS_FAITHFULNESS_MIN = 0.7
 RAGAS_CONTEXT_PRECISION_MIN = 0.7
+# 검색된 gold 청크 안에서 실제 근거가 차지하는 최소 비율. 이보다 낮으면 청크가 근거보다 훨씬
+# 커서 무관한 내용을 함께 싣고 있다고 본다(chunking_underchunking). 숫자 튜닝 필요.
+EVIDENCE_DENSITY_MIN = 0.2
 RAGAS_CONTEXT_RECALL_MIN = 0.7
 RAGAS_RESPONSE_RELEVANCY_MIN = 0.7
 
