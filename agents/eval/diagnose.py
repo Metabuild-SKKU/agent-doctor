@@ -470,6 +470,30 @@ def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
     return None
 
 
+def generation_no_abstention_on_gap(record: EvalRecord) -> Optional[Finding]:
+    """
+    코퍼스에 근거가 없는데(corpus_gap) 기권하지 않고 틀린 답을 지어냄.
+    확정: gold 가 코퍼스에 없음(tier2) + 답변 있음 + 기권 아님 + 정답도 아님.
+
+    generation_abstention_failure 는 answer_exists=False 게이트라 이 경우를 못 잡는다 —
+    그쪽은 '원래 답이 없는 질문', 이쪽은 '답은 있는데 우리 코퍼스에 근거가 없는 질문'이다.
+    정답을 맞혔으면 침묵한다 — 근거 없이 맞힌 건 parametric_overreliance 소관이다.
+    corpus_gap 은 '자료를 채우라'는 D 처방이고, 이 라벨은 그 상황에서 파이프라인이
+    어떻게 행동해야 하는가(기권)를 따로 짚는다.
+    """
+    if _gold_in_corpus(record) is not False:
+        return None                      # 코퍼스에 다 있거나 미측정 → 이 라벨의 전제 아님
+    if not (record.generated_answer or "").strip():
+        return None                      # 빈 답변은 지어낸 게 아니라 생성 실패 → 롤업 몫
+    if _abstained(record) or _f1_ok(record):
+        return None
+    judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
+    return _finding(
+        record, "generation_no_abstention_on_gap", "generation_failure", confirmed=True,
+        reason=f"gold_in_corpus=False, 기권 아님({judge}), f1={_v(record.f1_score)}(오답)",
+    )
+
+
 def generation_parametric_overreliance(record: EvalRecord) -> Optional[Finding]:
     """
     정답이지만 검색 context 에 근거가 없음 — 모델 파라미터 기억에 의존.
@@ -911,6 +935,7 @@ def _group_of(label: str, ftype: str) -> str:
 _CRITICAL_LABELS = {
     "retrieval_semantic_mismatch", "retrieval_missing_gold",
     "generation_hallucination", "generation_abstention_failure",   # 답 없는 질문에 지어냄 = 환각
+    "generation_no_abstention_on_gap",                             # 근거 없는데 지어냄 = 환각
     "generation_contradiction",                                    # 문맥과 정면 충돌 = 사실 오류
     "corpus_gap", "corpus_gap_partial_hop",
 }
@@ -1007,6 +1032,9 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
         findings.append(_pick(record, _CONTEXT_CAUSE))
     # B: 정답이지만 근거 없음 (additive) — 전제가 '답이 맞음'이라 위 원인들과 경쟁하지 않는다.
     findings.append(generation_parametric_overreliance(record))
+    # B: 코퍼스에 근거가 없는데 기권 안 함 (additive) — corpus_gap probe 는 gold context 가 없어
+    # 오라클 트랙이 안 돌고 _generation_failed 가 안 켜져 B 슬롯에 도달하지 못한다.
+    findings.append(generation_no_abstention_on_gap(record))
 
     findings = _dedup(_collect(*findings))
     findings.sort(key=lambda f: (

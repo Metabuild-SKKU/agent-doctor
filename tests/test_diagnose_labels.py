@@ -1071,6 +1071,46 @@ class GapLabelTest(_DiagnoseTestBase):
         self.assertTrue(diagnose.corpus_gap_partial_hop(rec).confirmed)
         self.assertIsNone(diagnose.corpus_gap(rec))                    # 배타
 
+    def _gap(self, *, answer="지어낸 답", f1=0.1):
+        """gold 가 코퍼스에 없는 probe(= corpus_gap 전제)."""
+        return _record(("unknown",), ("x",), recall=0.0, f1=f1, answer=answer)
+
+    def test_no_abstention_on_gap_confirmed_when_model_makes_something_up(self):
+        """corpus_gap 은 '자료를 채워라'까지만 말한다 — 기권했어야 하는데 지어낸 건 별개 문제."""
+        finding = diagnose.generation_no_abstention_on_gap(self._gap())
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+        self.assertEqual(finding.severity, "critical")
+        self.assertEqual(finding.metadata["group"], "B")
+
+    def test_no_abstention_on_gap_silent_when_model_abstains(self):
+        """올바른 동작 — 근거가 없다고 말했으면 생성 실패가 아니다."""
+        self.assertIsNone(diagnose.generation_no_abstention_on_gap(
+            self._gap(answer="제공된 정보로는 알 수 없습니다")))
+
+    def test_no_abstention_on_gap_silent_when_answer_is_correct(self):
+        """근거 없이 맞힌 건 parametric_overreliance 영역."""
+        self.assertIsNone(diagnose.generation_no_abstention_on_gap(self._gap(f1=1.0)))
+
+    def test_no_abstention_on_gap_silent_when_answer_is_empty(self):
+        """빈 답변은 지어낸 게 아니라 생성 실패 → 롤업 몫."""
+        self.assertIsNone(diagnose.generation_no_abstention_on_gap(self._gap(answer="")))
+
+    def test_no_abstention_on_gap_silent_when_gold_is_in_corpus(self):
+        rec = _record(("g_a",), ("x",), recall=0.0, f1=0.1)
+        self.assertIsNone(diagnose.generation_no_abstention_on_gap(rec))
+
+    def test_no_abstention_on_gap_silent_without_tier2(self):
+        """코퍼스 멤버십은 tier2 — 미측정이면 gap 전제를 못 세운다."""
+        metrics_common.set_mode(Mode.FAST)
+        self.assertIsNone(diagnose.generation_no_abstention_on_gap(self._gap()))
+
+    def test_gap_emits_both_corpus_gap_and_abstention_label(self):
+        """자료 보강(D)과 기권 동작(B)은 처방이 달라 둘 다 남아야 한다."""
+        labels = {f.label for f in diagnose.diagnose(self._gap(), Mode.STANDARD)}
+        self.assertIn("corpus_gap", labels)
+        self.assertIn("generation_no_abstention_on_gap", labels)
+
     def test_mixed_corpus_emits_both_retrieval_and_gap_labels(self):
         """혼합 코퍼스 — 코퍼스에 있는 몫은 A 라벨, 없는 몫은 D 라벨로 함께 남는다."""
         rec = _record(("g_a", "unknown"), ("x",), recall=0.0)
