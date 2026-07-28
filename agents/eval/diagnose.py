@@ -36,7 +36,7 @@ from agents.eval.types import (
     CONTEXT_CHARS_MAX, CONTEXT_MIDDLE_BAND,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN, RAGAS_CONTEXT_PRECISION_MIN,
 )
-from agents.eval.metrics_common import set_mode, set_context, _missed_gold_ids
+from agents.eval.metrics_common import set_mode, set_context, active_mode, _missed_gold_ids
 from agents.eval.metrics_basic import (            # tier1
     is_abstention, _compute_metrics, _gold_span_boundary_analysis,
     _gold_chunk_evidence_density, _oversized_gold_spans,
@@ -381,8 +381,7 @@ def retrieval_failure(record: EvalRecord) -> Optional[Finding]:
     """검색 실패 롤업"""
     return _finding(
         record, "retrieval_failure", "retrieval_failure", confirmed=False,
-        reason=f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, "
-                f"faithfulness={_v(_faith_oracle(record))}, relevancy={_v(_rel_oracle(record))}",
+        reason=_rollup_reason(record),
     )
 
 # ══════════════════════════════════════════════════════════════════
@@ -584,8 +583,7 @@ def generation_failure(record: EvalRecord) -> Optional[Finding]:
     """생성 실패 롤업"""
     return _finding(
         record, "generation_failure", "generation_failure", confirmed=False,
-        reason=f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, "
-                f"faithfulness={_v(_faith_oracle(record))}, relevancy={_v(_rel_oracle(record))}",
+        reason=_rollup_reason(record),
     )
 
 
@@ -739,8 +737,7 @@ def context_failure(record: EvalRecord) -> Optional[Finding]:
     """콘텍스트 실패 롤업"""
     return _finding(
         record, "context_failure", "context_failure", confirmed=False,
-        reason=f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, "
-                f"faithfulness={_v(_faith_oracle(record))}, relevancy={_v(_rel_oracle(record))}",
+        reason=_rollup_reason(record),
     )
 
 
@@ -935,6 +932,17 @@ def _v(x) -> str:
     if x is None:
         return "-"
     return f"{x:.2f}" if isinstance(x, float) else str(x)
+
+
+def _rollup_reason(record: EvalRecord) -> str:
+    """롤업(그룹만 알고 원인은 모름) 공통 reason.
+
+    구체 원인을 하나도 못 고른 이유는 대개 자원 부족이라, 아래 지표가 전부 '-' 로 비는
+    저모드에서는 값만 봐선 '왜 롤업인지'를 알 수 없다 → 실행 모드를 함께 남긴다.
+    """
+    return (f"구체 원인 미실측(mode={active_mode()}), "
+            f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, "
+            f"faithfulness={_v(_faith_oracle(record))}, relevancy={_v(_rel_oracle(record))}")
 
 
 def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool, reason: str = "") -> Finding:

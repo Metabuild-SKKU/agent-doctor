@@ -483,13 +483,47 @@ class RetrievalBridgeTest(_DiagnoseTestBase):
         self.assertIsNone(diagnose.retrieval_missing_bridge_dependency(rec))
 
 
-class RetrievalRollupTest(_DiagnoseTestBase):
-    def test_rollup_always_yields_preliminary_finding(self):
-        """_RETRIEVAL_CAUSE 맨 뒤 — 세부 원인을 못 고를 때 슬롯이 비지 않게 한다."""
+class RollupTest(_DiagnoseTestBase):
+    """롤업 3종 — 슬롯 맨 뒤·항상 예비. 구체 라벨이 하나라도 서면 밀려난다."""
+
+    ROLLUPS = (
+        (diagnose.retrieval_failure, "retrieval_failure", "A"),
+        (diagnose.generation_failure, "generation_failure", "B"),
+        (diagnose.context_failure, "context_failure", "C"),
+    )
+
+    def test_rollups_are_always_preliminary(self):
+        """_pick 맨 뒤 — 세부 원인을 못 고를 때 슬롯이 비지 않게 한다."""
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
-        finding = diagnose.retrieval_failure(rec)
-        self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)
+        for fn, label, group in self.ROLLUPS:
+            with self.subTest(label=label):
+                finding = fn(rec)
+                self.assertFalse(finding.confirmed)
+                self.assertEqual(finding.label, label)
+                self.assertEqual(finding.metadata["group"], group)
+
+    def test_rollup_reason_records_mode_when_metrics_are_blank(self):
+        """저모드에선 지표가 전부 '-' 라, 왜 롤업인지는 실행 모드로만 알 수 있다."""
+        metrics_common.set_mode(Mode.FAST)
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        reason = diagnose.retrieval_failure(rec).metadata["reason"]
+        self.assertIn(f"mode={Mode.FAST}", reason)
+        self.assertIn("faithfulness=-", reason)
+
+    def test_rollup_yields_to_any_specific_cause(self):
+        """구체 라벨이 예비여도 롤업보다 앞이라 채택된다(롤업은 최후)."""
+        metrics_common.set_mode(Mode.FAST)                     # tier2 없음 → 구체 라벨도 예비
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertNotEqual(diagnose._pick(rec, diagnose._RETRIEVAL_CAUSE).label,
+                            "retrieval_failure")
+
+    def test_rollups_have_no_prescription_and_stay_report_only(self):
+        """롤업은 rules.py 에 항목이 없어 optimize 가 건너뛴다 — 리포트 전용이라는 계약."""
+        from agents.optimize import rules
+        for _fn, label, _group in self.ROLLUPS:
+            with self.subTest(label=label):
+                self.assertIsNone(rules.get_rule(label))
+                self.assertFalse(rules.is_actionable(label))
 
 
 # ══════════════════════════════════════════════════════════════════
