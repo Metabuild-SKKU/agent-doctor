@@ -604,6 +604,11 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
             f"reranker={rec.retrieval_details.get('reranker_status', 'disabled')}"
         )
     print(f"    recall@k={recall}  f1={f1}  oracle_f1={oracle}")
+    if p.ground_truth and rec.raw_f1_score != rec.f1_score:
+        print(
+            f"    gold_variant: raw_f1={_fmt_metric(rec.raw_f1_score)} "
+            f"best_f1={f1} variants={rec.gold_answer_variant_count}"
+        )
     for f in rec.findings:
         mark = "" if f.confirmed else "(예비)"
         print(f"    ! {f.label}{mark}: {f.metadata.get('reason') or '-'}")
