@@ -33,6 +33,18 @@ force_utf8_stdio()
 
 from langgraph.graph import StateGraph, END
 
+# LangSmith 태그 전파용(선택). 우리 LLM 은 @traceable 로 직접 트레이싱되므로 graph.invoke 의
+# RunnableConfig 태그가 flat run 에 안 붙는다 → tracing_context 로 실행을 감싸 태그를 심는다.
+# langsmith 미설치/OFF 여도 무해하도록 아무것도 안 하는 컨텍스트로 폴백한다.
+try:
+    from langsmith.run_helpers import tracing_context
+except ImportError:  # pragma: no cover - langsmith 미설치 폴백
+    from contextlib import contextmanager
+
+    @contextmanager
+    def tracing_context(**_kwargs):
+        yield
+
 from core.llm_usage import print_agent_table
 from core.state import AgentDoctorState
 from agents.ingest.agent import run as ingest_run
@@ -113,9 +125,15 @@ def build_graph():
 def _langsmith_run_config(state: AgentDoctorState) -> dict:
     """이번 실행의 index_config 를 LangSmith tags/metadata 로 만든다(2단계: 실행 간 비교).
 
-    graph.invoke(state, config=...) 에 넘기면 이 실행에서 생성되는 모든 하위 트레이스
-    (gemini_chat 등)에 자동 전파된다 → UI 에서 "reranker=off 태그만 필터" 같은 before/after
-    비교가 된다. 트레이싱이 꺼져 있으면 이 config 는 langsmith 가 그냥 무시하므로 무해하다.
+    반환한 tags/metadata 는 run_pipeline 에서 `tracing_context(...)` 로 실행 전체를 감싸
+    이 실행에서 생성되는 모든 @traceable 트레이스(gemini_chat 등)에 실린다 → UI 에서
+    "reranker=off 태그만 필터" 같은 before/after 비교가 된다.
+
+    주의(왜 tracing_context 인가): 우리 LLM 호출은 LangChain runnable 이 아니라 @traceable
+    로 직접 트레이싱된다. 그래서 graph.invoke(config={"tags":...}) 의 RunnableConfig 는
+    LangGraph 트리 안에서만 흐르고, 트리 밖 flat 로 뜨는 @traceable root run 에는 태그가
+    안 붙는다(실측: tags=[]). tracing_context 는 스레드 컨텍스트에 태그를 심어 그 안의 모든
+    @traceable 호출에 붙이므로 flat run 에도 태그가 실린다.
 
     태그는 파이프라인 시작 시점의 config 기준이다 — Optimize 가 실행 중 config 를 바꿔도
     태그는 초기값을 유지한다. before/after 비교는 use_reranker 등을 바꿔 '따로 실행'하는
@@ -126,11 +144,16 @@ def _langsmith_run_config(state: AgentDoctorState) -> dict:
     short = {"use_reranker": "reranker", "use_hybrid": "hybrid",
              "chunk_strategy": "strategy", "chunk_size": "chunk", "top_k": "topk"}
     tags = [f"{short[k]}={str(cfg.get(k)).lower()}" for k in tag_keys if k in cfg]
+    # 핵심 축은 metadata 최상위 키로도 '평평하게' 넣는다 — LangSmith 트레이스 테이블에서
+    # index_config 통짜 dict 안에 묻힌 값은 독립 컬럼/필터로 잘 안 걸리기 때문. 이렇게 두면
+    # use_reranker / chunk_size 등이 각각 컬럼으로 떠 on/off 를 표에서 바로 필터할 수 있다.
+    flat_axes = {k: cfg[k] for k in tag_keys if k in cfg}
     return {
         "tags": tags,
         "metadata": {
             "source_type": state.source_type,
-            "index_config": cfg,  # config 전체 — 상세에서 정확한 값 확인용
+            **flat_axes,                # ← use_reranker, chunk_size … 최상위 키(=컬럼)
+            "index_config": cfg,        # config 전체 — 상세에서 정확한 값 확인용
         },
     }
 
@@ -175,9 +198,14 @@ def run_pipeline(
         print(f"  LangSmith 트레이싱: ON (project={project})")
     print("=" * 60)
 
-    # config=... : 이 실행의 index_config 를 tags/metadata 로 하위 트레이스에 전파(2단계).
-    # 트레이싱 OFF 여도 LangGraph 는 이 config 를 정상 처리하므로(langsmith 만 무시) 무해.
-    final_state = graph.invoke(initial_state, config=_langsmith_run_config(initial_state))
+    # 이 실행의 index_config 를 tags/metadata 로 만들어 두 경로로 전파한다:
+    #   1) graph.invoke(config=...): LangGraph 트리 안 트레이스용(RunnableConfig).
+    #   2) tracing_context(...): @traceable 로 직접 트레이싱되는 우리 LLM 호출(gemini_chat 등)
+    #      은 LangGraph 트리 밖 flat root run 으로 떠서 (1)의 태그를 못 받는다 → 여기서 감싼다.
+    # 트레이싱 OFF/미설치면 tracing_context 는 no-op, config 도 langsmith 가 무시하므로 무해.
+    run_cfg = _langsmith_run_config(initial_state)
+    with tracing_context(tags=run_cfg["tags"], metadata=run_cfg["metadata"]):
+        final_state = graph.invoke(initial_state, config=run_cfg)
     # LangGraph 는 dataclass state 를 dict 로 반환한다 → 속성 접근 위해 dataclass 로 복원
     # (노드 안에서는 AgentDoctorState 객체지만 invoke() 최종 반환은 dict).
     if isinstance(final_state, dict):
