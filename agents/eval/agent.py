@@ -61,6 +61,19 @@ from agents.eval.metrics_basic import _compute_metrics
 from agents.eval.diagnose import diagnose, _is_success
 from agents.eval.report import build_report
 
+# LangSmith 트레이싱(선택) — probe 1개를 span 하나로 남겨 점수(recall/f1/oracle)와
+# 문제유형 라벨을 LangSmith 에서 필터·검색할 수 있게 한다. core/llm_clients.py 와 동일한
+# 폴백 규약: 패키지 없음/트레이싱 OFF 면 @traceable 이 스스로 no-op 이라 파이프라인 무영향.
+try:
+    from langsmith import traceable
+except ImportError:  # pragma: no cover - langsmith 미설치 폴백
+    def traceable(*d_args, **d_kwargs):
+        def _decorator(fn):
+            return fn
+        if len(d_args) == 1 and callable(d_args[0]) and not d_kwargs:
+            return d_args[0]
+        return _decorator
+
 
 _EVAL_CACHE_ENV_KEYS = (
     "EVAL_PROBE_SOURCE",
@@ -498,7 +511,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         with step("Eval", 4, "원인 판정"):
             print()
             for i, rec in enumerate(records, 1):
-                rec.findings = diagnose(rec, mode)
+                rec.findings = _diagnose_traced(rec, mode)
                 _log_probe(i, len(records), rec)
             _log_diagnosis_summary(records)
 
@@ -570,6 +583,58 @@ def _mark(ok: bool) -> str:
     except (UnicodeEncodeError, LookupError):
         return "[OK]" if ok else "[FAIL]"
     return glyph
+
+
+def _probe_trace_payload(rec: EvalRecord) -> dict:
+    """probe 1개의 점수·라벨을 LangSmith span 에 실을 dict 로 정리한다(표시 전용).
+
+    _log_probe 가 콘솔에 찍는 것과 같은 정보(recall/f1/oracle·문제유형 라벨·검색 상세)를
+    트레이스에도 남겨, LangSmith 에서 'label=retrieval_low_recall 인 probe 만' 같은 필터·
+    검색이 되게 한다. 미측정 지표(-1·None)는 그대로 둬 UI 에서 '-' 로 읽히게 한다."""
+    p = rec.probe
+    labels = [f.label for f in rec.findings if f.label]
+    return {
+        "probe_id": p.probe_id,
+        "question": p.question,
+        "source": p.source,
+        "qtype": p.qtype or "single",
+        # 점수 지표 — _log_probe 의 recall@k / f1 / oracle_f1 과 동일
+        "recall_at_k": rec.recall_at_k,
+        "f1_score": rec.f1_score,
+        "oracle_f1": rec.oracle_f1,
+        "exact_match": rec.exact_match,
+        # 문제유형 라벨(진단 결과) — 성공 probe 는 빈 리스트
+        "labels": labels,
+        "n_findings": len(rec.findings),
+        "passed": not rec.findings,
+        # 검색 실행 상세(reranker 실제 발동 여부 등)
+        "reranker_status": rec.retrieval_details.get("reranker_status", "disabled"),
+        "search_mode": rec.retrieval_details.get("search_mode", "-"),
+    }
+
+
+def _diagnose_traced(rec: EvalRecord, mode: int) -> list:
+    """diagnose(rec, mode) 를 실행하되, probe 1개를 LangSmith span 하나로 남긴다.
+
+    span 의 이름은 probe_id, output 은 점수·라벨 payload → LangSmith 트레이스 목록에서
+    probe 별 recall/f1/oracle 과 문제유형 라벨을 바로 보고 필터할 수 있다. 진단 도중 일어나는
+    LLM 호출(RAGAS 등)은 이 span 아래로 중첩된다. 트레이싱 OFF/미설치면 @traceable 이
+    no-op 이라 그냥 diagnose 결과만 반환한다(파이프라인 무영향).
+
+    태그로도 라벨을 실어(label:<name>) '문제유형별 필터'가 태그 UI 에서 바로 되게 한다."""
+    findings = diagnose(rec, mode)
+    rec.findings = findings  # payload 계산이 findings 를 읽으므로 먼저 반영
+    payload = _probe_trace_payload(rec)
+    tags = [f"label:{lbl}" for lbl in payload["labels"]] or ["label:pass"]
+
+    @traceable(run_type="chain", name=f"probe:{rec.probe.probe_id}", tags=tags,
+               metadata=payload)
+    def _span():
+        # 반환값이 곧 span output. 점수·라벨을 그대로 실어 UI Output 에 표시.
+        return payload
+
+    _span()
+    return findings
 
 
 def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
