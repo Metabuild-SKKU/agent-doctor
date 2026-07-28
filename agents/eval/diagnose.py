@@ -545,7 +545,7 @@ def _hop_binding_from_counts(record: EvalRecord, faith) -> Optional[Finding]:
     if _hop_binding_counts_hit(record):
         return _finding(
             record, "generation_hop_binding_error", "generation_failure", confirmed=True,
-            reason=f"reasoning_mode=-, missing=0(요소 누락 없음), unsupported={fp}, tp={tp}, "
+            reason=f"reasoning_mode=-, missing={fn}(요소 누락 없음), unsupported={fp}, tp={tp}, "
                    f"faithfulness={_v(faith)}, qtype={record.probe.qtype}, "
                    f"oracle_f1={_v(record.oracle_f1)}",
         )
