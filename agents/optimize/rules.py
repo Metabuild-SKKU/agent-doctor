@@ -494,30 +494,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         # BLOCKER: generation_config 필드 없음.
     },
 
-    "generation_no_abstention_on_gap": {
-        "group": "B",
-        "assigned": "권성우",
-        "status": "draft",              # generation_config 필드 합의 필요
-        "diagnosis_confidence": None,   # 숫자 튜닝 필요
-        "target_metrics": ["faithfulness"],  # 코퍼스에 근거 없는데 지어냄 → 근거성
-        "prescriptions": [
-            {
-                "id": "strengthen_abstention_prompt",
-                "patch": {"abstention_prompt": "strengthen", "grounding_strict": True},
-                "reindex": False,
-                "cost": None,           # 숫자 튜닝 필요
-            },
-            {
-                "id": "require_citation",
-                "patch": {"require_citation": True},
-                "reindex": False,
-                "cost": None,           # 숫자 튜닝 필요
-            },
-        ],
-        # BLOCKER: generation_config 필드 없음.
-        # 같은 probe 에 corpus_gap(D, manual)이 함께 붙는다 — 자료 보강은 그쪽, 기권 동작은 이쪽.
-    },
-
     "generation_parametric_overreliance": {
         "group": "B",
         "assigned": "권성우",

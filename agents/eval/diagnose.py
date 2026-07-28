@@ -453,44 +453,42 @@ def _reasoning_failure_evidence(record: EvalRecord) -> bool:
     return _reasoning_failure_identified(record) or _hop_binding_counts_hit(record)
 
 
+def _expects_abstention(record: EvalRecord) -> bool:
+    """기권했어야 하는 상황인가 — 답의 근거가 애초에 없는 두 경우.
+
+    1) 무응답 기대 probe(answer_exists=False): 원래 답이 없는 질문 (tier1)
+    2) gold 가 코퍼스에 없음(corpus_gap) + 답도 틀림: 답은 있으나 우리 코퍼스에 근거가 없음 (tier2)
+
+    정답을 맞힌 2번은 뺀다 — 근거 없이 맞힌 건 parametric_overreliance 소관이다.
+    (싼 판정만 쓴다 — 여기서 걸러야 _abstained 의 AspectCritic 호출이 해당 probe 에만 든다.)
+    """
+    if record.probe.answer_exists is False:
+        return True
+    return _gold_in_corpus(record) is False and not _f1_ok(record)
+
+
 def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
     """
-    무응답 기대(answer_exists=False) probe인데 기권하지 않고 답을 지어냄.
-    확정: answer_exists=False + 기권 아님(DEEP+ AspectCritic / 미만은 마커 휴리스틱).
+    기권했어야 하는 질문에 기권하지 않고 답을 지어냄.
+    확정: _expects_abstention + 기권 아님(DEEP+ AspectCritic / 미만은 마커 휴리스틱).
+
+    두 상황(무응답 기대 / 코퍼스에 근거 없음)을 한 라벨로 둔다 — 실패 행동이 '근거 없이
+    단정했다'로 같고 처방도 같아서(기권 프롬프트 강화·인용 요구), 나눠도 optimize 가
+    다르게 처방할 게 없다. 어느 쪽이 발동했는지는 reason 으로 구분한다.
+    corpus_gap 쪽은 D 라벨(자료 보강)이 함께 붙는다 — 자료를 채우는 것과 별개로
+    '근거가 없을 때 어떻게 행동해야 하는가'를 이 라벨이 짚는다.
     (라벨은 optimize/rules.py 의 처방 키와 일치시킨다 — generation_abstention_failure)
     """
     if not (record.generated_answer or "").strip():
         return None                      # 빈 답변은 지어낸 게 아니라 생성 실패 → 롤업 몫
-    if record.probe.answer_exists is False and not _abstained(record):
-        judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
-        return _finding(
-            record, "generation_abstention_failure", "generation_failure", confirmed=True,
-            reason=f"answer_exists=False, 기권 아님({judge})",
-        )
-    return None
-
-
-def generation_no_abstention_on_gap(record: EvalRecord) -> Optional[Finding]:
-    """
-    코퍼스에 근거가 없는데(corpus_gap) 기권하지 않고 틀린 답을 지어냄.
-    확정: gold 가 코퍼스에 없음(tier2) + 답변 있음 + 기권 아님 + 정답도 아님.
-
-    generation_abstention_failure 는 answer_exists=False 게이트라 이 경우를 못 잡는다 —
-    그쪽은 '원래 답이 없는 질문', 이쪽은 '답은 있는데 우리 코퍼스에 근거가 없는 질문'이다.
-    정답을 맞혔으면 침묵한다 — 근거 없이 맞힌 건 parametric_overreliance 소관이다.
-    corpus_gap 은 '자료를 채우라'는 D 처방이고, 이 라벨은 그 상황에서 파이프라인이
-    어떻게 행동해야 하는가(기권)를 따로 짚는다.
-    """
-    if _gold_in_corpus(record) is not False:
-        return None                      # 코퍼스에 다 있거나 미측정 → 이 라벨의 전제 아님
-    if not (record.generated_answer or "").strip():
-        return None                      # 빈 답변은 지어낸 게 아니라 생성 실패 → 롤업 몫
-    if _abstained(record) or _f1_ok(record):
+    if not _expects_abstention(record) or _abstained(record):
         return None
     judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
+    trigger = ("answer_exists=False" if record.probe.answer_exists is False
+               else f"gold_in_corpus=False, f1={_v(record.f1_score)}(오답)")
     return _finding(
-        record, "generation_no_abstention_on_gap", "generation_failure", confirmed=True,
-        reason=f"gold_in_corpus=False, 기권 아님({judge}), f1={_v(record.f1_score)}(오답)",
+        record, "generation_abstention_failure", "generation_failure", confirmed=True,
+        reason=f"{trigger}, 기권 아님({judge})",
     )
 
 
@@ -934,8 +932,7 @@ def _group_of(label: str, ftype: str) -> str:
 # !!!!!!!!!!!!!!!!!!!!!!!!!!!! optimize와 논의 필요
 _CRITICAL_LABELS = {
     "retrieval_semantic_mismatch", "retrieval_missing_gold",
-    "generation_hallucination", "generation_abstention_failure",   # 답 없는 질문에 지어냄 = 환각
-    "generation_no_abstention_on_gap",                             # 근거 없는데 지어냄 = 환각
+    "generation_hallucination", "generation_abstention_failure",   # 근거 없는데 지어냄 = 환각
     "generation_contradiction",                                    # 문맥과 정면 충돌 = 사실 오류
     "corpus_gap", "corpus_gap_partial_hop",
 }
@@ -1032,9 +1029,9 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
         findings.append(_pick(record, _CONTEXT_CAUSE))
     # B: 정답이지만 근거 없음 (additive) — 전제가 '답이 맞음'이라 위 원인들과 경쟁하지 않는다.
     findings.append(generation_parametric_overreliance(record))
-    # B: 코퍼스에 근거가 없는데 기권 안 함 (additive) — corpus_gap probe 는 gold context 가 없어
-    # 오라클 트랙이 안 돌고 _generation_failed 가 안 켜져 B 슬롯에 도달하지 못한다.
-    findings.append(generation_no_abstention_on_gap(record))
+    # B: 기권 실패 (additive) — corpus_gap probe 는 gold context 가 없어 오라클 트랙이 안 돌고
+    # _generation_failed 가 안 켜져 B 슬롯에 도달하지 못한다(슬롯 경유분은 _dedup 이 접는다).
+    findings.append(generation_abstention_failure(record))
 
     findings = _dedup(_collect(*findings))
     findings.sort(key=lambda f: (

@@ -207,8 +207,7 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `generation_partial_answer` | B 생성 | 3 | RAGAS relevancy |
 | `generation_hop_binding_error` | B 생성 | 3 | RAGAS faithfulness(+추론검증) |
 | `generation_contradiction` / `numerical_error` / `misinterpretation` | B 생성 | 3 | 추론 실패 모드 단일분류(LLM 1회) |
-| `generation_abstention_failure` | B 생성 | 3 | 무응답 기대인데 기권 안 함(AspectCritic) |
-| `generation_no_abstention_on_gap` | B 생성 | 2 | 코퍼스에 근거 없는데 기권 안 함 |
+| `generation_abstention_failure` | B 생성 | 2~3 | 기권했어야 하는데 지어냄(무응답 기대 / 코퍼스에 근거 없음) |
 | `generation_parametric_overreliance` | B 생성 | 3 | 정답이지만 real faithfulness 낮음 |
 | `generation_failure` (롤업) | B 생성 | 3 | DEEP에서 세분화 (항상 예비) |
 | `too_long_context` | C context | 3 | 예비만 (context 길이 + 근거 없음, gold 는 양끝) |
