@@ -168,6 +168,21 @@ def _enumeration_recoverable_by_top_k(record: EvalRecord) -> bool:
 #  A그룹: 검색 실패 (Oracle 통과) — retrieval_*
 # ══════════════════════════════════════════════════════════════════
 
+def _retrieval_fixable(record: EvalRecord) -> bool:
+    """검색으로 고칠 수 있는 실패인가 — A 슬롯 진입 전제.
+
+    recall<1 만으로 슬롯을 열면 구체 라벨들은 self-scope 로 빠져도 롤업(retrieval_failure)이
+    무조건 붙어 '검색을 고쳐라'가 남는다. 아래 둘은 검색 결함이 아니다:
+    1) gold 가 전부 코퍼스 밖 → 자료를 채워야 한다(corpus_gap 몫). '하나라도 없음'이 아니라
+       '전부 없음'으로 본다 — 부분 gap 의 코퍼스에 있는 몫은 실제로 검색이 놓친 것이다.
+    2) answer_exists=False probe → gold 는 답의 근거가 아니라 전제를 반박하는 청크라
+       (false premise, probe_gen 참조) recall 자체가 성립하지 않는다.
+    """
+    if record.probe.answer_exists is False:
+        return False
+    return _gold_absent_from_corpus(record) is not True
+
+
 def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
     """
     gold가 top-N 후보엔 있으나 순위가 낮아 top-k 밖.
@@ -494,18 +509,24 @@ def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
     corpus_gap 쪽은 D 라벨(자료 보강)이 함께 붙는다 — 자료를 채우는 것과 별개로
     '근거가 없을 때 어떻게 행동해야 하는가'를 이 라벨이 짚는다.
     (라벨은 optimize/rules.py 의 처방 키와 일치시킨다 — generation_abstention_failure)
+
+    어느 쪽이 발동했는지는 metadata['trigger'] 로도 남긴다 — reason 문자열만으로는
+    reporter·optimize 가 '자료를 채우면 사라질 기권 실패'와 그렇지 않은 것을 파싱 없이 못 가른다.
     """
     if not (record.generated_answer or "").strip():
         return None                      # 빈 답변은 지어낸 게 아니라 생성 실패 → 롤업 몫
     if not _expects_abstention(record) or _abstained(record):
         return None
     judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
-    trigger = ("answer_exists=False" if record.probe.answer_exists is False
+    no_answer_expected = record.probe.answer_exists is False
+    trigger = ("answer_exists=False" if no_answer_expected
                else f"gold_in_corpus=False, f1={_v(record.f1_score)}(오답)")
-    return _finding(
+    finding = _finding(
         record, "generation_abstention_failure", "generation_failure", confirmed=True,
         reason=f"{trigger}, 기권 아님({judge})",
     )
+    finding.metadata["trigger"] = "no_answer_expected" if no_answer_expected else "corpus_gap"
+    return finding
 
 
 def generation_parametric_overreliance(record: EvalRecord) -> Optional[Finding]:
@@ -843,12 +864,23 @@ def _corpus_membership_ratio(record: EvalRecord) -> str:
     return f"{sum(1 for present in membership.values() if present)}/{len(membership)}"
 
 
+def _corpus_gap_premise(record: EvalRecord) -> bool:
+    """자료 결손(D) 공통 전제: gold 중 코퍼스에 없는 것이 있음.
+
+    answer_exists=False probe 는 뺀다 — 답이 애초에 없으니 채울 자료도 없고,
+    '관련 문서를 추가 수집하라'(rules.py manual_action)가 거짓 처방이 된다.
+    """
+    if record.probe.answer_exists is False:
+        return False
+    return _gold_in_corpus(record) is False
+
+
 def corpus_gap(record: EvalRecord) -> Optional[Finding]:
     """
     필요한 자료가 코퍼스에 없음(단일홉).
     확정: gold 중 코퍼스에 없는 것이 있음(tier2).
     """
-    if _gold_in_corpus(record) is False and not _is_multi_hop(record):
+    if _corpus_gap_premise(record) and not _is_multi_hop(record):
         return _finding(
             record, "corpus_gap", "gap", confirmed=True,
             reason=f"gold_in_corpus={_corpus_membership_ratio(record)}, "
@@ -862,7 +894,7 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
     멀티홉 중 일부 hop 근거만 코퍼스에 없음.
     확정: gold 중 코퍼스에 없는 것이 있음(tier2).
     """
-    if _gold_in_corpus(record) is False and _is_multi_hop(record):
+    if _corpus_gap_premise(record) and _is_multi_hop(record):
         return _finding(
             record, "corpus_gap_partial_hop", "gap", confirmed=True,
             reason=f"gold_in_corpus={_corpus_membership_ratio(record)}, "
@@ -1054,7 +1086,8 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
     # 추가 진단
     findings = []
     if 0 <= record.recall_at_k < 1:                     # A: 검색 실패 (gold 있는데 일부 미검색)
-        findings.append(_pick(record, _RETRIEVAL_CAUSE))
+        if _retrieval_fixable(record):                  # 코퍼스 밖·무응답 기대는 검색 몫이 아니다
+            findings.append(_pick(record, _RETRIEVAL_CAUSE))
         findings.append(corpus_gap(record))             # D: 코퍼스에 gold 없음 (additive)
         findings.append(corpus_gap_partial_hop(record))
     if _generation_failed(record):                      # B: 생성 실패

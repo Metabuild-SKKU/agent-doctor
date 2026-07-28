@@ -527,6 +527,42 @@ class RollupTest(_DiagnoseTestBase):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  A 슬롯 진입 전제 — recall<1 만으로는 열지 않는다
+#    구체 라벨은 self-scope 로 빠져도 롤업이 무조건 붙어 '검색을 고쳐라'가 남기 때문에,
+#    검색으로 고칠 수 없는 실패는 슬롯 자체를 닫아야 한다.
+# ══════════════════════════════════════════════════════════════════
+
+class RetrievalSlotGateTest(_DiagnoseTestBase):
+    def _a_labels(self, rec):
+        return {f.label for f in diagnose.diagnose(rec, Mode.STANDARD)
+                if f.metadata["group"] == "A"}
+
+    def test_closed_when_every_gold_is_outside_corpus(self):
+        """자료가 없는 걸 검색이 고칠 수는 없다 — corpus_gap 만 남아야 한다."""
+        rec = _record(("unknown",), ("x",), recall=0.0, answer="엉뚱한 말")
+        self.assertFalse(diagnose._retrieval_fixable(rec))
+        self.assertEqual(self._a_labels(rec), set())
+
+    def test_open_on_partial_gap(self):
+        """코퍼스에 있는 몫은 실제로 검색이 놓친 것 — '전부 없음'이 아니면 닫지 않는다."""
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0, answer="엉뚱한 말")
+        self.assertTrue(diagnose._retrieval_fixable(rec))
+        self.assertTrue(self._a_labels(rec))
+
+    def test_closed_for_false_premise_probe(self):
+        """answer_exists=False 의 gold 는 답의 근거가 아니라 전제를 반박하는 청크라
+        recall 이 성립하지 않는다 — 그걸 미검색으로 세면 무응답 probe 에 검색 처방이 붙는다."""
+        rec = _record(("g_a",), ("x",), recall=0.0, answer_exists=False,
+                      ground_truth=None, answer="지어낸 답")
+        self.assertFalse(diagnose._retrieval_fixable(rec))
+        self.assertEqual(self._a_labels(rec), set())
+
+    def test_open_when_gold_is_in_corpus(self):
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertTrue(diagnose._retrieval_fixable(rec))
+
+
+# ══════════════════════════════════════════════════════════════════
 #  B그룹: 생성 실패 (오라클 트랙 RAGAS 기반 · DEEP+)
 # ══════════════════════════════════════════════════════════════════
 
@@ -1184,6 +1220,32 @@ class GapLabelTest(_DiagnoseTestBase):
         rec = _record(("g_a",), ("x",), recall=0.0)
         self.assertIsNone(diagnose.corpus_gap(rec))
         self.assertIsNone(diagnose.corpus_gap_partial_hop(rec))
+
+    def test_both_silent_for_no_answer_probe(self):
+        """답이 애초에 없는 질문엔 채울 자료도 없다 — '문서를 추가 수집하라'가 거짓 처방이 된다."""
+        for qtype in (None, "bridge"):
+            with self.subTest(qtype=qtype):
+                rec = _record(("unknown",), ("x",), recall=0.0, qtype=qtype,
+                              answer_exists=False, ground_truth=None)
+                self.assertIsNone(diagnose.corpus_gap(rec))
+                self.assertIsNone(diagnose.corpus_gap_partial_hop(rec))
+
+    def test_trigger_metadata_separates_the_two_causes(self):
+        """처방은 같지만 '자료를 채우면 사라질 기권 실패'인지는 갈라야 한다 — reason 파싱 없이."""
+        gap = diagnose.generation_abstention_failure(self._gap())
+        self.assertEqual(gap.metadata["trigger"], "corpus_gap")
+
+        no_answer = _record((), ("x",), recall=-1.0, answer_exists=False,
+                            ground_truth=None, answer="지어낸 답")
+        self.assertEqual(diagnose.generation_abstention_failure(no_answer).metadata["trigger"],
+                         "no_answer_expected")
+
+    def test_no_answer_probe_emits_only_the_abstention_label(self):
+        """무응답 기대 probe 는 D(자료)·A(검색) 어디에도 걸리지 않는다 — 고칠 건 생성 동작뿐."""
+        rec = _record(("g_a",), ("x",), recall=0.0, answer_exists=False,
+                      ground_truth=None, answer="지어낸 답")
+        self.assertEqual({f.label for f in diagnose.diagnose(rec, Mode.STANDARD)},
+                         {"generation_abstention_failure"})
 
 
 # ══════════════════════════════════════════════════════════════════

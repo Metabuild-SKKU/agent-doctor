@@ -88,9 +88,14 @@ lexical 통과를 **강등**한다(부정문·`3월`↔`3일` 같은 근접 오�
 즉 **화면에 보이는 "신뢰도" 숫자는 "findings 없는 probe의 비율"이 아니라 "probe별 soft 신뢰도의
 평균"이다.** 자세한 배경은 `agents/optimize/history.py`의 `judge`/`_read_score` 주석과 PR #47 참고.
 
-실패로 판정되면 전제별로 해당 그룹만 검사한다 — A(검색, `0 <= recall < 1`) / B(생성, `_generation_failed`)
-/ C(컨텍스트, `_context_failed`). 슬롯마다 `_pick()`으로 확정(confirmed) 우선 하나씩 채택하고,
-D(데이터, `corpus_gap` 계열)는 additive로 더 붙는다.
+실패로 판정되면 전제별로 해당 그룹만 검사한다 — A(검색, `0 <= recall < 1` + `_retrieval_fixable`)
+/ B(생성, `_generation_failed`) / C(컨텍스트, `_context_failed`). 슬롯마다 `_pick()`으로
+확정(confirmed) 우선 하나씩 채택하고, D(데이터, `corpus_gap` 계열)는 additive로 더 붙는다.
+
+검색으로 고칠 수 없는 실패는 A 슬롯을 아예 닫는다(`_retrieval_fixable`) — gold가 전부 코퍼스
+밖이거나 `answer_exists=False` probe인 경우. 안 닫으면 구체 라벨이 self-scope로 다 빠져도 롤업
+`retrieval_failure`가 남아 "검색을 고쳐라"가 처방된다. 무응답 기대 probe는 D에도 붙지 않는다
+(채울 자료가 없으므로) — 남는 건 B의 `generation_abstention_failure` 하나다.
 
 ---
 
@@ -207,7 +212,7 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `generation_partial_answer` | B 생성 | 3 | RAGAS relevancy |
 | `generation_hop_binding_error` | B 생성 | 3 | RAGAS faithfulness(+추론검증) |
 | `generation_contradiction` / `numerical_error` / `misinterpretation` | B 생성 | 3 | 추론 실패 모드 단일분류(LLM 1회) |
-| `generation_abstention_failure` | B 생성 | 2~3 | 기권했어야 하는데 지어냄(무응답 기대 / 코퍼스에 근거 없음) |
+| `generation_abstention_failure` | B 생성 | 2~3 | 기권했어야 하는데 지어냄(두 갈래는 `metadata.trigger`로 구분 — `no_answer_expected` / `corpus_gap`) |
 | `generation_parametric_overreliance` | B 생성 | 3 | 정답이지만 real faithfulness 낮음 |
 | `generation_failure` (롤업) | B 생성 | 3 | DEEP에서 세분화 (항상 예비) |
 | `too_long_context` | C context | 3 | 예비만 (context 길이 + 근거 없음, gold 는 양끝) |
