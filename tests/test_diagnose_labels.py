@@ -913,6 +913,32 @@ class ContextLabelTest(_DiagnoseTestBase):
         rec = _record(recall=1.0, oracle_f1=0.1, f1=0.1, faith=0.9, rel=0.9)
         self.assertIsNone(diagnose.bad_gold_answer(rec))
 
+    def test_low_f1_numeric_grounded_answer_still_requires_answer_correctness(self):
+        rec = _record(
+            recall=1.0,
+            oracle_f1=0.2,
+            f1=0.29,
+            ground_truth="asset_total 49,157,964,024 and liability_total 32,695,236,480",
+            answer="The report says asset_total is 49,157,964,024 and liability_total is 32,695,236,480.",
+            faith=1.0,
+            rel=0.97,
+        )
+        self.assertFalse(diagnose._f1_ok(rec))
+        self.assertIsNotNone(diagnose.bad_gold_answer(rec))
+
+    def test_low_f1_numeric_answer_still_bad_gold_when_not_grounded_enough(self):
+        rec = _record(
+            recall=1.0,
+            oracle_f1=0.2,
+            f1=0.29,
+            ground_truth="asset_total 49,157,964,024 and liability_total 32,695,236,480",
+            answer="The report says asset_total is 49,157,964,024 and liability_total is 32,695,236,480.",
+            faith=0.8,
+            rel=0.97,
+        )
+        self.assertFalse(diagnose._f1_ok(rec))
+        self.assertIsNotNone(diagnose.bad_gold_answer(rec))
+
 
 # ══════════════════════════════════════════════════════════════════
 #  D그룹: 데이터 결손

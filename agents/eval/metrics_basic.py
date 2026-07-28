@@ -26,6 +26,7 @@ LLM 호출도, 추가 검색 쿼리도 쓰지 않는다 — 이미 가진 답변
 from __future__ import annotations
 
 import string
+import re
 from collections import Counter
 
 from agents.eval.types import EvalRecord
@@ -124,6 +125,84 @@ def answer_match(prediction: str, reference: str) -> float:
         if rc >= _CONTAINMENT_MIN:              # 정답이 거의 다 담김 → recall 로 precision 감점 상쇄
             return max(f1, rc)
     return f1
+
+
+_NUMBER_RE = re.compile(r"\d+(?:[,\d]*\d)?(?:\.\d+)?%?")
+_SAFE_TERM_VARIANTS = (
+    ("자산총계", "총자산"),
+    ("부채총계", "총부채"),
+    ("자본총계", "총자본"),
+    ("당분기말", "분기말"),
+    ("전기말", "직전 기말"),
+    ("금 액", "금액"),
+    ("비 율", "비율"),
+)
+
+
+def gold_answer_variants(reference: str) -> list[str]:
+    """Build safe reference variants for lexical matching.
+
+    The variants preserve the original facts. They are intentionally limited to
+    formatting and common label aliases so a wrong answer is not accepted merely
+    because it shares a number.
+    """
+    base = (reference or "").strip()
+    if not base:
+        return []
+
+    variants: list[str] = []
+
+    def add(value: str) -> None:
+        value = " ".join((value or "").strip().split())
+        if value and value not in variants:
+            variants.append(value)
+
+    add(base)
+    add(_strip_table_markup(base))
+    add(_numbers_without_commas(base))
+
+    for left, right in _SAFE_TERM_VARIANTS:
+        if left in base:
+            add(base.replace(left, right))
+        if right in base:
+            add(base.replace(right, left))
+
+
+    # Keep the candidate set small and auditable.
+    return variants[:8]
+
+
+def best_answer_match(prediction: str, reference: str) -> tuple[float, str, float, int]:
+    """Return best lexical match over safe gold-answer variants.
+
+    Returns: best_score, best_variant, raw_score_against_original, variant_count.
+    """
+    variants = gold_answer_variants(reference)
+    if not variants:
+        return 0.0, "", 0.0, 0
+    raw = answer_match(prediction, variants[0])
+    scored = [(answer_match(prediction, variant), variant) for variant in variants]
+    best_score, best_variant = max(scored, key=lambda item: item[0])
+    return best_score, best_variant, raw, len(variants)
+
+
+def _strip_table_markup(text: str) -> str:
+    value = (text or "").replace("|", " ")
+    value = value.replace(":", " ")
+    return " ".join(value.split())
+
+
+def _numbers_without_commas(text: str) -> str:
+    return _NUMBER_RE.sub(lambda m: m.group(0).replace(",", ""), text or "")
+
+
+def _looks_like_fragment(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if stripped.endswith((".", "?", "!", "다", "요")):
+        return False
+    return bool(_NUMBER_RE.search(stripped) or "|" in stripped or ":" in stripped)
 
 
 # ── 검색 지표 ─────────────────────────────────────────────────────
@@ -272,8 +351,31 @@ def _compute_metrics(record: EvalRecord) -> None:
         else recall_at_k(record.probe.gold_chunk_ids, record.retrieved_chunk_ids)
     )
     # answer_match: KorQuAD char-F1 (+짧은 정답 recall).
-    record.f1_score = answer_match(record.generated_answer, gt) if gt else 0.0
-    record.oracle_f1 = answer_match(record.oracle_answer, gt) if (gt and record.oracle_answer) else 0.0
+    if gt:
+        score, best_variant, raw_score, variant_count = best_answer_match(record.generated_answer, gt)
+        record.f1_score = raw_score
+        record.raw_f1_score = raw_score
+        record.best_gold_answer_f1 = score
+        record.best_gold_answer = best_variant
+        record.gold_answer_variant_count = variant_count
+    else:
+        record.f1_score = 0.0
+        record.raw_f1_score = 0.0
+        record.best_gold_answer_f1 = 0.0
+        record.best_gold_answer = None
+        record.gold_answer_variant_count = 0
+
+    if gt and record.oracle_answer:
+        score, best_variant, raw_score, _variant_count = best_answer_match(record.oracle_answer, gt)
+        record.oracle_f1 = raw_score
+        record.raw_oracle_f1 = raw_score
+        record.best_oracle_gold_answer_f1 = score
+        record.best_oracle_gold_answer = best_variant
+    else:
+        record.oracle_f1 = 0.0
+        record.raw_oracle_f1 = 0.0
+        record.best_oracle_gold_answer_f1 = 0.0
+        record.best_oracle_gold_answer = None
     # KorQuAD 공식 EM — 관측용으로만 남김.
     record.exact_match = exact_match(record.generated_answer, gt) if gt else False
 
