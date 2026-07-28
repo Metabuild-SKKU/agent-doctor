@@ -429,6 +429,7 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         state = agent.run(state)                             # 방문2: 판정 불가 → 롤백(차단 X)
         self.assertEqual(len(state.blacklist), 0)             # 처방이 소진/차단되지 않음
         self.assertEqual(state.optimization_history[0].status, "failed")
+        self.assertTrue(state.optimization_history[0].metadata["unjudgeable"])
 
     def test_rollback_reindex_survives_followup_search_time_rx(self):
         # index-time 처방(shrink_chunk_size, reindex=True)이 롤백된 뒤 같은 방문에서

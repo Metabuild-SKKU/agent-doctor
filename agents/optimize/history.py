@@ -252,6 +252,10 @@ def finalize_item(
     item.metadata["pending"] = False
     item.metadata["before_score"] = verdict.before_score
     item.metadata["after_score"] = verdict.after_score
+    # 측정 자체가 성립하지 않은 처방은 품질 blacklist와 구분해 기록한다.
+    # Optimize Agent가 이 값을 사용해 같은 실행 안에서 동일 no-progress 전이를
+    # 다시 열지 않으며, 새 파이프라인 실행에서는 이력이 초기화되어 재시도할 수 있다.
+    item.metadata["unjudgeable"] = bool(verdict.unjudgeable)
     # 표시·게이트용 종합점수(0~100). verdict 가 실어줬으면 그걸, 아니면 리포트에서 직접.
     before_report = item.metadata.get("before_report")
     item.metadata["before_composite"] = (
