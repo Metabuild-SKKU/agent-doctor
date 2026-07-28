@@ -3,6 +3,7 @@ import sys
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from unittest.mock import patch
 
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -106,6 +107,25 @@ class StageSummaryTest(unittest.TestCase):
         self.assertIn("누적 단가 미등록 1회", line)
         self.assertEqual(llm_usage.snapshot_usage()["prompt"], 2_000)
         self.assertEqual(llm_usage.snapshot_usage()["output"], 200)
+
+    def test_step_reports_timing_separately_from_single_llm_summary(self):
+        buf = StringIO()
+        with (
+            patch(
+                "core.llm_usage.time.monotonic",
+                side_effect=[10.0, 12.3],
+            ),
+            redirect_stdout(buf),
+        ):
+            with llm_usage.step("Eval", 2, "검색 + 답변 생성"):
+                llm_usage.log_usage("gpt-4o-mini", 1_000, 100)
+
+        lines = buf.getvalue().splitlines()
+        usage_lines = [line for line in lines if "LLM 사용 |" in line]
+        self.assertEqual(len(usage_lines), 1)
+        self.assertNotIn("소요", usage_lines[0])
+        self.assertIn("[Eval] STEP2 소요: 2.3s", lines)
+        self.assertFalse(hasattr(llm_usage, "_step_log"))
 
 
 if __name__ == "__main__":

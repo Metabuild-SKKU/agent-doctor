@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from contextlib import contextmanager
 
 # USD per 1M tokens (input, output). 유료 티어 텍스트 기준, 2026-07 요금표.
@@ -53,10 +54,6 @@ _lock = threading.Lock()
 # 귀속돼야 하므로 threading.local 이 아니라 모듈 전역 + _lock 으로 다룬다 —
 # Eval STEP2/STEP3-2 의 LLM 호출은 core/parallel.py 의 워커 스레드에서 일어난다.
 _current_step: dict | None = None
-# 한 에이전트 실행 동안 닫힌 스텝들(agent_box 가 소비하고 비운다).
-_step_log: list[dict] = []
-
-
 def _setting() -> str:
     return (os.getenv("LLM_LOG_USAGE") or os.getenv("EVAL_LOG_USAGE") or "1").strip().lower()
 
@@ -179,17 +176,19 @@ def step(tag: str, n: int, title: str):
             "cost": 0.0,
             "unpriced_calls": 0,
         }
+    started_at = time.monotonic()
     try:
         yield
     finally:
+        elapsed = time.monotonic() - started_at
         with _lock:
             rec, _current_step = _current_step, None
             cumulative = dict(_totals)
         if rec is not None:
-            _step_log.append(rec)
             line = _step_line(rec, cumulative)
             if line:
                 print(line)
+            print(f"[{tag}] STEP{n} 소요: {elapsed:.1f}s")
 
 
 def _step_line(rec: dict, cumulative: dict) -> str:
@@ -204,17 +203,6 @@ def _step_line(rec: dict, cumulative: dict) -> str:
         f"누적 비용 ≈ {_fmt_usd(cumulative['cost'])}, "
         f"누적 단가 미등록 {cumulative['unpriced_calls']}회"
     )
-
-
-def reset_steps() -> None:
-    """에이전트 재진입 시 스텝 기록 초기화(Optimize 루프로 Eval 이 여러 번 돈다).
-    프로세스 전역 누적(_totals/_by_agent)은 건드리지 않는다 — 최종 표가 그걸 쓴다."""
-    _step_log.clear()
-
-
-def agent_box(tag: str) -> None:
-    """단계별 로그와 전체 요약이 중복되지 않도록 닫힌 스텝 기록만 비운다."""
-    _step_log.clear()
 
 
 def print_summary(

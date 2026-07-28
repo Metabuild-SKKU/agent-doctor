@@ -34,7 +34,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from core.schema import Probe, EvalSnapshot
-from core.llm_usage import agent_box, print_summary, reset_steps, snapshot_usage, step
+from core.llm_usage import print_summary, snapshot_usage, step
 from core.parallel import parallel_map
 from core.state import AgentDoctorState
 
@@ -318,7 +318,6 @@ _MODE_NAMES = {Mode.FAST: "fast", Mode.STANDARD: "standard", Mode.DEEP: "deep", 
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
-    reset_steps()   # Optimize 루프로 재진입할 때 이전 회차의 스텝 기록이 섞이지 않게
 
     if not state.chunks:
         state.status = "error"
@@ -528,7 +527,6 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     finally:
         print_summary(tag="Eval", stage="전체", since=run_usage)
 
-    agent_box("Eval")
     return state
 
 

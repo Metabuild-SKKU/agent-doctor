@@ -103,17 +103,6 @@ def make_report(overall, pass_threshold=False, label="too_long_context"):
 
 class OptimizeCandidateLogTest(unittest.TestCase):
     def test_request_skip_does_not_reassign_reason_to_first_candidate(self):
-        candidates = [
-            PrescriptionCandidate("a", "too_long_context", "C", "ready"),
-            PrescriptionCandidate("b", "too_long_context", "C", "ready"),
-        ]
-        request = OptimizationRequest(
-            request_id="req-1",
-            iteration=1,
-            baseline_config={},
-            failure_label="too_long_context",
-            candidates=candidates,
-        )
         result = OptimizationResult(
             request_id="req-1",
             status="skipped",
@@ -129,7 +118,7 @@ class OptimizeCandidateLogTest(unittest.TestCase):
 
         buf = StringIO()
         with redirect_stdout(buf):
-            agent._log_candidate_review(request, result)
+            agent._log_candidate_review(result)
 
         lines = buf.getvalue().splitlines()
         self.assertEqual(
@@ -140,6 +129,137 @@ class OptimizeCandidateLogTest(unittest.TestCase):
                 "[Optimize] 요청 SKIP: reason=missing_search_space",
             ],
         )
+
+    def test_failed_candidate_is_not_logged_as_selected(self):
+        candidate = PrescriptionCandidate(
+            "a",
+            "too_long_context",
+            "C",
+            "ready",
+        )
+        result = OptimizationResult(
+            request_id="req-1",
+            status="failed",
+            optimizer="internal",
+            selected_candidate=candidate,
+            message="internal 평가에 실패했습니다.",
+            error="internal 평가에 실패했습니다.",
+            metadata={"error_code": "internal_failed"},
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_candidate_review(result)
+
+        self.assertEqual(
+            buf.getvalue().strip(),
+            "[Optimize] 후보 FAIL: id=a, reason=internal_failed",
+        )
+        self.assertNotIn("SELECT", buf.getvalue())
+
+    def test_failed_request_without_candidate_is_logged(self):
+        result = OptimizationResult(
+            request_id="req-1",
+            status="failed",
+            optimizer="internal",
+            message="후보 범위가 잘못됐습니다.",
+            error="후보 범위가 잘못됐습니다.",
+            metadata={"error_code": "invalid_internal_next_config"},
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_candidate_review(result)
+
+        self.assertEqual(
+            buf.getvalue().strip(),
+            "[Optimize] 요청 FAIL: reason=invalid_internal_next_config",
+        )
+
+    def test_candidate_list_omits_unused_fields_and_shared_reason_duplicates(self):
+        candidates = [
+            PrescriptionCandidate(
+                "a",
+                "too_long_context",
+                "C",
+                "ready",
+                cost=1.0,
+                priority=0.0,
+                reason="검색 context가 너무 깁니다.",
+                tradeoffs=["현재는 생산되지 않는 값"],
+            ),
+            PrescriptionCandidate(
+                "b",
+                "too_long_context",
+                "C",
+                "ready",
+                cost=2.0,
+                priority=0.0,
+                reason="검색 context가 너무 깁니다.",
+                tradeoffs=["현재는 생산되지 않는 값"],
+            ),
+        ]
+        request = OptimizationRequest(
+            request_id="req-1",
+            iteration=1,
+            baseline_config={},
+            failure_label="too_long_context",
+            candidates=candidates,
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_candidate_list(request)
+
+        output = buf.getvalue()
+        self.assertEqual(output.count("검색 context가 너무 깁니다."), 1)
+        self.assertNotIn("priority=", output)
+        self.assertNotIn("예상 부작용", output)
+
+    def test_selected_reason_is_logged_once_at_application(self):
+        candidate = PrescriptionCandidate(
+            "a",
+            "too_long_context",
+            "C",
+            "ready",
+            patch=ConfigPatch(changes={"top_k": 2}),
+        )
+        request = OptimizationRequest(
+            request_id="req-1",
+            iteration=1,
+            baseline_config={"top_k": 4},
+            failure_label="too_long_context",
+            candidates=[candidate],
+        )
+        result = OptimizationResult(
+            request_id="req-1",
+            status="applied",
+            optimizer="rules",
+            selected_candidate=candidate,
+            message="top_k를 줄입니다.",
+        )
+        state = AgentDoctorState(
+            index_config={"top_k": 2},
+            iteration=1,
+            max_iterations=3,
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_candidate_review(result)
+            agent._log_optimize_application(
+                state,
+                request,
+                result,
+                {"top_k": 4},
+                {"top_k": 2},
+                ["top_k"],
+                "a",
+            )
+
+        output = buf.getvalue()
+        self.assertIn("[Optimize] 후보 SELECT: id=a", output)
+        self.assertEqual(output.count("top_k를 줄입니다."), 1)
 
 
 def make_state(overall=60.0, chunk_size=512, iteration=0, max_iterations=3,

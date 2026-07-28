@@ -136,27 +136,32 @@ def _log_candidate_list(request: OptimizationRequest) -> None:
         f"[Optimize] 후보 생성: {len(request.candidates)}개 "
         f"(label={request.failure_label}, optimizer={request.optimizer})"
     )
+    distinct_reasons = list(
+        dict.fromkeys(
+            candidate.reason
+            for candidate in request.candidates
+            if candidate.reason
+        )
+    )
+    shared_reason = distinct_reasons[0] if len(distinct_reasons) == 1 else None
+    if shared_reason:
+        print(f"[Optimize] 후보 제안 근거: {shared_reason}")
     for index, candidate in enumerate(request.candidates, 1):
         reindex = bool(candidate.patch and candidate.patch.reindex_required)
         patch = candidate.patch.changes if candidate.patch else {}
         print(
             f"[Optimize] 후보 {index}/{len(request.candidates)}: "
             f"id={candidate.id}, status={candidate.status}, "
-            f"priority={candidate.priority:.2f}, cost={candidate.cost!r}, "
+            f"cost={candidate.cost!r}, "
             f"patch={_fmt_mapping(patch)}, "
             f"search_space={_fmt_mapping(candidate.search_space)}, "
             f"reindex={_fmt_bool(reindex)}"
         )
-        if candidate.reason:
+        if candidate.reason and candidate.reason != shared_reason:
             print(f"[Optimize]   제안 근거: {candidate.reason}")
-        if candidate.tradeoffs:
-            print(f"[Optimize]   예상 부작용: {', '.join(candidate.tradeoffs)}")
 
 
-def _log_candidate_review(
-    request: OptimizationRequest,
-    result: OptimizationResult,
-) -> None:
+def _log_candidate_review(result: OptimizationResult) -> None:
     """Optimizer가 후보를 거르거나 선택한 결과와 이유를 출력한다."""
     for skipped in result.metadata.get("skipped_candidates", []):
         if not isinstance(skipped, dict):
@@ -168,6 +173,17 @@ def _log_candidate_review(
         )
 
     selected = result.selected_candidate
+    if result.status == "failed":
+        reason = result.metadata.get("error_code") or result.error or result.message
+        if selected is None:
+            print(f"[Optimize] 요청 FAIL: reason={reason or 'unknown'}")
+        else:
+            print(
+                f"[Optimize] 후보 FAIL: id={selected.id}, "
+                f"reason={reason or 'unknown'}"
+            )
+        return
+
     if result.status == "skipped":
         reason = result.metadata.get("error_code") or result.error or result.message
         if selected is None:
@@ -181,8 +197,7 @@ def _log_candidate_review(
         return
 
     if selected is not None:
-        reason = result.message or selected.reason or request.reason or "-"
-        print(f"[Optimize] 후보 SELECT: id={selected.id}, reason={reason}")
+        print(f"[Optimize] 후보 SELECT: id={selected.id}")
 
 
 def _log_optimize_transition(
@@ -226,8 +241,6 @@ def _log_optimize_application(
         reason = result.message or selected.reason or request.reason
         if reason:
             print(f"[Optimize] 선택 근거: {reason}")
-        if selected.tradeoffs:
-            print(f"[Optimize] 예상 부작용: {', '.join(selected.tradeoffs)}")
     _log_optimize_transition(
         label=request.failure_label,
         prescription_id=prescription_id,
@@ -405,7 +418,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 return state
 
             result = optimizer.run(request)
-            _log_candidate_review(request, result)
+            _log_candidate_review(result)
             # skipped 처방(baseline 무개선·적용 불가 경로·빈 search space)이면 포기하지 않고
             # 그 처방을 블랙리스트에 넣어 다음 우선순위 처방으로 넘어간다. 한 라벨의 처방이
             # 막혀도(예: enable_hybrid 는 pipeline capability 미지원) 다른 actionable
@@ -642,7 +655,7 @@ def _continue_internal_study(
         },
     )
     result = optimizer.run(resumed_request)
-    _log_candidate_review(resumed_request, result)
+    _log_candidate_review(result)
     item.metadata["trial_results"] = list(
         result.metadata.get("trial_results", observed_trials)
     )

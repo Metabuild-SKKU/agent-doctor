@@ -370,7 +370,6 @@ class EvalRollbackCacheTest(unittest.TestCase):
                 side_effect=diagnose_record,
             ) as diagnose,
             patch("agents.eval.agent._log_probe"),
-            patch("agents.eval.agent.agent_box"),
         ):
             eval_agent.run(state)
             key_a = state.active_eval_key
@@ -474,7 +473,6 @@ class EvalRollbackCacheTest(unittest.TestCase):
                 ) as generate,
                 patch("agents.eval.agent.diagnose", return_value=[]),
                 patch("agents.eval.agent._log_probe"),
-                patch("agents.eval.agent.agent_box"),
             ):
                 eval_agent.run(state)
                 key_a = state.active_eval_key
@@ -527,7 +525,6 @@ class EvalRollbackCacheTest(unittest.TestCase):
             patch("agents.eval.agent.generate_answer", return_value="답변") as generate,
             patch("agents.eval.agent.diagnose", return_value=[]),
             patch("agents.eval.agent._log_probe"),
-            patch("agents.eval.agent.agent_box"),
         ):
             eval_agent.run(state)
             key_a = state.active_eval_key

@@ -1345,8 +1345,17 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
         state.chunks = all_chunks
         if config.get("graph_enabled", True):
             graph_usage = snapshot_usage()
-            state.index_artifacts = tools.build_graph_artifacts(all_chunks, config)
-            print_summary(tag="Index", stage="그래프 생성", since=graph_usage)
+            try:
+                state.index_artifacts = tools.build_graph_artifacts(
+                    all_chunks,
+                    config,
+                )
+            finally:
+                print_summary(
+                    tag="Index",
+                    stage="그래프 생성",
+                    since=graph_usage,
+                )
         else:
             state.index_artifacts = {}
 
