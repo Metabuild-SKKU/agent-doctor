@@ -50,8 +50,25 @@ class ChunkingTests(unittest.TestCase):
     def test_all_chunk_strategies_are_registered(self):
         self.assertEqual(
             set(CHUNK_STRATEGIES),
-            {"fixed", "markdown", "recursive", "markdown_recursive"},
+            {"fixed", "markdown", "recursive", "markdown_recursive",
+             "recursive_sentence"},
         )
+
+    def test_recursive_sentence_breaks_on_sentence_boundaries(self):
+        # 문장 종결부 우선. 분할이 일어난 청크의 끝은 문장 종결부여야 한다
+        # (마지막 청크와 강제 분할 폴백은 예외).
+        source = ("첫째 문장입니다. 둘째 문장은 조금 더 깁니다. 셋째 문장도 있습니다. "
+                  "넷째 문장으로 마무리합니다. 다섯째 문장 추가. 여섯째 문장 추가입니다.")
+        document = _document("sent-doc", source)
+        drafts = _chunk_document(
+            document, chunk_size=40, chunk_overlap=0, strategy="recursive_sentence"
+        )
+        self.assertGreater(len(drafts), 1)
+        for draft in drafts[:-1]:
+            self.assertTrue(
+                draft.text.rstrip().endswith((".", "。", "?", "!", "…")),
+                f"문장 경계로 안 끊김: {draft.text!r}",
+            )
 
     def test_overlap_and_max_size_are_respected(self):
         source = "가나다라마바사 " * 30

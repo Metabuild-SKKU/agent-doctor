@@ -286,7 +286,11 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         )
 
     def test_inapplicable_prescription_falls_through_to_next(self):
-        """issue #26: 미지원 처방이 최우선이어도 다음 actionable finding을 적용한다."""
+        """issue #26: 적용 불가 처방이 최우선이어도 다음 actionable finding을 적용한다.
+
+        lexical_mismatch(12건)가 최우선이지만 baseline이 이미 hybrid라 enable_hybrid는
+        유효 후보가 없어(no-op) 적용 불가 → blacklist 되고 missing_gold(increase_top_k)로
+        폴스루한다. (enable_hybrid 자체는 dense baseline에선 정상 적용된다 — hybrid 언블록.)"""
         def _finding(pid, label, **metadata):
             return Finding(
                 finding_id=f"{pid}:{label}",
@@ -325,6 +329,7 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                 "chunk_size": 512,
                 "chunk_overlap": 50,
                 "embedding_model": "BAAI/bge-m3",
+                "use_hybrid": True,   # 이미 hybrid → enable_hybrid는 no-op(적용 불가)
             },
             iteration=0,
             max_iterations=3,

@@ -58,13 +58,20 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
     # Eval Agent가 state.index_config.top_k를 실제 검색 개수로 사용한다.
     # (Index도 청크 metadata에 기록한다 — 소비처가 확인돼 허용으로 전환.)
     "retriever.top_k": True,
-    "hybrid_search": False,
+    # Index(agent.py)와 공통 Retriever(rag/retriever.py)가 use_hybrid를 실제 검색에
+    # 소비한다(Qdrant sparse+dense RRF). config_mapper가 retriever.search_type을
+    # use_hybrid로 매핑하고 STATE_MAPPABLE에도 있어 소비처가 확인됨 → 허용으로 전환.
+    "hybrid_search": True,
     "chunking": True,
     "embedding_model": False,
     # 공통 Retriever가 Eval과 Serve에서 같은 설정으로 CrossEncoder를 실행한다.
     "reranker": True,
     "context_compression": False,
-    "chunking_strategy": False,
+    # Index(agent.py)가 CHUNK_STRATEGIES 레지스트리에 recursive_sentence 를 등록해
+    # config["chunk_strategy"] 로 실제 소비한다. config_mapper 가 chunker.strategy 를
+    # chunk_strategy 로 매핑하고 제약(allowed=["recursive_sentence"])·REINDEX 경로도
+    # 있어 소비처가 확인됨 → 허용으로 전환.
+    "chunking_strategy": True,
 }
 
 
@@ -91,6 +98,7 @@ STATE_MAPPABLE_PATHS: set[str] = {
     "reranker.candidate_count",
     "chunker.chunk_size",
     "chunker.chunk_overlap",
+    "chunker.strategy",
     "embedding.model",
 }
 

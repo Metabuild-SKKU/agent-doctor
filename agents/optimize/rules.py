@@ -53,7 +53,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     "retrieval_low_rank": {
         "group": "A",
 
-        "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,  # 숫자 튜닝 필요
         "target_metrics": ["context_precision"],  # gold는 검색됨, 순위 품질이 문제
@@ -78,24 +77,26 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "retrieval_lexical_mismatch": {
         "group": "A",
-        "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # dense가 놓친 gold를 검색결과에 포함시킴
         "prescriptions": [
             {
                 "id": "enable_hybrid",
-                "patch": {"use_hybrid": True},
-                "reindex": False,       
+                # canonical 경로로 하이브리드 검색을 켠다. flat "use_hybrid": True 를 쓰면
+                # config_mapper 가 retriever.search_type 으로 정규화하면서 값을 문자열 "hybrid"
+                # 와 비교(str(True).lower() != "hybrid")해 오히려 use_hybrid=False 로 꺼버렸다.
+                # 값은 반드시 "hybrid"/"dense" 문자열이어야 매핑이 올바로 켠다.
+                "patch": {"retriever.search_type": "hybrid"},
+                "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # NOTE: baseline이 이미 hybrid면 발생 가능성 낮음. naive(dense-only) MVP 전용.
+        # NOTE: baseline이 이미 hybrid면 후보가 no-op으로 필터돼 발동하지 않는다(dense-only 전용).
     },
 
     "retrieval_semantic_mismatch": {
         "group": "A",
-        "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # dense·BM25 둘 다 놓친 gold를 검색되게
@@ -138,19 +139,19 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
             {
                 # 청킹 전략 교체 case 1에 해당 (초안 누락분 보강)
                 "id": "switch_chunking_strategy",
-                "patch": {"chunking_strategy": "recursive_sentence"},
+                "patch": {"chunker.strategy": "recursive_sentence"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
                 "applies_when": {"topic_cluster": ["none"]},
                 # NOTE: chunking_context_mismatch와 동일 처방(Case1: 청크 경계 의미 희석).
-                # TODO(index-합의)  chunking_strategy 필드는 index_config 합의 대기.  
+                # Index가 recursive_sentence 전략을 CHUNK_STRATEGIES에 등록해 실행 가능하다
+                # (chunker.strategy → chunk_strategy 매핑, chunking_strategy capability=True).
             },
         ],
     },
 
     "retrieval_missing_gold": {
         "group": "A",
-        "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 후보에 아예 없는 gold를 가져오게
@@ -188,7 +189,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "retrieval_incomplete_enumeration": {
         "group": "A",
-        "assigned": "이승준",
         # dynamic_top_k 하나가 실행 가능해져 ready 로 승격(나머지 2개는 여전히 스키마 미정).
         # top_k 는 STATE_MAPPABLE_PATHS 에 있고 Eval 이 index_config["top_k"] 를 실제로
         # 읽어 검색에 쓴다. mmr/adaptive_retrieval 은 매핑 불가라 optimizer 가 후보
@@ -227,7 +227,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "retrieval_missing_bridge_dependency": {
         "group": "A",
-        "assigned": "권성우",
         "status": "draft",              # multi-hop query rewrite / max_hops 스키마 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 미검색된 hop2 gold를 가져오게
@@ -260,7 +259,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "chunking_context_mismatch": {
         "group": "A",
-        "assigned": "권성우",
         # gold span/청크 절대좌표로 경계 분할을 확정하고 overlap 후보를
         # 사전검증할 수 있으므로 실행 가능한 라벨로 승격한다.
         "status": "ready",
@@ -283,18 +281,17 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
             },
             {
                 "id": "switch_chunking_strategy",
-                "patch": {"chunking_strategy": "recursive_sentence"},
+                "patch": {"chunker.strategy": "recursive_sentence"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # NOTE: 앞의 두 처방은 현재 index_config로 실행 가능하다.
-        # chunking_strategy는 지원 경로 합의 전까지 mapper에서 제외된다.
+        # NOTE: 세 처방 모두 현재 index_config로 실행 가능하다.
+        # (recursive_sentence 전략이 Index CHUNK_STRATEGIES에 등록됨 — chunker.strategy 매핑.)
     },
 
     "chunking_overchunking": {
         "group": "A",
-        "assigned": "권성우",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 과편화된 청크 → 완전한 gold 맥락 확보
@@ -310,7 +307,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "chunking_underchunking": {
         "group": "A",
-        "assigned": "권성우",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_precision"],  # 큰 청크에 섞인 무관 내용 → 유용성 개선
@@ -324,32 +320,41 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         ],
     },
 
-    "reranker_low_recall": {
-        "group": "A",
-        "assigned": "권성우",
-        "status": "draft",              # 이 튜닝 라벨과 threshold 소비 경로는 아직 없음
-        "diagnosis_confidence": None,   # 숫자 튜닝 필요
-        "target_metrics": ["context_recall"],  # 재랭커가 걸러낸 gold를 다시 살림
-        "prescriptions": [
-            {
-                "id": "widen_rerank_candidates",
-                "patch": {"rerank_candidates": "increase"},
-                "reindex": False,
-                "cost": None,           # 숫자 튜닝 필요
-            },
-            {
-                "id": "relax_reranker_threshold",
-                "patch": {"reranker_threshold": "decrease"},
-                "reindex": False,
-                "cost": None,           # 숫자 튜닝 필요
-            },
-        ],
-        # BLOCKER: Eval 라벨 생성과 reranker_threshold 소비 경로가 아직 없음.
-    },
+    # ── 폐기(보류) 라벨: reranker_low_recall ────────────────────────
+    # 2026-07-27 Eval팀 라벨 합의에서 도입하지 않기로 결정. 완전 삭제하지 않고
+    # 주석으로 남겨 근거를 보존한다(필요 시 아래 정의를 되살릴 수 있음).
+    # [이유] recall 은 retriever 단계 속성이고 리랭커는 후보 "재정렬"만 한다 →
+    #   후보 집합에 없는 gold 는 리랭커가 못 살린다. "리랭커가 gold 를 컷오프
+    #   아래로 밀어냈다(리랭킹 전>후 recall)"로 좁게 정의하고 pre/post delta 를
+    #   신호로 잡을 때만 성립하며, 그 외엔 retrieval_low_rank /
+    #   retrieval_incomplete_enumeration 과 처방이 겹쳐 이중 라벨링이 된다.
+    #   → 처방이 기존 라벨과 겹치면 새 라벨이 아니다(라벨 도입 원칙).
+    #
+    # "reranker_low_recall": {
+    #     "group": "A",
+    #     "assigned": "권성우",
+    #     "status": "draft",              # 이 튜닝 라벨과 threshold 소비 경로는 아직 없음
+    #     "diagnosis_confidence": None,   # 숫자 튜닝 필요
+    #     "target_metrics": ["context_recall"],  # 재랭커가 걸러낸 gold를 다시 살림
+    #     "prescriptions": [
+    #         {
+    #             "id": "widen_rerank_candidates",
+    #             "patch": {"rerank_candidates": "increase"},
+    #             "reindex": False,
+    #             "cost": None,           # 숫자 튜닝 필요
+    #         },
+    #         {
+    #             "id": "relax_reranker_threshold",
+    #             "patch": {"reranker_threshold": "decrease"},
+    #             "reindex": False,
+    #             "cost": None,           # 숫자 튜닝 필요
+    #         },
+    #     ],
+    #     # BLOCKER: Eval 라벨 생성과 reranker_threshold 소비 경로가 아직 없음.
+    # },
 
     "reranker_low_precision": {
         "group": "A",
-        "assigned": "권성우",
         "status": "draft",              # 모델 교체 후보와 threshold 소비 경로는 아직 없음
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_precision"],  # 재랭커가 상위로 올린 무관 청크 억제
@@ -378,7 +383,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_hallucination": {
         "group": "B",
-        "assigned": "이승준",
         "status": "draft",              # 로직은 확정, generation_config 필드 부재로 블로킹
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # context에 없는 내용 지어냄 → 근거성
@@ -413,7 +417,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_partial_answer": {
         "group": "B",
-        "assigned": "이승준",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["answer_relevancy"],  # 질문 요구 일부만 충족 → 완결성
@@ -436,7 +439,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_contradiction": {
         "group": "B",
-        "assigned": "이승준",
         "status": "draft",              # 재실행형(LLM 재검증 패스), 실행 방식도 별도 확정 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # 청크 간 모순을 못 풀고 답변 → 근거성
@@ -454,7 +456,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_misinterpretation": {
         "group": "B",
-        "assigned": "이승준",
         "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["answer_relevancy"],  # 질문 조건 오독 → 질문 의도 반영도
@@ -471,7 +472,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_abstention_failure": {
         "group": "B",
-        "assigned": "권성우",
         "status": "draft",              # generation_config 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # 모른다고 해야 하는데 지어냄 → 근거성
@@ -494,7 +494,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_parametric_overreliance": {
         "group": "B",
-        "assigned": "권성우",
         "status": "draft",              # generation_config 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # 맞았지만 context 근거 없음(파라미터 의존) → 근거성
@@ -517,7 +516,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_numerical_error": {
         "group": "B",
-        "assigned": "권성우",
         "status": "draft",              # generation_config 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # 숫자 계산/집계 오류 → 원문 근거성
@@ -540,7 +538,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_hop_binding_error": {
         "group": "B",
-        "assigned": "권성우",
         "status": "draft",              # multi-hop answer planning 스키마 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         # 각 fact는 근거 있어 faithfulness는 안 낮음 → 대신 결합 오류를 잡는
@@ -569,7 +566,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "too_long_context": {
         "group": "C",
-        "assigned": "이승준",
         "status": "ready",              # top_k 축소는 기존 키로 바로 실행 가능
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["noise_sensitivity"],  # 과다 context의 잡음에 답변이 흔들림
@@ -598,7 +594,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "lost_in_the_middle": {
         "group": "C",
-        "assigned": "권성우",
         "status": "draft",              # context ordering 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_utilization"],  # 검색은 됐으나 중간 청크를 답변에 못 씀
@@ -621,7 +616,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "context_noise_interference": {
         "group": "C",
-        "assigned": "권성우",
         "status": "draft",              # filtering/MMR/reranker 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["noise_sensitivity"],  # 비-gold 상충 청크가 답변을 오염
@@ -654,7 +648,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "corpus_gap": {
         "group": "D",
-        "assigned": "이승준",
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "prescriptions": [],            # config 처방 없음. 튜닝 루프에서 제외, 리포트만.
@@ -665,7 +658,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "corpus_gap_partial_hop": {
         "group": "D",
-        "assigned": "이승준",
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "prescriptions": [],
@@ -675,7 +667,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "bad_gold_answer": {
         "group": "D",
-        "assigned": "권성우",
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "prescriptions": [],
@@ -706,8 +697,3 @@ def is_manual(label: str) -> bool:
     """D그룹처럼 config 처방 불가 → 사람 개입 라벨인지."""
     rule = LABEL_TO_PRESCRIPTIONS.get(label)
     return bool(rule) and rule.get("status") == "manual"
-
-
-def my_labels(name: str = "이승준") -> list[str]:
-    """특정 담당자가 맡은 라벨 목록. 진행상황 체크용."""
-    return [k for k, v in LABEL_TO_PRESCRIPTIONS.items() if v.get("assigned") == name]
