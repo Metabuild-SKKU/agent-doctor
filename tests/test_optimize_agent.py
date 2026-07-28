@@ -81,7 +81,9 @@ from agents.optimize import agent, history
 from agents.optimize.schemas import (
     ConfigPatch,
     OptimizationHistoryItem,
+    OptimizationRequest,
     OptimizationResult,
+    PrescriptionCandidate,
     Verdict,
 )
 
@@ -97,6 +99,167 @@ def make_report(overall, pass_threshold=False, label="too_long_context"):
         ragas_scores={"context_recall": 0.7, "faithfulness": 0.7, "noise_sensitivity": 0.2},
         pass_threshold=pass_threshold,
     )
+
+
+class OptimizeCandidateLogTest(unittest.TestCase):
+    def test_request_skip_does_not_reassign_reason_to_first_candidate(self):
+        result = OptimizationResult(
+            request_id="req-1",
+            status="skipped",
+            optimizer="rules",
+            metadata={
+                "error_code": "missing_search_space",
+                "skipped_candidates": [
+                    {"prescription_id": "a", "reason": "not_ready"},
+                    {"prescription_id": "b", "reason": "empty_search_space"},
+                ],
+            },
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_candidate_review(result)
+
+        lines = buf.getvalue().splitlines()
+        self.assertEqual(
+            lines,
+            [
+                "[Optimize] 후보 SKIP: id=a, reason=not_ready",
+                "[Optimize] 후보 SKIP: id=b, reason=empty_search_space",
+                "[Optimize] 요청 SKIP: reason=missing_search_space",
+            ],
+        )
+
+    def test_failed_candidate_is_not_logged_as_selected(self):
+        candidate = PrescriptionCandidate(
+            "a",
+            "too_long_context",
+            "C",
+            "ready",
+        )
+        result = OptimizationResult(
+            request_id="req-1",
+            status="failed",
+            optimizer="internal",
+            selected_candidate=candidate,
+            message="internal 평가에 실패했습니다.",
+            error="internal 평가에 실패했습니다.",
+            metadata={"error_code": "internal_failed"},
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_candidate_review(result)
+
+        self.assertEqual(
+            buf.getvalue().strip(),
+            "[Optimize] 후보 FAIL: id=a, reason=internal_failed",
+        )
+        self.assertNotIn("SELECT", buf.getvalue())
+
+    def test_failed_request_without_candidate_is_logged(self):
+        result = OptimizationResult(
+            request_id="req-1",
+            status="failed",
+            optimizer="internal",
+            message="후보 범위가 잘못됐습니다.",
+            error="후보 범위가 잘못됐습니다.",
+            metadata={"error_code": "invalid_internal_next_config"},
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_candidate_review(result)
+
+        self.assertEqual(
+            buf.getvalue().strip(),
+            "[Optimize] 요청 FAIL: reason=invalid_internal_next_config",
+        )
+
+    def test_candidate_list_omits_unused_fields_and_shared_reason_duplicates(self):
+        candidates = [
+            PrescriptionCandidate(
+                "a",
+                "too_long_context",
+                "C",
+                "ready",
+                cost=1.0,
+                priority=0.0,
+                reason="검색 context가 너무 깁니다.",
+                tradeoffs=["현재는 생산되지 않는 값"],
+            ),
+            PrescriptionCandidate(
+                "b",
+                "too_long_context",
+                "C",
+                "ready",
+                cost=2.0,
+                priority=0.0,
+                reason="검색 context가 너무 깁니다.",
+                tradeoffs=["현재는 생산되지 않는 값"],
+            ),
+        ]
+        request = OptimizationRequest(
+            request_id="req-1",
+            iteration=1,
+            baseline_config={},
+            failure_label="too_long_context",
+            candidates=candidates,
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_candidate_list(request)
+
+        output = buf.getvalue()
+        self.assertEqual(output.count("검색 context가 너무 깁니다."), 1)
+        self.assertNotIn("priority=", output)
+        self.assertNotIn("예상 부작용", output)
+
+    def test_selected_reason_is_logged_once_at_application(self):
+        candidate = PrescriptionCandidate(
+            "a",
+            "too_long_context",
+            "C",
+            "ready",
+            patch=ConfigPatch(changes={"top_k": 2}),
+        )
+        request = OptimizationRequest(
+            request_id="req-1",
+            iteration=1,
+            baseline_config={"top_k": 4},
+            failure_label="too_long_context",
+            candidates=[candidate],
+        )
+        result = OptimizationResult(
+            request_id="req-1",
+            status="applied",
+            optimizer="rules",
+            selected_candidate=candidate,
+            message="top_k를 줄입니다.",
+        )
+        state = AgentDoctorState(
+            index_config={"top_k": 2},
+            iteration=1,
+            max_iterations=3,
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_candidate_review(result)
+            agent._log_optimize_application(
+                state,
+                request,
+                result,
+                {"top_k": 4},
+                {"top_k": 2},
+                ["top_k"],
+                "a",
+            )
+
+        output = buf.getvalue()
+        self.assertIn("[Optimize] 후보 SELECT: id=a", output)
+        self.assertEqual(output.count("top_k를 줄입니다."), 1)
 
 
 def make_state(overall=60.0, chunk_size=512, iteration=0, max_iterations=3,
@@ -147,6 +310,9 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertIn("[Optimize] 반복 횟수: 1/3", out)
         self.assertIn("Eval 결과: overall=0.42, composite=40.0, pass=false", out)
         self.assertIn("발견된 문제: too_long_context 1건", out)
+        self.assertIn("[Optimize] 후보 생성:", out)
+        self.assertIn("[Optimize] 후보 SELECT:", out)
+        self.assertIn("[Optimize] 처방 적용:", out)
         self.assertIn("다음 단계: Index 경유(물리 재색인 생략) 후 Eval 재실행", out)
         self.assertEqual(graph.route_after_optimize(state), "index")
 
@@ -196,10 +362,19 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                 )
             return real_optimizer_run(request)
 
-        with patch("agents.optimize.agent.optimizer.run", side_effect=select_baseline_once):
+        buf = StringIO()
+        with patch(
+            "agents.optimize.agent.optimizer.run",
+            side_effect=select_baseline_once,
+        ), redirect_stdout(buf):
             result_state = agent.run(state)
 
         self.assertEqual(len(calls), 2)
+        self.assertIn(
+            "[Optimize] 후보 SKIP: id=increase_chunk_overlap, "
+            "reason=baseline_selected",
+            buf.getvalue(),
+        )
         self.assertIn(
             ("chunking_context_mismatch", "increase_chunk_overlap"),
             result_state.blacklist,
@@ -388,11 +563,15 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertIn("shrink_chunk_size", out)
         self.assertIn("판정 결과: keep=false, before=60.00, after=40.00", out)
         verdict_block = out[:out.index("판정 결과: keep=false")]
-        self.assertNotIn("Eval 결과:", verdict_block)
-        self.assertNotIn("발견된 문제:", verdict_block)
+        self.assertIn("Eval 결과:", verdict_block)
+        self.assertIn("발견된 문제:", verdict_block)
+        self.assertIn("이전 처방 판정: ROLLBACK", verdict_block)
         self.assertNotIn("reindex_required=", verdict_block)
         self.assertNotIn("다음 단계:", verdict_block)
-        self.assertLess(out.index("decrease_top_k"), out.index("shrink_chunk_size"))
+        self.assertLess(
+            out.index("이전 처방 판정: ROLLBACK"),
+            out.index("처방 적용: id=shrink_chunk_size"),
+        )
 
     def test_keep_then_followup_application_logs_previous_verdict(self):
         state = agent.run(make_state(overall=60.0))
@@ -412,10 +591,14 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertIn("판정 결과: keep=true, before=60.00, after=75.00", out)
         self.assertIn("선택한 처방: shrink_chunk_size", out)
         verdict_block = out[:out.index("판정 결과: keep=true")]
-        self.assertNotIn("Eval 결과:", verdict_block)
-        self.assertNotIn("발견된 문제:", verdict_block)
+        self.assertIn("Eval 결과:", verdict_block)
+        self.assertIn("발견된 문제:", verdict_block)
+        self.assertIn("이전 처방 판정: KEEP", verdict_block)
         self.assertNotIn("다음 단계:", verdict_block)
-        self.assertLess(out.index("decrease_top_k"), out.index("shrink_chunk_size"))
+        self.assertLess(
+            out.index("이전 처방 판정: KEEP"),
+            out.index("처방 적용: id=shrink_chunk_size"),
+        )
 
     def test_unjudgeable_rollback_does_not_blacklist(self):
         # 측정이 없어(before_report None) 판정 불가한 경우: config 는 안전하게 복원하되,

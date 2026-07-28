@@ -130,6 +130,44 @@ class IndexRunTests(unittest.TestCase):
         )
         return state
 
+    def test_graph_usage_summary_runs_when_graph_builder_fails(self):
+        state = self._state()
+        state.documents = [_document("doc-1", "그래프 생성 실패 테스트 문서입니다.")]
+        state.index_config.update(
+            {
+                "graph_enabled": True,
+                "corpus_visualization_enabled": False,
+            }
+        )
+        tools = IndexTools(
+            get_retriever=lambda *_args, **_kwargs: Mock(),
+            embed=lambda _text, **_kwargs: [1.0, 0.0, 0.0, 0.0],
+            count_tokens=lambda _text, **_kwargs: 3,
+            build_sparse_vector=lambda _text: {"indices": [], "values": []},
+            build_graph_artifacts=Mock(side_effect=RuntimeError("graph boom")),
+        )
+        baseline = {
+            "calls": 0,
+            "prompt": 0,
+            "output": 0,
+            "cost": 0.0,
+            "unpriced_calls": 0,
+        }
+
+        with (
+            patch("agents.index.agent.snapshot_usage", return_value=baseline),
+            patch("agents.index.agent.print_summary") as summary,
+        ):
+            result = run(state, tools=tools)
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("graph boom", result.error)
+        summary.assert_called_once_with(
+            tag="Index",
+            stage="그래프 생성",
+            since=baseline,
+        )
+
     @patch("agents.index.agent.get_retriever")
     @patch("agents.index.agent.embed_batch", None)  # 단건 embed 폴백 경로로 강제
     @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])

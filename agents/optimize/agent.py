@@ -86,6 +86,13 @@ def _fmt_config_values(config: dict[str, Any], keys: list[str]) -> str:
     return ", ".join(f"{key}={config.get(key)!r}" for key in keys)
 
 
+def _fmt_mapping(values: dict[str, Any] | None) -> str:
+    """후보 탐색 범위나 patch를 한 줄 로그로 표시한다."""
+    if not values:
+        return "{}"
+    return "{" + ", ".join(f"{key}={value!r}" for key, value in values.items()) + "}"
+
+
 def _diff_visible_keys(diff: ConfigDiff) -> list[str]:
     seen: set[str] = set()
     keys: list[str] = []
@@ -110,8 +117,90 @@ def _log_eval_line(report: DiagnosticReport | None) -> None:
     )
 
 
+def _log_optimize_input(state: AgentDoctorState) -> None:
+    """이번 Optimize 방문의 진단 입력과 이미 소진된 처방을 출력한다."""
+    print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations} (진단 입력)")
+    _log_eval_line(state.report)
+    print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(state.report)}")
+    if state.blacklist:
+        blocked = ", ".join(
+            f"{label}/{prescription_id}"
+            for label, prescription_id in sorted(state.blacklist)
+        )
+        print(f"[Optimize] 제외된 처방: [{blocked}]")
+
+
+def _log_candidate_list(request: OptimizationRequest) -> None:
+    """Planner가 만든 처방 후보와 후보별 근거·탐색 범위를 출력한다."""
+    print(
+        f"[Optimize] 후보 생성: {len(request.candidates)}개 "
+        f"(label={request.failure_label}, optimizer={request.optimizer})"
+    )
+    distinct_reasons = list(
+        dict.fromkeys(
+            candidate.reason
+            for candidate in request.candidates
+            if candidate.reason
+        )
+    )
+    shared_reason = distinct_reasons[0] if len(distinct_reasons) == 1 else None
+    if shared_reason:
+        print(f"[Optimize] 후보 제안 근거: {shared_reason}")
+    for index, candidate in enumerate(request.candidates, 1):
+        reindex = bool(candidate.patch and candidate.patch.reindex_required)
+        patch = candidate.patch.changes if candidate.patch else {}
+        print(
+            f"[Optimize] 후보 {index}/{len(request.candidates)}: "
+            f"id={candidate.id}, status={candidate.status}, "
+            f"cost={candidate.cost!r}, "
+            f"patch={_fmt_mapping(patch)}, "
+            f"search_space={_fmt_mapping(candidate.search_space)}, "
+            f"reindex={_fmt_bool(reindex)}"
+        )
+        if candidate.reason and candidate.reason != shared_reason:
+            print(f"[Optimize]   제안 근거: {candidate.reason}")
+
+
+def _log_candidate_review(result: OptimizationResult) -> None:
+    """Optimizer가 후보를 거르거나 선택한 결과와 이유를 출력한다."""
+    for skipped in result.metadata.get("skipped_candidates", []):
+        if not isinstance(skipped, dict):
+            continue
+        print(
+            f"[Optimize] 후보 SKIP: "
+            f"id={skipped.get('prescription_id') or '-'}, "
+            f"reason={skipped.get('reason') or 'unknown'}"
+        )
+
+    selected = result.selected_candidate
+    if result.status == "failed":
+        reason = result.metadata.get("error_code") or result.error or result.message
+        if selected is None:
+            print(f"[Optimize] 요청 FAIL: reason={reason or 'unknown'}")
+        else:
+            print(
+                f"[Optimize] 후보 FAIL: id={selected.id}, "
+                f"reason={reason or 'unknown'}"
+            )
+        return
+
+    if result.status == "skipped":
+        reason = result.metadata.get("error_code") or result.error or result.message
+        if selected is None:
+            print(f"[Optimize] 요청 SKIP: reason={reason or 'unknown'}")
+            return
+        prescription_id = selected.id
+        print(
+            f"[Optimize] 후보 SKIP: id={prescription_id}, "
+            f"reason={reason or 'unknown'}"
+        )
+        return
+
+    if selected is not None:
+        print(f"[Optimize] 후보 SELECT: id={selected.id}")
+
+
 def _log_optimize_transition(
-    state: AgentDoctorState,
     *,
     label: str | None,
     prescription_id: str | None,
@@ -120,14 +209,9 @@ def _log_optimize_transition(
     changed_keys: list[str],
     reindex_required: bool,
     next_step: str,
-    include_eval_header: bool = True,
     include_reindex: bool = True,
     include_next_step: bool = True,
 ) -> None:
-    if include_eval_header:
-        print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations}")
-        _log_eval_line(state.report)
-        print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(state.report)}")
     print(f"[Optimize] 선택한 라벨: {label or '-'}")
     print(f"[Optimize] 선택한 처방: {prescription_id or '-'}")
     print(f"[Optimize] 변경 전 config: {_fmt_config_values(before_config, changed_keys)}")
@@ -147,8 +231,17 @@ def _log_optimize_application(
     changed_keys: list[str],
     prescription_id: str | None,
 ) -> None:
+    selected = result.selected_candidate
+    print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations} (처방 적용 후)")
+    print(
+        f"[Optimize] 처방 적용: id={prescription_id or '-'}, "
+        f"label={request.failure_label}"
+    )
+    if selected is not None:
+        reason = result.message or selected.reason or request.reason
+        if reason:
+            print(f"[Optimize] 선택 근거: {reason}")
     _log_optimize_transition(
-        state,
         label=request.failure_label,
         prescription_id=prescription_id,
         before_config=before_config,
@@ -175,8 +268,15 @@ def _log_optimize_verdict(
         after_config = dict(state.index_config)
         reindex_required = bool(state.reindex_required)
     diff = config_mapper.build_config_diff(before_config, after_config)
+    action = "KEEP" if verdict.keep else "ROLLBACK"
+    print(
+        f"[Optimize] 이전 처방 판정: {action}, "
+        f"prescription={item.selected_prescription_id or '-'}, "
+        f"before={_fmt_score(verdict.before_score)}, "
+        f"after={_fmt_score(verdict.after_score)}"
+    )
+    print(f"[Optimize] 판정 근거: {verdict.reason or '-'}")
     _log_optimize_transition(
-        state,
         label=item.failure_labels[0] if item.failure_labels else None,
         prescription_id=item.selected_prescription_id,
         before_config=before_config,
@@ -184,13 +284,13 @@ def _log_optimize_verdict(
         changed_keys=_diff_visible_keys(diff),
         reindex_required=reindex_required,
         next_step=next_step or _config_change_next_step(reindex_required),
-        include_eval_header=False,
         include_reindex=next_step is not None,
         include_next_step=next_step is not None,
     )
     print(
         f"[Optimize] 판정 결과: keep={_fmt_bool(verdict.keep)}, "
-        f"before={_fmt_score(verdict.before_score)}, after={_fmt_score(verdict.after_score)}"
+        f"before={_fmt_score(verdict.before_score)}, "
+        f"after={_fmt_score(verdict.after_score)}"
     )
 
 
@@ -199,9 +299,10 @@ def _log_optimize_decision(
     decision: OptimizeDecision,
 ) -> None:
     next_step = "Serve 이동" if decision.next_route == "serve" else decision.next_route
+    action = "SKIP" if decision.status == "skipped" else decision.status.upper()
+    print(f"[Optimize] 행동 결정: {action}, reason={decision.reason or '-'}")
 
     _log_optimize_transition(
-        state,
         label=None,
         prescription_id=None,
         before_config={},
@@ -229,6 +330,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     """Optimize 노드 진입점. 성공·스킵·수동·오류 어느 경로든 같은 state 를 반환한다."""
     state.current_agent = "optimize"
     try:
+        _log_optimize_input(state)
         # top_k sweep는 후보 하나의 성공/실패를 곧바로 확정하지 않는다.
         # 직전 후보의 Eval 결과를 같은 study에 넣고 다음 후보 또는 best를 고른다.
         active_study = history.find_active_study(state.optimization_history)
@@ -278,6 +380,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     deferred_runtime,
                 )
                 return state
+            _log_candidate_list(request)
 
             previous_label = history.last_failure_label(state.optimization_history)
             starts_new_label = (
@@ -315,6 +418,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 return state
 
             result = optimizer.run(request)
+            _log_candidate_review(result)
             # skipped 처방(baseline 무개선·적용 불가 경로·빈 search space)이면 포기하지 않고
             # 그 처방을 블랙리스트에 넣어 다음 우선순위 처방으로 넘어간다. 한 라벨의 처방이
             # 막혀도(예: enable_hybrid 는 pipeline capability 미지원) 다른 actionable
@@ -537,6 +641,11 @@ def _continue_internal_study(
             "error": None if state.report is not None else "Eval report가 없습니다.",
         }
     )
+    print(
+        f"[Optimize] 후보 평가 완료: config={_fmt_mapping(current_candidate)}, "
+        f"metrics={_fmt_mapping(observed_trials[-1]['metrics'])}, "
+        f"status={observed_trials[-1]['status']}"
+    )
     resumed_request = replace(
         request,
         metadata={
@@ -546,6 +655,7 @@ def _continue_internal_study(
         },
     )
     result = optimizer.run(resumed_request)
+    _log_candidate_review(result)
     item.metadata["trial_results"] = list(
         result.metadata.get("trial_results", observed_trials)
     )
@@ -699,7 +809,6 @@ def _finish_internal_study(
         else f"Serve 이동 ({state.status})"
     )
     _log_optimize_transition(
-        state,
         label=item.failure_labels[0] if item.failure_labels else None,
         prescription_id=item.selected_prescription_id,
         before_config=before_config_for_log,
@@ -758,7 +867,6 @@ def _fail_active_study(
         else f"Serve 이동 ({state.status})"
     )
     _log_optimize_transition(
-        state,
         label=label,
         prescription_id=prescription_id,
         before_config=before_config_for_log,
