@@ -206,11 +206,11 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `generation_hallucination` | B 생성 | 3 | RAGAS faithfulness |
 | `generation_partial_answer` | B 생성 | 3 | RAGAS relevancy |
 | `generation_hop_binding_error` | B 생성 | 3 | RAGAS faithfulness(+추론검증) |
-| `generation_contradiction` | B 생성 | 3 | AspectCritic(LLM) |
+| `generation_contradiction` | B 생성 | 3 | 추론 실패 모드 단일분류(LLM 1회) |
 | `generation_failure` (롤업) | B 생성 | 3 | DEEP에서 세분화 (항상 예비) |
-| `too_long_context` | C context | — | dormant (tier4 제거, 발동 조건 재설계 대기) |
-| `lost_in_the_middle` | C context | — | dormant (tier4 제거, 발동 조건 재설계 대기) |
-| `context_noise_interference` | C context | — | dormant (tier4 제거, 발동 조건 재설계 대기) |
+| `too_long_context` | C context | 3 | 예비만 (context 길이 + 근거 없음, gold 는 양끝) |
+| `lost_in_the_middle` | C context | 3 | 예비만 (gold 가 긴 context 중간 + 근거 없음) |
+| `context_noise_interference` | C context | 3 | 예비만 (real faithfulness 높음 = 노이즈에 근거) |
 | `bad_gold_answer` | D 데이터 | 3 | RAGAS 2지표(진짜 확정은 사람) |
 | `corpus_gap` | D 데이터 | 2 | 코퍼스 조회 |
 | `corpus_gap_partial_hop` | D 데이터 | 2 | 코퍼스 조회(hop별) |
