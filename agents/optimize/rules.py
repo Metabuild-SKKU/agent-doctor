@@ -610,41 +610,54 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "lost_in_the_middle": {
         "group": "C",
-        "status": "draft",              # context ordering 필드 합의 필요
+        # decrease_top_k 하나가 실행 가능해져 ready 로 승격(retrieval_incomplete_enumeration
+        # 과 동일 선례). context 재정렬(reorder_context_edges)은 정렬 서브시스템이 없어
+        # optimizer 가 후보 단계에서 자동으로 걸러내므로, 그 하나 때문에 라벨 전체를 막지 않는다.
+        "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_utilization"],  # 검색은 됐으나 중간 청크를 답변에 못 씀
         "prescriptions": [
             {
-                "id": "reorder_context_edges",
-                "patch": {"context_ordering": "most_relevant_edges"},
-                "reindex": False,
-                "cost": None,           # 숫자 튜닝 필요
-            },
-            {
+                # 검색 결과를 짧게 줄이면 "중간"에서 잃을 구간 자체가 줄어드는 정당한 완화책.
+                # top_k 는 STATE_MAPPABLE 이고 Eval 이 index_config["top_k"] 를 실제로 소비한다.
                 "id": "decrease_top_k",
                 "patch": {"top_k": "decrease"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
+            {
+                # 가장 관련도 높은 청크를 컨텍스트 양끝에 배치해 lost-in-the-middle 을 직접
+                # 완화하는 본래 처방. 컨텍스트 정렬 서브시스템 부재로 아직 막힘(후보로만 남김).
+                "id": "reorder_context_edges",
+                "patch": {"context_ordering": "most_relevant_edges"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
         ],
-        # BLOCKER: context_ordering/top_k 필드가 현재 index_config에 없음.
+        # NOTE: reorder_context_edges 는 context_ordering 소비 경로가 없어 자동 필터된다.
     },
 
     "context_noise_interference": {
         "group": "C",
-        "status": "draft",              # filtering/MMR/reranker 필드 합의 필요
+        # enable_mmr 이 실행 가능해져 ready 로 승격. 다양성 재정렬은 중복·잡음 근접청크를
+        # 줄여 노이즈 오염을 완화하는 정당한 처방이다. noise_filter/conflict_prompt 는
+        # 소비 노드가 없어 optimizer 가 후보 단계에서 자동으로 걸러낸다.
+        "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["noise_sensitivity"],  # 비-gold 상충 청크가 답변을 오염
         "prescriptions": [
             {
-                "id": "enable_noise_filter",
-                "patch": {"noise_filter": True},
+                # 관련성+다양성 균형으로 후보풀을 재정렬해 중복·잡음 청크 쏠림을 억제.
+                # 값 키는 A그룹과 통일한다 — flat "mmr":True 대신 canonical retriever.mmr.
+                # 공통 Retriever 가 use_mmr 로 소비해 실행 가능(retriever.mmr → use_mmr 매핑).
+                "id": "enable_mmr",
+                "patch": {"retriever.mmr": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
-                "id": "enable_mmr",
-                "patch": {"mmr": True},
+                "id": "enable_noise_filter",
+                "patch": {"noise_filter": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
@@ -655,7 +668,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: noise_filter/mmr/generation_config 필드가 아직 없음.
+        # NOTE: noise_filter/conflict_resolution_prompt 는 소비 경로가 없어 자동 필터된다.
     },
 
     # ═══════════════════════════════════════════════════════════════

@@ -528,6 +528,36 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertIsInstance(result, AgentDoctorState)
 
 
+class OptimizeCGroupUnblockTest(unittest.TestCase):
+    """C그룹 언블록: lost_in_the_middle / context_noise_interference 가 실행 가능한
+    처방(top_k 축소 / MMR)을 맨 앞 후보로 내는지 고정. 나머지(정렬·필터 프롬프트)는
+    소비 경로가 없어 뒤쪽 fallback 으로만 남고 optimizer 가 걸러낸다."""
+
+    def _first_candidate_space(self, label):
+        from agents.optimize.planner import plan
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="r",
+                findings=[Finding(
+                    finding_id="f1", type="context_failure", severity="critical",
+                    description="c", label=label, affected_probes=["p1"],
+                )],
+                composite_score={"total": 40.0},
+            ),
+        )
+        request, decision = plan(state)
+        self.assertEqual(decision.mode, "apply_optimize")
+        return request.candidates[0].search_space
+
+    def test_lost_in_the_middle_leads_with_top_k(self):
+        space = self._first_candidate_space("lost_in_the_middle")
+        self.assertIn("retriever.top_k", space)
+
+    def test_context_noise_interference_leads_with_mmr(self):
+        space = self._first_candidate_space("context_noise_interference")
+        self.assertEqual(space, {"retriever.mmr": [True]})
+
+
 class OptimizeAgentRollbackTest(unittest.TestCase):
     def test_improved_keeps_config(self):
         state = agent.run(make_state(overall=60.0))         # 방문1: 적용
