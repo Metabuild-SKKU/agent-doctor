@@ -24,6 +24,7 @@ from agents.eval import metrics_common, metrics_search, diagnose
 from agents.eval.types import (
     EvalRecord, Mode,
     F1_PASS_THRESHOLD, RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
+    CONTEXT_CHARS_MAX,
 )
 
 
@@ -837,7 +838,9 @@ class GenerationLabelTest(_DiagnoseTestBase):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  C그룹: context 구조 (tier4 제거로 3개는 dormant)
+#  C그룹: context 구조
+#    faith 높음(노이즈에 근거) / faith 낮음(어디에도 근거 없음)으로 갈리고,
+#    후자는 길이·gold 배치로 too_long_context / lost_in_the_middle 이 나뉜다.
 # ══════════════════════════════════════════════════════════════════
 
 class ContextLabelTest(_DiagnoseTestBase):
@@ -851,11 +854,64 @@ class ContextLabelTest(_DiagnoseTestBase):
         self.assertFalse(diagnose._context_failed(
             _record(recall=0.5, oracle_f1=1.0, f1=0.1)))       # 검색 실패는 A그룹
 
-    def test_tier4_labels_are_dormant(self):
-        """확정 신호(재실행)가 제거돼 optimize 재실행으로 대체됨 — 항상 None."""
-        rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1)
-        self.assertIsNone(diagnose.too_long_context(rec))
+    def _long_context(self, *, gold_at, n=5, faith=RAGAS_FAITHFULNESS_MIN - 0.01,
+                      chars=CONTEXT_CHARS_MAX, precision=None, spans=None):
+        """검색 결과 n건 중 gold_at 위치에 gold 를 둔 record. 총 context 길이는 chars."""
+        ids = [f"x{i}" for i in range(n)]
+        ids[gold_at] = "g_a"
+        rec = _record(("g_a",), tuple(ids), recall=1.0, oracle_f1=1.0, f1=0.1,
+                      gold_spans=spans)
+        rec.retrieved_context = ["가" * (chars // n)] * n
+        rec.ragas = {"faithfulness": faith}
+        if precision is not None:
+            rec.ragas["context_precision"] = precision
+        rec.ragas_done = True
+        return rec
+
+    def test_lost_in_the_middle_preliminary_when_gold_buried(self):
+        """gold 는 검색됐는데 답이 어디에도 근거하지 않고, gold 가 긴 context 한가운데 있다."""
+        rec = self._long_context(gold_at=2)                    # 상대 위치 0.5
+        finding = diagnose.lost_in_the_middle(rec)
+        self.assertIsNotNone(finding)
+        self.assertFalse(finding.confirmed)                    # 재배치 회복 검증은 optimize 위임
+        self.assertEqual(finding.metadata["group"], "C")
+        self.assertIsNone(diagnose.too_long_context(rec))      # 위치로 배타
+
+    def test_too_long_context_preliminary_when_gold_at_edge(self):
+        """gold 가 맨 앞인데도 못 썼다 — 배치가 아니라 길이·과부하 쪽."""
+        rec = self._long_context(gold_at=0)
+        finding = diagnose.too_long_context(rec)
+        self.assertIsNotNone(finding)
+        self.assertFalse(finding.confirmed)
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))    # 배타
+
+    def test_both_silent_when_context_is_short(self):
+        """짧은 context 에서 근거를 못 쓴 건 길이·배치 문제가 아니라 생성측 이탈 → 롤업."""
+        rec = self._long_context(gold_at=2, chars=1000)
         self.assertIsNone(diagnose.lost_in_the_middle(rec))
+        self.assertIsNone(diagnose.too_long_context(rec))
+
+    def test_both_silent_when_answer_is_grounded(self):
+        """faith 높음 = 노이즈 청크에 근거함 → context_noise_interference 영역."""
+        rec = self._long_context(gold_at=2, faith=0.9)
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))
+        self.assertIsNone(diagnose.too_long_context(rec))
+        self.assertIsNotNone(diagnose.context_noise_interference(rec))
+
+    def test_both_silent_below_deep(self):
+        """faithfulness 는 tier3 — DEEP 미만이면 갈릴 근거가 없다."""
+        metrics_common.set_mode(Mode.STANDARD)
+        rec = self._long_context(gold_at=2)
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))
+        self.assertIsNone(diagnose.too_long_context(rec))
+
+    def test_yield_to_underchunking_when_noise_is_inside_chunk(self):
+        """노이즈가 청크 '안'이면 길이·배치가 아니라 청크 크기 문제다(C그룹 3자 배타)."""
+        rec = self._long_context(gold_at=2, precision=0.1,
+                                 spans=[{"doc_id": "d1", "start": 0, "end": 10}])
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))
+        self.assertEqual(diagnose._pick(rec, diagnose._CONTEXT_CAUSE).label,
+                         "chunking_underchunking")
 
     def test_noise_interference_preliminary_when_answer_grounded_but_wrong(self):
         """faithfulness 는 retrieved_context(gold+노이즈) 기준 — 근거는 있는데 답이 틀리면

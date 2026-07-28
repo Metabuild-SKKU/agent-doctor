@@ -33,12 +33,14 @@ from core.schema import Finding
 from agents.eval.types import (
     DEFAULT_TOP_K, EvalRecord, Mode, resolve_mode,
     F1_PASS_THRESHOLD, ANSWER_CORRECTNESS_MIN, EVIDENCE_DENSITY_MIN,
+    CONTEXT_CHARS_MAX, CONTEXT_MIDDLE_BAND,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN, RAGAS_CONTEXT_PRECISION_MIN,
 )
 from agents.eval.metrics_common import set_mode, set_context, _missed_gold_ids
 from agents.eval.metrics_basic import (            # tier1
     is_abstention, _compute_metrics, _gold_span_boundary_analysis,
     _gold_chunk_evidence_density, _oversized_gold_spans,
+    _context_char_total, _gold_position_band,
 )
 from agents.eval.metrics_search import (           # tier2
     _gold_ranks, _bm25_hits_gold, _gold_in_corpus, _missed_gold_in_corpus,
@@ -595,22 +597,64 @@ def _context_failed(record: EvalRecord) -> bool:
     """컨텍스트 구조 문제(C) 전제: 검색 성공(recall=1)·생성 가능(oracle 통과)인데 실제 답만 틀림."""
     return _recall_ok(record) and _oracle_ok(record) and not _f1_ok(record)
 
+def _context_ungrounded(record: EvalRecord) -> bool:
+    """C 전제 + 실제 답이 gold·노이즈 어디에도 근거 없음(real faithfulness 낮음).
+
+    faithfulness 높은 쪽(노이즈 청크에 근거함)은 context_noise_interference 담당이라,
+    이 전제가 그 반대편 — 청크는 다 있는데 길이·배치 때문에 gold 를 못 쓴 경우 — 를 가른다.
+    노이즈가 청크 '안'이면 chunking_underchunking 영역이라 함께 배제한다(C그룹 3자 배타).
+    """
+    if not _context_failed(record) or _chunk_noise_heavy(record):
+        return False
+    faith = _faith(record)
+    return faith is not None and faith < RAGAS_FAITHFULNESS_MIN
+
+
+def _gold_in_middle_band(record: EvalRecord) -> bool:
+    """검색 결과 안 gold 가 양끝이 아니라 중간 밴드에 있나. 위치 미측정이면 False."""
+    position = _gold_position_band(record)
+    return position is not None and CONTEXT_MIDDLE_BAND[0] <= position <= CONTEXT_MIDDLE_BAND[1]
+
+
 def too_long_context(record: EvalRecord) -> Optional[Finding]:
     """
-    context가 너무 길어 잡음·과부하로 품질 저하.s
-    tier4(축소 재실행) 확정 신호가 유일한 발동 경로였으나 optimize 재실행으로 대체됨.
-    # TODO(tier4 제거): 예비 발동 조건(저비용 휴리스틱) 재설계 전까지 dormant.
+    context가 너무 길어 잡음·과부하로 품질 저하.
+    예비: C 전제 + 답에 근거 없음(faith 낮음) + context 길이 문턱 초과 + gold 는 양끝.
+    확정(축소 재실행)은 제거된 tier4 몫이라 optimize 재실행이 위임받는다.
+    gold 가 중간이면 lost_in_the_middle 영역 — 위치로 함수 자체 배타(튜플 순서 비의존).
     """
-    return None
+    if not _context_ungrounded(record):
+        return None
+    total = _context_char_total(record)
+    if total < CONTEXT_CHARS_MAX or _gold_in_middle_band(record):
+        return None
+    return _finding(
+        record, "too_long_context", "context_failure", confirmed=False,
+        reason=f"context_chars={total}>={CONTEXT_CHARS_MAX}, "
+               f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
+               f"recall@k={_v(record.recall_at_k)}",
+    )
 
 
 def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
     """
     청크가 긴 context 중간이라 LLM이 참조 못함.
-    tier4(gold 앞배치 재실행) 확정 신호가 유일한 발동 경로였으나 optimize 재실행으로 대체됨.
-    # TODO(tier4 제거): 예비 발동 조건(저비용 휴리스틱) 재설계 전까지 dormant.
+    예비: C 전제 + 답에 근거 없음 + gold 가 중간 밴드 + context 길이 문턱 초과.
+    확정(gold 앞배치 재실행)은 제거된 tier4 몫이라 optimize 재실행이 위임받는다.
+    길이 조건을 함께 두는 건 이 현상 자체가 긴 context 에서만 성립하기 때문이다 —
+    짧은 context 에서 근거를 못 쓴 건 배치 문제가 아니라 생성측 이탈(롤업)이다.
     """
-    return None
+    if not _context_ungrounded(record) or not _gold_in_middle_band(record):
+        return None
+    total = _context_char_total(record)
+    if total < CONTEXT_CHARS_MAX:
+        return None
+    return _finding(
+        record, "lost_in_the_middle", "context_failure", confirmed=False,
+        reason=f"gold_position={_v(_gold_position_band(record))}(중간), context_chars={total}, "
+               f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
+               f"recall@k={_v(record.recall_at_k)}",
+    )
 
 
 def _chunk_noise_heavy(record: EvalRecord) -> bool:
@@ -802,6 +846,9 @@ _GENERATION_CAUSE = (
 # A 슬롯에만 두면 recall=1 인 경계 분할 실패에서 도달 자체가 불가능하다(_dedup 이 중복 제거).
 # 노이즈가 '청크 안'이면 underchunking, '청크 사이'면 reranker/noise_interference —
 # _chunk_noise_heavy 로 배타가 서서 순서에 기대지 않는다.
+# 단 reranker_low_precision 과 too_long_context/lost_in_the_middle 은 함께 성립할 수 있다
+# (리랭커가 gold 를 중간으로 밀면 둘 다 참). 셋 다 예비라 여기서는 순서로 정한다 —
+# 리랭커가 켜져 있으면 그쪽이 더 구체적인 실행 사실이므로 앞에 둔다.
 _CONTEXT_CAUSE = (
     bad_gold_answer, chunking_overchunking, chunking_context_mismatch,
     chunking_underchunking, reranker_low_precision,
