@@ -34,7 +34,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from core.schema import Probe, EvalSnapshot
-from core.llm_usage import agent_box, reset_steps, step
+from core.llm_usage import print_summary, snapshot_usage, step
 from core.parallel import parallel_map
 from core.state import AgentDoctorState
 
@@ -318,7 +318,6 @@ _MODE_NAMES = {Mode.FAST: "fast", Mode.STANDARD: "standard", Mode.DEEP: "deep", 
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
-    reset_steps()   # Optimize 루프로 재진입할 때 이전 회차의 스텝 기록이 섞이지 않게
 
     if not state.chunks:
         state.status = "error"
@@ -365,6 +364,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     # Probe 캐시는 원문 문서에 의존한다. top_k뿐 아니라 chunk_size가 바뀌어도 같은
     # 질문/gold_spans를 유지하고, 불러온 뒤 현재 청크 기준 gold_chunk_ids만 재동기화한다.
+    run_usage = snapshot_usage()
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
         # user_log 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
@@ -524,8 +524,9 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.status = "error"
         state.error = f"평가 실패: {e}"
         print(f"[Eval] 오류: {e}")
+    finally:
+        print_summary(tag="Eval", stage="전체", since=run_usage)
 
-    agent_box("Eval")
     return state
 
 
@@ -604,6 +605,11 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
             f"reranker={rec.retrieval_details.get('reranker_status', 'disabled')}"
         )
     print(f"    recall@k={recall}  f1={f1}  oracle_f1={oracle}")
+    if p.ground_truth and rec.best_gold_answer_f1 > rec.raw_f1_score:
+        print(
+            f"    gold_variant: raw_f1={_fmt_metric(rec.raw_f1_score)} "
+            f"best_f1={_fmt_metric(rec.best_gold_answer_f1)} variants={rec.gold_answer_variant_count}"
+        )
     for f in rec.findings:
         mark = "" if f.confirmed else "(예비)"
         print(f"    ! {f.label}{mark}: {f.metadata.get('reason') or '-'}")
