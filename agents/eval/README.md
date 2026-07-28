@@ -376,12 +376,11 @@ agents/eval/
 6. **STEP4 라벨 세트 확장** (`diagnose.py`) — `chunking_context_mismatch`는 구현됨.
    exact `gold_spans`가 현재 청크들의 합집합에는 포함되지만 한 청크에는 온전히 포함되지
    않는 검색 실패를 FAST 모드에서 확정한다(LLM·추가 검색 불필요). 그 밖에 Notion 설계
-   문서엔 현재 라벨보다 많은
-   후보 라벨이 있다(`chunking_*`, `reranker_*`, `generation_contradiction/misinterpretation/
-   abstention_failure/parametric_overreliance/numerical_error` 등). `generation_contradiction`은
-   `metrics_ragas.py::evaluate_aspect_critics`가 이미 `record.aspect["contradiction"]`을 계산해둬서
-   라벨 함수만 추가하면 저비용으로 확장 가능(diagnose.py 주석상 "나중에 개발"로 자리만 표시돼 있음).
-   `chunking_*`/`reranker_*`는 Index Agent 쪽(청킹 전략 정보·리랭커)이 선행돼야 판별 가능.
+   문서엔 현재 라벨보다 많은 후보 라벨이 있다.
+   `generation_contradiction/misinterpretation/numerical_error/hop_binding_error`는
+   `generation_reasoning_failure`(오라클 답변 단일분류)로, `abstention_failure`·
+   `parametric_overreliance`·`chunking_over/underchunking`·`reranker_low_precision`도 구현됐다.
+   `reranker_low_recall`은 리랭크 전/후 순위 기록이 선행돼야 판별 가능.
 7. **임시 검색 제거** — ✅ 완료. `retrieval_temp.py` 는 삭제됐고, `agent.py` 는
    `agents/rag/retriever.py`(`build_retriever`) 검색과 `agents/rag/generator.py`
    (`generate_answer`) 생성을 호출한다.

@@ -583,16 +583,6 @@ def generation_failure(record: EvalRecord) -> Optional[Finding]:
     )
 
 
-# 나중에 개발
-# def generation_contradiction(record: EvalRecord) -> Optional[Finding]:
-#     """
-#     답변이 컨텍스트/사실과 모순(AspectCritic, tier3). 다른 라벨과 함께 붙는다.
-#     """
-#     if record.aspect.get("contradiction") == 1:
-#         return _finding(record, "generation_contradiction", "generation_failure", confirmed=True)
-#     return None
-
-
 # ══════════════════════════════════════════════════════════════════
 #  C그룹: context 구조 문제
 # ══════════════════════════════════════════════════════════════════

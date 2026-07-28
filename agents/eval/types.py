@@ -216,7 +216,7 @@ class EvalRecord:
     # STEP3-2: LLM(RAGAS) 지표 — diagnose 가 lazy 로 채움
     ragas: dict = field(default_factory=dict)          # 실제 트랙
     oracle_ragas: dict = field(default_factory=dict)   # 오라클 트랙
-    aspect: dict = field(default_factory=dict)         # AspectCritic 결과 — generation_contradiction(주석처리) 용 예약, 현 라이브 미사용
+    aspect: dict = field(default_factory=dict)         # 실행 단위 LLM 판정(abstention / reasoning_mode) memoize
     # RAGAS lazy 계산 여부(트랙별). 빈 결과({})여도 '시도함'으로 남겨 같은 트랙 재-LLM호출을 막는다.
     ragas_done: bool = False
     oracle_ragas_done: bool = False
