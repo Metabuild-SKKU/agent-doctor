@@ -176,6 +176,19 @@ def local_score(target, probes: list[dict]) -> None:
     print(f"[로컬 채점] {len(scores)}문항 평균 char_f1 = {avg:.4f}")
 
 
+# Experiment 목록 화면에서 컬럼/필터로 쓰기 좋은 config 핵심 축. index_config 통짜 dict 를
+# 그대로 metadata 에 넣으면 중첩이라 목록 컬럼으로 안 갈라져서, 이 축들만 '평평하게' 최상위
+# 키로 뽑아 넣는다(graph._langsmith_run_config 의 flat_axes 와 같은 규약). 그러면 LangSmith
+# Experiment 목록에서 chunk_size / use_reranker / top_k 등이 각각 컬럼으로 떠 비교가 된다.
+_CONFIG_COLUMN_KEYS = ("use_reranker", "use_hybrid", "chunk_strategy", "chunk_size", "top_k")
+
+
+def _experiment_metadata(config: dict) -> dict:
+    """evaluate(metadata=...) 에 넣을 dict. 핵심 축은 최상위(=컬럼), 전체는 참고용으로 중첩."""
+    flat_axes = {k: config[k] for k in _CONFIG_COLUMN_KEYS if k in config}
+    return {**flat_axes, "index_config": config}
+
+
 def main() -> None:
     use_reranker = os.getenv("USE_RERANKER", "").strip().lower() in ("1", "true", "yes")
     label = "reranker=on" if use_reranker else "reranker=off"
@@ -209,7 +222,9 @@ def main() -> None:
         data=DATASET_NAME,
         evaluators=[f1_evaluator],
         experiment_prefix=label,       # 실험 이름에 reranker on/off 표시 → UI 비교
-        metadata={"use_reranker": use_reranker, "index_config": config},
+        # config 핵심 축을 최상위 키로 평탄화 → Experiment 목록에서 chunk_size/reranker/
+        # top_k 등이 각각 컬럼으로 떠 실험 간 설정 비교가 된다(index_config 전체도 참고용 유지).
+        metadata=_experiment_metadata(config),
     )
     print("=" * 60)
     print(f"[완료] LangSmith Experiment 로 업로드됨 → Datasets & Experiments 탭 확인")
