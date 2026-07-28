@@ -27,13 +27,17 @@ from __future__ import annotations
 # manual      : config로 못 고침, 사람 개입 필요 (D그룹)
 
 # ── config 키 주의 ────────────────────────────────────────────────
-# 현재 state.index_config 에는 chunk/embedding/search 설정과 reranker 기본값이 있다.
+# 현재 state.index_config 에는 chunk/embedding/search 설정과 reranker 기본값,
+# 그리고 생성(B그룹) 설정(temperature·grounding_strict 등)이 함께 담긴다.
 # Optimize 내부 patch는 flat key 대신 canonical path를 사용하고 config_mapper를 거친다.
 #
-# ⚠️ 더 큰 블로커: generation_config 필드 자체가 core/state.py의
-#   AgentDoctorState 에 아예 없음 (index_config만 존재). B그룹 처방은
-#   전부 이 필드가 생겨야 실행 가능 → schema/state 합의가 선행돼야 함.
-#   # TODO(state-스키마-확장): generation_config: dict 필드 추가 필요
+# ⚠️ 단일 축 규칙: optimizer는 한 처방이 config 키 하나만 바꾸게 강제한다(효과 귀속).
+#   patch에 키가 2개 이상이면 거부(multi_axis_search_space)되므로, 한 처방 = 한 키.
+#
+# 생성(B그룹 Tier1): generation.* 처방은 index_config의 생성 키로 매핑되고 generator가
+#   프롬프트/온도로 소비한다(Eval이 index_config를 generate_answer로 전달). 실제 프롬프트
+#   문구는 generator(_build_prompt)가 플래그로 조립한다 — rules는 스위치만 든다.
+#   Tier2(verifier/checklist/calculation 노드)·Tier3(모델 교체)는 소비처 부재로 draft.
 
 # swap_embedding_model이 바꿔 끼울 실제 임베딩 모델명.
 # TODO(embedding-후보-합의): 품질 기준으로 검증된 실제 업그레이드 후보가 아직 정해지지
@@ -386,47 +390,52 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_hallucination": {
         "group": "B",
-        "status": "draft",              # 로직은 확정, generation_config 필드 부재로 블로킹
+        "status": "ready",              # 프롬프트/온도 플래그가 generator에 소비됨(Tier1)
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # context에 없는 내용 지어냄 → 근거성
         "prescriptions": [
             {
-                # MVP: temperature만 낮추는 게 제일 가벼움 (프롬프트 수정과 독립적인 레버)
+                # 온도만 낮추는 게 제일 가벼운 독립 레버. baseline이 0이면 no-op으로 필터.
                 "id": "lower_temperature",
-                "patch": {"temperature": "decrease"},
+                "patch": {"generation.temperature": "decrease"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
-                # MVP는 프롬프트 텍스트를 직접 패치값으로 사용.
-                # TODO(업그레이드): grounding_strict:true 같은 신호 방식으로 전환.
-                #   rules.py엔 "엄격 모드 on/off" 스위치만 남기고, 실제 프롬프트 문구는
-                #   Eval 구현이 결정하도록 분리 (use_hybrid/use_reranker와 같은 패턴).
-                "id": "strict_grounding_prompt",
-                "patch": {"system_prompt": "context에 없으면 모른다고 답하라",
-                          "require_citation": True},
+                # 근거가 없으면 지어내지 말고 강하게 기권하도록. (문구는 generator 소유,
+                # 여기선 스위치만 — grounding_strict는 기본 True라 abstention_strict가 실질 레버.)
+                "id": "strengthen_abstention",
+                "patch": {"generation.abstention_strict": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                # 근거 번호 인용 강제(기본 True라 대개 no-op이나, 꺼진 경우 복구용).
+                "id": "require_citation",
+                "patch": {"generation.require_citation": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
                 "id": "upgrade_generation_model",
-                "patch": {"generation_model": "upgrade"},  # 프롬프트로 안 되면 최후 수단
+                "patch": {"generation.model": "upgrade"},  # 프롬프트로 안 되면 최후 수단
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
+                # BLOCKER(Tier3): 검증된 교체 후보 없음 → capability generation_model=False.
             },
         ],
-        # BLOCKER: core/state.py 에 generation_config 필드 없음. 추가 전까지 draft.
     },
 
     "generation_partial_answer": {
         "group": "B",
-        "status": "draft",
+        "status": "ready",              # completeness_mode 플래그가 generator에 소비됨(Tier1)
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["answer_relevancy"],  # 질문 요구 일부만 충족 → 완결성
         "prescriptions": [
             {
+                # 여러 항목·하위 질문에 빠짐없이 답하도록 유도(문구는 generator 소유).
                 "id": "completeness_prompt",
-                "patch": {"system_prompt": "모든 하위 질문에 빠짐없이 답하라"},
+                "patch": {"generation.completeness_mode": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
@@ -435,9 +444,9 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"answer_checklist_review": True},  # 답변 누락 점검 단계 추가
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
+                # BLOCKER(Tier2): 답변 점검 노드가 아직 없음(소비처 부재).
             },
         ],
-        # BLOCKER: generation_config 필드 없음.
     },
 
     "generation_contradiction": {
@@ -459,62 +468,66 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_misinterpretation": {
         "group": "B",
-        "status": "draft",
+        "status": "ready",              # restate_question 플래그가 generator에 소비됨(Tier1)
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["answer_relevancy"],  # 질문 조건 오독 → 질문 의도 반영도
         "prescriptions": [
             {
                 "id": "restate_question",
-                "patch": {"restate_question": True},  # 답변 전 질문 재진술 강제
+                "patch": {"generation.restate_question": True},  # 답변 전 질문 재진술 강제
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: generation_config 없음.
     },
 
     "generation_abstention_failure": {
         "group": "B",
-        "status": "draft",              # generation_config 필드 합의 필요
+        "status": "ready",              # abstention_strict 플래그가 generator에 소비됨(Tier1)
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # 모른다고 해야 하는데 지어냄 → 근거성
         "prescriptions": [
             {
-                "id": "strengthen_abstention_prompt",
-                "patch": {"abstention_prompt": "strengthen", "grounding_strict": True},
+                "id": "strengthen_abstention",
+                "patch": {"generation.abstention_strict": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
                 "id": "require_citation",
-                "patch": {"require_citation": True},
+                "patch": {"generation.require_citation": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: generation_config 필드 없음.
     },
 
     "generation_parametric_overreliance": {
         "group": "B",
-        "status": "draft",              # generation_config 필드 합의 필요
+        "status": "ready",              # abstention_strict 플래그가 generator에 소비됨(Tier1)
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # 맞았지만 context 근거 없음(파라미터 의존) → 근거성
         "prescriptions": [
             {
-                "id": "strict_grounding_prompt",
-                "patch": {"grounding_strict": True, "require_citation": True},
+                # 정답이라도 context 근거가 없으면 기권하도록 강화(파라미터 기억 의존 억제).
+                "id": "strengthen_abstention",
+                "patch": {"generation.abstention_strict": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "require_citation",
+                "patch": {"generation.require_citation": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
                 "id": "lower_temperature",
-                "patch": {"temperature": "decrease"},
+                "patch": {"generation.temperature": "decrease"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: generation_config 필드 없음.
     },
 
     "generation_numerical_error": {

@@ -914,7 +914,10 @@ def _concrete_values(
 ) -> list[Any] | None:
     """
     rules.py patch 값 하나를 optimizer 가 쓸 구체 후보값 리스트로 변환한다.
-      - "increase"/"decrease" : 현재값 × 또는 ÷ _DIRECTION_STEP (정수)
+      - "increase"/"decrease" : 현재값 × 또는 ÷ _DIRECTION_STEP.
+          정수 knob(top_k·chunk_size 등)은 정수로, 실수 knob(temperature 등)은
+          실수(소수 3자리)로 유지한다 — float 을 int 로 캐스팅하면 0.15→0 처럼
+          뭉개져 온도 미세조정이 불가능해진다.
       - 그 외(True, 숫자, "recursive_sentence" 등) : 그대로 [값]
     현재값이 숫자가 아니거나 없어 계산이 불가하면 None(→ 해당 키 제외).
     """
@@ -928,9 +931,10 @@ def _concrete_values(
             )
         if isinstance(current, bool) or not isinstance(current, (int, float)):
             return None  # 현재값을 숫자로 알 수 없으면 방향 계산 불가
-        if patch_value == "increase":
-            return [int(round(current * _DIRECTION_STEP))]
-        return [int(round(current / _DIRECTION_STEP))]
+        raw = (current * _DIRECTION_STEP if patch_value == "increase"
+               else current / _DIRECTION_STEP)
+        # 정수 knob 은 정수 유지, 실수 knob 은 소수로 유지(타입 보존).
+        return [int(round(raw)) if isinstance(current, int) else round(raw, 3)]
     # 방향 키워드가 아니면 이미 구체값으로 본다.
     return [patch_value]
 

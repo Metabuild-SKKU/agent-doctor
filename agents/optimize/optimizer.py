@@ -48,6 +48,7 @@ DEFAULT_CONSTRAINTS: dict[str, dict[str, Any]] = {
     "chunker.chunk_size": {"min": 200, "max": 1500},
     "chunker.chunk_overlap": {"min": 0, "max": 300},
     "chunker.strategy": {"allowed": ["recursive_sentence"]},
+    "generation.temperature": {"min": 0.0, "max": 1.0},
 }
 
 
@@ -74,6 +75,12 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
     # chunk_strategy 로 매핑하고 제약(allowed=["recursive_sentence"])·REINDEX 경로도
     # 있어 소비처가 확인됨 → 허용으로 전환.
     "chunking_strategy": True,
+    # generator(_build_prompt)가 프롬프트 플래그를, provider가 temperature를 실제
+    # 소비한다(Eval이 index_config를 generate_answer로 전달). Tier1 처방 허용.
+    "generation_prompt": True,
+    "generation_temperature": True,
+    # 모델 교체(Tier3)는 검증된 후보가 아직 없어 막아둔다.
+    "generation_model": False,
 }
 
 
@@ -89,6 +96,13 @@ PATH_CAPABILITIES: dict[str, str] = {
     "chunker.chunk_overlap": "chunking",
     "chunker.strategy": "chunking_strategy",
     "embedding.model": "embedding_model",
+    "generation.temperature": "generation_temperature",
+    "generation.grounding_strict": "generation_prompt",
+    "generation.require_citation": "generation_prompt",
+    "generation.restate_question": "generation_prompt",
+    "generation.completeness_mode": "generation_prompt",
+    "generation.abstention_strict": "generation_prompt",
+    "generation.model": "generation_model",
 }
 
 
@@ -104,6 +118,15 @@ STATE_MAPPABLE_PATHS: set[str] = {
     "chunker.chunk_overlap",
     "chunker.strategy",
     "embedding.model",
+    # 생성(B그룹 Tier1) — index_config에 매핑되고 generator가 소비한다.
+    # generation.model은 capability=False라 실행 단계에서 걸러진다(후보 부재).
+    "generation.temperature",
+    "generation.grounding_strict",
+    "generation.require_citation",
+    "generation.restate_question",
+    "generation.completeness_mode",
+    "generation.abstention_strict",
+    "generation.model",
 }
 
 

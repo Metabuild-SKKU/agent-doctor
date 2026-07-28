@@ -29,6 +29,15 @@ CANONICAL_INDEX_CONFIG_KEYS: dict[str, str] = {
     "embedding.model": "embedding_model",
     "embedding_model": "embedding_model",
     "embedding.recreate_on_mismatch": "recreate_collection_on_dimension_mismatch",
+    # 생성(B그룹) 설정. index_config에 함께 담기므로 여기 매핑한다(재색인은 키별
+    # 결정이라 generation.* 는 REINDEX_PATHS에 없어 재색인을 유발하지 않는다).
+    "generation.temperature": "temperature",
+    "generation.grounding_strict": "grounding_strict",
+    "generation.require_citation": "require_citation",
+    "generation.restate_question": "restate_question",
+    "generation.completeness_mode": "completeness_mode",
+    "generation.abstention_strict": "abstention_strict",
+    "generation.model": "generation_model",
 }
 
 
@@ -56,6 +65,13 @@ CONFIG_READ_PATHS: dict[str, tuple[str, ...]] = {
         "embedding.recreate_on_mismatch",
         "recreate_collection_on_dimension_mismatch",
     ),
+    "generation.temperature": ("generation.temperature", "temperature"),
+    "generation.grounding_strict": ("generation.grounding_strict", "grounding_strict"),
+    "generation.require_citation": ("generation.require_citation", "require_citation"),
+    "generation.restate_question": ("generation.restate_question", "restate_question"),
+    "generation.completeness_mode": ("generation.completeness_mode", "completeness_mode"),
+    "generation.abstention_strict": ("generation.abstention_strict", "abstention_strict"),
+    "generation.model": ("generation.model", "generation_model"),
 }
 
 

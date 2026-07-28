@@ -105,6 +105,22 @@ class AgentDoctorState:
         # 같은 Qdrant를 여러 파이프라인이 공유하면 고유 namespace를 지정한다.
         # 비어 있으면 Index가 문서 ID/source 조합에서 안정적으로 파생한다.
         "qdrant_collection_namespace": "",
+        # ── 생성(답변) 설정 ──────────────────────────────────────────
+        # Eval/Serve가 generate_answer로 넘기고 Optimize(B그룹)가 조정한다.
+        # use_hybrid/use_reranker처럼 index_config에 함께 담되, 재색인은 키별로
+        # 결정되므로(REINDEX_PATHS) 이 키들은 재색인을 유발하지 않는다.
+        # 기본값은 현재 하드코딩 동작을 그대로 재현한다(Optimize가 손대기 전엔 불변).
+        # 실제 프롬프트 문구는 generator가 이 플래그들로 조립한다
+        # (rules는 스위치, 소비처가 문구 — use_hybrid와 같은 패턴).
+        # 약간의 온기를 둬서 lower_temperature 처방이 실제로 내릴 여지를 준다
+        # (0.0이면 더 못 내려 처방이 no-op). 여전히 낮아 답변은 대체로 결정적.
+        "temperature": 0.15,
+        "grounding_strict": True,    # 컨텍스트만 근거로, 없으면 모른다고 (현 프롬프트)
+        "require_citation": True,    # 답변 끝 근거 번호 표시 (현 프롬프트)
+        "restate_question": False,   # 답변 전 질문 재진술 강제
+        "completeness_mode": False,  # 모든 하위 질문에 빠짐없이 답하도록 유도
+        "abstention_strict": False,  # 확신 없으면 반드시 기권하도록 강화
+        "generation_model": "",      # Tier3(모델 교체)용 자리. 빈값=env/기본 사용
     })
     # 인덱싱 부산물(청크/문서 수, 그래프 파일 경로, failed_documents 등).
     # 선언 없이 동적 속성으로 쓰면 LangGraph가 노드 간 상태 복사 시 유실할 수 있다.

@@ -10,7 +10,13 @@ from agents.rag.retriever import (
     reset_retriever_cache,
     _mmr_select,
 )
-from agents.rag.generator import answer_question, answer_text, generate_answer
+from agents.rag.generator import (
+    answer_question,
+    answer_text,
+    generate_answer,
+    _build_prompt,
+    _generation_temperature,
+)
 from core.schema import Chunk
 
 
@@ -207,6 +213,41 @@ class MmrSelectTests(unittest.TestCase):
     def test_missing_embedding_returns_none(self):
         pool = [{"chunk_id": "x", "score": 1.0}]  # embedding 없음
         self.assertIsNone(_mmr_select(pool, 1, 0.5))
+
+
+class GenerationConfigTests(unittest.TestCase):
+    """B그룹 Tier1: generation 플래그가 프롬프트/온도에 반영되는지 고정."""
+
+    def _sys(self, config):
+        system, _ = _build_prompt("질문?", ["문서"], max_context_chars=500, config=config)
+        return system
+
+    def test_default_reproduces_grounded_prompt(self):
+        # 기본값(config 없음/기본 플래그) = 과거 하드코딩 프롬프트 재현.
+        system = self._sys(None)
+        self.assertIn("제공된 컨텍스트만 근거로", system)
+        self.assertIn("근거 번호를 대괄호로", system)
+        self.assertNotIn("재진술", system)
+
+    def test_flags_add_clauses(self):
+        system = self._sys({
+            "restate_question": True,
+            "completeness_mode": True,
+            "abstention_strict": True,
+        })
+        self.assertIn("재진술", system)
+        self.assertIn("빠짐없이", system)
+        self.assertIn("확신이 없으면", system)
+
+    def test_grounding_off_loosens_prompt(self):
+        system = self._sys({"grounding_strict": False, "require_citation": False})
+        self.assertNotIn("제공된 컨텍스트만 근거로", system)
+        self.assertNotIn("근거 번호를 대괄호로", system)
+
+    def test_temperature_read_from_config(self):
+        self.assertEqual(_generation_temperature(None), 0.0)
+        self.assertEqual(_generation_temperature({"temperature": 0.7}), 0.7)
+        self.assertEqual(_generation_temperature({"temperature": "bad"}), 0.0)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,16 @@ _retriever: Retriever | None = None
 _chunks_raw: list[dict] = []
 _chunks_file: str | None = None
 _fingerprint: str = ""
+# Optimize(B그룹)가 고른 생성 설정. 비어 있으면 generator 기본값(현 동작)을 쓴다.
+# TODO(serve-generation-config): 파이프라인이 고른 generation_config를 Serve까지
+#   영속화(사이드카/청크 메타)해 configure_generation으로 주입하는 배선은 후속.
+_generation_config: dict = {}
+
+
+def configure_generation(generation_config: dict | None) -> None:
+    """서빙에 쓸 generation_config를 설정한다(파이프라인 Serve 단계에서 호출)."""
+    global _generation_config
+    _generation_config = dict(generation_config or {})
 
 
 def init_qdrant(chunks_file: str) -> None:
@@ -126,7 +136,7 @@ def answer(query: str, top_k: int | None = None):
         raise HTTPException(status_code=400, detail="query must not be blank")
     if top_k is not None and top_k <= 0:
         raise HTTPException(status_code=400, detail="top_k must be positive")
-    return answer_question(query, retriever, top_k=top_k)
+    return answer_question(query, retriever, top_k=top_k, config=_generation_config)
 
 
 @app.get("/documents")

@@ -458,8 +458,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             parallel_note = (f" 병렬 (동시성 {concurrency})"
                              if concurrency > 1 and len(gen_tasks) > 1 else " 순차")
             print(f"  probe {len(probes)}개 · 답변 {len(gen_tasks)}건{parallel_note}")
-            answers = parallel_map(lambda t: generate_answer(t[0].probe.question, t[2]),
-                                   gen_tasks, concurrency)
+            # index_config 를 전달해 Optimize(B그룹)의 프롬프트·온도 처방(temperature,
+            # grounding_strict 등)이 실제 답변 생성에 반영되게 한다. generator 는 아는
+            # 키만 읽고 나머지(chunk_size 등)는 무시한다. 없으면 기본값이 현 동작 유지.
+            gen_config = state.index_config or {}
+            answers = parallel_map(
+                lambda t: generate_answer(t[0].probe.question, t[2], config=gen_config),
+                gen_tasks, concurrency)
             for (rec, track, _ctx), answer in zip(gen_tasks, answers):
                 if track == "real":
                     rec.generated_answer = answer
