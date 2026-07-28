@@ -33,17 +33,19 @@ RAGAS_CONTEXT_PRECISION_MIN = 0.7
 # 커서 무관한 내용을 함께 싣고 있다고 본다(chunking_underchunking). 숫자 튜닝 필요.
 EVIDENCE_DENSITY_MIN = 0.2
 RAGAS_CONTEXT_RECALL_MIN = 0.7
-# context 총 길이(문자)가 이보다 길면 길이·배치를 의심한다(too_long_context/lost_in_the_middle).
-# 임의값 — 실측 후 튜닝 필요.
-CONTEXT_CHARS_MAX = 6000
-# 검색 결과에서 gold 청크의 상대 위치가 이 구간(양끝 아님)이면 '중간에 묻혔다'로 본다.
-CONTEXT_MIDDLE_BAND = (0.25, 0.75)
 RAGAS_RESPONSE_RELEVANCY_MIN = 0.7
 
 # 정답 강등 임계값 — RAGAS answer_correctness(답변↔gold 비교, tier3).
 # lexical answer_match(F1_PASS_THRESHOLD)는 통과했지만 이 값 미만이면 '표면형만 비슷한
 # 근접 오답(부정문·3월↔3일 등)'으로 보고 성공 판정을 강등한다. DEEP+ 에서만 적용.
 ANSWER_CORRECTNESS_MIN = 0.5
+
+# ── context 구조 라벨(too_long_context / lost_in_the_middle)의 저비용 발동 문턱 ──
+# context 총 길이(문자)가 이보다 길면 길이·배치를 의심한다. 임의값 — 실측 후 튜닝 필요.
+CONTEXT_CHARS_MAX = 6000
+# 검색 결과에서 gold 청크의 상대 위치가 이 구간(경계 포함)이면 '중간에 묻혔다'로 본다.
+# 경계 포함이라 top_k=5 의 2번째 순위(위치 0.25)도 중간으로 잡힌다 — 튜닝 대상.
+CONTEXT_MIDDLE_BAND = (0.25, 0.75)
 
 # STEP5 최종 판정
 # graph.route_after_eval() 이 이 값 기반 pass_threshold 로 Serve/Optimize 를 분기한다.
