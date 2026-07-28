@@ -1389,9 +1389,18 @@ def _run(
         state.chunks = all_chunks
         if config.get("graph_enabled", True):
             graph_usage = snapshot_usage()
-            with timer.measure("그래프 생성"):
-                state.index_artifacts = tools.build_graph_artifacts(all_chunks, config)
-            print_summary(tag="Index", stage="그래프 생성", since=graph_usage)
+            try:
+                with timer.measure("그래프 생성"):
+                    state.index_artifacts = tools.build_graph_artifacts(
+                        all_chunks,
+                        config,
+                    )
+            finally:
+                print_summary(
+                    tag="Index",
+                    stage="그래프 생성",
+                    since=graph_usage,
+                )
         else:
             state.index_artifacts = {}
 

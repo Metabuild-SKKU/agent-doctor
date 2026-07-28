@@ -404,3 +404,77 @@ def _gold_span_boundary_analysis(record: EvalRecord):
         }
 
     return _cache(record, "gold_span_boundary_analysis", compute)
+
+
+def _gold_chunk_evidence_density(record: EvalRecord):
+    """검색된 gold 청크 안에서 실제 근거(span)가 차지하는 비율. 낮을수록 청크가 근거보다 크다.
+
+    청크 '사이' 노이즈(비-gold 청크)가 아니라 청크 '안'의 노이즈를 잰다 —
+    chunking_underchunking 과 context_noise_interference 를 가르는 신호다.
+    gold 를 안 담은 청크는 분모에서 뺀다(그건 top_k·리랭커 문제지 청크 크기 문제가 아니다).
+    반환: 0~1 / 좌표·span 없으면 None.
+    """
+    if not _ctx.chunks:
+        return None
+
+    def compute():
+        spans = _exact_probe_gold_spans(record)
+        if not spans:
+            return None
+        by_doc: dict[str, list[tuple[int, int]]] = {}
+        for span in spans:
+            by_doc.setdefault(span["doc_id"], []).append((span["start"], span["end"]))
+
+        retrieved = set(record.retrieved_chunk_ids)
+        evidence = 0
+        total = 0
+        for chunk in _ctx.chunks:
+            if getattr(chunk, "chunk_id", None) not in retrieved:
+                continue
+            position = _chunk_char_span(chunk)
+            doc_id = getattr(chunk, "doc_id", None)
+            if position is None or doc_id not in by_doc:
+                continue
+            c_start, c_end = position
+            covered = sum(max(0, min(c_end, s_end) - max(c_start, s_start))
+                          for s_start, s_end in by_doc[doc_id])
+            if covered <= 0:
+                continue                      # gold 를 안 담은 청크 → 분모 제외
+            evidence += covered
+            total += c_end - c_start
+        return evidence / total if total > 0 else None
+
+    return _cache(record, "gold_chunk_evidence_density", compute)
+
+
+def _oversized_gold_spans(record: EvalRecord):
+    """현재 청크로는 한 청크에 담길 수 없는 gold span 통계.
+
+    span 길이가 최장 청크보다 길면 겹침을 아무리 늘려도 한 청크에 담기지 않는다 —
+    청크 i 가 [i·(c-o), i·(c-o)+c) 를 덮으므로 담김 가능 조건이 L <= c 이기 때문이다(기하 사실).
+    그래서 처방이 overlap 이 아니라 chunk_size 증가다 — chunking_overchunking 판별.
+    반환: {"oversized_count", "max_chunk_len", "max_span_len"} / 재료 없으면 None.
+    """
+    if not _ctx.chunks:
+        return None
+
+    def compute():
+        spans = _exact_probe_gold_spans(record)
+        if not spans:
+            return None
+        chunk_lengths = []
+        for chunk in _ctx.chunks:
+            position = _chunk_char_span(chunk)
+            if position is not None:
+                chunk_lengths.append(position[1] - position[0])
+        if not chunk_lengths:
+            return None
+        max_chunk = max(chunk_lengths)
+        span_lengths = [span["end"] - span["start"] for span in spans]
+        return {
+            "oversized_count": sum(1 for length in span_lengths if length > max_chunk),
+            "max_chunk_len": max_chunk,
+            "max_span_len": max(span_lengths),
+        }
+
+    return _cache(record, "oversized_gold_spans", compute)

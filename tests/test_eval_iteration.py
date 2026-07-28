@@ -10,6 +10,28 @@ from core.state import AgentDoctorState
 
 
 class EvalIterationContractTest(unittest.TestCase):
+    @patch("agents.eval.agent.generate_probes", side_effect=RuntimeError("boom"))
+    def test_eval_prints_overall_usage_summary_from_finally(self, _generate_probes):
+        state = AgentDoctorState(
+            chunks=[Chunk(chunk_id="c1", doc_id="d1", text="충분한 길이의 테스트 청크")],
+            user_questions=["질문"],
+        )
+
+        with (
+            patch("agents.eval.agent.snapshot_usage", return_value={"calls": 0}) as snapshot,
+            patch("agents.eval.agent.print_summary") as summary,
+        ):
+            result = agent.run(state)
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("boom", result.error)
+        summary.assert_called_once_with(
+            tag="Eval",
+            stage="전체",
+            since={"calls": 0},
+        )
+        snapshot.assert_called_once_with()
+
     @patch("agents.eval.agent.generate_probes", return_value=[])
     def test_eval_keeps_iteration_for_candidate_measurement(self, _generate_probes):
         state = AgentDoctorState(

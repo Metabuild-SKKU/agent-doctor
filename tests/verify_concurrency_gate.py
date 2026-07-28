@@ -90,7 +90,7 @@ def _run_once(label: str, concurrency: int, chunks) -> tuple[dict, dict]:
         print(f"[Gate] {label} 실행 오류: {result.error}")
         sys.exit(1)
     after = llm_usage._totals
-    usage = {k: after[k] - before[k] for k in ("calls", "prompt", "output")}
+    usage = {"calls": after["calls"] - before["calls"]}
     print(f"\n[Gate] {label}: 동시성={concurrency}, LLM {usage['calls']}회, "
           f"overall={result.report.overall_score}")
     return _report_dict(result.report), usage

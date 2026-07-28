@@ -34,13 +34,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from core.schema import Probe, EvalSnapshot
-from core.llm_usage import (
-    agent_box,
-    print_summary,
-    reset_steps,
-    snapshot_usage,
-    step,
-)
+from core.llm_usage import print_summary, snapshot_usage, step
 from core.parallel import parallel_map
 from core.state import AgentDoctorState
 from core.timing import StageTimer
@@ -61,7 +55,8 @@ from agents.index.qdrant_store import keyword_search
 from agents.rag.generator import generate_answer
 from agents.rag.retriever import Retriever, get_retriever
 from agents.eval.metrics_ragas import (
-    evaluate_real_track, evaluate_oracle_track, _judge as _ragas_judge,
+    evaluate_real_track, evaluate_oracle_track, evaluate_abstention,
+    evaluate_reasoning_mode, _judge as _ragas_judge,
 )
 from agents.eval.metrics_common import set_context as set_diag_context
 from agents.eval.metrics_basic import _compute_metrics
@@ -308,6 +303,10 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
     try:
         if track == "oracle":
             return evaluate_oracle_track(record, judge) if record.oracle_answer is not None else {}
+        if track == "abstention":
+            return evaluate_abstention(record, judge)
+        if track == "reasoning_mode":
+            return evaluate_reasoning_mode(record, judge) if record.oracle_answer is not None else {}
         return evaluate_real_track(record, judge)
     except Exception as e:
         print(f"[Eval] RAGAS({track}) 실패({e}) → 폴백")
@@ -320,17 +319,17 @@ _MODE_NAMES = {Mode.FAST: "fast", Mode.STANDARD: "standard", Mode.DEEP: "deep", 
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점과 전체 실행 시간을 함께 기록한다."""
     timer = StageTimer("Eval")
+    run_usage = snapshot_usage()
     try:
         return _run(state, timer)
     finally:
+        print_summary(tag="Eval", stage="전체", since=run_usage)
         timer.finish()
-        agent_box("Eval")
 
 
 def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
     """Eval STEP1~5 본체."""
     state.current_agent = "eval"
-    reset_steps()   # Optimize 루프로 재진입할 때 이전 회차의 스텝 기록이 섞이지 않게
 
     if not state.chunks:
         state.status = "error"
@@ -380,7 +379,6 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
     try:
         # ── STEP1: Probe 생성 ──────────────────────────────────
         step1_started = timer.begin()
-        step1_usage = snapshot_usage()
         # user_log 소스는 매번 그대로 변환하는 저비용 경로라 캐시하지 않는다.
         # 판정은 generate_probes 와 같은 술어(uses_user_log)로 한다 — state.user_questions
         # 유무만 보면 EVAL_PROBE_SOURCE=auto 일 때 실제로는 LLM 생성으로 가는데도
@@ -424,7 +422,6 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                     )
                     print(f"  저장된 Probe {len(probes)}개 재사용(버전 일치)")
         timer.end("STEP1 Probe 준비", step1_started)
-        print_summary(tag="Eval", stage="STEP1 Probe 준비", since=step1_usage)
         if not probes:
             print("[Eval] 경고: Probe 0개 생성 → 평가 불가, 통과 처리")
             state.probes = []
@@ -480,7 +477,6 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                              if concurrency > 1 and len(gen_tasks) > 1 else " 순차")
             print(f"  probe {len(probes)}개 · 답변 {len(gen_tasks)}건{parallel_note}")
             generation_started = timer.begin()
-            generation_usage = snapshot_usage()
             answers = parallel_map(lambda t: generate_answer(t[0].probe.question, t[2]),
                                    gen_tasks, concurrency)
             for (rec, track, _ctx), answer in zip(gen_tasks, answers):
@@ -489,7 +485,6 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                 else:
                     rec.oracle_answer = answer
             timer.end("STEP2 답변 생성", generation_started)
-            print_summary(tag="Eval", stage="STEP2 답변 생성", since=generation_usage)
 
         # ── STEP3: 지표 · RAGAS 진단 ──────────────────────────
         # Phase B2(병렬): RAGAS 선계산 — 트랙별로 필요한 probe 만 동시 실행하고 *_done
@@ -498,7 +493,6 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
         # 게이트는 _compute_ragas_* 와 동일(mode >= DEEP); LLM 비활성·키없음은
         # _ragas_track 이 {} 폴백이라 기존과 같은 동작으로 수렴한다.
         # 동시성 1이면 태스크 순서가 Phase C 호출 순서(probe 순)와 일치.
-        ragas_usage = snapshot_usage()
         with step("Eval", 3, "지표 · RAGAS 진단"):
             if mode < Mode.DEEP:
                 print(f"  모드 {_MODE_NAMES.get(mode, mode)} — RAGAS 생략 (deep 이상에서 실행)")
@@ -522,13 +516,11 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                     oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency)
                     for rec, score in zip(failed, oracle_scores):
                         rec.oracle_ragas, rec.oracle_ragas_done = score, True
-        print_summary(tag="Eval", stage="STEP3-2 RAGAS", since=ragas_usage)
 
         # ── STEP4: 원인 판정 ──────────────────────────────────
         # Phase C(순차): 지표·진단·로그 — diagnose 는 signals 전역·진단 캐시·tier2
         # 재검색을 쓰므로 병렬 구간 밖에서 실행한다.
         diagnosis_started = timer.begin()
-        diagnosis_usage = snapshot_usage()
         with step("Eval", 4, "원인 판정"):
             print()
             for i, rec in enumerate(records, 1):
@@ -536,7 +528,6 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                 _log_probe(i, len(records), rec)
             _log_diagnosis_summary(records)
         timer.end("STEP3-4 지표·진단", diagnosis_started)
-        print_summary(tag="Eval", stage="STEP3-4 지표·진단", since=diagnosis_usage)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
         report_started = timer.begin()
@@ -557,7 +548,6 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
         state.status = "error"
         state.error = f"평가 실패: {e}"
         print(f"[Eval] 오류: {e}")
-
     return state
 
 
