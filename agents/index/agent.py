@@ -34,6 +34,7 @@ from agents.rag.retriever import (
     get_retriever,
     reset_retriever_cache,
 )
+from core.llm_usage import print_summary, snapshot_usage
 from core.schema import Chunk, Document, IndexSnapshot
 from core.state import AgentDoctorState
 
@@ -1379,7 +1380,18 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
 
         state.chunks = all_chunks
         if config.get("graph_enabled", True):
-            state.index_artifacts = tools.build_graph_artifacts(all_chunks, config)
+            graph_usage = snapshot_usage()
+            try:
+                state.index_artifacts = tools.build_graph_artifacts(
+                    all_chunks,
+                    config,
+                )
+            finally:
+                print_summary(
+                    tag="Index",
+                    stage="그래프 생성",
+                    since=graph_usage,
+                )
         else:
             state.index_artifacts = {}
 
