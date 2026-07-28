@@ -11,11 +11,13 @@ Optimize 노드의 진입점(오케스트레이션 계층).
   모든 경로에서 같은 state 를 반환한다(AGENTS.md 2절 계약).
 
 [읽는 것]  state.report, state.index_config, state.iteration, state.max_iterations,
-           state.blacklist, state.optimization_history,
+           state.optimize_visit_count, state.max_optimize_visits,
+           state.blacklist, state.completed_prescriptions, state.optimization_history,
            state.active_index_key, state.active_eval_key,
            state.runtime_capabilities(Planner request를 통해 소비)
-[쓰는 것]  state.index_config, state.iteration, state.status, state.error,
-           state.current_agent, state.blacklist, state.optimization_history,
+[쓰는 것]  state.index_config, state.iteration, state.optimize_visit_count,
+           state.status, state.error, state.current_agent, state.blacklist,
+           state.completed_prescriptions, state.optimization_history,
            state.optimization_report, state.reindex_required
 
 [state.status 신호]  (graph 라우팅이 참고)
@@ -48,6 +50,47 @@ from agents.optimize.schemas import (
 
 
 _MAX_UNJUDGEABLE_ATTEMPTS = 1
+
+
+def _stop_at_optimize_visit_limit(
+    state: AgentDoctorState,
+) -> AgentDoctorState:
+    """Optimize 절대 방문 상한에 도달하면 진행 중 설정을 복원하고 종료한다."""
+    pending = history.find_active_study(state.optimization_history)
+    if pending is None:
+        pending = history.find_pending(state.optimization_history)
+
+    before_config = dict(state.index_config)
+    if pending is not None:
+        state.index_config = dict(pending.before_config)
+        pending.after_config = dict(state.index_config)
+        pending.status = "failed"
+        pending.rollback_reason = "Optimize 절대 방문 상한 도달"
+        pending.metadata.update(
+            {
+                "pending": False,
+                "active_study": False,
+                "visit_limit_reached": True,
+            }
+        )
+        pending.metadata.pop("before_report", None)
+        state.reindex_required = bool(
+            pending.metadata.get("reindex_required", True)
+        )
+
+    changed = before_config != state.index_config
+    state.status = "rolled_back" if changed else "verified"
+    state.error = None
+    print(
+        "[Optimize] 절대 방문 상한 도달: "
+        f"{state.optimize_visit_count}/{state.max_optimize_visits}"
+    )
+    print(
+        "[Optimize] 진행 중 설정을 baseline으로 복원"
+        if changed
+        else "[Optimize] 추가 처방 없이 종료"
+    )
+    return state
 
 
 def _unjudgeable_exclusions(
@@ -256,6 +299,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     """Optimize 노드 진입점. 성공·스킵·수동·오류 어느 경로든 같은 state 를 반환한다."""
     state.current_agent = "optimize"
     try:
+        state.optimize_visit_count += 1
+        if state.optimize_visit_count >= state.max_optimize_visits:
+            return _stop_at_optimize_visit_limit(state)
+
         # top_k sweep는 후보 하나의 성공/실패를 곧바로 확정하지 않는다.
         # 직전 후보의 Eval 결과를 같은 study에 넣고 다음 후보 또는 best를 고른다.
         active_study = history.find_active_study(state.optimization_history)
@@ -266,6 +313,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         judged_item, verdict, rollback_baseline_report = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
         visit_exclusions = set(state.blacklist)
+        visit_exclusions.update(state.completed_prescriptions)
         visit_exclusions.update(
             _unjudgeable_exclusions(state.optimization_history)
         )
@@ -694,6 +742,11 @@ def _finish_internal_study(
                 else "verified"
             )
             state.reindex_required = bool(result.needs_reindex)
+            label = item.failure_labels[0] if item.failure_labels else ""
+            if label and item.selected_prescription_id:
+                state.completed_prescriptions.add(
+                    (label, item.selected_prescription_id)
+                )
     else:
         return _fail_active_study(
             state,
