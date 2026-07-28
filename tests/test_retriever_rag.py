@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from agents.index.qdrant_store import build_client, build_sparse_vector
+from agents.index.qdrant_store import build_client, build_sparse_vector, keyword_search, normalize_math_text
 from agents.rag.retriever import build_retriever, get_retriever, reset_retriever_cache
 from agents.rag.generator import answer_question, answer_text, generate_answer
 from core.schema import Chunk
@@ -37,6 +37,55 @@ class RetrieverTests(unittest.TestCase):
         self.assertTrue(response["fallback_used"])
         self.assertEqual(response["search_mode"], "keyword")
         self.assertEqual(response["results"][0]["chunk_id"], "remote")
+
+    def test_math_expression_normalization_matches_korean_fraction(self):
+        chunks = [
+            Chunk(
+                chunk_id="pi-four",
+                doc_id="math",
+                text="x=2cos^3(t), y=3sin^3(t), t=pi/4 일 때 접선의 기울기를 구한다.",
+            )
+        ]
+
+        results = keyword_search(chunks, "t가 4분의 파이일 때 기울기", top_k=1)
+
+        self.assertEqual(results[0]["chunk_id"], "pi-four")
+        self.assertIn("pi/4", normalize_math_text("4분의 파이"))
+
+    def test_math_expression_normalization_skips_general_text(self):
+        text = "당분기말 자산총계는 전기말 이상으로 증가했다."
+
+        self.assertEqual(normalize_math_text(text), text)
+
+    def test_math_query_expands_reranker_candidate_pool(self):
+        retriever = build_retriever(
+            [
+                Chunk(chunk_id=f"c-{i}", doc_id="math", text=f"수열 급수 후보 {i}")
+                for i in range(80)
+            ],
+            config={"use_reranker": True, "rerank_candidates": 20, "top_k": 5},
+        )
+        seen = {}
+
+        def fake_keyword_search(chunks, query, top_k=5):
+            seen["top_k"] = top_k
+            return [
+                {
+                    "chunk_id": chunk.get("chunk_id") if isinstance(chunk, dict) else chunk.chunk_id,
+                    "doc_id": chunk.get("doc_id") if isinstance(chunk, dict) else chunk.doc_id,
+                    "text": chunk.get("text") if isinstance(chunk, dict) else chunk.text,
+                    "score": 1.0,
+                }
+                for chunk in chunks[:top_k]
+            ]
+
+        with patch("agents.rag.retriever.keyword_search", side_effect=fake_keyword_search):
+            with patch("agents.rag.retriever.rerank_with_status", side_effect=lambda q, r, model_name, top_k: (r[:top_k], "applied")):
+                response = retriever.search_with_details("수열 Sn의 공비와 극한값을 구하라", top_k=5)
+
+        self.assertEqual(seen["top_k"], 60)
+        self.assertEqual(response["reranker_status"], "applied")
+        self.assertEqual(len(response["results"]), 5)
 
     def test_dense_search_uses_index_embeddings(self):
         retriever = build_retriever(
