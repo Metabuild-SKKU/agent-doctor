@@ -255,6 +255,7 @@ def _store_eval_snapshot(
             report=deepcopy(state.report),
             diagnosis_cache=deepcopy(state.diagnosis_cache),
             diagnosis_cache_version=state.diagnosis_cache_version,
+            eval_probe_metrics=deepcopy(state.eval_probe_metrics),
         )
     )
     pinned_key = _pending_baseline_eval_key(state)
@@ -371,6 +372,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.report = deepcopy(snapshot.report)
         state.diagnosis_cache = deepcopy(snapshot.diagnosis_cache)
         state.diagnosis_cache_version = snapshot.diagnosis_cache_version
+        # 옛 스냅샷(필드 추가 전 저장분)엔 이 속성이 없을 수 있어 getattr 로 안전 복원.
+        state.eval_probe_metrics = deepcopy(getattr(snapshot, "eval_probe_metrics", {}) or {})
         state.active_eval_key = eval_cache_key
         state.eval_cache_hit = True
         state.status = "evaluated"
@@ -525,6 +528,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         with step("Eval", 5, "리포트"):
             state.probes = probes
             state.report = build_report(records, state.iteration, mode)
+            # probe별 지표·라벨을 state 에 남긴다(build_report 는 집계만 하고 records 를 버린다).
+            # LangSmith Experiment 업로드가 재계산(RAGAS LLM 재호출) 없이 이 값을 feedback
+            # 컬럼으로 쓴다. 키는 question — Dataset example 과 조인하는 안전한 키(스키마 무변경).
+            # _probe_trace_payload 를 재사용해 트레이스 payload 와 같은 지표 집합을 보장한다.
+            state.eval_probe_metrics = {
+                rec.probe.question: _probe_trace_payload(rec) for rec in records
+            }
             state.status = "evaluated"
             eval_cache_key = _eval_cache_key(
                 state,

@@ -143,4 +143,7 @@ class EvalSnapshot:
     report: Optional[DiagnosticReport] = None
     diagnosis_cache: dict = field(default_factory=dict)
     diagnosis_cache_version: str = ""
+    # probe별 지표·라벨 맵(state.eval_probe_metrics 와 동일 형식). cache hit 복원 시에도
+    # LangSmith 업로드가 지표를 얻도록 함께 보관한다. 옵셔널·기본 빈 dict(하위호환).
+    eval_probe_metrics: dict = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)

@@ -114,6 +114,11 @@ class AgentDoctorState:
     # Eval Agent 결과
     probes: list[Probe] = field(default_factory=list)
     report: Optional[DiagnosticReport] = None
+    # probe별 지표·라벨 스냅샷 {question: {recall_at_k,f1_score,oracle_f1,labels,qtype,...}}.
+    # build_report 는 집계값만 남기고 EvalRecord(개별 수치)는 버려지므로, LangSmith
+    # Experiment 업로드(tests/run_corpus.py)가 재계산(=RAGAS LLM 재호출) 없이 probe별
+    # 지표를 feedback 컬럼으로 실을 수 있게 STEP5 에서 이 맵에 남긴다.
+    eval_probe_metrics: dict = field(default_factory=dict)
     # 진단 신호 캐시: {probe_id: {signal_name: value}}. 같은 파이프라인 버전 내 재진단 시 재사용.
     # 버전(index_config+코퍼스)이 바뀌면 Eval 진입 시 무효화한다.
     diagnosis_cache: dict = field(default_factory=dict)

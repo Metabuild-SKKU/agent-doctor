@@ -270,11 +270,37 @@ def _upload_langsmith(state, qa_path: Path) -> None:
         )
         print(f"  [LangSmith] Dataset '{dataset_name}' 생성 + {len(probes)}문항 업로드")
 
+    # 파이프라인(Eval STEP1~5)이 이미 계산해 둔 probe별 지표·라벨을 Experiment 컬럼으로 싣는다.
+    # 재계산이 아니라 state.eval_probe_metrics(질문→{recall/f1/oracle/labels/qtype}) 조회만 하므로
+    # RAGAS(LLM) 재호출이 없다. qa.json 은 gold_spans 정합이 맞아 recall/oracle 이 정직하다.
+    probe_metrics = getattr(state, "eval_probe_metrics", {}) or {}
+
+    def probe_metric_evaluator(run, example):
+        """example.question 으로 파이프라인 계산 지표를 찾아 다중 feedback 반환.
+        숫자 지표는 score(정렬·평균 컬럼), 문제유형 라벨은 value(문자열 컬럼). 맵에 없으면
+        아무 것도 안 붙여 기존 char_f1 만 뜨는 동작으로 안전하게 폴백한다."""
+        q = (example.inputs or {}).get("question", "")
+        m = probe_metrics.get(q)
+        if not m:
+            return {"results": []}
+        results = []
+        for key in ("recall_at_k", "f1_score", "oracle_f1"):
+            v = m.get(key)
+            # 미측정(-1·None·비수치)은 스킵 → 실행 평균 오염 방지(agent.py 규칙과 동일).
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+                results.append({"key": key, "score": float(v)})
+        labels = m.get("labels") or []
+        results.append({"key": "problem_labels",
+                        "value": ", ".join(labels) if labels else "pass"})
+        results.append({"key": "qtype", "value": m.get("qtype", "single")})
+        return {"results": results}
+
     print(f"  [LangSmith] Experiment 실행 중... ({label}, 답변 {len(probes)}건 생성)")
     evaluate(
         target,
         data=dataset_name,
-        evaluators=[f1_evaluator],
+        # char_f1(하위호환) + probe별 recall/f1/oracle/라벨(파이프라인 계산값 재사용).
+        evaluators=[f1_evaluator, probe_metric_evaluator],
         experiment_prefix=label,
         # config 핵심 축(chunk_size/use_reranker/top_k/chunk_strategy)을 최상위 키로 평탄화 →
         # Experiment 목록에서 컬럼/필터로 뜬다. langsmith_regression 과 같은 함수를 재사용해
