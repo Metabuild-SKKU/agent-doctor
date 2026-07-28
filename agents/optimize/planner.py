@@ -45,10 +45,7 @@ from core.schema import Finding
 from agents.optimize import rules
 from agents.optimize import gate
 from agents.optimize.config_mapper import canonicalize_path, get_current_value
-from agents.optimize.evidence_window import (
-    DEFAULT_EVIDENCE_WINDOW_POLICY,
-    build_evidence_windows,
-)
+from agents.optimize.evidence_window import build_evidence_windows
 from agents.optimize.schemas import (
     ConfigPatch,
     OptimizationRequest,
@@ -84,6 +81,23 @@ _MAX_STEP_PER_PROBE = 2.0
 # sweep 후보 상한. 후보 1개당 파이프라인 전체 재평가(LLM 호출 다수)가 들어가므로
 # 무릎에서 위로 이만큼만 시도한다. (OPTIMIZER_IMPLEMENTATION_PLAN.md §2.3)
 _MAX_SWEEP_CANDIDATES = 3
+
+# Chunk 축의 방향 추측 폴백은 상태 이름으로만 결정한다. ``source`` 키 존재 여부는
+# metadata 표현이 조금만 바뀌어도 안전 정책을 뒤집으므로 제어 신호로 쓰지 않는다.
+_SYMBOLIC_FALLBACK_ALLOWED: dict[str, frozenset[str]] = {
+    "chunker.chunk_size": frozenset({
+        "missing_gold_spans",
+        "missing_evidence_windows",
+        "invalid_policy",
+        "invalid_evidence_window_policy",
+    }),
+    "chunker.chunk_overlap": frozenset({
+        "missing_gold_spans",
+        "invalid_policy",
+    }),
+}
+
+_EvidenceAnalysis = tuple[list[dict[str, Any]], dict[str, Any] | None]
 
 # 방향 키워드를 계산할 때 baseline_config 에 해당 키가 없을 경우의 기본 현재값.
 _DEFAULT_CURRENT: dict[str, int] = {
@@ -145,10 +159,42 @@ def plan(
         )
 
     label, findings, rule, _score_val = picked
-    candidates = _build_candidates(label, findings, rule, blacklist, state)
-    request = _build_request(label, findings, rule, candidates, ranked, state)
+    evidence_analysis = (
+        _evidence_windows(state, findings)
+        if _rule_uses_chunk_size(rule)
+        else None
+    )
+    candidates = _build_candidates(
+        label,
+        findings,
+        rule,
+        blacklist,
+        state,
+        evidence_analysis=evidence_analysis,
+    )
+    request = _build_request(
+        label,
+        findings,
+        rule,
+        candidates,
+        ranked,
+        state,
+        evidence_analysis=evidence_analysis,
+    )
     decision.request_id = request.request_id
     return request, decision
+
+
+def _rule_uses_chunk_size(rule: dict[str, Any]) -> bool:
+    """선택된 라벨의 처방 중 chunk_size 축이 있는지 확인한다."""
+
+    return any(
+        canonicalize_path(path) == "chunker.chunk_size"
+        for prescription in rule.get("prescriptions", [])
+        if isinstance(prescription, dict)
+        for path in prescription.get("patch", {})
+        if isinstance(path, str)
+    )
 
 
 # ── 1. 분류 ───────────────────────────────────────────────────────
@@ -402,7 +448,10 @@ def _probe_required_top_k(finding: Finding) -> int | None:
 
 
 def _ground_top_k_from_gold(
-    findings: list[Finding], state: AgentDoctorState, _direction: Any
+    findings: list[Finding],
+    state: AgentDoctorState,
+    _direction: Any,
+    _evidence_analysis: _EvidenceAnalysis | None = None,
 ) -> tuple[list[int] | None, dict[str, Any] | None]:
     """gold 를 다 담으려면 필요한 top_k 후보 — 검색 실패 라벨 공용.
 
@@ -572,13 +621,12 @@ def _evidence_windows(
     spans = _valid_gold_spans(state, findings)
     if not spans:
         return [], {"status": "missing_gold_spans"}
-    configured_policy = state.index_config.get("evidence_window_policy")
-    policy = {
-        **DEFAULT_EVIDENCE_WINDOW_POLICY,
-        **(configured_policy if isinstance(configured_policy, dict) else {}),
-    }
     try:
-        windows = build_evidence_windows(state.documents, spans, policy)
+        windows = build_evidence_windows(
+            state.documents,
+            spans,
+            state.index_config.get("evidence_window_policy"),
+        )
     except ValueError as exc:
         return [], {
             "status": "invalid_evidence_window_policy",
@@ -661,10 +709,15 @@ def _ground_chunk_size_candidates(
     findings: list[Finding],
     state: AgentDoctorState,
     direction: Any,
+    evidence_analysis: _EvidenceAnalysis | None = None,
 ) -> tuple[list[int] | None, dict[str, Any]]:
     """구조 기반 evidence window 길이와 현재값 사이에서 후보 범위를 만든다."""
 
-    windows, evidence_metadata = _evidence_windows(state, findings)
+    windows, evidence_metadata = (
+        evidence_analysis
+        if evidence_analysis is not None
+        else _evidence_windows(state, findings)
+    )
     if not windows:
         return None, evidence_metadata or {"status": "missing_evidence_windows"}
 
@@ -694,17 +747,10 @@ def _ground_chunk_size_candidates(
     step = policy["rounding_step"]
     evidence_target = max(step, int(math.ceil(raw_target / step) * step))
     current_int = int(round(current))
-    lower_limit = max(
-        policy["min_chunk_size"],
-        int(math.ceil(
-            current_int * (1 - policy["max_step_ratio"]) / step
-        ) * step),
-    )
-    upper_limit = min(
-        policy["max_chunk_size"],
-        int(math.floor(
-            current_int * (1 + policy["max_step_ratio"]) / step
-        ) * step),
+    lower_limit, upper_limit = _chunk_candidate_limits(
+        current_int,
+        step,
+        policy,
     )
     target = (
         max(evidence_target, lower_limit)
@@ -758,6 +804,28 @@ def _ground_chunk_size_candidates(
     return candidates, metadata
 
 
+def _chunk_candidate_limits(
+    current: int,
+    step: int,
+    policy: dict[str, Any],
+) -> tuple[int, int]:
+    """정책의 최소·최대값과 1회 변경 비율로 후보 하한·상한을 계산한다."""
+
+    lower_limit = max(
+        int(policy["min_chunk_size"]),
+        int(math.ceil(
+            current * (1 - float(policy["max_step_ratio"])) / step
+        ) * step),
+    )
+    upper_limit = min(
+        int(policy["max_chunk_size"]),
+        int(math.floor(
+            current * (1 + float(policy["max_step_ratio"])) / step
+        ) * step),
+    )
+    return lower_limit, upper_limit
+
+
 def _chunk_positions_by_doc(
     state: AgentDoctorState,
 ) -> tuple[dict[str, list[tuple[int, int]]], int]:
@@ -791,6 +859,7 @@ def _ground_chunk_overlap_candidates(
     findings: list[Finding],
     state: AgentDoctorState,
     direction: Any,
+    _evidence_analysis: _EvidenceAnalysis | None = None,
 ) -> tuple[list[int] | None, dict[str, Any]]:
     """경계에 걸린 gold span에서 필요한 총 chunk_overlap 후보를 계산한다.
 
@@ -968,6 +1037,7 @@ def _grounded_search_space(
     findings: list[Finding],
     state: AgentDoctorState,
     changes: dict,
+    evidence_analysis: _EvidenceAnalysis | None = None,
 ) -> tuple[dict[str, list], dict[str, Any] | None]:
     """이 라벨에서 측정값으로 계산 가능한 {config키: [후보값]} 을 만든다.
     계산할 근거가 없는 키는 담지 않는다(호출부가 방향 키워드로 폴백)."""
@@ -976,7 +1046,12 @@ def _grounded_search_space(
     for key, compute in _GROUNDED_VALUES.get(label, {}).items():
         if key not in changes:
             continue
-        values, metadata = compute(findings, state, changes.get(key))
+        values, metadata = compute(
+            findings,
+            state,
+            changes.get(key),
+            evidence_analysis,
+        )
         if values:
             space[key] = values
         if metadata is not None:
@@ -1049,6 +1124,7 @@ def _finding_search_space(
     findings: list[Finding],
     changes: dict,
     state: AgentDoctorState,
+    evidence_analysis: _EvidenceAnalysis | None = None,
 ) -> tuple[dict[str, list], dict[str, Any] | None]:
     """이 처방이 바꿀 키들의 최종 후보값을 정한다.
 
@@ -1063,7 +1139,11 @@ def _finding_search_space(
     fallback = _build_search_space(changes, state.index_config)
     supplied = _supplied_candidates(findings)
     grounded, grounding_metadata = _grounded_search_space(
-        findings[0].label if findings else "", findings, state, changes
+        findings[0].label if findings else "",
+        findings,
+        state,
+        changes,
+        evidence_analysis,
     )
 
     resolved: dict[str, list] = {}
@@ -1091,19 +1171,13 @@ def _finding_search_space(
                     or (patch_value == "decrease" and value < current)
                 )
             ]
-        label = findings[0].label if findings else ""
-        blocks_symbolic_fallback = (
-            path in {"chunker.chunk_size", "chunker.chunk_overlap"}
-            and isinstance(grounding_metadata, dict)
-            and grounding_metadata.get("source") in {
-                "structural_evidence_windows",
-                "gold_span_boundary_geometry",
-            }
-            and grounding_metadata.get("status") != "grounded"
+        allows_symbolic_fallback = _allows_symbolic_fallback(
+            path,
+            grounding_metadata,
         )
         if values:
             resolved[path] = list(values)
-        elif not evidence_values and not blocks_symbolic_fallback:
+        elif not evidence_values and allows_symbolic_fallback:
             resolved[path] = list(fallback_values)
         if supplied_values and path in {
             "chunker.chunk_size",
@@ -1117,12 +1191,27 @@ def _finding_search_space(
     return resolved, grounding_metadata
 
 
+def _allows_symbolic_fallback(
+    path: str,
+    grounding_metadata: dict[str, Any] | None,
+) -> bool:
+    """Chunk 방향 추측의 허용 여부를 명시적인 grounding status로 결정한다."""
+
+    allowed_statuses = _SYMBOLIC_FALLBACK_ALLOWED.get(path)
+    if allowed_statuses is None or grounding_metadata is None:
+        return True
+    status = grounding_metadata.get("status")
+    return isinstance(status, str) and status in allowed_statuses
+
+
 def _build_candidates(
     label: str,
     findings: list[Finding],
     rule: dict,
     blacklist: set[tuple[str, str]],
     state: AgentDoctorState,
+    *,
+    evidence_analysis: _EvidenceAnalysis | None = None,
 ) -> list[PrescriptionCandidate]:
     """
     rules.py 의 raw dict 처방들을 PrescriptionCandidate 객체로 변환한다.
@@ -1135,7 +1224,10 @@ def _build_candidates(
     for pres in _available_prescriptions(rule, label, blacklist):
         changes = dict(pres.get("patch", {}))
         search_space, grounding_metadata = _finding_search_space(
-            findings, changes, state
+            findings,
+            changes,
+            state,
+            evidence_analysis,
         )
         patch = ConfigPatch(
             changes=changes,
@@ -1179,6 +1271,8 @@ def _build_request(
     candidates: list[PrescriptionCandidate],
     ranked: list[tuple[str, list[Finding], dict, float]],
     state: AgentDoctorState,
+    *,
+    evidence_analysis: _EvidenceAnalysis | None = None,
 ) -> OptimizationRequest:
     """선택된 라벨과 처방 후보를 OptimizationRequest 로 묶는다."""
     related = [lbl for lbl, _fs, _rule, _s in ranked if lbl != label]
@@ -1220,6 +1314,7 @@ def _build_request(
             state,
             findings,
             path=_space_path(selected_space),
+            evidence_analysis=evidence_analysis,
         )
     return OptimizationRequest(
         request_id=str(uuid.uuid4()),
@@ -1275,6 +1370,7 @@ def _chunk_precheck_context(
     findings: list[Finding],
     *,
     path: str | None,
+    evidence_analysis: _EvidenceAnalysis | None = None,
 ) -> dict[str, Any]:
     """Chunk 사전검증에 원문과 축에 맞는 evidence 좌표를 전달한다."""
 
@@ -1282,10 +1378,14 @@ def _chunk_precheck_context(
     measured_spans = gold_spans
     span_source = "gold_spans"
     if path == "chunker.chunk_size":
-        evidence_windows, _metadata = _evidence_windows(state, findings)
+        evidence_windows, _metadata = (
+            evidence_analysis
+            if evidence_analysis is not None
+            else _evidence_windows(state, findings)
+        )
         if evidence_windows:
             measured_spans = evidence_windows
-            span_source = "evidence_windows"
+            span_source = "structural_evidence_windows"
     affected_doc_ids = {
         span.get("doc_id")
         for span in measured_spans
@@ -1298,9 +1398,9 @@ def _chunk_precheck_context(
     ]
     return {
         "documents": documents,
-        # prescreener의 기존 계약 이름을 유지하되 chunk_size 축에서는
-        # gold 문자열이 아니라 확장된 evidence window 좌표를 전달한다.
-        "gold_spans": measured_spans,
+        # 새 계약은 측정 대상을 정확히 표현한다. prescreener는 오래된 저장 요청의
+        # ``gold_spans``도 하위호환 입력으로 계속 읽는다.
+        "evidence_spans": measured_spans,
         "span_source": span_source,
         "chunk_strategy": state.index_config.get(
             "chunk_strategy",

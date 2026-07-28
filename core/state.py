@@ -76,6 +76,9 @@ class AgentDoctorState:
             # 일으키지 않도록 하는 탐색 범위 안전장치다.
             "max_step_ratio": 0.25,
             "min_chunk_size": 200,
+            # evidence_window_policy.max_chars는 일반 문맥 확장 상한이고 아래 값은
+            # margin 적용 후 후보의 절대 상한이다. gold 자체가 window 상한보다
+            # 길면 gold 보존이 우선하므로 두 값은 같은 제한을 뜻하지 않는다.
             "max_chunk_size": 1500,
         },
         # gold 정답 문자열을 그대로 재지 않고, 정답을 이해하는 데 필요한

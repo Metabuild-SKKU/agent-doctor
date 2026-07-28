@@ -13,6 +13,7 @@ Planner 검증 — 후보값을 어떻게 정하고, 그걸 optimizer 요청으�
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -317,9 +318,9 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertEqual(request.search_space, {"chunker.chunk_size": [400, 600]})
         context = request.metadata["chunk_precheck_context"]
         self.assertEqual(context["documents"][0].doc_id, "d1")
-        self.assertEqual(context["span_source"], "evidence_windows")
-        self.assertEqual(context["gold_spans"][0]["start"], 0)
-        self.assertEqual(context["gold_spans"][0]["end"], 1000)
+        self.assertEqual(context["span_source"], "structural_evidence_windows")
+        self.assertEqual(context["evidence_spans"][0]["start"], 0)
+        self.assertEqual(context["evidence_spans"][0]["end"], 1000)
 
     @staticmethod
     def _chunk_blacklist():
@@ -376,7 +377,8 @@ class PlannerCandidateListTest(unittest.TestCase):
 
         self.assertEqual(request.search_space, {})
         grounding = request.metadata["candidate_grounding"]
-        self.assertEqual(grounding["status"], "insufficient_spans")
+        self.assertEqual(grounding["status"], "direction_conflict")
+        self.assertEqual(grounding["span_count"], 3)
         self.assertEqual(grounding["source"], "structural_evidence_windows")
 
     def test_exact_spans_expand_before_candidate_calculation(self):
@@ -428,7 +430,8 @@ class PlannerCandidateListTest(unittest.TestCase):
 
         self.assertEqual(request.search_space, {})
         grounding = request.metadata["candidate_grounding"]
-        self.assertEqual(grounding["status"], "insufficient_spans")
+        self.assertEqual(grounding["status"], "direction_conflict")
+        self.assertEqual(grounding["span_count"], 3)
         self.assertEqual(grounding["source"], "structural_evidence_windows")
 
     def test_too_few_evidence_windows_do_not_trigger_blind_halving(self):
@@ -501,6 +504,218 @@ class PlannerCandidateListTest(unittest.TestCase):
             request.metadata["candidate_grounding"]["status"],
             "invalid_policy",
         )
+
+    def test_chunk_candidate_limits_apply_ratio_and_absolute_bounds(self):
+        policy = {
+            "max_step_ratio": 0.25,
+            "min_chunk_size": 200,
+            "max_chunk_size": 1500,
+        }
+
+        self.assertEqual(
+            planner._chunk_candidate_limits(800, 50, policy),
+            (600, 1000),
+        )
+        self.assertEqual(
+            planner._chunk_candidate_limits(300, 50, policy),
+            (250, 350),
+        )
+        self.assertEqual(
+            planner._chunk_candidate_limits(1400, 50, policy),
+            (1050, 1500),
+        )
+
+    def test_chunk_candidate_policy_rejects_invalid_safety_bounds(self):
+        base_policy = {
+            "target_quantile": 0.85,
+            "margin_ratio": 0.20,
+            "rounding_step": 50,
+            "path_fractions": [0.33, 0.66, 1.0],
+            "candidate_count": 3,
+            "min_span_count": 3,
+            "max_step_ratio": 0.25,
+            "min_chunk_size": 200,
+            "max_chunk_size": 1500,
+        }
+        invalid_overrides = [
+            {"max_step_ratio": 0.75},
+            {"max_step_ratio": True},
+            {"min_chunk_size": 0},
+            {"max_chunk_size": 100},
+        ]
+
+        for overrides in invalid_overrides:
+            with self.subTest(overrides=overrides):
+                state = AgentDoctorState(index_config={
+                    "chunk_candidate_policy": {
+                        **base_policy,
+                        **overrides,
+                    }
+                })
+                policy, error = planner._chunk_candidate_policy(state)
+                self.assertIsNone(policy)
+                self.assertIn("유효하지 않음", error)
+
+    def test_state_evidence_window_policy_controls_candidate_measurements(self):
+        finding = make_finding("p1", "too_long_context")
+        state = AgentDoctorState(
+            report=_report(finding),
+            documents=[Document("d1", "memory", "txt", "가" * 3000)],
+            probes=[
+                Probe(
+                    probe_id="p1",
+                    question="질문",
+                    source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[
+                        {"doc_id": "d1", "start": 100, "end": 110},
+                        {"doc_id": "d1", "start": 1000, "end": 1010},
+                        {"doc_id": "d1", "start": 2000, "end": 2010},
+                    ],
+                )
+            ],
+            index_config={
+                "chunk_size": 800,
+                "chunk_overlap": 50,
+                "evidence_window_policy": {
+                    "min_chars": 100,
+                    "max_chars": 120,
+                    "heading_max_distance": 0,
+                    "adjacent_context_blocks": 0,
+                },
+                "chunk_candidate_policy": {
+                    "target_quantile": 0.85,
+                    "margin_ratio": 0.20,
+                    "rounding_step": 50,
+                    "path_fractions": [0.33, 0.66, 1.0],
+                    "candidate_count": 3,
+                    "min_span_count": 3,
+                },
+            },
+        )
+
+        request, _decision = planner.plan(
+            state,
+            blacklist=self._chunk_blacklist(),
+        )
+
+        grounding = request.metadata["candidate_grounding"]
+        self.assertEqual(grounding["status"], "grounded")
+        self.assertEqual(grounding["max"], 120)
+        self.assertEqual(grounding["span_count"], 3)
+        self.assertTrue(
+            all(value >= 600 for value in request.search_space["chunker.chunk_size"])
+        )
+
+    def test_invalid_evidence_window_policy_has_explicit_status(self):
+        finding = make_finding("p1", "too_long_context")
+        state = AgentDoctorState(
+            report=_report(finding),
+            documents=[Document("d1", "memory", "txt", "가" * 1000)],
+            probes=[
+                Probe(
+                    probe_id="p1",
+                    question="질문",
+                    source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[{"doc_id": "d1", "start": 10, "end": 20}],
+                )
+            ],
+            index_config={
+                "chunk_size": 800,
+                "chunk_overlap": 50,
+                "evidence_window_policy": {
+                    "min_chars": 200,
+                    "max_chars": 100,
+                },
+            },
+        )
+
+        request, _decision = planner.plan(
+            state,
+            blacklist=self._chunk_blacklist(),
+        )
+
+        self.assertEqual(request.search_space, {"chunker.chunk_size": [400]})
+        self.assertEqual(
+            request.metadata["candidate_grounding"]["status"],
+            "invalid_evidence_window_policy",
+        )
+
+    def test_non_dict_evidence_window_policy_is_rejected(self):
+        finding = make_finding("p1", "too_long_context")
+        state = AgentDoctorState(
+            report=_report(finding),
+            documents=[Document("d1", "memory", "txt", "가" * 1000)],
+            probes=[
+                Probe(
+                    probe_id="p1",
+                    question="질문",
+                    source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[{"doc_id": "d1", "start": 10, "end": 20}],
+                )
+            ],
+            index_config={
+                "chunk_size": 800,
+                "chunk_overlap": 50,
+                "evidence_window_policy": "invalid",
+            },
+        )
+
+        request, _decision = planner.plan(
+            state,
+            blacklist=self._chunk_blacklist(),
+        )
+
+        self.assertEqual(
+            request.metadata["candidate_grounding"]["status"],
+            "invalid_evidence_window_policy",
+        )
+
+    def test_plan_reuses_evidence_analysis_for_candidates_and_precheck(self):
+        finding = make_finding(
+            "p1",
+            "too_long_context",
+            candidates={"chunker.chunk_size": [400, 600]},
+        )
+        state = AgentDoctorState(
+            report=_report(finding),
+            documents=[Document("d1", "memory", "txt", "가" * 1000)],
+            probes=[
+                Probe(
+                    probe_id="p1",
+                    question="질문",
+                    source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[{"doc_id": "d1", "start": 100, "end": 180}],
+                )
+            ],
+            index_config={"chunk_size": 800, "chunk_overlap": 50},
+        )
+
+        with patch.object(
+            planner,
+            "build_evidence_windows",
+            wraps=planner.build_evidence_windows,
+        ) as build_windows:
+            planner.plan(state, blacklist=self._chunk_blacklist())
+
+        build_windows.assert_called_once()
+
+    def test_chunk_symbolic_fallback_uses_status_allowlist(self):
+        self.assertTrue(planner._allows_symbolic_fallback(
+            "chunker.chunk_size",
+            {"status": "missing_gold_spans", "source": "anything"},
+        ))
+        self.assertFalse(planner._allows_symbolic_fallback(
+            "chunker.chunk_size",
+            {"status": "insufficient_spans"},
+        ))
+        self.assertFalse(planner._allows_symbolic_fallback(
+            "chunker.chunk_size",
+            {"status": "direction_conflict"},
+        ))
 
 
 if __name__ == "__main__":

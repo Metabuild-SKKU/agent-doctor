@@ -208,6 +208,13 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
             request.metadata["candidate_grounding"]["source"],
             "structural_evidence_windows",
         )
+        result = run_chunk_prescreener(request)
+        self.assertEqual(result.status, "completed")
+        self.assertIn(
+            result.best_config["chunker.chunk_size"],
+            candidates,
+        )
+        self.assertFalse(result.metadata["best_is_baseline"])
 
 
 if __name__ == "__main__":
