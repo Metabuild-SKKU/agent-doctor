@@ -48,6 +48,33 @@ from agents.optimize.schemas import (
 )
 
 
+_MAX_UNJUDGEABLE_ATTEMPTS = 1
+
+
+def _unjudgeable_exclusions(
+    optimization_history: list[OptimizationHistoryItem],
+) -> set[tuple[str, str]]:
+    """효과를 검증하지 못한 동일 처방의 재선택을 제한한다.
+
+    품질 악화가 확인된 것은 아니므로 영구 blacklist에는 넣지 않는다. 대신 현재
+    파이프라인 실행의 이력에서 같은 처방이 이미 측정 불가로 끝났다면 이후 Optimize
+    방문에서 제외한다. 새 파이프라인 실행은 이력이 비어 있으므로 다시 시도할 수 있다.
+    """
+    attempts: Counter[tuple[str, str]] = Counter()
+    for item in optimization_history:
+        if not item.metadata.get("unjudgeable"):
+            continue
+        label = item.failure_labels[0] if item.failure_labels else ""
+        prescription_id = item.selected_prescription_id or ""
+        if label and prescription_id:
+            attempts[(label, prescription_id)] += 1
+    return {
+        key
+        for key, count in attempts.items()
+        if count >= _MAX_UNJUDGEABLE_ATTEMPTS
+    }
+
+
 def _fmt_bool(value: bool) -> str:
     return "true" if value else "false"
 
@@ -355,6 +382,9 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
             judged_item, verdict, rollback_baseline_report = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
         visit_exclusions = set(state.blacklist)
+        visit_exclusions.update(
+            _unjudgeable_exclusions(state.optimization_history)
+        )
         deferred_runtime: list[dict[str, Any]] = []
         if (
             judged_item is not None
@@ -470,7 +500,10 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                 return state
             error_code = str(result.metadata.get("error_code") or "")
             visit_exclusions.add(rejection)
-            if error_code == "runtime_capability_unavailable":
+            if error_code in {
+                "runtime_capability_unavailable",
+                "reranker_disabled",
+            }:
                 capability = (
                     request.metadata.get("runtime_capabilities", {})
                     .get("reranker", {})
@@ -479,11 +512,19 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                     {
                         "failure_label": request.failure_label,
                         "prescription_id": prescription_id,
-                        "reason": capability.get(
-                            "reason",
-                            "runtime_capability_unavailable",
+                        "reason": (
+                            error_code
+                            if error_code == "reranker_disabled"
+                            else capability.get(
+                                "reason",
+                                "runtime_capability_unavailable",
+                            )
                         ),
-                        "retryable": bool(capability.get("retryable", True)),
+                        "retryable": (
+                            True
+                            if error_code == "reranker_disabled"
+                            else bool(capability.get("retryable", True))
+                        ),
                     }
                 )
             else:

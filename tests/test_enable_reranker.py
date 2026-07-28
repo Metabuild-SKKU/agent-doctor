@@ -476,6 +476,82 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
             {"enable_reranker", "widen_rerank_candidates"},
         )
 
+    def test_incomplete_reranker_execution_does_not_reopen_same_prescription(self):
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="before",
+                findings=[self._finding()],
+                overall_score=0.3,
+                ragas_scores={"context_precision": 0.2},
+                pass_threshold=False,
+            ),
+            runtime_capabilities={
+                "reranker": {
+                    "status": "verified",
+                    "model": qdrant_store.DEFAULT_RERANKER_MODEL,
+                    "retryable": True,
+                    "reason": None,
+                }
+            },
+        )
+
+        state = run_optimize(state)
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "enable_reranker",
+        )
+        self.assertEqual(state.iteration, 1)
+
+        state.report = DiagnosticReport(
+            report_id="after-incomplete",
+            findings=[self._finding()],
+            overall_score=0.3,
+            ragas_scores={"context_precision": 0.2},
+            runtime_summary={
+                "reranker": {
+                    "enabled": True,
+                    "attempted": 1,
+                    "applied": 0,
+                }
+            },
+            pass_threshold=False,
+        )
+        state = run_optimize(state)
+
+        self.assertEqual(state.status, "rolled_back")
+        self.assertFalse(state.index_config["use_reranker"])
+        self.assertEqual(len(state.optimization_history), 1)
+        self.assertTrue(
+            state.optimization_history[0].metadata[
+                "reranker_execution_incomplete"
+            ]
+        )
+
+        # Index/Eval을 한 번 거쳐 같은 finding이 유지된 다음 Optimize 방문을
+        # 재현한다. 이전 처방과 무의미한 후보 수 확대 모두 다시 적용되지 않아야 한다.
+        state.report = DiagnosticReport(
+            report_id="baseline-restored",
+            findings=[self._finding()],
+            overall_score=0.3,
+            ragas_scores={"context_precision": 0.2},
+            pass_threshold=False,
+        )
+        state = run_optimize(state)
+
+        self.assertEqual(state.status, "skipped")
+        self.assertEqual(state.iteration, 1)
+        self.assertEqual(len(state.optimization_history), 1)
+        self.assertFalse(state.index_config["use_reranker"])
+        self.assertEqual(state.index_config["rerank_candidates"], 20)
+        self.assertNotIn(
+            ("retrieval_low_rank", "enable_reranker"),
+            state.blacklist,
+        )
+        self.assertNotIn(
+            ("retrieval_low_rank", "widen_rerank_candidates"),
+            state.blacklist,
+        )
+
 
 class RerankerMetadataValidationTest(unittest.TestCase):
     def test_invalid_runtime_values_fall_back_to_safe_defaults(self):
