@@ -65,7 +65,8 @@ from agents.eval.report import build_report
 # 문제유형 라벨을 LangSmith 에서 필터·검색할 수 있게 한다. core/llm_clients.py 와 동일한
 # 폴백 규약: 패키지 없음/트레이싱 OFF 면 @traceable 이 스스로 no-op 이라 파이프라인 무영향.
 try:
-    from langsmith import traceable
+    from langsmith import traceable, get_current_run_tree
+    from langsmith import Client as _LSClient
 except ImportError:  # pragma: no cover - langsmith 미설치 폴백
     def traceable(*d_args, **d_kwargs):
         def _decorator(fn):
@@ -73,6 +74,11 @@ except ImportError:  # pragma: no cover - langsmith 미설치 폴백
         if len(d_args) == 1 and callable(d_args[0]) and not d_kwargs:
             return d_args[0]
         return _decorator
+
+    def get_current_run_tree():  # langsmith 없으면 붙일 run 도 없다
+        return None
+
+    _LSClient = None
 
 
 _EVAL_CACHE_ENV_KEYS = (
@@ -613,6 +619,35 @@ def _probe_trace_payload(rec: EvalRecord) -> dict:
     }
 
 
+# feedback score 로 올릴 지표(키 → 값) 정의. 미측정(음수·None)은 스킵 대상.
+# metadata(필드)와 달리 feedback 은 LangSmith 트레이스 목록에서 정렬 가능한 '점수 컬럼'으로
+# 뜨고 실행 간 평균이 자동 집계된다 — char_f1 이 컬럼으로 보이던 것과 같은 계층.
+_FEEDBACK_METRIC_KEYS = ("recall_at_k", "f1_score", "oracle_f1")
+
+
+def _attach_probe_feedback(payload: dict) -> None:
+    """현재 probe span 에 recall/f1/oracle 을 feedback score 로 붙인다(정렬 가능한 컬럼용).
+
+    metadata 로도 이미 싣지만(필드), feedback 이어야 트레이스 테이블에서 char_f1 처럼
+    정렬·평균되는 점수 컬럼이 된다. 미측정 지표(-1·None)는 붙이지 않는다 — 넣으면 실행
+    평균이 오염된다. 트레이싱 OFF/미설치·전송 실패는 조용히 무시(파이프라인 무영향)."""
+    run = get_current_run_tree()
+    if run is None or _LSClient is None:
+        return
+    try:
+        client = _LSClient()
+    except Exception:  # 클라이언트 생성 실패(키 없음 등) — feedback 은 부가기능이라 무시
+        return
+    for key in _FEEDBACK_METRIC_KEYS:
+        v = payload.get(key)
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
+            continue  # 미측정/미해당(-1·None·비수치)은 스킵 → 평균 오염 방지
+        try:
+            client.create_feedback(run.id, key=key, score=float(v))
+        except Exception:
+            pass  # 개별 전송 실패는 그 지표만 건너뛴다
+
+
 def _diagnose_traced(rec: EvalRecord, mode: int) -> list:
     """diagnose(rec, mode) 를 실행하되, probe 1개를 LangSmith span 하나로 남긴다.
 
@@ -621,7 +656,8 @@ def _diagnose_traced(rec: EvalRecord, mode: int) -> list:
     LLM 호출(RAGAS 등)은 이 span 아래로 중첩된다. 트레이싱 OFF/미설치면 @traceable 이
     no-op 이라 그냥 diagnose 결과만 반환한다(파이프라인 무영향).
 
-    태그로도 라벨을 실어(label:<name>) '문제유형별 필터'가 태그 UI 에서 바로 되게 한다."""
+    태그로도 라벨을 실어(label:<name>) '문제유형별 필터'가 태그 UI 에서 바로 되게 하고,
+    recall/f1/oracle 은 feedback score 로도 붙여 정렬 가능한 점수 컬럼이 되게 한다."""
     findings = diagnose(rec, mode)
     rec.findings = findings  # payload 계산이 findings 를 읽으므로 먼저 반영
     payload = _probe_trace_payload(rec)
@@ -630,7 +666,9 @@ def _diagnose_traced(rec: EvalRecord, mode: int) -> list:
     @traceable(run_type="chain", name=f"probe:{rec.probe.probe_id}", tags=tags,
                metadata=payload)
     def _span():
-        # 반환값이 곧 span output. 점수·라벨을 그대로 실어 UI Output 에 표시.
+        # span 실행 중이라 get_current_run_tree()가 이 span 을 가리킨다 → feedback 을
+        # 이 run 에 붙인다. 반환값은 곧 span output(점수·라벨을 UI Output 에 표시).
+        _attach_probe_feedback(payload)
         return payload
 
     _span()
