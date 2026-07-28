@@ -89,6 +89,17 @@ def _gold_in_corpus(record: EvalRecord):
     return None if membership is None else all(membership.values())
 
 
+def _gold_absent_from_corpus(record: EvalRecord):
+    """gold 가 하나도 코퍼스에 없나 — '답의 근거가 애초에 없다'의 실측. 미측정이면 None.
+
+    _gold_in_corpus 의 부정이 아니다: 그쪽은 '하나라도 없음'이라 부분 gap(일부 gold 는
+    코퍼스에 있고 검색까지 된 상태)도 False 가 된다. 근거가 실제로 있는 답변을
+    '근거 없이 지어냄'으로 몰지 않으려면 전부 없음을 따로 물어야 한다.
+    """
+    membership = _gold_corpus_membership(record)
+    return None if membership is None else not any(membership.values())
+
+
 def _missed_gold_in_corpus(record: EvalRecord):
     """놓친 gold 중 코퍼스에 존재하는 것 — 검색 원인(A) 라벨의 실제 근거.
     코퍼스에 없는 gold 는 검색으로 못 고치니 corpus_gap 몫이라 뺀다. 멤버십 미측정이면 None."""

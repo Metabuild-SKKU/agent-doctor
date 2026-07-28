@@ -728,6 +728,24 @@ class GenerationLabelTest(_DiagnoseTestBase):
         self.assertEqual(diagnose._pick(rec, diagnose._GENERATION_CAUSE).label,
                          "bad_gold_answer")
 
+    def test_measured_other_is_not_overridden_by_counts(self):
+        """분류기가 실제로 돌아 '구체적 실패 없음'이라고 했으면, 약한 카운트 휴리스틱이
+        그 판정을 뒤엎으면 안 된다 — 양보만 하고 라벨은 아무것도 안 나와 롤업으로 강등됐다."""
+        self._with(ragas=_FakeReasoningJudge("other"))
+        rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, rel_oracle=0.9,
+                      counts_oracle=(3, 2, 0))              # 카운트상으론 hop_binding 조건
+        self.assertIsNone(diagnose.generation_reasoning_failure(rec))   # 'other' → 침묵
+        self.assertIsNotNone(diagnose.bad_gold_answer_oracle(rec))      # 반증당하지 않는다
+        self.assertEqual(diagnose._pick(rec, diagnose._GENERATION_CAUSE).label,
+                         "bad_gold_answer")                 # 롤업으로 안 떨어진다
+
+    def test_counts_fallback_still_wins_when_classifier_unmeasured(self):
+        rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, rel_oracle=0.9,
+                      counts_oracle=(3, 2, 0))              # 분류기 자원 미주입
+        self.assertIsNone(diagnose.bad_gold_answer_oracle(rec))
+        self.assertEqual(diagnose._pick(rec, diagnose._GENERATION_CAUSE).label,
+                         "generation_hop_binding_error")
+
     def test_classifier_memoized_once(self):
         judge = _FakeReasoningJudge("contradiction")
         self._with(ragas=judge)
@@ -939,6 +957,22 @@ class ContextLabelTest(_DiagnoseTestBase):
         self.assertIsNone(diagnose.lost_in_the_middle(rec))
         self.assertIsNone(diagnose.too_long_context(rec))
 
+    def test_both_silent_when_gold_position_is_unmeasurable(self):
+        """gold id 드리프트(재청킹 후 recall 은 span 기준으로 1인데 chunk-id 는 안 맞음) —
+        위치를 못 재면 too_long_context 가 전부 흡수해선 안 된다(처방이 재배치와 갈린다)."""
+        rec = self._long_context(gold_at=0)
+        rec.retrieved_chunk_ids = [f"drifted{i}" for i in range(5)]   # gold id 가 하나도 안 맞음
+        self.assertIsNone(diagnose._gold_in_middle_band(rec))
+        self.assertIsNone(diagnose.too_long_context(rec))
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))
+
+    def test_both_silent_when_results_too_few_to_have_a_middle(self):
+        """결과가 3건 미만이면 앞·중간·뒤가 안 갈린다 — 같은 이유로 둘 다 침묵."""
+        rec = self._long_context(gold_at=0, n=2)
+        self.assertIsNone(diagnose._gold_in_middle_band(rec))
+        self.assertIsNone(diagnose.too_long_context(rec))
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))
+
     def test_yield_to_underchunking_when_noise_is_inside_chunk(self):
         """노이즈가 청크 '안'이면 길이·배치가 아니라 청크 크기 문제다(C그룹 3자 배타)."""
         rec = self._long_context(gold_at=2, precision=0.1,
@@ -1096,6 +1130,11 @@ class GapLabelTest(_DiagnoseTestBase):
         """빈 답변은 지어낸 게 아니라 생성 실패 → 롤업 몫."""
         self.assertIsNone(diagnose.generation_abstention_failure(self._gap(answer="")))
 
+    def test_abstention_failure_silent_on_partial_gap(self):
+        """gold 하나라도 코퍼스에 있으면 근거 있는 부분 답변일 수 있다 — 환각으로 몰면 안 된다."""
+        rec = _record(("g_a", "unknown"), ("g_a",), recall=0.5, f1=0.1, qtype="bridge")
+        self.assertIsNone(diagnose.generation_abstention_failure(rec))
+
     def test_abstention_failure_on_gap_silent_when_gold_is_in_corpus(self):
         rec = _record(("g_a",), ("x",), recall=0.0, f1=0.1)
         self.assertIsNone(diagnose.generation_abstention_failure(rec))
@@ -1122,11 +1161,24 @@ class GapLabelTest(_DiagnoseTestBase):
         self.assertIn("generation_abstention_failure", labels)
 
     def test_mixed_corpus_emits_both_retrieval_and_gap_labels(self):
-        """혼합 코퍼스 — 코퍼스에 있는 몫은 A 라벨, 없는 몫은 D 라벨로 함께 남는다."""
-        rec = _record(("g_a", "unknown"), ("x",), recall=0.0)
+        """혼합 코퍼스 — 코퍼스에 있는 몫은 A 라벨, 없는 몫은 D 라벨로 함께 남는다.
+
+        기권 라벨은 붙으면 안 된다: 근거 일부는 실제로 코퍼스에 있으니 '기권했어야 했다'가
+        같은 record 의 A 라벨(검색을 고쳐라)과 정면으로 모순되는 처방이 된다.
+        """
+        # 답이 틀려야 기권 분기까지 실제로 도달한다(_compute_metrics 가 f1 을 다시 계산하므로
+        # 여기서 f1 을 주입하지 않고 답변 자체를 틀리게 둔다). 이게 없으면 assertNotIn 이 공허하다.
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0, answer="엉뚱한 말")
         labels = {f.label for f in diagnose.diagnose(rec, Mode.STANDARD)}
+        self.assertFalse(diagnose._f1_ok(rec))                 # 기권 분기 도달 전제
         self.assertIn("retrieval_missing_gold", labels)
         self.assertIn("corpus_gap", labels)
+        self.assertNotIn("generation_abstention_failure", labels)
+
+    def test_corpus_gap_reason_shows_membership_ratio(self):
+        """'gold_in_corpus=False' 만 적으면 부분 gap 을 '전부 없음'으로 오독한다."""
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0)
+        self.assertIn("gold_in_corpus=1/2", diagnose.corpus_gap(rec).metadata["reason"])
 
     def test_both_silent_when_gold_present_in_corpus(self):
         rec = _record(("g_a",), ("x",), recall=0.0)

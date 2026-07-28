@@ -44,6 +44,7 @@ from agents.eval.metrics_basic import (            # tier1
 )
 from agents.eval.metrics_search import (           # tier2
     _gold_ranks, _bm25_hits_gold, _gold_in_corpus, _missed_gold_in_corpus,
+    _gold_absent_from_corpus, _gold_corpus_membership,
 )
 from agents.eval.metrics_ragas import (            # tier3
     _compute_ragas_real, _compute_ragas_oracle, _abstention_judged, _reasoning_mode_oracle,
@@ -434,7 +435,11 @@ def _reasoning_failure_identified(record: EvalRecord) -> bool:
 
 
 def _hop_binding_counts_hit(record: EvalRecord) -> bool:
-    """카운트가 결합 오류를 지목하나 — FN=0(요소 누락 없음) & FP>0(근거 없는 주장)."""
+    """카운트가 결합 오류를 지목하나 — FN=0(요소 누락 없음) & FP>0(근거 없는 주장).
+
+    전제(근거는 있었나 = faith≥문턱)는 포함하지 않는다 — 호출부가 이미 세운 뒤에 부른다.
+    근거 없는 답(hallucination 영역)에도 참이 될 수 있으니 전제 없이 재사용하지 말 것.
+    """
     if not _is_multi_hop(record):
         return False
     counts = _correctness_counts_oracle(record)
@@ -445,26 +450,37 @@ def _hop_binding_counts_hit(record: EvalRecord) -> bool:
 
 
 def _reasoning_failure_evidence(record: EvalRecord) -> bool:
-    """추론 실패가 실측됐나 — 분류기 지목 또는 카운트 폴백. bad_gold_answer 주장을 반증한다.
+    """추론 실패가 실측됐나 — 분류기 지목, 또는 분류기 미측정 시 카운트 폴백.
+    bad_gold_answer 주장을 반증한다.
 
     카운트 폴백까지 보는 이유: 분류기 미측정이면 폴백이 결합 오류를 확정으로 내는데,
     bad_gold_answer_oracle 이 튜플상 앞이라 그 확정을 선점했다(순서 대신 함수 자체로 배타).
+
+    단 폴백은 분류기가 미측정일 때만 본다. 분류기가 실제로 돌아 'other'(구체적 실패 없음)를
+    냈다면 그게 카운트 휴리스틱보다 강한 측정이고, reasoning_failure 도 그 경우엔 침묵한다 —
+    여기서 양보까지 하면 반증만 당한 채 아무 라벨도 안 남아 슬롯이 롤업으로 강등된다.
     """
-    return _reasoning_failure_identified(record) or _hop_binding_counts_hit(record)
+    if _reasoning_failure_identified(record):
+        return True
+    return _reasoning_mode(record) is None and _hop_binding_counts_hit(record)
 
 
 def _expects_abstention(record: EvalRecord) -> bool:
     """기권했어야 하는 상황인가 — 답의 근거가 애초에 없는 두 경우.
 
     1) 무응답 기대 probe(answer_exists=False): 원래 답이 없는 질문 (tier1)
-    2) gold 가 코퍼스에 없음(corpus_gap) + 답도 틀림: 답은 있으나 우리 코퍼스에 근거가 없음 (tier2)
+    2) gold 가 하나도 코퍼스에 없음 + 답도 틀림: 답은 있으나 우리 코퍼스에 근거가 없음 (tier2)
 
+    2번은 '전부 없음'(_gold_absent_from_corpus)이라야 한다 — '하나라도 없음'으로 잡으면
+    부분 gap(일부 gold 는 코퍼스에 있고 검색까지 됨)에서 실제 근거에 기반한 부분 답변을
+    환각으로 확정하게 되고, 같은 probe 에 함께 붙는 A 라벨(검색을 고쳐라)·
+    corpus_gap_partial_hop(자료를 채워라)과 처방이 정면으로 모순된다.
     정답을 맞힌 2번은 뺀다 — 근거 없이 맞힌 건 parametric_overreliance 소관이다.
     (싼 판정만 쓴다 — 여기서 걸러야 _abstained 의 AspectCritic 호출이 해당 probe 에만 든다.)
     """
     if record.probe.answer_exists is False:
         return True
-    return _gold_in_corpus(record) is False and not _f1_ok(record)
+    return _gold_absent_from_corpus(record) is True and not _f1_ok(record)
 
 
 def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
@@ -630,10 +646,18 @@ def _context_ungrounded(record: EvalRecord) -> bool:
     return faith is not None and faith < RAGAS_FAITHFULNESS_MIN
 
 
-def _gold_in_middle_band(record: EvalRecord) -> bool:
-    """검색 결과 안 gold 가 양끝이 아니라 중간 밴드에 있나. 위치 미측정이면 False."""
+def _gold_in_middle_band(record: EvalRecord) -> Optional[bool]:
+    """검색 결과 안 gold 가 양끝이 아니라 중간 밴드에 있나. 위치 미측정이면 None.
+
+    미측정을 False(=양끝)로 접으면 안 된다 — 위치는 chunk-id 대조인데 C 전제의 recall 은
+    span 기준이라, 재청킹으로 id 가 어긋난 recall=1 케이스(_missed_gold_ids 독스트링 참고)나
+    검색 결과 3건 미만에서 위치가 안 잡힌다. 그때 too_long_context 가 전부 흡수하면
+    처방이 갈린다(재배치 vs 길이 축소). 미측정이면 둘 다 침묵시킨다.
+    """
     position = _gold_position_band(record)
-    return position is not None and CONTEXT_MIDDLE_BAND[0] <= position <= CONTEXT_MIDDLE_BAND[1]
+    if position is None:
+        return None
+    return CONTEXT_MIDDLE_BAND[0] <= position <= CONTEXT_MIDDLE_BAND[1]
 
 
 def too_long_context(record: EvalRecord) -> Optional[Finding]:
@@ -642,11 +666,12 @@ def too_long_context(record: EvalRecord) -> Optional[Finding]:
     예비: C 전제 + 답에 근거 없음(faith 낮음) + context 길이 문턱 초과 + gold 는 양끝.
     확정(축소 재실행)은 제거된 tier4 몫이라 optimize 재실행이 위임받는다.
     gold 가 중간이면 lost_in_the_middle 영역 — 위치로 함수 자체 배타(튜플 순서 비의존).
+    위치 미측정(None)이면 배치를 못 가르므로 침묵한다(둘 다 예비라 롤업이 안전한 쪽).
     """
     if not _context_ungrounded(record):
         return None
     total = _context_char_total(record)
-    if total < CONTEXT_CHARS_MAX or _gold_in_middle_band(record):
+    if total < CONTEXT_CHARS_MAX or _gold_in_middle_band(record) is not False:
         return None
     return _finding(
         record, "too_long_context", "context_failure", confirmed=False,
@@ -664,7 +689,7 @@ def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
     길이 조건을 함께 두는 건 이 현상 자체가 긴 context 에서만 성립하기 때문이다 —
     짧은 context 에서 근거를 못 쓴 건 배치 문제가 아니라 생성측 이탈(롤업)이다.
     """
-    if not _context_ungrounded(record) or not _gold_in_middle_band(record):
+    if not _context_ungrounded(record) or _gold_in_middle_band(record) is not True:
         return None
     total = _context_char_total(record)
     if total < CONTEXT_CHARS_MAX:
@@ -811,15 +836,23 @@ def bad_gold_answer_oracle(record: EvalRecord) -> Optional[Finding]:
     return None
 
 
+def _corpus_membership_ratio(record: EvalRecord) -> str:
+    """코퍼스에 있는 gold 비율을 'n/N' 로. 멤버십이 per-gold 라 'False'(=하나라도 없음)만
+    적으면 부분 gap 을 '전부 없음'으로 오독하게 된다(A 라벨의 missed_gold_in_corpus 와 같은 형식)."""
+    membership = _gold_corpus_membership(record) or {}
+    return f"{sum(1 for present in membership.values() if present)}/{len(membership)}"
+
+
 def corpus_gap(record: EvalRecord) -> Optional[Finding]:
     """
     필요한 자료가 코퍼스에 없음(단일홉).
-    확정: 코퍼스에 gold 없음(tier2).
+    확정: gold 중 코퍼스에 없는 것이 있음(tier2).
     """
     if _gold_in_corpus(record) is False and not _is_multi_hop(record):
         return _finding(
             record, "corpus_gap", "gap", confirmed=True,
-            reason=f"gold_in_corpus=False, qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
+            reason=f"gold_in_corpus={_corpus_membership_ratio(record)}, "
+                   f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
         )
     return None
 
@@ -827,12 +860,13 @@ def corpus_gap(record: EvalRecord) -> Optional[Finding]:
 def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
     """
     멀티홉 중 일부 hop 근거만 코퍼스에 없음.
-    확정: 코퍼스에 gold 없음(tier2).
+    확정: gold 중 코퍼스에 없는 것이 있음(tier2).
     """
     if _gold_in_corpus(record) is False and _is_multi_hop(record):
         return _finding(
             record, "corpus_gap_partial_hop", "gap", confirmed=True,
-            reason=f"gold_in_corpus=False, qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
+            reason=f"gold_in_corpus={_corpus_membership_ratio(record)}, "
+                   f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
         )
     return None
 
