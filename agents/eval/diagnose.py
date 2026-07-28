@@ -424,8 +424,28 @@ _REASONING_LABELS = {
 
 
 def _reasoning_failure_identified(record: EvalRecord) -> bool:
-    """분류기가 구체적 추론 실패를 지목했나 — bad_gold_answer 등 경쟁 주장을 반증한다."""
+    """분류기가 구체적 추론 실패를 지목했나."""
     return _reasoning_mode(record) in _REASONING_LABELS
+
+
+def _hop_binding_counts_hit(record: EvalRecord) -> bool:
+    """카운트가 결합 오류를 지목하나 — FN=0(요소 누락 없음) & FP>0(근거 없는 주장)."""
+    if not _is_multi_hop(record):
+        return False
+    counts = _correctness_counts_oracle(record)
+    if counts is None:
+        return False
+    _tp, fp, fn = counts
+    return fn == 0 and fp > 0
+
+
+def _reasoning_failure_evidence(record: EvalRecord) -> bool:
+    """추론 실패가 실측됐나 — 분류기 지목 또는 카운트 폴백. bad_gold_answer 주장을 반증한다.
+
+    카운트 폴백까지 보는 이유: 분류기 미측정이면 폴백이 결합 오류를 확정으로 내는데,
+    bad_gold_answer_oracle 이 튜플상 앞이라 그 확정을 선점했다(순서 대신 함수 자체로 배타).
+    """
+    return _reasoning_failure_identified(record) or _hop_binding_counts_hit(record)
 
 
 def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
@@ -517,7 +537,7 @@ def _hop_binding_from_counts(record: EvalRecord, faith) -> Optional[Finding]:
                    f"qtype={record.probe.qtype}, oracle_f1={_v(record.oracle_f1)}",
         )
     tp, fp, fn = counts
-    if fn == 0 and fp > 0:
+    if _hop_binding_counts_hit(record):
         return _finding(
             record, "generation_hop_binding_error", "generation_failure", confirmed=True,
             reason=f"reasoning_mode=-, missing=0(요소 누락 없음), unsupported={fp}, tp={tp}, "
@@ -718,10 +738,10 @@ def bad_gold_answer_oracle(record: EvalRecord) -> Optional[Finding]:
     bad_gold_answer 의 오라클 트랙 버전
     생성 실패 계열 (B 그룹에 함께 있음)
     라벨은 동일('bad_gold_answer').
-    분류기가 구체적 추론 실패(모순/수치/해석)를 지목하면 '답은 맞는데 정답셋이 틀렸다'가
+    추론 실패가 실측되면(분류기 지목 또는 카운트 폴백) '답은 맞는데 정답셋이 틀렸다'가
     반증된다 → 그쪽에 양보.
     """
-    if _reasoning_failure_identified(record):
+    if _reasoning_failure_evidence(record):
         return None
     faith, rel = _faith_oracle(record), _rel_oracle(record)
     if (faith is not None and faith >= RAGAS_FAITHFULNESS_MIN

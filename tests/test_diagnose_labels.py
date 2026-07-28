@@ -643,6 +643,23 @@ class GenerationLabelTest(_DiagnoseTestBase):
         rec = _record(oracle_f1=0.1, faith_oracle=0.9, rel_oracle=0.9)
         self.assertIsNotNone(diagnose.bad_gold_answer_oracle(rec))
 
+    def test_count_fallback_beats_bad_gold_answer_in_slot(self):
+        """분류기 미측정이어도 카운트가 결합 오류를 지목하면 '정답셋 오류'는 반증된다.
+        (예전엔 bad_gold_answer_oracle 이 튜플상 앞이라 이 확정을 선점했다.)"""
+        rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, rel_oracle=0.9,
+                      counts_oracle=(3, 2, 0))
+        self.assertIsNone(diagnose.bad_gold_answer_oracle(rec))
+        picked = diagnose._pick(rec, diagnose._GENERATION_CAUSE)
+        self.assertEqual(picked.label, "generation_hop_binding_error")
+        self.assertTrue(picked.confirmed)
+
+    def test_count_fallback_keeps_bad_gold_when_counts_unmeasured(self):
+        """카운트도 없으면 결합 오류는 예비뿐이라 확정 bad_gold_answer 를 밀어내지 않는다."""
+        rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, rel_oracle=0.9)
+        self.assertIsNotNone(diagnose.bad_gold_answer_oracle(rec))
+        self.assertEqual(diagnose._pick(rec, diagnose._GENERATION_CAUSE).label,
+                         "bad_gold_answer")
+
     def test_classifier_memoized_once(self):
         judge = _FakeReasoningJudge("contradiction")
         self._with(ragas=judge)
