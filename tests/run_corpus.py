@@ -19,7 +19,7 @@ Run:
     python tests/run_corpus.py --no-open   # 브라우저 안 띄움(CI·원격 등)
     python tests/run_corpus.py --regen-qa  # qa.json 무시하고 새로 생성
 
-진단 깊이는 항상 EVAL_MODE=full + EVAL_ENABLE_LLM=1 로 고정한다(RAGAS·tier4 검증까지).
+진단 깊이는 항상 EVAL_MODE=full(= deep) + EVAL_ENABLE_LLM=1 로 고정한다(RAGAS 까지).
 LLM 을 실제로 호출하므로 비용이 든다 — 대신 findings 가 '예비'에 머물지 않고 확정된다.
 
 QA셋은 한 번 만들어지면 계속 재사용된다(EVAL_PROBE_SOURCE=made 와 같은 계약) —
@@ -112,8 +112,8 @@ def run_pipeline_for(corpus_dir: Path, *, regen_qa: bool, loop: bool):
         qa_path.unlink()
         print(f"  --regen-qa → 기존 {QA_FILENAME} 삭제, 새로 생성합니다")
 
-    # 진단 깊이는 항상 full — tier4 검증까지 돌려 예비(preliminary) Finding 을 확정으로
-    # 끌어올린다. full 만으로는 부족하고 EVAL_ENABLE_LLM 이 같이 켜져야 RAGAS(LLM-as-Judge)가
+    # 진단 깊이는 항상 full(= deep 으로 접힘) — 가장 깊은 모드로 고정한다.
+    # 모드만으로는 부족하고 EVAL_ENABLE_LLM 이 같이 켜져야 RAGAS(LLM-as-Judge)가
     # 실제로 돈다(types.ragas_enabled 는 별도 환경변수를 본다) — web_api 의 depth=full 과 동일 조합.
     # .env/셸에 다른 값이 있어도 이 스크립트에선 full 로 고정한다(회귀 비교 기준을 흔들지 않기 위해).
     os.environ["EVAL_MODE"] = "full"

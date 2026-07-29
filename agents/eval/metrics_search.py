@@ -45,12 +45,16 @@ def _gold_ranks(record: EvalRecord):
 
 def _bm25_hits_gold(record: EvalRecord):
     """키워드(BM25) 검색이 dense top-k 가 놓친 gold 를 잡나. lexical/semantic mismatch 용.
+    대상은 코퍼스에 있는 놓친 gold 만 — 코퍼스에 없는 걸 BM25 가 못 잡는 건 '의미 불일치'가
+    아니라 corpus_gap 이다(멤버십 미측정이면 놓친 gold 전부).
     True=키워드로 잡힘(단어 불일치) / False=키워드도 놓침(의미 불일치) / None=자원·모드 미충족."""
     if active_mode() < Mode.STANDARD or _ctx.keyword_fn is None:
         return None
 
     def compute():
-        missed = _missed_gold_ids(record)
+        missed = _missed_gold_in_corpus(record)
+        if missed is None:
+            missed = _missed_gold_ids(record)
         if not missed:
             return None
         hits = _ctx.keyword_fn(_ctx.chunks, record.probe.question, _ctx.wide_n)  # 위와 같으나 검색 함수만 다름
@@ -60,9 +64,12 @@ def _bm25_hits_gold(record: EvalRecord):
     return _cache(record, "bm25_hits_gold", compute)
 
 
-def _gold_in_corpus(record: EvalRecord):
-    """gold 가 코퍼스에 존재하나(멤버십 조회). True→missing_gold / False→corpus_gap.
-    gold 전부 존재 True / 하나라도 없으면 False / gold·자원 없으면 None."""
+def _gold_corpus_membership(record: EvalRecord):
+    """gold 청크별 코퍼스 존재 여부 {gold_id: bool}. gold·자원 없으면 None.
+
+    probe 단위 bool 하나로 접으면 혼합 코퍼스(놓친 gold 가 {있음+없음})에서 검색 라벨이
+    통째로 소실된다 — 코퍼스에 있는데 못 찾은 gold 까지 corpus_gap 으로 넘어가기 때문이다.
+    """
     if active_mode() < Mode.STANDARD or not _ctx.corpus_ids:
         return None
 
@@ -70,6 +77,33 @@ def _gold_in_corpus(record: EvalRecord):
         golds = record.probe.gold_chunk_ids
         if not golds:
             return None
-        return all(g in _ctx.corpus_ids for g in golds)  # 코퍼스 전체와 대조
+        return {g: g in _ctx.corpus_ids for g in golds}  # 코퍼스 전체와 대조
 
-    return _cache(record, "gold_in_corpus", compute)
+    return _cache(record, "gold_corpus_membership", compute)
+
+
+def _gold_in_corpus(record: EvalRecord):
+    """gold 가 전부 코퍼스에 존재하나. corpus_gap(하나라도 없음) 판정용.
+    전부 존재 True / 하나라도 없으면 False / gold·자원 없으면 None."""
+    membership = _gold_corpus_membership(record)
+    return None if membership is None else all(membership.values())
+
+
+def _gold_absent_from_corpus(record: EvalRecord):
+    """gold 가 하나도 코퍼스에 없나 — '답의 근거가 애초에 없다'의 실측. 미측정이면 None.
+
+    _gold_in_corpus 의 부정이 아니다: 그쪽은 '하나라도 없음'이라 부분 gap(일부 gold 는
+    코퍼스에 있고 검색까지 된 상태)도 False 가 된다. 근거가 실제로 있는 답변을
+    '근거 없이 지어냄'으로 몰지 않으려면 전부 없음을 따로 물어야 한다.
+    """
+    membership = _gold_corpus_membership(record)
+    return None if membership is None else not any(membership.values())
+
+
+def _missed_gold_in_corpus(record: EvalRecord):
+    """놓친 gold 중 코퍼스에 존재하는 것 — 검색 원인(A) 라벨의 실제 근거.
+    코퍼스에 없는 gold 는 검색으로 못 고치니 corpus_gap 몫이라 뺀다. 멤버십 미측정이면 None."""
+    membership = _gold_corpus_membership(record)
+    if membership is None:
+        return None
+    return {g for g in _missed_gold_ids(record) if membership.get(g)}
