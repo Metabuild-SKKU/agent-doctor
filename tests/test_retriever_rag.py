@@ -3,11 +3,10 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from agents.ingest.document_type import detect_document_type, has_math_signal
 from agents.index.qdrant_store import (
     build_client,
     build_sparse_vector,
-    detect_document_type,
-    has_math_signal,
     keyword_search,
     normalize_math_text,
 )

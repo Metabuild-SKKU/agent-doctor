@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from agents.ingest.document_type import detect_document_type
 from agents.index.corpus_visualization import build_corpus_visualization_artifacts
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
@@ -25,7 +26,6 @@ from agents.index.qdrant_store import (
     DEFAULT_RERANKER_MODEL,
     build_sparse_vector,
     count_tokens,
-    detect_document_type,
     embed,
     embed_batch,
     embedding_is_fallback,

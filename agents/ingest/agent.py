@@ -22,6 +22,7 @@ import os
 import uuid
 from pathlib import Path
 
+from agents.ingest.document_type import annotate_document_metadata
 from core.schema import Document
 from core.state import AgentDoctorState
 
@@ -66,15 +67,17 @@ def _ingest_notion(source_url: str) -> list[Document]:
     title = _notion_title(page)
     content = _notion_blocks_to_text(client, page_id)
 
+    metadata = annotate_document_metadata(content, {
+        "title": title,
+        "page_id": page_id,
+    })
+
     return [Document(
         doc_id=_stable_doc_id("notion", page_id),
         source=source_url,
         format="notion",
         content=content,
-        metadata={
-            "title": title,
-            "page_id": page_id,
-        },
+        metadata=metadata,
     )]
 
 
@@ -211,12 +214,14 @@ def _ingest_file(source_url: str) -> list[Document]:
     else:
         raise ValueError(f"지원 안 하는 형식: {suffix}  (지원: .txt .md .pdf)")
 
+    metadata = annotate_document_metadata(content, {"filename": path.name, **extra_metadata})
+
     return [Document(
         doc_id=_stable_doc_id("file", str(path.resolve())),
         source=str(path.resolve()),
         format=fmt,
         content=content,
-        metadata={"filename": path.name, **extra_metadata},
+        metadata=metadata,
     )]
 
 
@@ -256,12 +261,14 @@ def _ingest_json_corpus(source_url: str) -> list[Document]:
         src = item.get("source", str(path.resolve()))
         fmt = Path(src).suffix.lstrip(".").lower() or "txt"
 
+        metadata = annotate_document_metadata(content, {"source_file": item.get("source", path.name)})
+
         docs.append(Document(
             doc_id  = doc_id,
             source  = src,
             format  = fmt,
             content = content,
-            metadata= {"source_file": item.get("source", path.name)},
+            metadata=metadata,
         ))
 
     return docs
@@ -283,6 +290,8 @@ def _ingest_korquad_corpus(source_url: str) -> list[Document]:
     docs = reconstruct_documents(path, max_docs=korquad_max_docs())
     if not docs:
         raise ValueError(f"KorQuAD corpus 가 비어있습니다: {path}")
+    for doc in docs:
+        doc.metadata = annotate_document_metadata(doc.content, doc.metadata)
     return docs
 
 

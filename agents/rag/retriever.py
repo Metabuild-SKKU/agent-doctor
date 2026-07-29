@@ -19,6 +19,7 @@ from typing import Any
 
 from qdrant_client import QdrantClient
 
+from agents.ingest.document_type import has_math_signal, is_math_document
 from agents.index.qdrant_store import (
     COLLECTION,
     DEFAULT_EMBEDDING_MODEL,
@@ -29,9 +30,7 @@ from agents.index.qdrant_store import (
     delete_document_chunks,
     embed,
     ensure_collection,
-    has_math_signal,
     hybrid_search,
-    is_math_document,
     keyword_search,
     rerank_with_status,
     search as dense_search,
