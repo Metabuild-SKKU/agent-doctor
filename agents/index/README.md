@@ -90,10 +90,10 @@ state.index_config["chunk_stage"] = 3  # markdown_recursive
 
 | 전략 | 동작 | 용도 |
 |---|---|---|
-| `fixed` | 일정 글자 수로 자름 | 가장 단순한 baseline |
+| `fixed` | 일정 글자 수로 자름 | 기본값, 가장 단순한 baseline |
 | `markdown` | 제목/소제목 경계만 사용 | 구조 비교 실험 |
 | `recursive` | 문단→문장→공백 경계 사용 | 일반 텍스트 |
-| `markdown_recursive` | Markdown 1차 분할 후 긴 섹션 재분할 | 기본값 |
+| `markdown_recursive` | Markdown 1차 분할 후 긴 섹션 재분할 | 구조 보존 비교 실험 |
 
 한 번의 Index 실행에서는 한 전략을 선택한다. Eval 결과가 낮으면 Optimize가
 `chunk_strategy`를 바꾸고 Index를 재실행할 수 있다.

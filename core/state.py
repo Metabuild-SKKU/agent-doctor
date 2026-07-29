@@ -58,7 +58,7 @@ class AgentDoctorState:
         # metadata 기록에 소비한다. 둘 다 미지정 시 5를 폴백으로 쓰고 있어 같은 값을
         # 명시해 동작을 바꾸지 않으면서 Optimize가 조정할 baseline을 드러낸다.
         "top_k": 5,
-        "chunk_strategy": "markdown_recursive",
+        "chunk_strategy": "fixed",
         "embedding_dimension": 1024,
         "deduplicate": True,
         "hybrid_dense_weight": 0.7,
