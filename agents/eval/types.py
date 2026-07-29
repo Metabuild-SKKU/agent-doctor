@@ -102,23 +102,26 @@ MULTIHOP_SUBTYPES = ["bridge", "comparison", "aggregation"]
 # ── 진단 모드 (비용 tier) ─────────────────────────────────────────
 # 사용자가 고르는 '진단 깊이'. 값 = 그 모드가 감당하는 최대 자원 tier.
 #   자원 사다리(=tier):  tier1 규칙·기존지표만  <  tier2 추가 검색 쿼리(top-N 재검색·BM25·코퍼스)
-#                        <  tier3 LLM·RAGAS  <  tier4 파이프라인 재실행(ablation)
+#                        <  tier3 LLM·RAGAS
 # 라벨은 '판별에 필요한 가장 비싼 자원'이 곧 그 라벨의 confirm tier 다(각 측정이 metrics_* 에서 self-gate).
 #   mode >= tier 이고 그 확정 측정이 실제 발동 → 확정(confirmed=True), 아니면 예비(confirmed=False).
 # 생성 원인(B)은 전부 RAGAS(=DEEP) 의존이라, DEEP 미만에선 하나의 예비 'generation_failure' 로 롤업.
 # STEP3-2 RAGAS 자체도 DEEP 이상에서만 실행한다(metrics_ragas._faith 등 RAGAS 측정의 DEEP 게이트).
+# tier4(파이프라인 재실행/ablation)는 없다 — Optimize 의 config 재실행과 중복이라 그쪽으로 넘겼고,
+# DEEP 이 가장 깊은 모드다. context 원인(C)은 실측 신호로 DEEP 에서 확정된다.
 class Mode:
     FAST = 1       # 규칙·기존지표만 (추가 쿼리·LLM 없음) — 나열형(enumeration)만 확정
     STANDARD = 2   # + 추가 검색 쿼리(top-N·BM25·코퍼스)   — 검색 원인 대부분 확정
-    DEEP = 3       # + LLM(RAGAS/AspectCritic)         — 생성 원인 진단
-    FULL = 4       # + 파이프라인 재실행(ablation)      — context 원인 확정
+    DEEP = 3       # + LLM(RAGAS/AspectCritic)         — 생성·context 원인 확정
 
 
 DEFAULT_MODE = Mode.FAST   # 미지정 시 가장 싼 모드
 
+# "full"/"4" 는 DEEP 으로 접는다 — 웹 UI 의 depth 선택지(agents/serve/web_api.py)와 기존
+# EVAL_MODE 설정이 쓰는 문자열이라, 지우면 조용히 DEFAULT_MODE(fast)로 강등된다.
 _MODE_ALIASES = {
-    "fast": Mode.FAST, "standard": Mode.STANDARD, "deep": Mode.DEEP, "full": Mode.FULL,
-    "1": Mode.FAST, "2": Mode.STANDARD, "3": Mode.DEEP, "4": Mode.FULL,
+    "fast": Mode.FAST, "standard": Mode.STANDARD, "deep": Mode.DEEP, "full": Mode.DEEP,
+    "1": Mode.FAST, "2": Mode.STANDARD, "3": Mode.DEEP, "4": Mode.DEEP,
 }
 
 

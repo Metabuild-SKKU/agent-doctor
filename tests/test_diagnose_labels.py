@@ -443,7 +443,7 @@ class RetrievalBridgeTest(_DiagnoseTestBase):
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5, qtype="bridge")
         finding = diagnose.retrieval_missing_bridge_dependency(rec)
         self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)          # tier4 제거 → 확정 불가
+        self.assertFalse(finding.confirmed)          # hop 의존 판별 신호 미측정 → 확정 불가
 
     def test_silent_for_single_hop(self):
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5, qtype=None)
@@ -956,21 +956,25 @@ class ContextLabelTest(_DiagnoseTestBase):
         rec.ragas_done = True
         return rec
 
-    def test_lost_in_the_middle_preliminary_when_gold_buried(self):
-        """gold 는 검색됐는데 답이 어디에도 근거하지 않고, gold 가 긴 context 한가운데 있다."""
+    def test_lost_in_the_middle_confirmed_when_gold_buried(self):
+        """gold 는 검색됐는데 답이 어디에도 근거하지 않고, gold 가 긴 context 한가운데 있다.
+
+        확정이다 — 위치·길이·faithfulness 가 전부 실측이라(confirmed 는 '처방이 통한다'가 아니라
+        '판별 신호가 측정됐다'는 뜻) 더 올라갈 tier 도 없다.
+        """
         rec = self._long_context(gold_at=2)                    # 상대 위치 0.5
         finding = diagnose.lost_in_the_middle(rec)
         self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)                    # 재배치 회복 검증은 optimize 위임
+        self.assertTrue(finding.confirmed)
         self.assertEqual(finding.metadata["group"], "C")
         self.assertIsNone(diagnose.too_long_context(rec))      # 위치로 배타
 
-    def test_too_long_context_preliminary_when_gold_at_edge(self):
+    def test_too_long_context_confirmed_when_gold_at_edge(self):
         """gold 가 맨 앞인데도 못 썼다 — 배치가 아니라 길이·과부하 쪽."""
         rec = self._long_context(gold_at=0)
         finding = diagnose.too_long_context(rec)
         self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)
+        self.assertTrue(finding.confirmed)
         self.assertIsNone(diagnose.lost_in_the_middle(rec))    # 배타
 
     def test_both_silent_when_context_is_short(self):
@@ -1017,13 +1021,13 @@ class ContextLabelTest(_DiagnoseTestBase):
         self.assertEqual(diagnose._pick(rec, diagnose._CONTEXT_CAUSE).label,
                          "chunking_underchunking")
 
-    def test_noise_interference_preliminary_when_answer_grounded_but_wrong(self):
+    def test_noise_interference_confirmed_when_answer_grounded_but_wrong(self):
         """faithfulness 는 retrieved_context(gold+노이즈) 기준 — 근거는 있는데 답이 틀리면
         gold 아닌 청크에 근거했다는 뜻이다."""
         rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1, faith=0.9, rel=0.9)
         finding = diagnose.context_noise_interference(rec)
         self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)                    # 회복 검증은 optimize 위임
+        self.assertTrue(finding.confirmed)
         self.assertEqual(finding.metadata["group"], "C")
 
     def test_noise_interference_silent_when_answer_ungrounded(self):
@@ -1059,12 +1063,12 @@ class ContextLabelTest(_DiagnoseTestBase):
         rec.retrieval_details = {"reranked": reranked}
         return rec
 
-    def test_underchunking_preliminary_when_evidence_buried_in_big_chunk(self):
+    def test_underchunking_confirmed_when_evidence_buried_in_big_chunk(self):
         """근거가 청크의 10% 뿐 + precision 낮음 → 청크가 근거보다 큼."""
         rec = self._chunky(span_len=10)
         finding = diagnose.chunking_underchunking(rec)
         self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)                 # 축소 회복 검증은 optimize 위임
+        self.assertTrue(finding.confirmed)
         self.assertEqual(finding.metadata["group"], "A")    # 청킹은 전부 A그룹
 
     def test_underchunking_silent_when_evidence_dense(self):
@@ -1086,8 +1090,28 @@ class ContextLabelTest(_DiagnoseTestBase):
         rec = self._chunky(span_len=80, reranked=True)      # 밀도는 높음(청크 안 문제 아님)
         finding = diagnose.reranker_low_precision(rec)
         self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)                 # 전/후 순위 비교 불가 → 예비
+        self.assertFalse(finding.confirmed)                 # 전/후 순위 비교 불가 → C그룹 유일 예비
         self.assertEqual(finding.metadata["group"], "A")
+
+    def test_confirmed_length_cause_beats_preliminary_reranker(self):
+        """리랭커와 길이 원인이 함께 성립하면 확정 쪽을 채택한다 — 순서가 아니라 confirmed 로 갈린다.
+
+        예전엔 셋 다 예비라 튜플 순서(리랭커 우선)가 결정했다. 이제 리랭커만 예비로 남아
+        (인과 미측정) _pick 이 확정된 길이 원인을 먼저 뽑는다.
+        """
+        rec = self._long_context(gold_at=0, precision=0.1)   # gold 양끝 + precision 낮음
+        rec.retrieval_details = {"reranked": True}
+        self.assertTrue(diagnose.too_long_context(rec).confirmed)
+        self.assertFalse(diagnose.reranker_low_precision(rec).confirmed)
+        self.assertEqual(diagnose._pick(rec, diagnose._CONTEXT_CAUSE).label, "too_long_context")
+
+    def test_reranker_owns_slot_when_no_confirmed_cause(self):
+        """길이·배치가 성립하지 않으면(짧은 context) 예비 리랭커가 슬롯을 가져간다."""
+        rec = self._long_context(gold_at=0, precision=0.1, chars=1000)
+        rec.retrieval_details = {"reranked": True}
+        self.assertIsNone(diagnose.too_long_context(rec))
+        self.assertEqual(diagnose._pick(rec, diagnose._CONTEXT_CAUSE).label,
+                         "reranker_low_precision")
 
     def test_reranker_silent_when_not_reranked(self):
         rec = self._chunky(span_len=80, reranked=False)
@@ -1341,6 +1365,19 @@ class AssemblyTest(_DiagnoseTestBase):
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
         dup = [diagnose.retrieval_missing_gold(rec), diagnose.retrieval_missing_gold(rec)]
         self.assertEqual(len(diagnose._dedup(dup)), 1)
+
+    def test_full_mode_folds_into_deep(self):
+        """tier4 는 없앴다 — 다만 'full' 은 웹 UI depth 문자열이라 DEEP 으로 접어야 한다.
+        지우면 EVAL_MODE=full 이 DEFAULT_MODE(fast)로 조용히 강등된다."""
+        from agents.eval import types
+        self.assertFalse(hasattr(Mode, "FULL"))
+        for raw in ("full", "4"):
+            with self.subTest(raw=raw):
+                os.environ["EVAL_MODE"] = raw
+                try:
+                    self.assertEqual(types.resolve_mode(), Mode.DEEP)
+                finally:
+                    os.environ.pop("EVAL_MODE", None)
 
     def test_group_derivation_matches_prescription_order(self):
         self.assertEqual(diagnose._group_of("corpus_gap", "gap"), "D")

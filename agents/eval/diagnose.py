@@ -16,10 +16,11 @@ Finding에 label들을 담고 다음단계로 진행한다.
 Finding.type 필드에 라벨 그룹을 담고, Finding.label 필드에 세분화 라벨을 담는다.
 
 진단 모드:
-  - 1[FAST], 2[STANDARD], 3[DEEP] (삭제됨)4[FULL]
+  - 1[FAST], 2[STANDARD], 3[DEEP] — DEEP 이 가장 깊다(tier4/FULL 은 없앴다).
   - diagnose() 진입 시 metrics_common.set_mode 로 현재 실행 모드를 설정한다.
   - 지정된 진단 모드 이하 tier인 진단만 수행할 수 있다.
-  - 파이프라인 재실행(tier4)로 context 원인을 확정하던 경로는 제거됨. 관련 라벨은 예비 Finding 으로만 남긴다.
+  - 파이프라인 재실행으로 확정하던 경로는 Optimize 로 넘겼다. context 원인(C)은 실측 신호로
+    DEEP 에서 확정한다 — reranker_low_precision 만 인과 미측정이라 예비로 남는다.
 
 측정값·진단 자원(_ctx)·모드 상태는 tier 별 측정 파일에 존재한다:
   metrics_common(인프라) / metrics_basic(tier1) / metrics_search(tier2) / metrics_ragas(tier3).
@@ -350,7 +351,7 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
 def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]:
     """
     연쇄형(bridge): hop2 근거가 hop1 답에 의존해 원 질문 검색으론 못 찾음.
-    예비: 확정(decompose 재검색 회복)은 제거된 tier4 몫이라 optimize 가 위임받는다.
+    예비: hop 의존을 확정할 신호(decompose 재검색 회복)가 없어 optimize 가 위임받는다.
     comparison/aggregation 은 hop 간 독립이라 제외(나열형은 enumeration 담당).
     low_rank·lexical 확정은 원 질문으로 잡힌다는 실측이라 bridge 를 반증 → 그쪽이 우선.
     처방(enable_query_decomposition)은 rules.py draft — query_rewrite/max_hops 스키마 미합의 BLOCKER.
@@ -684,10 +685,9 @@ def _gold_in_middle_band(record: EvalRecord) -> Optional[bool]:
 def too_long_context(record: EvalRecord) -> Optional[Finding]:
     """
     context가 너무 길어 잡음·과부하로 품질 저하.
-    예비: C 전제 + 답에 근거 없음(faith 낮음) + context 길이 문턱 초과 + gold 는 양끝.
-    확정(축소 재실행)은 제거된 tier4 몫이라 optimize 재실행이 위임받는다.
+    확정: C 전제 + 답에 근거 없음(faith 낮음) + context 길이 문턱 초과 + gold 는 양끝.
     gold 가 중간이면 lost_in_the_middle 영역 — 위치로 함수 자체 배타(튜플 순서 비의존).
-    위치 미측정(None)이면 배치를 못 가르므로 침묵한다(둘 다 예비라 롤업이 안전한 쪽).
+    위치 미측정(None)이면 배치를 못 가르므로 침묵한다.
     """
     if not _context_ungrounded(record):
         return None
@@ -695,7 +695,7 @@ def too_long_context(record: EvalRecord) -> Optional[Finding]:
     if total < CONTEXT_CHARS_MAX or _gold_in_middle_band(record) is not False:
         return None
     return _finding(
-        record, "too_long_context", "context_failure", confirmed=False,
+        record, "too_long_context", "context_failure", confirmed=True,
         reason=f"context_chars={total}>={CONTEXT_CHARS_MAX}, "
                f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
                f"recall@k={_v(record.recall_at_k)}",
@@ -705,8 +705,7 @@ def too_long_context(record: EvalRecord) -> Optional[Finding]:
 def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
     """
     청크가 긴 context 중간이라 LLM이 참조 못함.
-    예비: C 전제 + 답에 근거 없음 + gold 가 중간 밴드 + context 길이 문턱 초과.
-    확정(gold 앞배치 재실행)은 제거된 tier4 몫이라 optimize 재실행이 위임받는다.
+    확정: C 전제 + 답에 근거 없음 + gold 가 중간 밴드 + context 길이 문턱 초과.
     길이 조건을 함께 두는 건 이 현상 자체가 긴 context 에서만 성립하기 때문이다 —
     짧은 context 에서 근거를 못 쓴 건 배치 문제가 아니라 생성측 이탈(롤업)이다.
     """
@@ -716,7 +715,7 @@ def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
     if total < CONTEXT_CHARS_MAX:
         return None
     return _finding(
-        record, "lost_in_the_middle", "context_failure", confirmed=False,
+        record, "lost_in_the_middle", "context_failure", confirmed=True,
         reason=f"gold_position={_v(_gold_position_band(record))}(중간), context_chars={total}, "
                f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
                f"recall@k={_v(record.recall_at_k)}",
@@ -735,16 +734,15 @@ def _chunk_noise_heavy(record: EvalRecord) -> bool:
 def chunking_underchunking(record: EvalRecord) -> Optional[Finding]:
     """
     청크가 근거보다 훨씬 커서 무관한 내용까지 함께 딸려옴.
-    예비: C 전제 + gold 청크 내부 근거 밀도 낮음 + context_precision 낮음.
+    확정: C 전제 + gold 청크 내부 근거 밀도 낮음 + context_precision 낮음.
 
     청크 '사이' 노이즈(context_noise_interference)가 아니라 청크 '안'의 노이즈다 —
     gold 를 담은 청크만 분모로 삼아 재므로 top_k·리랭커 문제와 섞이지 않는다.
-    확정은 청크 축소 재청킹으로 회복되는지 봐야 하고 optimize 가 위임받는다 → 예비.
     """
     if not _context_failed(record) or not _chunk_noise_heavy(record):
         return None
     return _finding(
-        record, "chunking_underchunking", "retrieval_failure", confirmed=False,
+        record, "chunking_underchunking", "retrieval_failure", confirmed=True,
         reason=f"evidence_density={_v(_gold_chunk_evidence_density(record))}<{EVIDENCE_DENSITY_MIN}, "
                f"context_precision={_v(_ctx_precision(record))}<{RAGAS_CONTEXT_PRECISION_MIN}, "
                f"recall@k={_v(record.recall_at_k)}",
@@ -756,10 +754,10 @@ def reranker_low_precision(record: EvalRecord) -> Optional[Finding]:
     리랭커가 무관한 청크를 상위로 올림.
     예비: C 전제 + 리랭크가 실제 적용됨 + context_precision 낮음 + 청크 안 노이즈는 아님.
 
-    확정하려면 리랭크 전/후 순위를 대조해야 하는데 retriever 가 리랭크 전 후보를 남기지 않는다
-    (search_with_details 가 results 를 덮어씀) — 그 기록 추가는 별도 PR.
-    그래서 여기서는 '리랭크를 거친 결과의 정밀도가 낮다'까지만 말한다(리랭커가 원인이라는
-    증거는 아니다 — 원래 검색이 나빴을 수도 있다).
+    C그룹에서 유일하게 예비로 남는 라벨이다 — 확정하려면 리랭크 전/후 순위를 대조해야 하는데
+    retriever 가 리랭크 전 후보를 남기지 않는다(search_with_details 가 results 를 덮어씀).
+    그래서 '리랭크를 거친 결과의 정밀도가 낮다'까지만 말한다(리랭커가 원인이라는 증거는 아니다 —
+    원래 검색이 나빴을 수도 있다). 전/후 기록을 남기면 그때 확정으로 올릴 수 있다(별도 PR).
     """
     if not _context_failed(record):
         return None
@@ -780,12 +778,11 @@ def reranker_low_precision(record: EvalRecord) -> Optional[Finding]:
 def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     """
     비-gold 청크의 상충 정보에 이끌림.
-    예비: C 전제(recall=1·oracle 통과·실제 답 틀림) + 실제 답이 검색 context 에는 근거 있음
+    확정: C 전제(recall=1·oracle 통과·실제 답 틀림) + 실제 답이 검색 context 에는 근거 있음
           (real faithfulness 높음) → gold 아닌 청크에 근거했다는 뜻.
 
     faithfulness 는 retrieved_context(gold+노이즈) 기준이라, 노이즈 청크의 정보를 가져다 쓰면
     '근거 있음'으로 높게 나온다. 낮은 쪽은 gold·노이즈 어디에도 없는 생성측 이탈이라 다른 원인이다.
-    확정은 노이즈 제거(top_k 축소·리랭커) 재실행으로 회복되는지 봐야 하고 optimize 가 위임받는다.
     처방(enable_noise_filter/mmr)은 rules.py draft — filtering/MMR/reranker 필드 합의 미완.
     """
     if not _context_failed(record):
@@ -796,7 +793,7 @@ def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     if faith is None or faith < RAGAS_FAITHFULNESS_MIN:
         return None
     return _finding(
-        record, "context_noise_interference", "context_failure", confirmed=False,
+        record, "context_noise_interference", "context_failure", confirmed=True,
         reason=f"faithfulness={_v(faith)}>={RAGAS_FAITHFULNESS_MIN}(검색 context 엔 근거 있음), "
                f"recall@k={_v(record.recall_at_k)}, f1={_v(record.f1_score)}",
     )
@@ -950,8 +947,9 @@ _GENERATION_CAUSE = (
 # 노이즈가 '청크 안'이면 underchunking, '청크 사이'면 reranker/noise_interference —
 # _chunk_noise_heavy 로 배타가 서서 순서에 기대지 않는다.
 # 단 reranker_low_precision 과 too_long_context/lost_in_the_middle 은 함께 성립할 수 있다
-# (리랭커가 gold 를 중간으로 밀면 둘 다 참). 셋 다 예비라 여기서는 순서로 정한다 —
-# 리랭커가 켜져 있으면 그쪽이 더 구체적인 실행 사실이므로 앞에 둔다.
+# (리랭커가 gold 를 중간으로 밀면 둘 다 참). 이때는 _pick 이 확정을 먼저 뽑아 그쪽이 채택된다 —
+# reranker 는 인과(리랭크 전/후 대조)가 미측정이라 예비로 남기 때문이고, 순서가 아니라
+# confirmed 로 갈린다. 다른 확정이 없을 때만 reranker 가 슬롯을 가져간다.
 _CONTEXT_CAUSE = (
     bad_gold_answer, chunking_overchunking, chunking_context_mismatch,
     chunking_underchunking, reranker_low_precision,
