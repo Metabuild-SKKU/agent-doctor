@@ -43,7 +43,10 @@ def run(
         gold_spans = _gold_spans(context, documents)
         strategy = context.get(
             "chunk_strategy",
-            request.baseline_config.get("chunk_strategy", "markdown_recursive"),
+            # 최종 폴백은 Index가 실제로 쓰는 디폴트와 일치시킨다(state.py chunk_strategy /
+            # index/agent.py _configured_chunk_strategy). PR #58에서 fixed로 바뀌었다 —
+            # 이 값이 어긋나면 dry-run 청커와 실제 색인 청커가 달라져 사전검증이 빗나간다.
+            request.baseline_config.get("chunk_strategy", "fixed"),
         )
     except (TypeError, ValueError) as exc:
         return _result(
