@@ -198,9 +198,23 @@
   .rec { display: flex; flex-direction: column; gap: 10px; }
   .rec-item { display: grid; grid-template-columns: 34px 1fr auto; gap: 14px; align-items: center; padding: 16px 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
   .rec-ic { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: var(--surface-2); color: var(--muted); }
+  .rec-item { align-items: start; }
+  .rec-ic { margin-top: 1px; }
   .rec-body .rt { font-weight: 550; font-size: 14px; }
   .rec-body .rd { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
-  .rec-cta { font-family: var(--mono); font-size: 11.5px; color: var(--accent); white-space: nowrap; }
+  .rec-cta { font-family: var(--mono); font-size: 11.5px; color: var(--accent); white-space: nowrap; margin-top: 1px; }
+  /* 어디가 문제인지 — per-question 목록 */
+  .rec-items { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .rec-q { font-size: 12.5px; padding: 8px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+  .rec-q .rq { font-weight: 500; }
+  .rec-q .rw { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 3px; }
+  /* 매뉴얼 조치 스텝 */
+  .rec-steps { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; counter-reset: recstep; }
+  .rec-step { display: grid; grid-template-columns: 18px 1fr; gap: 8px; font-size: 12px; }
+  .rec-step::before { counter-increment: recstep; content: counter(recstep); font-family: var(--mono); font-size: 10px; color: var(--accent); width: 18px; height: 18px; border: 1px solid var(--border); border-radius: 5px; display: grid; place-items: center; }
+  .rec-step .rs-act { font-weight: 500; }
+  .rec-step .rs-det { color: var(--muted); margin-top: 2px; }
+  .rec-badge-data { color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); }
 
   /* transparency footer */
   .trans { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-top: 8px; }
@@ -375,24 +389,7 @@
   <!-- RECOMMENDATIONS -->
   <section class="section">
     <div class="section-head"><span class="idx">06</span><h2>남은 권고</h2><span class="sub">자동 처방으로 끝나지 않는 항목</span></div>
-    <div class="rec">
-      <div class="rec-item">
-        <div class="rec-ic"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 0-4 10.5V17h8v-3.5A6 6 0 0 0 12 3zM9 21h6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-        <div class="rec-body">
-          <div class="rt">부분 답변 <span class="badge prelim">의심</span></div>
-          <div class="rd">정답 근거는 있으나 일부 조건이 빠집니다. 생성 원인은 표준 검진으로 확정할 수 없어 <b style="color:var(--muted)">정밀 검진</b>이 필요합니다.</div>
-        </div>
-        <div class="rec-cta">정밀 검진 실행 →</div>
-      </div>
-      <div class="rec-item">
-        <div class="rec-ic"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2M4 7h16M4 7v12a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7M9 11h6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-        <div class="rec-body">
-          <div class="rt">코퍼스에 없는 질문 2건 <span class="badge" style="color:var(--muted);background:var(--surface-2);border:1px solid var(--border)">D · 데이터</span></div>
-          <div class="rd">파라미터로는 해결되지 않습니다 — 해당 주제를 다루는 문서를 코퍼스에 추가하는 걸 권장합니다.</div>
-        </div>
-        <div class="rec-cta">문서 보강 필요</div>
-      </div>
-    </div>
+    <div class="rec" id="recList"></div>
   </section>
 
   <!-- TRANSPARENCY -->
@@ -476,6 +473,24 @@
       after: '청크 축소 처방이 회수율을 떨어뜨려 롤백 — 이 질문은 아직 해결되지 않았습니다.',
       fix: '다른 처방 후보(컨텍스트 재정렬 등)를 다음 반복에서 시도할 예정' }
   ];
+  var DUMMY_RECS = [
+    { kind: 'prelim', code: 'generation_partial_answer', badge: ['prelim', '의심'],
+      title: '부분 답변 · 질문 1건', desc: '표준 검진으로는 원인을 확정할 수 없어 정밀 검진이 필요합니다.',
+      cta: '정밀 검진 실행 →', steps: [],
+      items: [{ q: '무료 체험 기간과 전환 조건을 모두 알려줘', where: '', gold: '' }] },
+    { kind: 'manual', code: 'corpus_gap', badge: ['data', 'D · 데이터'],
+      title: '코퍼스에 근거가 없는 질문 2건',
+      desc: '질문에 답할 근거 문서가 코퍼스에 없습니다. 해당 주제를 다루는 문서를 추가로 수집·인덱싱해 주세요.',
+      cta: '문서 보강 필요',
+      steps: [
+        { action: '코퍼스에서 빠진 근거를 특정', detail: '해당 질문의 정답 근거가 담긴 원본 문서 중 코퍼스에 없는 것을 확인합니다.' },
+        { action: '그 문서를 수집·추가한 뒤 재색인', detail: '특정된 문서를 코퍼스에 넣고 재색인한 뒤 다시 진단을 실행합니다.' }
+      ],
+      items: [
+        { q: '리전별 데이터 보존 기간은?', where: '근거 문서: compliance_2025', gold: '' },
+        { q: 'SSO 강제 적용 정책은?', where: '근거 문서: security_policy', gold: '' }
+      ] }
+  ];
   var DUMMY_SCORE = { before: 62, after: 84 };
   var DUMMY_PRIORITY = [
     { group: 'A · 검색 실패', severity: 'critical', title: '나열형 질문에서 정답 누락', desc: '정답이 여러 청크에 흩어져 있는데 top_k가 5로 고정돼 뒤쪽 정답을 못 가져옵니다.', confirmed: true, affected: 3 },
@@ -492,6 +507,7 @@
     var dxs = isLive ? (data.dxs || []) : DUMMY_DXS;
     var qas = isLive ? (data.qas || []) : DUMMY_QAS;
     var priority = isLive ? (data.priority || []) : DUMMY_PRIORITY;
+    var recs = isLive ? (data.recommendations || []) : DUMMY_RECS;
     var score = isLive ? (data.score || DUMMY_SCORE) : DUMMY_SCORE;
     var meta = isLive ? (data.meta || DUMMY_META) : DUMMY_META;
 
@@ -502,6 +518,7 @@
     renderQas(qas);
     renderGauge(score);
     renderPriority(priority);
+    renderRecommendations(recs);
     renderHero(score, meta);
     renderMeta(meta);
   }
@@ -696,6 +713,40 @@
       '<div class="dx-foot">' + esc(d.foot) + '<span class="rx-link">' + esc(d.rx) + '</span></div>' +
     '</div>';
   }).join('');
+  }
+
+  /* ── 남은 권고 (D그룹 매뉴얼 + 예비) ── */
+  var RECIC_BULB = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 0-4 10.5V17h8v-3.5A6 6 0 0 0 12 3zM9 21h6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var RECIC_BOX = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2M4 7h16M4 7v12a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7M9 11h6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  function renderRecommendations(recs) {
+    var el = document.getElementById('recList');
+    if (!recs || !recs.length) {
+      el.innerHTML = '<div class="rec-item"><div class="rec-ic">' + RECIC_BULB + '</div><div class="rec-body"><div class="rd">사람 개입이 필요한 남은 권고가 없습니다.</div></div></div>';
+      return;
+    }
+    el.innerHTML = recs.map(function (r) {
+      var isData = r.kind === 'manual';
+      var badgeCls = r.badge[0] === 'prelim' ? 'badge prelim' : 'badge rec-badge-data';
+      var items = (r.items || []).map(function (it) {
+        var where = it.gold ? ('기대 정답: ' + esc(it.gold)) : esc(it.where || '');
+        return '<div class="rec-q"><div class="rq">' + esc(it.q) + '</div>' +
+          (where ? '<div class="rw">' + where + '</div>' : '') + '</div>';
+      }).join('');
+      var steps = (r.steps || []).map(function (s) {
+        return '<div class="rec-step"><div><div class="rs-act">' + esc(s.action) + '</div>' +
+          (s.detail ? '<div class="rs-det">' + esc(s.detail) + '</div>' : '') + '</div></div>';
+      }).join('');
+      return '<div class="rec-item">' +
+        '<div class="rec-ic">' + (isData ? RECIC_BOX : RECIC_BULB) + '</div>' +
+        '<div class="rec-body">' +
+          '<div class="rt">' + esc(r.title) + ' <span class="' + badgeCls + '">' + esc(r.badge[1]) + '</span></div>' +
+          '<div class="rd">' + esc(r.desc) + '</div>' +
+          (items ? '<div class="rec-items">' + items + '</div>' : '') +
+          (steps ? '<div class="rec-steps">' + steps + '</div>' : '') +
+        '</div>' +
+        '<div class="rec-cta">' + esc(r.cta) + '</div>' +
+      '</div>';
+    }).join('');
   }
 
   /* ── failed validation QA ── */

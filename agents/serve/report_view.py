@@ -66,6 +66,7 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
         "rxs": _build_rxs(history),
         "dxs": _build_dxs(findings),
         "qas": _build_qas(state, findings),
+        "recommendations": _build_recommendations(state, findings),
         "transparency": {
             "duration_label": "",
             "question_count": len(state.probes),
@@ -258,6 +259,126 @@ def _build_dxs(findings: list) -> list[dict[str, Any]]:
             "foot": f"질문 {len(f.affected_probes)}건 영향",
             "rx": f.prescription or "미처방",
         })
+    return out
+
+
+# ── 남은 권고 (자동 처방으로 끝나지 않는 항목) ──────────────────────
+# 두 부류를 모은다:
+#   - manual(D그룹): config로 못 고침 → 사람이 문서 보강/probe 재생성. rules.py 의
+#     매뉴얼 스텝과 "어디가 문제인지"(질문·근거 문서)를 함께 실어 구체화한다.
+#   - preliminary(의심): 표준 검진으론 원인 미확정 → 정밀 검진 필요.
+# 확정 자동처방 대상(dxs/rxs에서 다룸)은 여기서 제외한다.
+
+_REC_TITLES = {
+    "corpus_gap": "코퍼스에 근거가 없는 질문 {n}건",
+    "corpus_gap_partial_hop": "일부 단계 근거가 없는 질문 {n}건",
+    "bad_gold_answer": "정답셋이 의심되는 질문 {n}건",
+}
+_REC_CTAS = {
+    "corpus_gap": "문서 보강 필요",
+    "corpus_gap_partial_hop": "문서 보강 필요",
+    "bad_gold_answer": "probe 재생성 필요",
+}
+# manual finding.metadata["group"] → 배지. D 이외(예비가 A/B/C일 수 있음)는 prelim에서 처리.
+_REC_GROUP_BADGES = {"D": ["data", "D · 데이터"]}
+
+
+def _rec_source_docs(probe) -> list[str]:
+    """probe 가 근거로 삼는 원본 문서들(재청킹에도 안 깨지는 gold_doc_id / gold_spans.doc_id).
+    누락 gold 를 콕 집으려면 finding.metadata['missing_gold_ids'] 가 필요하나(Eval 계약, PR #55),
+    아직 없으므로 probe 의 gold 문서 전체를 degradation 으로 보여준다."""
+    docs: list[str] = []
+    if getattr(probe, "gold_doc_id", None):
+        docs.append(probe.gold_doc_id)
+    for span in getattr(probe, "gold_spans", None) or []:
+        doc = span.get("doc_id") if isinstance(span, dict) else None
+        if doc and doc not in docs:
+            docs.append(doc)
+    return docs
+
+
+def _rec_manual_steps(rule: dict) -> list[dict[str, str]]:
+    """rules.py 의 매뉴얼 처방 스텝(manual=True)을 렌더용으로."""
+    steps = []
+    for p in rule.get("prescriptions", []):
+        if not p.get("manual"):
+            continue
+        steps.append({"action": p.get("action", ""), "detail": p.get("detail", "")})
+    return steps
+
+
+def _rec_items(label: str, findings: list, probes_by_id: dict) -> list[dict[str, str]]:
+    """이 권고가 걸린 질문들을 '어디가 문제인지'와 함께 per-probe 로.
+    corpus_gap 계열은 근거 문서를, bad_gold_answer 는 기대 정답을 함께 보여준다."""
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for f in findings:
+        for pid in f.affected_probes:
+            if pid in seen:
+                continue
+            seen.add(pid)
+            probe = probes_by_id.get(pid)
+            if probe is None:
+                continue
+            if label == "bad_gold_answer":
+                items.append({"q": probe.question, "where": "", "gold": probe.ground_truth or ""})
+            else:
+                docs = _rec_source_docs(probe)
+                where = ("근거 문서: " + ", ".join(docs)) if docs else "근거 문서 미상"
+                items.append({"q": probe.question, "where": where, "gold": ""})
+    return items
+
+
+def _build_recommendations(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
+    from agents.optimize.rules import get_rule, is_manual
+
+    probes_by_id = {p.probe_id: p for p in state.probes}
+    groups: dict[str, list] = {}
+    order: list[str] = []
+    for f in findings:
+        label = f.label
+        if not label:
+            continue
+        # manual(D) 또는 예비(의심)만. 확정 자동처방 대상은 dxs/rxs 몫.
+        if not (is_manual(label) or not f.confirmed):
+            continue
+        if label not in groups:
+            groups[label] = []
+            order.append(label)
+        groups[label].append(f)
+
+    out: list[dict[str, Any]] = []
+    for label in order:
+        fs = groups[label]
+        rule = get_rule(label) or {}
+        n = len({pid for f in fs for pid in f.affected_probes})
+        if is_manual(label):
+            title = _REC_TITLES.get(label, "사람 조치가 필요한 질문 {n}건").format(n=n)
+            out.append({
+                "kind": "manual",
+                "code": label,
+                "badge": _REC_GROUP_BADGES.get(rule.get("group"), ["data", "D · 데이터"]),
+                "title": title,
+                "desc": rule.get("manual_action", ""),
+                "cta": _REC_CTAS.get(label, "사람 조치 필요"),
+                "steps": _rec_manual_steps(rule),
+                "items": _rec_items(label, fs, probes_by_id),
+            })
+        else:
+            # 예비(의심): 원인 미확정 → 정밀 검진 안내. 제목은 진단 설명 첫 줄에서 군더더기 제거.
+            title = fs[0].description.split("\n")[0]
+            for token in ("[예비] ", "[A그룹] ", "[B그룹] ", "[C그룹] ", "[D그룹] "):
+                title = title.replace(token, "")
+            out.append({
+                "kind": "prelim",
+                "code": label,
+                "badge": ["prelim", "의심"],
+                "title": f"{title[:50]} · 질문 {n}건",
+                "desc": "표준 검진으로는 원인을 확정할 수 없어 정밀 검진이 필요합니다.",
+                "cta": "정밀 검진 실행 →",
+                "steps": [],
+                "items": _rec_items(label, fs, probes_by_id),
+            })
     return out
 
 
