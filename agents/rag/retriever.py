@@ -249,7 +249,6 @@ class Retriever:
         }
         self._corpus_has_math = any(
             is_math_document(chunk.get("metadata", {}) or {})
-            or has_math_signal(str(chunk.get("text", "")))
             for chunk in self.chunks
         )
         self.retrieval_scope_id = (

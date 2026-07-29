@@ -68,10 +68,17 @@ class RetrieverTests(unittest.TestCase):
         self.assertFalse(has_math_signal("user_id 조회 정책"))
         self.assertEqual(normalize_math_text("API rate limit 정책"), "API rate limit 정책")
 
-    def test_document_type_detection_routes_math_without_general_limit_noise(self):
+    def test_document_type_detection_uses_explicit_metadata_only(self):
         self.assertEqual(
             detect_document_type(
                 "SET 17\n172번 문제\nx=2cos^3(t), y=3sin^3(t)\nt=π/4 일 때 접선의 기울기를 구한다."
+            ),
+            "general",
+        )
+        self.assertEqual(
+            detect_document_type(
+                "SET 17\n172번 문제\nx=2cos^3(t), y=3sin^3(t)\nt=π/4 일 때 접선의 기울기를 구한다.",
+                {"document_type": "math"},
             ),
             "math",
         )
@@ -123,7 +130,11 @@ class RetrieverTests(unittest.TestCase):
 
         self.assertEqual(results[0]["chunk_id"], "api-limit")
 
-    def test_math_query_expands_reranker_candidate_pool(self):
+    def test_translation_aliases_do_not_leak_into_general_terms(self):
+        self.assertNotIn("limit", normalize_math_text("수열의 극한값과 극한을 계산한다."))
+        self.assertFalse(has_math_signal("대부분의 API rate limit 정책"))
+
+    def test_undeclared_math_text_does_not_expand_reranker_candidate_pool(self):
         retriever = build_retriever(
             [
                 Chunk(chunk_id=f"c-{i}", doc_id="math", text=f"수열 급수 후보 {i}")
@@ -147,9 +158,9 @@ class RetrieverTests(unittest.TestCase):
 
         with patch("agents.rag.retriever.keyword_search", side_effect=fake_keyword_search):
             with patch("agents.rag.retriever.rerank_with_status", side_effect=lambda q, r, model_name, top_k: (r[:top_k], "applied")):
-                response = retriever.search_with_details("수열 Sn의 공비와 극한값을 구하라", top_k=5)
+                response = retriever.search_with_details("t=pi/4 일 때 x=2인지 확인하라", top_k=5)
 
-        self.assertEqual(seen["top_k"], 60)
+        self.assertEqual(seen["top_k"], 20)
         self.assertEqual(response["reranker_status"], "applied")
         self.assertEqual(len(response["results"]), 5)
 

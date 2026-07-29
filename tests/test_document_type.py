@@ -10,21 +10,35 @@ from agents.ingest.document_type import (
 
 
 class DocumentTypeTests(unittest.TestCase):
-    def test_math_document_metadata_is_added_during_ingest_preprocess(self):
+    def test_math_document_metadata_is_added_when_declared(self):
         metadata = annotate_document_metadata(
             "SET 17\n172번 문제\nx=2cos^3(t), y=3sin^3(t)\nt=π/4 일 때 접선의 기울기를 구한다.",
-            {"filename": "math.pdf"},
+            {"filename": "math.pdf", "document_type": "math"},
         )
 
         self.assertEqual(metadata["document_type"], "math")
         self.assertEqual(metadata["retrieval_profile"], "math_formula")
         self.assertEqual(metadata["filename"], "math.pdf")
 
+    def test_undeclared_text_is_general_even_when_it_looks_structured(self):
+        metadata = annotate_document_metadata(
+            "SET 17\n172번 문제\nx=2cos^3(t), y=3sin^3(t)\nt=π/4 일 때 접선의 기울기를 구한다.",
+            {"filename": "math.pdf"},
+        )
+
+        self.assertEqual(metadata["document_type"], "general")
+        self.assertNotIn("retrieval_profile", metadata)
+
     def test_general_limit_and_user_id_are_not_math_signals(self):
         text = "API rate limit 정책은 분당 요청 수를 제한한다. user_id별 quota를 기록한다."
 
         self.assertFalse(has_math_signal(text))
         self.assertEqual(detect_document_type(text), "general")
+
+    def test_ambiguous_korean_substrings_and_dates_are_not_math_signals(self):
+        self.assertFalse(has_math_signal("대부분의 고객이 동의했다"))
+        self.assertFalse(has_math_signal("미분류 항목 정리"))
+        self.assertFalse(has_math_signal("2024/01 실적 보고"))
 
     def test_explicit_document_type_is_preserved(self):
         metadata = annotate_document_metadata(

@@ -51,17 +51,7 @@ _MATH_SYMBOL_ALIASES = (
     ("∞", "infinity"),
     ("무한대", "infinity"),
     ("≤", "<="),
-    ("이하", "<="),
     ("≥", ">="),
-    ("이상", ">="),
-    ("극한값", "limit"),
-    ("극한", "limit"),
-    ("수열", "sequence"),
-    ("급수", "series"),
-    ("공비", "common_ratio"),
-    ("첫째항", "first_term"),
-    ("접선", "tangent"),
-    ("기울기", "slope"),
 )
 
 def _env_float(name: str, default: float) -> float:
