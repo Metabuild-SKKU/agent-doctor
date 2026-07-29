@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from agents.index.qdrant_store import build_client, build_sparse_vector, keyword_search, normalize_math_text
+from agents.index.qdrant_store import build_client, build_sparse_vector, has_math_signal, keyword_search, normalize_math_text
 from agents.rag.retriever import build_retriever, get_retriever, reset_retriever_cache
 from agents.rag.generator import answer_question, answer_text, generate_answer
 from core.schema import Chunk
@@ -57,6 +57,44 @@ class RetrieverTests(unittest.TestCase):
 
         self.assertEqual(normalize_math_text(text), text)
 
+    def test_math_signal_skips_limit_and_user_id_terms(self):
+        self.assertFalse(has_math_signal("API rate limit 정책"))
+        self.assertFalse(has_math_signal("user_id 조회 정책"))
+        self.assertEqual(normalize_math_text("API rate limit 정책"), "API rate limit 정책")
+
+    def test_math_expression_normalization_matches_pi_fraction_forms(self):
+        chunks = [
+            Chunk(
+                chunk_id="pi-symbol",
+                doc_id="math",
+                text="t=π/4 일 때의 접선 기울기를 계산한다.",
+            )
+        ]
+
+        results = keyword_search(chunks, "t=pi/4 기울기", top_k=1)
+
+        self.assertEqual(results[0]["chunk_id"], "pi-symbol")
+        self.assertIn("pi/4", normalize_math_text("π/4"))
+        self.assertIn("π/4", normalize_math_text("pi/4"))
+
+    def test_general_limit_query_does_not_prefer_math_alias(self):
+        chunks = [
+            Chunk(
+                chunk_id="math-limit",
+                doc_id="math",
+                text="수열의 극한값과 극한을 계산한다.",
+            ),
+            Chunk(
+                chunk_id="api-limit",
+                doc_id="api",
+                text="API rate limit 정책과 요청 제한을 설명한다.",
+            ),
+        ]
+
+        results = keyword_search(chunks, "API rate limit 정책", top_k=1)
+
+        self.assertEqual(results[0]["chunk_id"], "api-limit")
+
     def test_math_query_expands_reranker_candidate_pool(self):
         retriever = build_retriever(
             [
@@ -86,6 +124,34 @@ class RetrieverTests(unittest.TestCase):
         self.assertEqual(seen["top_k"], 60)
         self.assertEqual(response["reranker_status"], "applied")
         self.assertEqual(len(response["results"]), 5)
+
+    def test_general_query_does_not_expand_reranker_candidate_pool_in_math_corpus(self):
+        retriever = build_retriever(
+            [
+                Chunk(chunk_id=f"c-{i}", doc_id="math", text=f"x^{i} 수식 후보")
+                for i in range(80)
+            ],
+            config={"use_reranker": True, "rerank_candidates": 20, "top_k": 5},
+        )
+        seen = {}
+
+        def fake_keyword_search(chunks, query, top_k=5):
+            seen["top_k"] = top_k
+            return [
+                {
+                    "chunk_id": chunk.get("chunk_id") if isinstance(chunk, dict) else chunk.chunk_id,
+                    "doc_id": chunk.get("doc_id") if isinstance(chunk, dict) else chunk.doc_id,
+                    "text": chunk.get("text") if isinstance(chunk, dict) else chunk.text,
+                    "score": 1.0,
+                }
+                for chunk in chunks[:top_k]
+            ]
+
+        with patch("agents.rag.retriever.keyword_search", side_effect=fake_keyword_search):
+            with patch("agents.rag.retriever.rerank_with_status", side_effect=lambda q, r, model_name, top_k: (r[:top_k], "applied")):
+                retriever.search_with_details("user_id 조회 정책", top_k=5)
+
+        self.assertEqual(seen["top_k"], 20)
 
     def test_dense_search_uses_index_embeddings(self):
         retriever = build_retriever(

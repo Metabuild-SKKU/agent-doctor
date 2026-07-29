@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import hashlib
 import os
-import re
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -30,9 +29,9 @@ from agents.index.qdrant_store import (
     delete_document_chunks,
     embed,
     ensure_collection,
+    has_math_signal,
     hybrid_search,
     keyword_search,
-    normalize_math_text,
     rerank_with_status,
     search as dense_search,
     upsert_chunks,
@@ -248,6 +247,9 @@ class Retriever:
             for chunk in self.chunks
             if chunk.get("chunk_id")
         }
+        self._corpus_has_math = any(
+            has_math_signal(str(chunk.get("text", ""))) for chunk in self.chunks
+        )
         self.retrieval_scope_id = (
             _first_metadata(self.chunks).get("retrieval_scope_id")
             if self.chunks
@@ -319,7 +321,11 @@ class Retriever:
             if self.settings.use_reranker
             else requested_top_k
         )
-        if self.settings.use_reranker and _looks_like_math_query(query):
+        if (
+            self.settings.use_reranker
+            and self._corpus_has_math
+            and _looks_like_math_query(query)
+        ):
             candidate_k = max(candidate_k, requested_top_k * 12, 60)
         vector_candidate_k = self._vector_candidate_k(candidate_k)
         results: list[dict] = []
@@ -338,7 +344,7 @@ class Retriever:
                     results = hybrid_search(
                         self.client,
                         query_vector=query_vector,
-                        query=normalize_math_text(query),
+                        query=query,
                         chunks=self.chunks,
                         top_k=vector_candidate_k,
                         dense_weight=self.settings.hybrid_dense_weight,
@@ -365,11 +371,7 @@ class Retriever:
         if not results:
             mode = "keyword"
             fallback_used = True
-            results = keyword_search(
-                self.chunks,
-                normalize_math_text(query),
-                top_k=candidate_k,
-            )
+            results = keyword_search(self.chunks, query, top_k=candidate_k)
 
         reranker_attempted = bool(self.settings.use_reranker and results)
         reranked = False
@@ -406,12 +408,7 @@ class Retriever:
 
 
 def _looks_like_math_query(query: str) -> bool:
-    value = query or ""
-    if any(marker in value for marker in ("\\frac", "^", "_", "π", "∑", "∞", "lim")):
-        return True
-    if any(term in value for term in ("분의", "수식", "수열", "급수", "공비", "극한", "접선", "기울기", "적분", "미분")):
-        return True
-    return bool(re.search(r"\b[a-zA-Z]\s*[=<>]|[0-9]+\s*/\s*[0-9]+", value))
+    return has_math_signal(query)
 
 def _populate(
     raw_chunks: list[dict],

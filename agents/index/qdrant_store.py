@@ -39,6 +39,7 @@ DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 VECTOR_DIM = 1024
 
 _LATEX_FRAC_RE = re.compile(r"\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}")
+_PI_FRACTION_RE = re.compile(r"(π|pi)\s*/\s*([0-9]+)", re.IGNORECASE)
 _KOREAN_FRAC_RE = re.compile(
     r"([0-9]+)\s*분의\s*(파이|π|pi|[A-Za-z가-힣0-9]+)",
     re.IGNORECASE,
@@ -539,7 +540,7 @@ def search(
 def normalize_math_text(text: str) -> str:
     """수식/한국어 표현 차이를 sparse·keyword 검색 힌트로 확장한다."""
     value = text or ""
-    if not _has_math_signal(value):
+    if not has_math_signal(value):
         return value
 
     aliases: list[str] = []
@@ -555,6 +556,14 @@ def normalize_math_text(text: str) -> str:
         den = _normalize_math_piece(denominator)
         if num and den:
             aliases.extend([f"{num}/{den}", f"{num} over {den}"])
+
+    for numerator, denominator in _PI_FRACTION_RE.findall(value):
+        num = _normalize_math_piece(numerator)
+        den = _normalize_math_piece(denominator)
+        if num and den:
+            aliases.extend([f"{num}/{den}", f"{num} over {den}"])
+            if num == "pi":
+                aliases.append(f"π/{den}")
 
     for left, right in _MATH_SYMBOL_ALIASES:
         if left in value:
@@ -575,10 +584,14 @@ def normalize_math_text(text: str) -> str:
     return f"{value} {' '.join(unique_aliases)}"
 
 
-def _has_math_signal(value: str) -> bool:
-    if any(marker in value for marker in ("\\frac", "^", "_", "π", "∑", "∞", "lim")):
+def has_math_signal(value: str) -> bool:
+    if any(marker in value for marker in ("\\frac", "^", "π", "∑", "∞")):
         return True
     if any(term in value for term in _MATH_SIGNAL_TERMS):
+        return True
+    if _PI_FRACTION_RE.search(value):
+        return True
+    if re.search(r"(\\lim\b|\blim\s*[_({])", value):
         return True
     return bool(re.search(r"\b[a-zA-Z]\s*[=<>]|[0-9]+\s*/\s*[0-9]+", value))
 
