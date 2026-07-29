@@ -25,6 +25,7 @@ from agents.index.qdrant_store import (
     DEFAULT_RERANKER_MODEL,
     build_sparse_vector,
     count_tokens,
+    detect_document_type,
     embed,
     embed_batch,
     embedding_is_fallback,
@@ -752,6 +753,10 @@ def _chunk_metadata(
     # page_spans 는 문서 단위 정보라 청크마다 복사하면 payload 가 페이지 수만큼 불어난다.
     # 아래에서 이 청크의 "page" 하나로 접어 넣으므로 원본 목록은 뺀다.
     doc_metadata = {k: v for k, v in document.metadata.items() if k != "page_spans"}
+    document_type = detect_document_type(document.content, doc_metadata)
+    doc_metadata.setdefault("document_type", document_type)
+    if document_type == "math":
+        doc_metadata.setdefault("retrieval_profile", "math_formula")
 
     # Serve는 Qdrant payload만 보고 검색 옵션을 복원하므로 retrieval 설정도 같이 저장한다.
     return {

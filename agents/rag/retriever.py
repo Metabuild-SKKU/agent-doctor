@@ -31,6 +31,7 @@ from agents.index.qdrant_store import (
     ensure_collection,
     has_math_signal,
     hybrid_search,
+    is_math_document,
     keyword_search,
     rerank_with_status,
     search as dense_search,
@@ -248,7 +249,9 @@ class Retriever:
             if chunk.get("chunk_id")
         }
         self._corpus_has_math = any(
-            has_math_signal(str(chunk.get("text", ""))) for chunk in self.chunks
+            is_math_document(chunk.get("metadata", {}) or {})
+            or has_math_signal(str(chunk.get("text", "")))
+            for chunk in self.chunks
         )
         self.retrieval_scope_id = (
             _first_metadata(self.chunks).get("retrieval_scope_id")
