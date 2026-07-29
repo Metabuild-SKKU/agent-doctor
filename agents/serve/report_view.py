@@ -307,9 +307,18 @@ def _rec_manual_steps(rule: dict) -> list[dict[str, str]]:
     return steps
 
 
+# bad_gold_answer 소스별 조치 — 사용자 제공 정답은 자동 재생성 대상이 아니라 사람 검수,
+# 우리가 만든 probe 는 재생성 대상. 분기 로직은 rules.py(선언)가 아니라 여기(resolver)에 둔다.
+# 실제 제외·재평가 실행은 Eval 재평가 루프 몫이므로, 여기서는 소스에 맞는 안내만 한다.
+_BAD_GOLD_BY_SOURCE = {
+    "user_log": "사용자 제공 정답 — 자동 재생성 대상 아님. 검수·수정 요청",
+}
+_BAD_GOLD_DEFAULT_ACTION = "자동 생성 probe — 재생성 후 재평가 대상"
+
+
 def _rec_items(label: str, findings: list, probes_by_id: dict) -> list[dict[str, str]]:
     """이 권고가 걸린 질문들을 '어디가 문제인지'와 함께 per-probe 로.
-    corpus_gap 계열은 근거 문서를, bad_gold_answer 는 기대 정답을 함께 보여준다."""
+    corpus_gap 계열은 근거 문서를, bad_gold_answer 는 기대 정답 + 소스별 조치를 보여준다."""
     items: list[dict[str, str]] = []
     seen: set[str] = set()
     for f in findings:
@@ -321,7 +330,12 @@ def _rec_items(label: str, findings: list, probes_by_id: dict) -> list[dict[str,
             if probe is None:
                 continue
             if label == "bad_gold_answer":
-                items.append({"q": probe.question, "where": "", "gold": probe.ground_truth or ""})
+                action = _BAD_GOLD_BY_SOURCE.get(getattr(probe, "source", ""), _BAD_GOLD_DEFAULT_ACTION)
+                items.append({
+                    "q": probe.question,
+                    "where": action,          # 소스별 조치를 위치 슬롯에 실어 렌더 재사용
+                    "gold": probe.ground_truth or "",
+                })
             else:
                 docs = _rec_source_docs(probe)
                 where = ("근거 문서: " + ", ".join(docs)) if docs else "근거 문서 미상"

@@ -95,6 +95,20 @@ class ReportViewRecommendationsTest(unittest.TestCase):
         self.assertEqual(recs[0]["kind"], "prelim")
         self.assertEqual(recs[0]["badge"], ["prelim", "의심"])
 
+    def test_bad_gold_answer_branches_by_probe_source(self):
+        def action(source):
+            probe = Probe(probe_id="q1", question="설립연도?", source=source, ground_truth="1998")
+            f = Finding(finding_id="q1:bad_gold_answer", type="gap", severity="warning",
+                        description="[D그룹] bad_gold_answer", label="bad_gold_answer",
+                        confirmed=True, affected_probes=["q1"], metadata={"group": "D"})
+            recs = build_report_view(self._state([f], [probe]))["recommendations"]
+            return recs[0]["items"][0]["where"]
+
+        # 사용자 제공 정답은 자동 재생성 대상이 아니라 검수 요청
+        self.assertIn("검수", action("user_log"))
+        self.assertNotIn("검수", action("taxonomy"))  # 우리가 만든 probe는 재생성 대상
+        self.assertIn("재생성", action("taxonomy"))
+
     def test_confirmed_actionable_excluded_from_recommendations(self):
         # 확정 자동처방 대상(retrieval_low_rank)은 dxs/rxs 몫 — 남은 권고에서 제외.
         finding = Finding(finding_id="p1:retrieval_low_rank", type="retrieval_failure",

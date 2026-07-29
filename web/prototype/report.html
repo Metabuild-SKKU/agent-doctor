@@ -728,7 +728,10 @@
       var isData = r.kind === 'manual';
       var badgeCls = r.badge[0] === 'prelim' ? 'badge prelim' : 'badge rec-badge-data';
       var items = (r.items || []).map(function (it) {
-        var where = it.gold ? ('기대 정답: ' + esc(it.gold)) : esc(it.where || '');
+        var lines = [];
+        if (it.gold) lines.push('기대 정답: ' + esc(it.gold));
+        if (it.where) lines.push(esc(it.where));
+        var where = lines.join(' · ');
         return '<div class="rec-q"><div class="rq">' + esc(it.q) + '</div>' +
           (where ? '<div class="rw">' + where + '</div>' : '') + '</div>';
       }).join('');
