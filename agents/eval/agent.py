@@ -43,7 +43,9 @@ from agents.eval.types import (
     resolve_llm_concurrency, resolve_probe_source,
     PROBE_SOURCE_MADE, PROBE_SOURCE_TAXONOMY,
 )
-from agents.eval.probe_gen import generate_probes, uses_user_log, _resync_gold_chunk_ids
+from agents.eval.probe_gen import (
+    generate_probes, uses_user_log, _resync_gold_chunk_ids, regenerate_probes,
+)
 from agents.eval.probe_store import (
     DEFAULT_STORE_PATH,
     save_probes,
@@ -60,7 +62,7 @@ from agents.eval.metrics_ragas import (
 from agents.eval.metrics_common import set_context as set_diag_context
 from agents.eval.metrics_basic import _compute_metrics
 from agents.eval.diagnose import diagnose, _is_success
-from agents.eval.report import build_report
+from agents.eval.report import build_report, is_bad_gold_probe
 
 
 _EVAL_CACHE_ENV_KEYS = (
@@ -315,6 +317,27 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
 _MODE_NAMES = {Mode.FAST: "fast", Mode.STANDARD: "standard", Mode.DEEP: "deep", Mode.FULL: "full"}
 
 
+def _maybe_regenerate_bad_gold(
+    state: AgentDoctorState,
+    records: list[EvalRecord],
+    probes: list[Probe],
+    probe_version: str,
+) -> None:
+    """bad_gold_answer 로 확정된 우리 probe 를 재생성해 probe 파일에 반영한다(Option A).
+    이번 방문의 report/records/snapshot 은 바꾸지 않는다 — 다음 실행이 재평가한다."""
+    bad_probes = [r.probe for r in records if is_bad_gold_probe(r)]
+    if not bad_probes:
+        return
+    replaced = regenerate_probes(bad_probes, state)
+    if not replaced:
+        # 재생성 불가(전부 user_log·멀티홉·LLM 실패 등) → 리포트의 검수 요청으로만 남는다.
+        return
+    updated = [replaced.get(p.probe_id, p) for p in probes]
+    save_probes(updated, probe_version)
+    print(f"[Eval] bad_gold probe {len(replaced)}개 재생성 → 다음 실행에서 재평가 "
+          f"(재생성 불가 {len(bad_probes) - len(replaced)}개는 사용자 검수 요청)")
+
+
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
@@ -511,6 +534,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 rec.findings = diagnose(rec, mode)
                 _log_probe(i, len(records), rec)
             _log_diagnosis_summary(records)
+
+        # ── STEP4.5: bad_gold probe 재생성 (Option A — 다음 실행에서 재평가) ──
+        # 정답셋 오류로 확정된 '우리(llm_generated)' probe 를 같은 근거 청크에서 재합성해
+        # probe 파일에 반영한다. 이번 방문의 report/records/snapshot 은 건드리지 않아(현
+        # 진단·점수 일관) 다음 파이프라인 실행이 재생성된 probe 를 로드해 재평가한다.
+        # (user_log·멀티홉은 regenerate_probes 가 제외 → 리포트의 사용자 검수 요청으로 남는다.)
+        _maybe_regenerate_bad_gold(state, records, probes, probe_version)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
         with step("Eval", 5, "리포트"):

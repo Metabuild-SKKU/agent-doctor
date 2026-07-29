@@ -33,9 +33,14 @@ from agents.eval.diagnose import _oracle_ok   # oracle 통과 판정은 진단�
 _RAGAS_KEYS = ("faithfulness", "context_precision", "context_recall", "response_relevancy")
 
 
-def _is_bad_gold_probe(record: EvalRecord) -> bool:
-    """이 probe 가 정답셋 오류(bad_gold_answer)로 확정 판정됐나 — 점수 제외 대상."""
+def is_bad_gold_probe(record: EvalRecord) -> bool:
+    """이 probe 가 정답셋 오류(bad_gold_answer)로 확정 판정됐나 — 점수 제외 + 재생성 대상.
+    Eval agent(재생성)와 build_report(점수 제외)가 공유한다."""
     return any(f.label == "bad_gold_answer" and f.confirmed for f in record.findings)
+
+
+# 하위호환 별칭(내부 호출부).
+_is_bad_gold_probe = is_bad_gold_probe
 
 
 def build_report(records: list[EvalRecord], iteration: int, mode: int | None = None) -> DiagnosticReport:
