@@ -46,7 +46,11 @@ class AgentDoctorState:
         # Index가 실제 지원하는 모델만 지정할 것 — 미지원 문자열은
         # SentenceTransformer()에 그대로 전달되어 로드가 멈출 수 있음
         "embedding_model": "BAAI/bge-m3",
-        "use_hybrid": True,
+        # 검증 baseline은 dense-only(off)로 둔다 — use_reranker/use_mmr과 같은 취지.
+        # hybrid가 켜져 있으면 retrieval_lexical_mismatch 실패 모드가 잘 안 생기고
+        # enable_hybrid 처방도 no-op으로 걸러져 "단어 불일치 → hybrid" 개선을 못 보여준다.
+        # (retriever가 dense + keyword fallback을 지원해 off로도 안전.)
+        "use_hybrid": False,
         # baseline 검색 결과를 먼저 측정한 뒤 retrieval_low_rank 처방이 켠다.
         # 모델명과 후보 수를 상태에 명시해 Eval과 Serve가 같은 reranker 계약을 쓴다.
         "use_reranker": False,
