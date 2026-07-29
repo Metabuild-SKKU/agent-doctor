@@ -339,6 +339,11 @@ def _rec_items(label: str, findings: list, probes_by_id: dict) -> list[dict[str,
             else:
                 docs = _rec_source_docs(probe)
                 where = ("근거 문서: " + ", ".join(docs)) if docs else "근거 문서 미상"
+                # Eval이 missing_gold_ids를 실었으면 '전체 gold 중 몇 개가 없는지'를 정밀 표기.
+                missing = f.metadata.get("missing_gold_ids") if f.metadata else None
+                total = len(getattr(probe, "gold_chunk_ids", None) or [])
+                if missing and total:
+                    where += f" (gold {total}개 중 {len(missing)}개 누락)"
                 items.append({"q": probe.question, "where": where, "gold": ""})
     return items
 

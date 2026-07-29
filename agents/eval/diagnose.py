@@ -41,7 +41,7 @@ from agents.eval.metrics_basic import (            # tier1
     _gold_chunk_evidence_density, _oversized_gold_spans,
 )
 from agents.eval.metrics_search import (           # tier2
-    _gold_ranks, _bm25_hits_gold, _gold_in_corpus,
+    _gold_ranks, _bm25_hits_gold, _gold_in_corpus, _gold_corpus_membership,
 )
 from agents.eval.metrics_ragas import (            # tier3
     _compute_ragas_real, _compute_ragas_oracle, _abstention_judged, _reasoning_mode_oracle,
@@ -734,16 +734,32 @@ def bad_gold_answer_oracle(record: EvalRecord) -> Optional[Finding]:
     return None
 
 
+def _missing_gold_ids(record: EvalRecord) -> list[str]:
+    """코퍼스에 없는 gold 청크 id 목록. Optimize/Serve 가 '어느 근거가 빠졌는지'를
+    사용자에게 콕 집어 보여줄 수 있게 finding.metadata 로 넘긴다(멤버십은 Eval 자원이라
+    소비처가 스스로 못 구함). 미측정이면 빈 리스트."""
+    membership = _gold_corpus_membership(record) or {}
+    return [g for g, present in membership.items() if not present]
+
+
+def _attach_missing_gold(finding: Optional[Finding], record: EvalRecord) -> Optional[Finding]:
+    if finding is not None:
+        missing = _missing_gold_ids(record)
+        if missing:
+            finding.metadata["missing_gold_ids"] = missing
+    return finding
+
+
 def corpus_gap(record: EvalRecord) -> Optional[Finding]:
     """
     필요한 자료가 코퍼스에 없음(단일홉).
     확정: 코퍼스에 gold 없음(tier2).
     """
     if _gold_in_corpus(record) is False and not _is_multi_hop(record):
-        return _finding(
+        return _attach_missing_gold(_finding(
             record, "corpus_gap", "gap", confirmed=True,
             reason=f"gold_in_corpus=False, qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
-        )
+        ), record)
     return None
 
 
@@ -753,10 +769,10 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
     확정: 코퍼스에 gold 없음(tier2).
     """
     if _gold_in_corpus(record) is False and _is_multi_hop(record):
-        return _finding(
+        return _attach_missing_gold(_finding(
             record, "corpus_gap_partial_hop", "gap", confirmed=True,
             reason=f"gold_in_corpus=False, qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
-        )
+        ), record)
     return None
 
 

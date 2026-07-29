@@ -85,6 +85,17 @@ class ReportViewRecommendationsTest(unittest.TestCase):
         self.assertEqual(rec["items"][0]["q"], "재택근무 상한은?")
         self.assertIn("policy_2024", rec["items"][0]["where"])  # 어디가 문제인지
 
+    def test_missing_gold_ids_shows_precise_count(self):
+        # Eval이 missing_gold_ids를 실으면 'gold N개 중 M개 누락'으로 정밀 표기.
+        probe = Probe(probe_id="u12", question="q?", source="user_log",
+                      gold_chunk_ids=["c1", "c2", "c3"], gold_doc_id="policy_2024")
+        finding = Finding(finding_id="u12:corpus_gap", type="gap", severity="critical",
+                          description="[D그룹] corpus_gap", label="corpus_gap",
+                          confirmed=True, affected_probes=["u12"],
+                          metadata={"group": "D", "missing_gold_ids": ["c2", "c3"]})
+        recs = build_report_view(self._state([finding], [probe]))["recommendations"]
+        self.assertIn("3개 중 2개 누락", recs[0]["items"][0]["where"])
+
     def test_preliminary_finding_becomes_prelim_recommendation(self):
         finding = Finding(finding_id="p1:too_long_context", type="context_failure",
                           severity="warning", description="[예비] [C그룹] too_long_context",

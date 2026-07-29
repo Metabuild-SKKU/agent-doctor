@@ -60,9 +60,10 @@ def _bm25_hits_gold(record: EvalRecord):
     return _cache(record, "bm25_hits_gold", compute)
 
 
-def _gold_in_corpus(record: EvalRecord):
-    """gold 가 코퍼스에 존재하나(멤버십 조회). True→missing_gold / False→corpus_gap.
-    gold 전부 존재 True / 하나라도 없으면 False / gold·자원 없으면 None."""
+def _gold_corpus_membership(record: EvalRecord):
+    """gold 청크별 코퍼스 존재 여부 {gold_id: bool}. gold·자원 없으면 None.
+    코퍼스에 없는 gold 를 콕 집어야(missing_gold_ids) 하는 소비처(Optimize/Serve)를 위해
+    probe 단위 bool 로 접지 않고 gold 별로 남긴다."""
     if active_mode() < Mode.STANDARD or not _ctx.corpus_ids:
         return None
 
@@ -70,6 +71,13 @@ def _gold_in_corpus(record: EvalRecord):
         golds = record.probe.gold_chunk_ids
         if not golds:
             return None
-        return all(g in _ctx.corpus_ids for g in golds)  # 코퍼스 전체와 대조
+        return {g: g in _ctx.corpus_ids for g in golds}  # 코퍼스 전체와 대조
 
-    return _cache(record, "gold_in_corpus", compute)
+    return _cache(record, "gold_corpus_membership", compute)
+
+
+def _gold_in_corpus(record: EvalRecord):
+    """gold 가 코퍼스에 존재하나(멤버십 조회). True→missing_gold / False→corpus_gap.
+    gold 전부 존재 True / 하나라도 없으면 False / gold·자원 없으면 None."""
+    membership = _gold_corpus_membership(record)
+    return None if membership is None else all(membership.values())
