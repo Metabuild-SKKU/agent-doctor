@@ -314,7 +314,12 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "chunking_underchunking": {
         "group": "A",
-        "status": "draft",
+        # Eval이 확정 신호(gold 청크 내부 근거 밀도↓ + context_precision↓)로 발행하고
+        # (diagnose.chunking_underchunking, PR #55에서 confirmed=True로 승격), 유일 처방
+        # decrease_chunk_size가 chunk_size 경로로 실행 가능하므로 ready로 승격한다.
+        # NOTE: PR #55 병합 전(Eval이 아직 예비 발행)에는 planner가 f.confirmed=False로
+        #   안전하게 스킵하므로 forward-compatible하다(예비면 ready여도 발동하지 않음).
+        "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_precision"],  # 큰 청크에 섞인 무관 내용 → 유용성 개선
         "prescriptions": [
