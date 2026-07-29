@@ -140,16 +140,27 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "cost": None,           # 숫자 튜닝 필요
                 "applies_when": {"topic_cluster": ["none"]},
             },
+            # 청킹 전략 교체 case 1 — 상급 전략 2개를 순서 후보로 두고 Eval이 실측 채택한다.
+            # 어느 상급 전략이 나은지는 코퍼스 타입(평문 vs 마크다운 구조) 의존이라 하나로
+            # 못 박지 않는다. 진단(경계에서 의미 희석)에 직결된 recursive_sentence를 먼저,
+            # 구조형 코퍼스용 markdown_recursive를 다음 후보로 둔다. baseline과 같은 값은
+            # no-op 필터가 자동 제외한다(예: 이미 markdown_recursive면 그 후보만 스킵).
             {
-                # 청킹 전략 교체 case 1에 해당 (초안 누락분 보강)
-                "id": "switch_chunking_strategy",
+                "id": "switch_to_recursive_sentence",
                 "patch": {"chunker.strategy": "recursive_sentence"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
                 "applies_when": {"topic_cluster": ["none"]},
-                # NOTE: chunking_context_mismatch와 동일 처방(Case1: 청크 경계 의미 희석).
                 # Index가 recursive_sentence 전략을 CHUNK_STRATEGIES에 등록해 실행 가능하다
                 # (chunker.strategy → chunk_strategy 매핑, chunking_strategy capability=True).
+            },
+            {
+                "id": "switch_to_markdown_recursive",
+                "patch": {"chunker.strategy": "markdown_recursive"},
+                "reindex": True,
+                "cost": None,           # 숫자 튜닝 필요
+                "applies_when": {"topic_cluster": ["none"]},
+                # 구조형(마크다운) 코퍼스면 섹션·문단 보존이 검색에 더 유리할 수 있다.
             },
         ],
     },
@@ -284,15 +295,24 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "reindex": True,
                 "cost": None,
             },
+            # 청킹 전략 교체 — 상급 전략 2개를 순서 후보로 두고 Eval이 실측 채택.
+            # recursive_sentence(문장 보존, 경계 잘림 직결 처방) 먼저, markdown_recursive
+            # (구조형 코퍼스용) 다음. baseline과 같은 값은 no-op 필터가 자동 제외한다.
             {
-                "id": "switch_chunking_strategy",
+                "id": "switch_to_recursive_sentence",
                 "patch": {"chunker.strategy": "recursive_sentence"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
             },
+            {
+                "id": "switch_to_markdown_recursive",
+                "patch": {"chunker.strategy": "markdown_recursive"},
+                "reindex": True,
+                "cost": None,           # 숫자 튜닝 필요
+            },
         ],
-        # NOTE: 세 처방 모두 현재 index_config로 실행 가능하다.
-        # (recursive_sentence 전략이 Index CHUNK_STRATEGIES에 등록됨 — chunker.strategy 매핑.)
+        # NOTE: 모든 처방이 현재 index_config로 실행 가능하다.
+        # (두 전략 모두 Index CHUNK_STRATEGIES에 등록됨 — chunker.strategy 매핑.)
     },
 
     "chunking_overchunking": {
