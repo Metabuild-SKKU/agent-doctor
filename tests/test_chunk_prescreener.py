@@ -69,6 +69,24 @@ class ChunkPrescreenerTest(unittest.TestCase):
             "structural_evidence_windows",
         )
 
+    def test_single_chunk_candidate_is_compared_with_baseline(self):
+        request = self.make_request(
+            path="chunker.chunk_size",
+            values=[400],
+            baseline={"chunk_size": 512, "chunk_overlap": 0},
+            spans=[
+                {"doc_id": "doc-1", "start": 100, "end": 350},
+            ],
+        )
+
+        result = run(request, previewer=fixed_previewer)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.best_config, {"chunker.chunk_size": 400})
+        self.assertEqual(len(result.trial_results), 2)
+        self.assertEqual(result.metadata["budget_used"], 1)
+        self.assertFalse(result.metadata["best_is_baseline"])
+
     def test_chunk_overlap_selects_smallest_boundary_recovery(self):
         request = self.make_request(
             path="chunker.chunk_overlap",

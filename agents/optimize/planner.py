@@ -96,6 +96,14 @@ _SYMBOLIC_FALLBACK_ALLOWED: dict[str, frozenset[str]] = {
         "invalid_policy",
     }),
 }
+_CHUNK_PRECHECK_PATHS = frozenset({
+    "chunker.chunk_size",
+    "chunker.chunk_overlap",
+})
+_CHUNK_PRECHECK_GROUNDING_STATUSES = frozenset({
+    "grounded",
+    "explicit_candidates",
+})
 
 _EvidenceAnalysis = tuple[list[dict[str, Any]], dict[str, Any] | None]
 
@@ -764,6 +772,51 @@ def _ground_chunk_size_candidates(
     raw_target = target_span * (1 + policy["margin_ratio"])
     step = policy["rounding_step"]
     evidence_target = max(step, int(math.ceil(raw_target / step) * step))
+    metadata: dict[str, Any] = {
+        **(evidence_metadata or {}),
+        "status": "grounded",
+        "source": "structural_evidence_windows",
+        "span_count": len(lengths),
+        "min": min(lengths),
+        "p50": p50,
+        "p85": p85,
+        "p95": p95,
+        "max": max(lengths),
+        "target_quantile": policy["target_quantile"],
+        "margin_ratio": policy["margin_ratio"],
+        "current_chunk_size": current_int,
+        "evidence_target_chunk_size": evidence_target,
+        "max_step_ratio": policy["max_step_ratio"],
+        "direction": direction,
+    }
+    if (direction == "decrease" and evidence_target >= current_int) or (
+        direction == "increase" and evidence_target <= current_int
+    ):
+        metadata["status"] = "direction_conflict"
+        return None, metadata
+
+    # baseline이 절대 안전 범위 밖이면 max_step_ratio를 지키면서 범위 안으로
+    # 들어올 수 없는 불연속 구간이 생긴다. evidence 방향과 일치할 때만 가장
+    # 가까운 절대 경계로 복구하고, 실제 적용 여부는 prescreener가 판단한다.
+    boundary_target: int | None = None
+    boundary_name: str | None = None
+    if direction == "decrease" and current_int > max_chunk_size:
+        boundary_target = max_chunk_size
+        boundary_name = "max_chunk_size"
+    elif direction == "increase" and current_int < min_chunk_size:
+        boundary_target = min_chunk_size
+        boundary_name = "min_chunk_size"
+    if boundary_target is not None:
+        metadata.update({
+            "target_chunk_size": boundary_target,
+            "candidate_lower_limit": boundary_target,
+            "candidate_upper_limit": boundary_target,
+            "safety_bound_clamp": boundary_name,
+            "max_step_ratio_applied": False,
+            "generated_candidates": [boundary_target],
+        })
+        return [boundary_target], metadata
+
     limits = _chunk_candidate_limits(
         current_int,
         step,
@@ -789,32 +842,12 @@ def _ground_chunk_size_candidates(
             "max_step_ratio": policy["max_step_ratio"],
         }
     target = min(max(evidence_target, lower_limit), upper_limit)
-
-    metadata: dict[str, Any] = {
-        "status": "grounded",
-        "source": "structural_evidence_windows",
-        "span_count": len(lengths),
-        "min": min(lengths),
-        "p50": p50,
-        "p85": p85,
-        "p95": p95,
-        "max": max(lengths),
-        "target_quantile": policy["target_quantile"],
-        "margin_ratio": policy["margin_ratio"],
-        "current_chunk_size": current_int,
-        "evidence_target_chunk_size": evidence_target,
+    metadata.update({
         "target_chunk_size": target,
         "candidate_lower_limit": lower_limit,
         "candidate_upper_limit": upper_limit,
-        "max_step_ratio": policy["max_step_ratio"],
-        "direction": direction,
-        **(evidence_metadata or {}),
-    }
-    if (direction == "decrease" and evidence_target >= current_int) or (
-        direction == "increase" and evidence_target <= current_int
-    ):
-        metadata["status"] = "direction_conflict"
-        return None, metadata
+        "max_step_ratio_applied": True,
+    })
 
     candidates: list[int] = []
     for fraction in policy["path_fractions"]:
@@ -1323,7 +1356,23 @@ def _build_request(
         and isinstance(next(iter(selected_space.values())), (list, tuple))
         else 1
     )
-    use_internal = candidate_count > 1
+    selected_path = _space_path(selected_space)
+    candidate_grounding = (
+        candidates[0].metadata.get("candidate_grounding")
+        if candidates
+        else None
+    )
+    grounding_status = (
+        candidate_grounding.get("status")
+        if isinstance(candidate_grounding, dict)
+        else None
+    )
+    use_chunk_precheck = (
+        candidate_count > 0
+        and selected_path in _CHUNK_PRECHECK_PATHS
+        and grounding_status in _CHUNK_PRECHECK_GROUNDING_STATUSES
+    )
+    use_internal = candidate_count > 1 or use_chunk_precheck
     metadata: dict[str, Any] = {
         # 후보별 trade-off의 최종 심판은 Eval의 정규화 composite_score(0~1)다.
         # 신뢰도 축이 연속값이 된 뒤 composite 이 매끄러워져, 표시·게이트와 같은 지표로
@@ -1341,18 +1390,13 @@ def _build_request(
             if isinstance(capability, dict)
         },
     }
-    if candidates and "candidate_grounding" in candidates[0].metadata:
-        metadata["candidate_grounding"] = dict(
-            candidates[0].metadata["candidate_grounding"]
-        )
-    if use_internal and _space_path(selected_space) in {
-        "chunker.chunk_size",
-        "chunker.chunk_overlap",
-    }:
+    if isinstance(candidate_grounding, dict):
+        metadata["candidate_grounding"] = dict(candidate_grounding)
+    if use_internal and selected_path in _CHUNK_PRECHECK_PATHS:
         metadata["chunk_precheck_context"] = _chunk_precheck_context(
             state,
             findings,
-            path=_space_path(selected_space),
+            path=selected_path,
             evidence_analysis=evidence_analysis,
         )
     return OptimizationRequest(
