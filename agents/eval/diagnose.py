@@ -900,7 +900,6 @@ def corpus_gap(record: EvalRecord) -> Optional[Finding]:
     """
     필요한 자료가 코퍼스에 없음(단일홉).
     확정: gold 중 코퍼스에 없는 것이 있음(tier2).
-    (현재 diagnose 배선에서 제외 — dormant. 아래 diagnose 주석 참조.)
     """
     if _corpus_gap_premise(record) and not _is_multi_hop(record):
         return _gap_finding(record, "corpus_gap")
@@ -911,7 +910,6 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
     """
     멀티홉 중 일부 hop 근거만 코퍼스에 없음.
     확정: gold 중 코퍼스에 없는 것이 있음(tier2).
-    (현재 diagnose 배선에서 제외 — dormant. 아래 diagnose 주석 참조.)
     """
     if _corpus_gap_premise(record) and _is_multi_hop(record):
         return _gap_finding(record, "corpus_gap_partial_hop")
@@ -1104,9 +1102,8 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
     if 0 <= record.recall_at_k < 1:                     # A: 검색 실패 (gold 있는데 일부 미검색)
         if _retrieval_fixable(record):                  # 코퍼스 밖·무응답 기대는 검색 몫이 아니다
             findings.append(_pick(record, _RETRIEVAL_CAUSE))
-        # D(corpus_gap / corpus_gap_partial_hop)는 배선에서 제외 — dormant(팀 결정).
-        # 라벨 함수는 그대로 두어 재배선만으로 되살아난다. 단 지금은 gold 가 전부 코퍼스 밖인
-        # 실패에 어떤 라벨도 남지 않는다(A 는 _retrieval_fixable 로 닫히고 D 는 여기서 빠짐).
+        findings.append(corpus_gap(record))             # D: 코퍼스에 gold 없음 (additive)
+        findings.append(corpus_gap_partial_hop(record))
     if _generation_failed(record):                      # B: 생성 실패
         findings.append(_pick(record, _GENERATION_CAUSE))
     if _context_failed(record):                         # C: context 구조

@@ -1213,19 +1213,15 @@ class GapLabelTest(_DiagnoseTestBase):
         metrics_common.set_mode(Mode.FAST)
         self.assertIsNone(diagnose.generation_abstention_failure(self._gap()))
 
-    def test_gap_is_dormant_but_abstention_label_remains(self):
-        """corpus_gap 계열은 배선에서 빠졌다(dormant) — 라벨 함수는 살아 있고 B 만 남는다.
-
-        [설계 논의 중] 팀 결정으로 D 를 diagnose 에서 제외했다. 되살릴 때 이 테스트가 뒤집힌다.
-        """
-        rec = self._gap()
-        self.assertIsNotNone(diagnose.corpus_gap(rec))         # 함수는 그대로 판정한다
-        labels = {f.label for f in diagnose.diagnose(rec, Mode.STANDARD)}
-        self.assertNotIn("corpus_gap", labels)                 # 배선에서 빠짐
+    def test_gap_emits_both_corpus_gap_and_abstention_label(self):
+        """자료 보강(D)과 기권 동작(B)은 처방이 달라 둘 다 남아야 한다.
+        (B 슬롯은 오라클 답이 없어 안 열리므로 additive 경로로만 도달한다.)"""
+        labels = {f.label for f in diagnose.diagnose(self._gap(), Mode.STANDARD)}
+        self.assertIn("corpus_gap", labels)
         self.assertIn("generation_abstention_failure", labels)
 
-    def test_mixed_corpus_keeps_retrieval_label_without_gap(self):
-        """혼합 코퍼스 — 코퍼스에 있는 몫은 A 라벨로 남고, D 는 dormant 라 빠진다.
+    def test_mixed_corpus_emits_both_retrieval_and_gap_labels(self):
+        """혼합 코퍼스 — 코퍼스에 있는 몫은 A 라벨, 없는 몫은 D 라벨로 함께 남는다.
 
         기권 라벨은 붙으면 안 된다: 근거 일부는 실제로 코퍼스에 있으니 '기권했어야 했다'가
         같은 record 의 A 라벨(검색을 고쳐라)과 정면으로 모순되는 처방이 된다.
@@ -1236,7 +1232,7 @@ class GapLabelTest(_DiagnoseTestBase):
         labels = {f.label for f in diagnose.diagnose(rec, Mode.STANDARD)}
         self.assertFalse(diagnose._f1_ok(rec))                 # 기권 분기 도달 전제
         self.assertIn("retrieval_missing_gold", labels)
-        self.assertNotIn("corpus_gap", labels)
+        self.assertIn("corpus_gap", labels)
         self.assertNotIn("generation_abstention_failure", labels)
 
     def test_missing_gold_ids_lists_only_absent_gold(self):
