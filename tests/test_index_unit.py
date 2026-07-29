@@ -115,6 +115,56 @@ class ChunkingTests(unittest.TestCase):
         self.assertTrue(all(chunk.section is not None for chunk in stage_3))
         self.assertTrue(all(len(chunk.text) <= 40 for chunk in stage_3))
 
+    def test_math_document_keeps_problem_boundaries(self):
+        document = _document(
+            "math",
+            "\n".join(
+                [
+                    "SET 17",
+                    "171번 x=2cos^3(t), y=3sin^3(t)의 접선 기울기를 구하라.",
+                    "해설: dy/dx를 계산한다.",
+                    "172번 적분법 문제의 정답은 58이다.",
+                    "해설: 표의 정답란을 확인한다.",
+                    "173번 수열 Sn의 첫째항과 공비를 이용해 급수의 합을 구하라.",
+                    "해설: 무한등비급수 공식을 사용한다.",
+                ]
+            ),
+        )
+        document.metadata["document_type"] = "math"
+
+        drafts = _chunk_document(
+            document,
+            chunk_size=120,
+            chunk_overlap=20,
+            strategy="markdown_recursive",
+        )
+
+        sections = [draft.section for draft in drafts]
+        self.assertIn("문제 171", sections)
+        self.assertIn("문제 172", sections)
+        self.assertIn("문제 173", sections)
+        for draft in drafts:
+            if draft.section == "문제 172":
+                self.assertIn("정답은 58", draft.text)
+                self.assertNotIn("173번", draft.text)
+            self.assertEqual(document.content[draft.start : draft.end], draft.text)
+
+    def test_general_numbered_document_does_not_use_math_problem_sections(self):
+        document = _document(
+            "policy",
+            "1. API rate limit 정책을 설명한다.\n2. user_id별 요청 제한을 설명한다.",
+        )
+
+        drafts = _chunk_document(
+            document,
+            chunk_size=200,
+            chunk_overlap=20,
+            strategy="markdown_recursive",
+        )
+
+        self.assertEqual(len(drafts), 1)
+        self.assertIsNone(drafts[0].section)
+
 
 class IndexRunTests(unittest.TestCase):
     def _state(self) -> AgentDoctorState:

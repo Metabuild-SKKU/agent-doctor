@@ -175,6 +175,61 @@ def _split_markdown_sections(text: str) -> list[_SectionDraft]:
     return [_SectionDraft(text=body, section=None, start=start, end=end)] if body else []
 
 
+_MATH_PROBLEM_MARKER_RE = re.compile(
+    r"^\s*(?:(?:(?:문제|예제|유제|연습문제)\s*)?(?:\[|\()?(?P<number>\d{1,4})(?:\]|\))?\s*(?:번|[.)])?|SET\s*(?P<set_number>\d{1,3}))(?=\s|$|[:：])",
+    re.IGNORECASE,
+)
+
+
+def _math_problem_marker(line: str) -> str | None:
+    match = _MATH_PROBLEM_MARKER_RE.match(line)
+    if not match:
+        return None
+    number = match.group("number") or match.group("set_number")
+    if not number:
+        return None
+    prefix = "SET" if match.group("set_number") else "문제"
+    return f"{prefix} {number}"
+
+
+def _split_math_problem_sections(document: Document) -> list[_SectionDraft]:
+    """수학 교재 PDF에서 문제 번호 단위로 chunk 경계를 보존한다."""
+    text = document.content
+    starts: list[tuple[int, str]] = []
+    cursor = 0
+    for line in text.splitlines(keepends=True):
+        marker = _math_problem_marker(line.strip())
+        if marker:
+            starts.append((cursor, marker))
+        cursor += len(line)
+
+    if len(starts) < 2:
+        return []
+
+    sections: list[_SectionDraft] = []
+    for index, (start, marker) in enumerate(starts):
+        end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
+        body, body_start, body_end = _trimmed_slice(text, start, end)
+        if body:
+            sections.append(
+                _SectionDraft(
+                    text=body,
+                    section=marker,
+                    start=body_start,
+                    end=body_end,
+                )
+            )
+    return sections
+
+
+def _split_document_sections(document: Document) -> list[_SectionDraft]:
+    if detect_document_type(document.content, document.metadata) == "math":
+        math_sections = _split_math_problem_sections(document)
+        if math_sections:
+            return math_sections
+    return _split_markdown_sections(document.content)
+
+
 # recursive chunker가 문맥 경계에서 끊도록 후보 순서를 둔다.
 def _preferred_boundary(text: str, start: int, hard_end: int) -> int:
     minimum = start + max(1, (hard_end - start) // 2)
@@ -284,7 +339,7 @@ def _markdown_strategy(
             start=section.start,
             end=section.end,
         )
-        for section in _split_markdown_sections(document.content)
+        for section in _split_document_sections(document)
     ]
 
 
@@ -308,7 +363,7 @@ def _markdown_recursive_strategy(
     chunk_overlap: int,
 ) -> list[_ChunkDraft]:
     drafts: list[_ChunkDraft] = []
-    for section in _split_markdown_sections(document.content):
+    for section in _split_document_sections(document):
         drafts.extend(
             _recursive_chunks(
                 section.text,
@@ -400,6 +455,7 @@ def _chunk_document(
 # 청크/임베딩 결과를 바꾸는 설정만 재사용 판단에 반영한다.
 def _index_signature(config: dict) -> str:
     relevant = {
+        "chunk_preprocess_version": 1,
         "chunk_size": config["chunk_size"],
         "chunk_overlap": config["chunk_overlap"],
         "chunk_strategy": _configured_chunk_strategy(config),
