@@ -366,6 +366,14 @@ def _prepare_search_space(
     supported, reason = is_capability_supported(capability, capabilities)
     if not supported:
         return {}, reason or "unsupported_capability"
+    if (
+        path == "reranker.candidate_count"
+        and not bool(get_current_value(baseline_config, "reranker.enabled"))
+    ):
+        # 후보 수 확대는 reranker가 실제로 켜져 있을 때만 의미가 있다. 비활성
+        # 상태에서 값을 바꾸면 Eval 실행 횟수가 0인 채 롤백되어 같은 처방이
+        # 다시 선택되는 no-progress 순환이 생길 수 있다.
+        return {}, "reranker_disabled"
     if path.startswith("reranker.") and isinstance(
         runtime_capabilities,
         dict,

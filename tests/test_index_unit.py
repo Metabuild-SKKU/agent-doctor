@@ -85,7 +85,12 @@ class ChunkingTests(unittest.TestCase):
             "# 설치\n설치 방법입니다.\n\n## Windows\nPowerShell을 사용합니다.",
         )
 
-        drafts = _chunk_document(document, chunk_size=100, chunk_overlap=10)
+        drafts = _chunk_document(
+            document,
+            chunk_size=100,
+            chunk_overlap=10,
+            strategy="markdown_recursive",
+        )
 
         self.assertEqual(drafts[0].section, "설치")
         self.assertEqual(drafts[1].section, "설치 > Windows")
@@ -131,6 +136,18 @@ class ChunkingTests(unittest.TestCase):
         self.assertTrue(all(chunk.section is None for chunk in stage_2))
         self.assertTrue(all(chunk.section is not None for chunk in stage_3))
         self.assertTrue(all(len(chunk.text) <= 40 for chunk in stage_3))
+
+    def test_default_chunk_strategy_is_fixed(self):
+        document = _document(
+            "guide",
+            "# 설치\n" + ("설치 설명 문장입니다. " * 8),
+        )
+
+        drafts = _chunk_document(document, 40, 8)
+
+        self.assertTrue(drafts)
+        self.assertTrue(all(chunk.section is None for chunk in drafts))
+        self.assertTrue(all(len(chunk.text) <= 40 for chunk in drafts))
 
 
 class IndexRunTests(unittest.TestCase):
@@ -195,6 +212,7 @@ class IndexRunTests(unittest.TestCase):
         content = "# 규정\n재택근무는 주 2일까지 가능합니다."
         state.documents = [_document("doc-1", content), _document("doc-2", content)]
         state.index_config["use_hybrid"] = True
+        state.index_config["chunk_strategy"] = "markdown_recursive"
 
         result = run(state)
 
