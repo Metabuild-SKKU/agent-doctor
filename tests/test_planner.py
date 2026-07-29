@@ -331,6 +331,41 @@ class PlannerCandidateListTest(unittest.TestCase):
             ("too_long_context", "context_compression"),
         }
 
+    @staticmethod
+    def _chunk_policy():
+        """chunk_size 후보 경계 테스트용 기본 정책."""
+
+        return {
+            "target_quantile": 0.85,
+            "margin_ratio": 0.20,
+            "rounding_step": 50,
+            "path_fractions": [0.33, 0.66, 1.0],
+            "candidate_count": 3,
+            "min_span_count": 3,
+            "max_step_ratio": 0.25,
+            "min_chunk_size": 200,
+            "max_chunk_size": 1500,
+        }
+
+    @staticmethod
+    def _evidence_analysis(length: int = 100):
+        """동일 길이 evidence window 세 개와 provenance를 만든다."""
+
+        return (
+            [
+                {
+                    "doc_id": "d1",
+                    "start": index * (length + 10),
+                    "end": index * (length + 10) + length,
+                }
+                for index in range(3)
+            ],
+            {
+                "status": "grounded",
+                "source": "structural_evidence_windows",
+            },
+        )
+
     def test_chunk_size_does_not_shrink_below_undelimited_evidence(self):
         finding = make_finding("p1", "too_long_context")
         state = AgentDoctorState(
@@ -524,6 +559,122 @@ class PlannerCandidateListTest(unittest.TestCase):
             planner._chunk_candidate_limits(1400, 50, policy),
             (1050, 1500),
         )
+        self.assertIsNone(
+            planner._chunk_candidate_limits(10000, 50, policy),
+        )
+
+    def test_chunk_size_direction_at_absolute_limit_has_dedicated_status(self):
+        cases = [
+            (200, "decrease"),
+            (1500, "increase"),
+            (100, "decrease"),
+            (10000, "increase"),
+        ]
+
+        for current, direction in cases:
+            with self.subTest(current=current, direction=direction):
+                state = AgentDoctorState(index_config={
+                    "chunk_size": current,
+                    "chunk_candidate_policy": self._chunk_policy(),
+                })
+
+                values, metadata = planner._ground_chunk_size_candidates(
+                    [],
+                    state,
+                    direction,
+                    self._evidence_analysis(),
+                )
+
+                self.assertIsNone(values)
+                self.assertEqual(metadata["status"], "at_safe_limit")
+                self.assertFalse(planner._allows_symbolic_fallback(
+                    "chunker.chunk_size",
+                    metadata,
+                ))
+
+    def test_single_safe_chunk_candidate_at_boundary_is_kept(self):
+        state = AgentDoctorState(index_config={
+            "chunk_size": 250,
+            "chunk_candidate_policy": self._chunk_policy(),
+        })
+
+        values, metadata = planner._ground_chunk_size_candidates(
+            [],
+            state,
+            "decrease",
+            self._evidence_analysis(),
+        )
+
+        self.assertEqual(values, [200])
+        self.assertEqual(metadata["status"], "grounded")
+        self.assertEqual(metadata["generated_candidates"], [200])
+
+    def test_out_of_range_current_only_generates_absolute_bounded_candidates(self):
+        state = AgentDoctorState(index_config={
+            "chunk_size": 1600,
+            "chunk_candidate_policy": self._chunk_policy(),
+        })
+
+        values, metadata = planner._ground_chunk_size_candidates(
+            [],
+            state,
+            "decrease",
+            self._evidence_analysis(length=1100),
+        )
+
+        self.assertEqual(metadata["status"], "grounded")
+        self.assertTrue(values)
+        self.assertTrue(all(200 <= value <= 1500 for value in values))
+        self.assertNotIn(1550, values)
+
+    def test_unreachable_absolute_range_has_explicit_status(self):
+        cases = [
+            (100, "increase"),
+            (10000, "decrease"),
+        ]
+
+        for current, direction in cases:
+            with self.subTest(current=current, direction=direction):
+                state = AgentDoctorState(index_config={
+                    "chunk_size": current,
+                    "chunk_candidate_policy": self._chunk_policy(),
+                })
+
+                values, metadata = planner._ground_chunk_size_candidates(
+                    [],
+                    state,
+                    direction,
+                    self._evidence_analysis(length=300),
+                )
+
+                self.assertIsNone(values)
+                self.assertEqual(
+                    metadata["status"],
+                    "no_safe_candidate_within_bounds",
+                )
+                self.assertFalse(planner._allows_symbolic_fallback(
+                    "chunker.chunk_size",
+                    metadata,
+                ))
+
+    def test_semantic_mismatch_chunk_prescription_uses_evidence_grounding(self):
+        finding = make_finding("p1", "retrieval_semantic_mismatch")
+        state = AgentDoctorState(index_config={
+            "chunk_size": 800,
+            "chunk_candidate_policy": self._chunk_policy(),
+        })
+
+        space, metadata = planner._grounded_search_space(
+            finding.label,
+            [finding],
+            state,
+            {"chunk_size": "decrease"},
+            self._evidence_analysis(),
+        )
+
+        self.assertEqual(space, {"chunk_size": [750, 650, 600]})
+        self.assertEqual(metadata["status"], "grounded")
+        self.assertEqual(metadata["source"], "structural_evidence_windows")
 
     def test_chunk_candidate_policy_rejects_invalid_safety_bounds(self):
         base_policy = {
@@ -555,6 +706,29 @@ class PlannerCandidateListTest(unittest.TestCase):
                 policy, error = planner._chunk_candidate_policy(state)
                 self.assertIsNone(policy)
                 self.assertIn("유효하지 않음", error)
+
+    def test_chunk_candidate_policy_allows_single_candidate_budget(self):
+        state = AgentDoctorState(index_config={
+            "chunk_candidate_policy": {
+                **self._chunk_policy(),
+                "path_fractions": [1.0],
+                "candidate_count": 1,
+            }
+        })
+
+        policy, error = planner._chunk_candidate_policy(state)
+
+        self.assertIsNone(error)
+        self.assertEqual(policy["candidate_count"], 1)
+        state.index_config["chunk_size"] = 800
+        values, metadata = planner._ground_chunk_size_candidates(
+            [],
+            state,
+            "decrease",
+            self._evidence_analysis(),
+        )
+        self.assertEqual(values, [600])
+        self.assertEqual(metadata["status"], "grounded")
 
     def test_state_evidence_window_policy_controls_candidate_measurements(self):
         finding = make_finding("p1", "too_long_context")

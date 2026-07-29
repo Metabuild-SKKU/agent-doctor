@@ -566,38 +566,61 @@ def _trim_while_preserving_gold(
 def _table_blocks(
     line_texts: tuple[str, ...],
 ) -> tuple[_LineBlock | None, ...]:
-    """Markdown 표로 확인된 연속 행 블록을 각 행에 연결한다."""
+    """Markdown 표로 확인된 행만 블록으로 묶어 각 행에 연결한다."""
 
     blocks: list[_LineBlock | None] = [None] * len(line_texts)
-    index = 0
+
+    # GFM 표는 구분행 바로 앞의 한 행만 header다. 그보다 앞선 pipe 포함 산문까지
+    # 하나의 후보 run으로 묶으면 산문 gold가 표 evidence로 오인된다.
+    index = 1
     while index < len(line_texts):
-        if not _is_table_row_candidate(line_texts[index]):
+        if (
+            not _is_table_separator(line_texts[index])
+            or _is_table_separator(line_texts[index - 1])
+            or not _is_table_row_candidate(line_texts[index - 1])
+        ):
             index += 1
             continue
         end = index
         while (
             end + 1 < len(line_texts)
             and _is_table_row_candidate(line_texts[end + 1])
+            and not _is_table_separator(line_texts[end + 1])
+            and not (
+                end + 2 < len(line_texts)
+                and _is_table_separator(line_texts[end + 2])
+            )
         ):
             end += 1
-        texts = line_texts[index:end + 1]
-        confirmed = (
-            any(_is_table_separator(text) for text in texts)
-            or (
-                len(texts) >= 2
-                and all(_is_bordered_table_row(text) for text in texts)
-            )
-        )
-        if confirmed:
+        block = _LineBlock(index - 1, end)
+        for line_index in range(block.start, block.end + 1):
+            blocks[line_index] = block
+        index = end + 1
+
+    # 구분행이 없는 표는 모든 행이 바깥 pipe를 가진 경우에만 허용한다.
+    # 위에서 확인한 GFM 표와 겹치는 run은 그대로 둔다.
+    index = 0
+    while index < len(line_texts):
+        if blocks[index] is not None or not _is_bordered_table_row(line_texts[index]):
+            index += 1
+            continue
+        end = index
+        while (
+            end + 1 < len(line_texts)
+            and blocks[end + 1] is None
+            and _is_bordered_table_row(line_texts[end + 1])
+        ):
+            end += 1
+        if end > index:
             block = _LineBlock(index, end)
-            for line_index in range(index, end + 1):
+            for line_index in range(block.start, block.end + 1):
                 blocks[line_index] = block
         index = end + 1
     return tuple(blocks)
 
 
 def _is_table_row_candidate(text: str) -> bool:
-    """표 후보 행인지 보되 단일 pipe 일반 문장은 제외한다."""
+    """구분행과 함께 표를 이룰 수 있는 비어 있지 않은 행인지 확인한다."""
 
     stripped = text.strip()
     if not stripped or "|" not in stripped:

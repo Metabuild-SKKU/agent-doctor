@@ -583,7 +583,7 @@ def _chunk_candidate_policy(
         )
         and isinstance(candidate_count, int)
         and not isinstance(candidate_count, bool)
-        and candidate_count > 1
+        and candidate_count > 0
         and isinstance(min_span_count, int)
         and not isinstance(min_span_count, bool)
         and min_span_count > 0
@@ -731,6 +731,24 @@ def _ground_chunk_size_candidates(
     if direction not in {"increase", "decrease"}:
         return None, {"status": "unsupported_direction", "direction": direction}
 
+    current_int = int(round(current))
+    min_chunk_size = int(policy["min_chunk_size"])
+    max_chunk_size = int(policy["max_chunk_size"])
+    limit_metadata = {
+        **(evidence_metadata or {}),
+        "current_chunk_size": current_int,
+        "min_chunk_size": min_chunk_size,
+        "max_chunk_size": max_chunk_size,
+        "direction": direction,
+    }
+    if (direction == "decrease" and current_int <= min_chunk_size) or (
+        direction == "increase" and current_int >= max_chunk_size
+    ):
+        return None, {
+            **limit_metadata,
+            "status": "at_safe_limit",
+        }
+
     lengths = [window["end"] - window["start"] for window in windows]
     if len(lengths) < policy["min_span_count"]:
         return None, {
@@ -746,17 +764,31 @@ def _ground_chunk_size_candidates(
     raw_target = target_span * (1 + policy["margin_ratio"])
     step = policy["rounding_step"]
     evidence_target = max(step, int(math.ceil(raw_target / step) * step))
-    current_int = int(round(current))
-    lower_limit, upper_limit = _chunk_candidate_limits(
+    limits = _chunk_candidate_limits(
         current_int,
         step,
         policy,
     )
-    target = (
-        max(evidence_target, lower_limit)
-        if direction == "decrease"
-        else min(evidence_target, upper_limit)
-    )
+    if limits is None:
+        return None, {
+            **limit_metadata,
+            "status": "no_safe_candidate_within_bounds",
+            "max_step_ratio": policy["max_step_ratio"],
+        }
+    lower_limit, upper_limit = limits
+    if direction == "decrease":
+        upper_limit = min(upper_limit, ((current_int - 1) // step) * step)
+    else:
+        lower_limit = max(lower_limit, ((current_int // step) + 1) * step)
+    if lower_limit > upper_limit:
+        return None, {
+            **limit_metadata,
+            "status": "no_safe_candidate_within_bounds",
+            "candidate_lower_limit": lower_limit,
+            "candidate_upper_limit": upper_limit,
+            "max_step_ratio": policy["max_step_ratio"],
+        }
+    target = min(max(evidence_target, lower_limit), upper_limit)
 
     metadata: dict[str, Any] = {
         "status": "grounded",
@@ -788,6 +820,8 @@ def _ground_chunk_size_candidates(
     for fraction in policy["path_fractions"]:
         value = current_int + ((target - current_int) * fraction)
         rounded = _round_to_step(value, step)
+        if not lower_limit <= rounded <= upper_limit:
+            continue
         if direction == "decrease" and not target <= rounded < current_int:
             continue
         if direction == "increase" and not current_int < rounded <= target:
@@ -797,7 +831,7 @@ def _ground_chunk_size_candidates(
         if len(candidates) >= policy["candidate_count"]:
             break
 
-    if len(candidates) < 2:
+    if not candidates:
         metadata["status"] = "insufficient_candidates"
         return None, metadata
     metadata["generated_candidates"] = list(candidates)
@@ -808,8 +842,8 @@ def _chunk_candidate_limits(
     current: int,
     step: int,
     policy: dict[str, Any],
-) -> tuple[int, int]:
-    """정책의 최소·최대값과 1회 변경 비율로 후보 하한·상한을 계산한다."""
+) -> tuple[int, int] | None:
+    """절대 안전 범위와 1회 변경 비율의 교집합을 계산한다."""
 
     lower_limit = max(
         int(policy["min_chunk_size"]),
@@ -823,6 +857,8 @@ def _chunk_candidate_limits(
             current * (1 + float(policy["max_step_ratio"])) / step
         ) * step),
     )
+    if lower_limit > upper_limit:
+        return None
     return lower_limit, upper_limit
 
 
@@ -1017,6 +1053,9 @@ def _ground_chunk_overlap_candidates(
 #   리랭커(rules.py enable_reranker)다. top_k 증가는 노이즈(too_long/lost_in_middle)를
 #   키우는 열등한 차선책이라 rules.py 도 top_k 를 처방하지 않는다.
 _GROUNDED_VALUES: dict[str, dict[str, Any]] = {
+    # semantic mismatch 중 topic_cluster="none"은 rules.py에서 청크 희석으로
+    # 분류해 chunk_size 축소를 처방한다. 이 경우에도 고정 비율 추측 대신 같은
+    # 구조적 evidence window 분포에서 안전한 축소 후보를 계산한다.
     "retrieval_semantic_mismatch": {
         "chunk_size": _ground_chunk_size_candidates,
     },

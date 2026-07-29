@@ -210,6 +210,58 @@ class EvidenceWindowTest(unittest.TestCase):
 
         self.assertEqual(windows[0]["kind"], "prose")
 
+    def test_pipe_prose_immediately_before_table_is_not_absorbed(self):
+        content = (
+            "선택지는 A | B 중 하나다\n"
+            "| 항목 | 값 |\n"
+            "|---|---|\n"
+            "| a | 1 |\n"
+        )
+        policy = {
+            **POLICY,
+            "min_chars": 1,
+            "heading_max_distance": 0,
+            "adjacent_context_blocks": 0,
+        }
+
+        windows = build_evidence_windows(
+            [Document("d1", "memory", "md", content)],
+            [_span(content, "A | B")],
+            policy,
+        )
+
+        window_text = content[windows[0]["start"]:windows[0]["end"]]
+        self.assertEqual(windows[0]["kind"], "prose")
+        self.assertEqual(window_text, "선택지는 A | B 중 하나다")
+        self.assertNotIn("| 항목 |", window_text)
+
+    def test_adjacent_markdown_tables_remain_separate_blocks(self):
+        content = (
+            "| 첫째 | 값 |\n"
+            "|---|---|\n"
+            "| a | 1 |\n"
+            "| 둘째 | 값 |\n"
+            "|---|---|\n"
+            "| b | 2 |\n"
+        )
+        policy = {
+            **POLICY,
+            "min_chars": 1,
+            "heading_max_distance": 0,
+            "adjacent_context_blocks": 0,
+        }
+
+        windows = build_evidence_windows(
+            [Document("d1", "memory", "md", content)],
+            [_span(content, "a | 1")],
+            policy,
+        )
+
+        window_text = content[windows[0]["start"]:windows[0]["end"]]
+        self.assertEqual(windows[0]["kind"], "table")
+        self.assertIn("| 첫째 | 값 |", window_text)
+        self.assertNotIn("| 둘째 | 값 |", window_text)
+
     def test_gold_longer_than_policy_maximum_is_preserved(self):
         content = ("앞" * 50) + ("정답" * 200) + ("뒤" * 50)
         start = content.index("정답")
