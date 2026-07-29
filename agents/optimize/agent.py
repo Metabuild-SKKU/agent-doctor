@@ -11,11 +11,13 @@ Optimize 노드의 진입점(오케스트레이션 계층).
   모든 경로에서 같은 state 를 반환한다(AGENTS.md 2절 계약).
 
 [읽는 것]  state.report, state.index_config, state.iteration, state.max_iterations,
-           state.blacklist, state.optimization_history,
+           state.optimize_visit_count, state.max_optimize_visits,
+           state.blacklist, state.completed_prescriptions, state.optimization_history,
            state.active_index_key, state.active_eval_key,
            state.runtime_capabilities(Planner request를 통해 소비)
-[쓰는 것]  state.index_config, state.iteration, state.status, state.error,
-           state.current_agent, state.blacklist, state.optimization_history,
+[쓰는 것]  state.index_config, state.iteration, state.optimize_visit_count,
+           state.status, state.error, state.current_agent, state.blacklist,
+           state.completed_prescriptions, state.optimization_history,
            state.optimization_report, state.reindex_required
 
 [state.status 신호]  (graph 라우팅이 참고)
@@ -45,6 +47,116 @@ from agents.optimize.schemas import (
     OptimizeDecision,
     Verdict,
 )
+
+
+_MAX_UNJUDGEABLE_ATTEMPTS = 1
+_OPTIMIZE_VISIT_LIMIT_REASON = "Optimize 절대 방문 상한 도달"
+
+
+def _restore_history_item_baseline(
+    state: AgentDoctorState,
+    item: OptimizationHistoryItem,
+    reason: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], DiagnosticReport | None, bool]:
+    """처방 이력을 종료하고 적용 전 baseline 설정으로 안전하게 복원한다."""
+    before_config = dict(state.index_config)
+    before_report = item.metadata.get("before_report")
+    state.index_config = dict(item.before_config)
+    item.after_config = dict(state.index_config)
+    item.status = "failed"
+    item.rollback_reason = reason
+    item.metadata.update(
+        {
+            "pending": False,
+            "active_study": False,
+            **(metadata or {}),
+        }
+    )
+    item.metadata.pop("before_report", None)
+    state.reindex_required = bool(item.metadata.get("reindex_required", True))
+    return before_config, before_report, before_config != state.index_config
+
+
+def _stop_at_optimize_visit_limit(
+    state: AgentDoctorState,
+) -> AgentDoctorState:
+    """Optimize 절대 방문 상한에 도달하면 진행 중 설정을 복원하고 종료한다."""
+    pending = history.find_active_study(state.optimization_history)
+    if pending is None:
+        pending = history.find_pending(state.optimization_history)
+
+    changed = False
+    if pending is not None:
+        _before_config, before_report, changed = _restore_history_item_baseline(
+            state,
+            pending,
+            _OPTIMIZE_VISIT_LIMIT_REASON,
+            metadata={"visit_limit_reached": True},
+        )
+        before_score = _report_score(before_report)
+        verdict = Verdict(
+            keep=False,
+            before_score=before_score,
+            after_score=before_score,
+            reason=_OPTIMIZE_VISIT_LIMIT_REASON,
+        )
+        pending.metadata.update(
+            {
+                "before_score": verdict.before_score,
+                "after_score": verdict.after_score,
+                "before_composite": history._read_composite(before_report),
+                "after_composite": history._read_composite(before_report),
+            }
+        )
+        state.optimization_report = reporter.build_trial_report(pending, verdict)
+    else:
+        decision = OptimizeDecision(
+            mode="use_current",
+            status="skipped",
+            requires_user_confirmation=False,
+            next_route="serve",
+            reason=_OPTIMIZE_VISIT_LIMIT_REASON,
+        )
+        state.optimization_report = reporter.build_report(decision)
+
+    state.status = "rolled_back" if changed else "verified"
+    state.error = None
+    print(
+        "[Optimize] 절대 방문 상한 도달: "
+        f"{state.optimize_visit_count}/{state.max_optimize_visits}"
+    )
+    print(
+        "[Optimize] 진행 중 설정을 baseline으로 복원"
+        if changed
+        else "[Optimize] 추가 처방 없이 종료"
+    )
+    return state
+
+
+def _unjudgeable_exclusions(
+    optimization_history: list[OptimizationHistoryItem],
+) -> set[tuple[str, str]]:
+    """효과를 검증하지 못한 동일 처방의 재선택을 제한한다.
+
+    품질 악화가 확인된 것은 아니므로 영구 blacklist에는 넣지 않는다. 대신 현재
+    파이프라인 실행의 이력에서 같은 처방이 이미 측정 불가로 끝났다면 이후 Optimize
+    방문에서 제외한다. 새 파이프라인 실행은 이력이 비어 있으므로 다시 시도할 수 있다.
+    """
+    attempts: Counter[tuple[str, str]] = Counter()
+    for item in optimization_history:
+        if not item.metadata.get("unjudgeable"):
+            continue
+        label = item.failure_labels[0] if item.failure_labels else ""
+        prescription_id = item.selected_prescription_id or ""
+        if label and prescription_id:
+            attempts[(label, prescription_id)] += 1
+    return {
+        key
+        for key, count in attempts.items()
+        if count >= _MAX_UNJUDGEABLE_ATTEMPTS
+    }
 
 
 def _fmt_bool(value: bool) -> str:
@@ -331,6 +443,12 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     state.current_agent = "optimize"
     try:
         _log_optimize_input(state)
+        if state.optimize_visit_count >= state.max_optimize_visits:
+            return _stop_at_optimize_visit_limit(state)
+        state.optimize_visit_count += 1
+        if state.optimize_visit_count >= state.max_optimize_visits:
+            return _stop_at_optimize_visit_limit(state)
+
         # top_k sweep는 후보 하나의 성공/실패를 곧바로 확정하지 않는다.
         # 직전 후보의 Eval 결과를 같은 study에 넣고 다음 후보 또는 best를 고른다.
         active_study = history.find_active_study(state.optimization_history)
@@ -341,6 +459,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         judged_item, verdict, rollback_baseline_report = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
         visit_exclusions = set(state.blacklist)
+        visit_exclusions.update(state.completed_prescriptions)
+        visit_exclusions.update(
+            _unjudgeable_exclusions(state.optimization_history)
+        )
         deferred_runtime: list[dict[str, Any]] = []
         if (
             judged_item is not None
@@ -454,7 +576,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 return state
             error_code = str(result.metadata.get("error_code") or "")
             visit_exclusions.add(rejection)
-            if error_code == "runtime_capability_unavailable":
+            if error_code in {
+                "runtime_capability_unavailable",
+                "reranker_disabled",
+            }:
                 capability = (
                     request.metadata.get("runtime_capabilities", {})
                     .get("reranker", {})
@@ -463,11 +588,19 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     {
                         "failure_label": request.failure_label,
                         "prescription_id": prescription_id,
-                        "reason": capability.get(
-                            "reason",
-                            "runtime_capability_unavailable",
+                        "reason": (
+                            error_code
+                            if error_code == "reranker_disabled"
+                            else capability.get(
+                                "reason",
+                                "runtime_capability_unavailable",
+                            )
                         ),
-                        "retryable": bool(capability.get("retryable", True)),
+                        "retryable": (
+                            False
+                            if error_code == "reranker_disabled"
+                            else bool(capability.get("retryable", True))
+                        ),
                     }
                 )
             else:
@@ -763,6 +896,11 @@ def _finish_internal_study(
                 else "verified"
             )
             state.reindex_required = bool(result.needs_reindex)
+            label = item.failure_labels[0] if item.failure_labels else ""
+            if label and item.selected_prescription_id:
+                state.completed_prescriptions.add(
+                    (label, item.selected_prescription_id)
+                )
     else:
         return _fail_active_study(
             state,
@@ -828,17 +966,15 @@ def _fail_active_study(
     retryable: bool = False,
 ) -> AgentDoctorState:
     """study 오류 시 baseline으로 복원하고 재시도 가능 여부를 구분한다."""
-    before_config_for_log = dict(state.index_config)
-    changed = state.index_config != item.before_config
-    state.index_config = dict(item.before_config)
-    item.status = "failed"
-    item.rollback_reason = reason
-    item.after_config = dict(state.index_config)
-    item.metadata["pending"] = False
-    item.metadata["active_study"] = False
-    item.metadata["study_error"] = reason
-    item.metadata["study_retryable"] = retryable
-    item.metadata.pop("before_report", None)
+    before_config_for_log, _before_report, changed = _restore_history_item_baseline(
+        state,
+        item,
+        reason,
+        metadata={
+            "study_error": reason,
+            "study_retryable": retryable,
+        },
+    )
     label = item.failure_labels[0] if item.failure_labels else ""
     prescription_id = item.selected_prescription_id
     previous_same_errors = sum(
@@ -858,7 +994,6 @@ def _fail_active_study(
     ):
         state.blacklist.add((label, prescription_id))
     state.status = "rolled_back" if changed else "error"
-    state.reindex_required = bool(item.metadata.get("reindex_required", True))
     state.error = None if changed else reason
     diff = config_mapper.build_config_diff(before_config_for_log, state.index_config)
     next_step = (

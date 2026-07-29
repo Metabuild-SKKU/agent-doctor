@@ -258,6 +258,43 @@ class OptimizerExecutionTest(unittest.TestCase):
             "runtime_capability_unavailable",
         )
 
+    def test_reranker_candidate_count_requires_enabled_reranker(self):
+        candidate = self.make_candidate(
+            prescription_id="widen_rerank_candidates",
+            search_space={"reranker.candidate_count": [40]},
+            reindex=False,
+        )
+        request = self.make_request(
+            baseline_config={
+                "use_reranker": False,
+                "rerank_candidates": 20,
+            },
+            candidates=[candidate],
+            metadata={
+                "runtime_capabilities": {
+                    "reranker": {
+                        "status": "verified",
+                        "reason": None,
+                        "retryable": False,
+                    }
+                }
+            },
+        )
+
+        result = run(request)
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(result.metadata["error_code"], "reranker_disabled")
+        self.assertEqual(
+            result.metadata["skipped_candidates"],
+            [
+                {
+                    "prescription_id": "widen_rerank_candidates",
+                    "reason": "reranker_disabled",
+                }
+            ],
+        )
+
     def test_missing_search_space_is_skipped_without_symbolic_interpretation(self):
         request = self.make_request(
             candidates=[self.make_candidate(search_space={})],

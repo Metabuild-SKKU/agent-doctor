@@ -126,6 +126,8 @@ class AgentDoctorState:
     # 반복 제어
     iteration: int = 0
     max_iterations: int = 3
+    optimize_visit_count: int = 0
+    max_optimize_visits: int = 20
 
     # Optimize Agent 이력/제어
     # optimization_history: 각 처방 시도 기록. 원소는 OptimizationHistoryItem
@@ -133,6 +135,9 @@ class AgentDoctorState:
     # blacklist: 롤백된 (label, prescription_id) 조합. planner가 재시도에서 제외.
     optimization_history: list = field(default_factory=list)
     blacklist: set = field(default_factory=set)
+    # 내부 sweep을 정상 완료한 (label, prescription_id) 조합.
+    # 같은 파이프라인 실행에서 이미 탐색을 끝낸 처방을 다시 시작하지 않도록 한다.
+    completed_prescriptions: set = field(default_factory=set)
     # optimization_report: 이번 Optimize 방문의 사용자용 처방 리포트.
     #   원소 타입은 OptimizationReport(agents/optimize/schemas.py). core가 optimize를
     #   import하지 않도록 타입은 느슨하게 둔다. Serve가 마지막 방문 리포트를 읽는다.
