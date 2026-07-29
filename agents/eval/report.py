@@ -81,6 +81,7 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     report = DiagnosticReport(
         report_id=f"report_{uuid.uuid4().hex[:8]}",
         findings=findings,
+        failed_questions=_failed_questions(records),
         findings_summary=_findings_summary(records, mode),
         ragas_scores=scores,
         runtime_summary={"reranker": reranker_runtime},
@@ -96,6 +97,24 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
 
 
 # ── 집계 헬퍼 ─────────────────────────────────────────────────────
+
+def _failed_questions(records: list[EvalRecord]) -> list[dict]:
+    """실패한 probe의 질문·기대 정답·실제 답변을 리포트에 보존한다.
+
+    EvalRecord는 Eval 실행이 끝나면 사라지므로 UI가 재구성하지 않고 실제 생성 답변을
+    표시할 수 있게 필요한 원문만 직렬화 가능한 dict로 남긴다.
+    """
+    return [
+        {
+            "probe_id": record.probe.probe_id,
+            "question": record.probe.question,
+            "expected_answer": record.probe.ground_truth or "",
+            "actual_answer": record.generated_answer or "",
+        }
+        for record in records
+        if record.findings
+    ]
+
 
 def _findings_summary(records: list[EvalRecord], mode: int) -> dict:
     """Finding 들을 확정/예비·라벨로 집계. Optimize 가 확정건 우선 처리하도록 요약 제공.
