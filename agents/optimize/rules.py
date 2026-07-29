@@ -674,33 +674,92 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     # ═══════════════════════════════════════════════════════════════
     #  D그룹 — 데이터 문제 (config로 처방 불가, 사람 개입)
     # ═══════════════════════════════════════════════════════════════
+    #
+    # [매뉴얼 처방 규약]
+    #   A/B/C 처방은 config patch(자동 적용)지만, D그룹 처방은 사람이 수행할
+    #   "매뉴얼 스텝"이다. 각 항목은 patch 대신 다음 필드를 든다:
+    #     - manual: True   → planner/optimizer가 절대 자동 적용하지 않는다는 표식.
+    #                        (status="manual" 이라 is_actionable 도 계속 False)
+    #     - action        : 사용자가 할 한 줄 조치(명령형).
+    #     - detail        : 어떻게 하는지 구체 설명.
+    #     - show          : "어디가 문제인지"를 사용자에게 보여줄 때 쓸 finding/probe
+    #                       필드 목록(reporter가 렌더). 실제 배선은 Eval의 finding.metadata
+    #                       계약 확정(PR #55, missing_gold_ids 등) 후 붙인다 — 그전엔
+    #                       reporter가 manual_action 헤드라인만 읽는다(동작 불변).
+    #   manual_action 은 라벨 전체를 한 줄로 요약한 헤드라인으로 계속 유지한다
+    #   (스텝들은 그 아래에 번호로 렌더될 예정).
 
     "corpus_gap": {
         "group": "D",
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
-        "prescriptions": [],            # config 처방 없음. 튜닝 루프에서 제외, 리포트만.
-        # reporter가 사용자에게 보여줄 조치 문구. (config로 못 고치는 D그룹 전용)
+        # config로 못 고침 → 사람이 수행할 매뉴얼 스텝. planner는 이 라벨을 manual로
+        # 분리해 reporter로만 넘긴다(자동처방 루프에서 제외).
+        "prescriptions": [
+            {
+                "id": "locate_missing_evidence",
+                "manual": True,
+                "action": "코퍼스에서 빠진 근거를 특정",
+                "detail": "해당 질문의 정답 근거가 담긴 원본 문서 중 코퍼스에 없는 것을 확인한다. "
+                          "누락 gold의 원본 문서(gold_doc_id)와 질문을 함께 제시한다.",
+                # reporter가 "어디가 문제인지" 보여줄 때 쓸 위치정보(배선은 Eval 계약 확정 후):
+                "show": ["question", "missing_gold_ids", "gold_doc_id", "corpus_membership_ratio"],
+            },
+            {
+                "id": "collect_and_reindex",
+                "manual": True,
+                "action": "그 문서를 수집·추가한 뒤 재색인",
+                "detail": "특정된 주제/문서를 소스에서 추가 수집해 코퍼스에 넣고 재색인한 뒤 "
+                          "다시 진단을 실행한다.",
+            },
+        ],
+        # reporter가 사용자에게 보여줄 헤드라인. (config로 못 고치는 D그룹 전용)
         "manual_action": "질문에 답할 근거 문서가 코퍼스에 없습니다. 해당 주제를 다루는 문서를 추가로 수집·인덱싱해 주세요.",
-        # 처방: 사용자에게 관련 문서 추가 수집 요청. Optimize 우회.
     },
 
     "corpus_gap_partial_hop": {
         "group": "D",
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
-        "prescriptions": [],
+        "prescriptions": [
+            {
+                "id": "locate_missing_hop",
+                "manual": True,
+                "action": "끊긴 hop의 근거를 특정",
+                "detail": "다단계 질문에서 어느 hop의 근거가 코퍼스에 없는지 특정한다. "
+                          "누락 hop의 원본 문서(gold_spans[i].doc_id)와 질문을 함께 제시한다.",
+                # 멀티홉은 hop별 위치(gold_spans)로 어느 단계가 빠졌는지까지 보여준다:
+                "show": ["question", "missing_gold_ids", "gold_spans", "corpus_membership_ratio"],
+            },
+            {
+                "id": "collect_bridge_docs",
+                "manual": True,
+                "action": "빠진 hop 문서를 수집·추가한 뒤 재색인",
+                "detail": "특정된 hop을 뒷받침하는 문서를 추가 수집해 코퍼스에 넣고 재색인한 뒤 "
+                          "다시 진단을 실행한다.",
+            },
+        ],
         "manual_action": "다단계(multi-hop) 질문의 중간 단계를 뒷받침하는 문서가 일부 누락됐습니다. 빠진 hop과 관련된 문서를 추가로 수집해 주세요.",
-        # corpus_gap과 동일 처리 + 어느 hop이 빠졌는지 리포트에 구체적으로 명시.
     },
 
     "bad_gold_answer": {
         "group": "D",
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
-        "prescriptions": [],
-        "manual_action": "RAG 파이프라인이 아니라 평가셋(정답) 문제로 보입니다. 해당 질문의 ground_truth를 검수·수정하거나 평가셋에서 제외해 주세요.",
-        # RAG pipeline 결함이 아니라 평가셋 문제. Probe ground_truth 수정/제거 또는 사람 검수 큐로 전달.
+        # RAG 결함이 아니라 평가셋(정답) 문제 → 해당 probe 자체를 재생성하도록 요청한다.
+        "prescriptions": [
+            {
+                "id": "regenerate_probe",
+                "manual": True,
+                "action": "이 라벨이 붙은 probe를 재생성",
+                "detail": "affected_probes에 해당하는 각 probe의 질문·정답(ground_truth)을 "
+                          "다시 생성하거나 검수해 교체한다. 재생성으로도 타당한 정답을 얻지 "
+                          "못하면 해당 probe를 평가셋에서 제외한다.",
+                # 어느 probe를 재생성할지 사용자에게 명시:
+                "show": ["probe_id", "question", "ground_truth"],
+            },
+        ],
+        "manual_action": "RAG 파이프라인이 아니라 평가셋(정답) 문제로 보입니다. 해당 probe를 재생성(질문·정답 재작성)하거나 평가셋에서 제외해 주세요.",
     },
 }
 
