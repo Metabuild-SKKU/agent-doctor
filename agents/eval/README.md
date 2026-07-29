@@ -90,12 +90,17 @@ lexical 통과를 **강등**한다(부정문·`3월`↔`3일` 같은 근접 오�
 
 실패로 판정되면 전제별로 해당 그룹만 검사한다 — A(검색, `0 <= recall < 1` + `_retrieval_fixable`)
 / B(생성, `_generation_failed`) / C(컨텍스트, `_context_failed`). 슬롯마다 `_pick()`으로
-확정(confirmed) 우선 하나씩 채택하고, D(데이터, `corpus_gap` 계열)는 additive로 더 붙는다.
+확정(confirmed) 우선 하나씩 채택한다.
 
 검색으로 고칠 수 없는 실패는 A 슬롯을 아예 닫는다(`_retrieval_fixable`) — gold가 전부 코퍼스
 밖이거나 `answer_exists=False` probe인 경우. 안 닫으면 구체 라벨이 self-scope로 다 빠져도 롤업
-`retrieval_failure`가 남아 "검색을 고쳐라"가 처방된다. 무응답 기대 probe는 D에도 붙지 않는다
-(채울 자료가 없으므로) — 남는 건 B의 `generation_abstention_failure` 하나다.
+`retrieval_failure`가 남아 "검색을 고쳐라"가 처방된다.
+
+**`corpus_gap` / `corpus_gap_partial_hop`은 현재 `diagnose()` 배선에서 빠져 있다(dormant, 팀 결정).**
+라벨 함수와 판정 기준은 그대로라 배선 한 줄로 되살아나고, 되살릴 때 쓸
+누락 gold 목록도 `metadata["missing_gold_ids"]`로 이미 채워 둔다(optimize는 코퍼스 멤버십을
+스스로 구할 수 없다 — `_ctx.corpus_ids`는 Eval 자원). 지금은 gold가 전부 코퍼스 밖인 실패에
+어떤 라벨도 남지 않는다(A는 위에서 닫히고 D는 빠짐) — 모델이 옳게 기권하면 findings 0건이 된다.
 
 ---
 
@@ -219,8 +224,8 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `lost_in_the_middle` | C context | 3 | 예비만 (gold 가 긴 context 중간 + 근거 없음) |
 | `context_noise_interference` | C context | 3 | 예비만 (real faithfulness 높음 = 노이즈에 근거) |
 | `bad_gold_answer` | D 데이터 | 3 | RAGAS 2지표(진짜 확정은 사람) |
-| `corpus_gap` | D 데이터 | 2 | 코퍼스 조회 |
-| `corpus_gap_partial_hop` | D 데이터 | 2 | 코퍼스 조회(hop별) |
+| `corpus_gap` | D 데이터 | 2 | 코퍼스 조회 — **dormant(배선 제외)** |
+| `corpus_gap_partial_hop` | D 데이터 | 2 | 코퍼스 조회(hop별) — **dormant(배선 제외)** |
 
 > "확정"은 원인 검증(처방이 실제로 통함)을 뜻한다. C그룹·`bridge_dependency` 는 재실행으로만
 > 확정되는데, 그 재실행을 Eval 이 직접 하던 tier4 를 없애고 Optimize 로 넘겼다 — 그래서 Eval 에서는

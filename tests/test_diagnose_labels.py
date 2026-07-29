@@ -1189,15 +1189,19 @@ class GapLabelTest(_DiagnoseTestBase):
         metrics_common.set_mode(Mode.FAST)
         self.assertIsNone(diagnose.generation_abstention_failure(self._gap()))
 
-    def test_gap_emits_both_corpus_gap_and_abstention_label(self):
-        """자료 보강(D)과 기권 동작(B)은 처방이 달라 둘 다 남아야 한다.
-        (B 슬롯은 오라클 답이 없어 안 열리므로 additive 경로로만 도달한다.)"""
-        labels = {f.label for f in diagnose.diagnose(self._gap(), Mode.STANDARD)}
-        self.assertIn("corpus_gap", labels)
+    def test_gap_is_dormant_but_abstention_label_remains(self):
+        """corpus_gap 계열은 배선에서 빠졌다(dormant) — 라벨 함수는 살아 있고 B 만 남는다.
+
+        [설계 논의 중] 팀 결정으로 D 를 diagnose 에서 제외했다. 되살릴 때 이 테스트가 뒤집힌다.
+        """
+        rec = self._gap()
+        self.assertIsNotNone(diagnose.corpus_gap(rec))         # 함수는 그대로 판정한다
+        labels = {f.label for f in diagnose.diagnose(rec, Mode.STANDARD)}
+        self.assertNotIn("corpus_gap", labels)                 # 배선에서 빠짐
         self.assertIn("generation_abstention_failure", labels)
 
-    def test_mixed_corpus_emits_both_retrieval_and_gap_labels(self):
-        """혼합 코퍼스 — 코퍼스에 있는 몫은 A 라벨, 없는 몫은 D 라벨로 함께 남는다.
+    def test_mixed_corpus_keeps_retrieval_label_without_gap(self):
+        """혼합 코퍼스 — 코퍼스에 있는 몫은 A 라벨로 남고, D 는 dormant 라 빠진다.
 
         기권 라벨은 붙으면 안 된다: 근거 일부는 실제로 코퍼스에 있으니 '기권했어야 했다'가
         같은 record 의 A 라벨(검색을 고쳐라)과 정면으로 모순되는 처방이 된다.
@@ -1208,8 +1212,48 @@ class GapLabelTest(_DiagnoseTestBase):
         labels = {f.label for f in diagnose.diagnose(rec, Mode.STANDARD)}
         self.assertFalse(diagnose._f1_ok(rec))                 # 기권 분기 도달 전제
         self.assertIn("retrieval_missing_gold", labels)
-        self.assertIn("corpus_gap", labels)
+        self.assertNotIn("corpus_gap", labels)
         self.assertNotIn("generation_abstention_failure", labels)
+
+    def test_missing_gold_ids_lists_only_absent_gold(self):
+        """비율(n/N)만으론 '코퍼스 어디가 빈지'를 못 적는다 — optimize 는 멤버십을 스스로 못 구한다."""
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0, qtype="bridge")
+        finding = diagnose.corpus_gap_partial_hop(rec)
+        self.assertEqual(finding.metadata["missing_gold_ids"], ["unknown"])
+
+    def test_missing_gold_ids_covers_every_gold_on_full_gap(self):
+        rec = _record(("unknown", "unknown2"), ("x",), recall=0.0)
+        self.assertEqual(set(diagnose.corpus_gap(rec).metadata["missing_gold_ids"]),
+                         {"unknown", "unknown2"})
+
+    def test_missing_gold_ids_empty_when_membership_unmeasured(self):
+        """멤버십은 tier2 — 미측정이면 라벨 자체가 안 서므로 키를 소비할 일도 없다."""
+        metrics_common.set_mode(Mode.FAST)
+        self.assertIsNone(diagnose.corpus_gap(_record(("unknown",), ("x",), recall=0.0)))
+
+    def test_critical_findings_do_not_move_reliability(self):
+        """critical 이 additive 로 늘어도 점수축은 안 움직인다 — findings 는 gold 대조 probe 의
+        신뢰도 식(recall × 답변축)에 들어가지 않는다(무응답 기대 probe 만 findings 유무로 1/0).
+
+        recall=0.5 · 정답 일치로 잡아 값이 0 이 아닌 지점에서 본다 — gap probe(recall=0)로
+        비교하면 0 == 0 이라 findings 무관함을 증명하지 못한다.
+        """
+        from agents.eval import scoring
+        # gold 를 둘 다 코퍼스에 둬야 missing_gold(critical)가 확정으로 선다 — 코퍼스 밖이면
+        # 그 라벨이 self-scope 로 빠지고 예비 enumeration 만 남아 critical 이 사라진다.
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5, answer="정답")
+        rec.findings = diagnose.diagnose(rec, Mode.STANDARD)
+        self.assertTrue(any(f.severity == "critical" for f in rec.findings))
+        self.assertEqual(scoring._probe_reliability(rec), 0.5)   # 0.5(recall) × 1.0(정답)
+
+    def test_abstention_label_is_additive_not_a_score_penalty(self):
+        """기권 실패가 붙는 corpus_gap probe 의 신뢰도 0 은 recall=0 탓이다 — 라벨 탓이 아니다."""
+        from agents.eval import scoring
+        rec = self._gap()
+        rec.findings = diagnose.diagnose(rec, Mode.STANDARD)
+        self.assertIn("generation_abstention_failure", {f.label for f in rec.findings})
+        self.assertEqual(rec.recall_at_k, 0.0)
+        self.assertEqual(scoring._probe_reliability(rec), 0.0)
 
     def test_corpus_gap_reason_shows_membership_ratio(self):
         """'gold_in_corpus=False' 만 적으면 부분 gap 을 '전부 없음'으로 오독한다."""

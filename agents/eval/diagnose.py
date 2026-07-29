@@ -875,17 +875,38 @@ def _corpus_gap_premise(record: EvalRecord) -> bool:
     return _gold_in_corpus(record) is False
 
 
+def _gold_absent_ids(record: EvalRecord) -> list[str]:
+    """코퍼스에 없는 gold id 목록. 미측정이면 빈 리스트.
+
+    `_missed_gold_ids`(검색이 못 가져온 몫)와 다르다 — 이건 코퍼스 자체에 없는 몫이다.
+    """
+    membership = _gold_corpus_membership(record) or {}
+    return [g for g, present in membership.items() if not present]
+
+
+def _gap_finding(record: EvalRecord, label: str) -> Finding:
+    """corpus_gap 계열 공통 Finding — reason(비율) + 누락 gold id.
+
+    비율만으론 '코퍼스 어디가 빈지'를 리포트에 못 적는데, optimize 는 멤버십을 스스로
+    구할 수 없다(`_ctx.corpus_ids` 는 Eval 자원) → id 목록을 metadata 로 넘긴다.
+    """
+    finding = _finding(
+        record, label, "gap", confirmed=True,
+        reason=f"gold_in_corpus={_corpus_membership_ratio(record)}, "
+               f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
+    )
+    finding.metadata["missing_gold_ids"] = _gold_absent_ids(record)
+    return finding
+
+
 def corpus_gap(record: EvalRecord) -> Optional[Finding]:
     """
     필요한 자료가 코퍼스에 없음(단일홉).
     확정: gold 중 코퍼스에 없는 것이 있음(tier2).
+    (현재 diagnose 배선에서 제외 — dormant. 아래 diagnose 주석 참조.)
     """
     if _corpus_gap_premise(record) and not _is_multi_hop(record):
-        return _finding(
-            record, "corpus_gap", "gap", confirmed=True,
-            reason=f"gold_in_corpus={_corpus_membership_ratio(record)}, "
-                   f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
-        )
+        return _gap_finding(record, "corpus_gap")
     return None
 
 
@@ -893,13 +914,10 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
     """
     멀티홉 중 일부 hop 근거만 코퍼스에 없음.
     확정: gold 중 코퍼스에 없는 것이 있음(tier2).
+    (현재 diagnose 배선에서 제외 — dormant. 아래 diagnose 주석 참조.)
     """
     if _corpus_gap_premise(record) and _is_multi_hop(record):
-        return _finding(
-            record, "corpus_gap_partial_hop", "gap", confirmed=True,
-            reason=f"gold_in_corpus={_corpus_membership_ratio(record)}, "
-                   f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
-        )
+        return _gap_finding(record, "corpus_gap_partial_hop")
     return None
 
 
@@ -1088,8 +1106,9 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
     if 0 <= record.recall_at_k < 1:                     # A: 검색 실패 (gold 있는데 일부 미검색)
         if _retrieval_fixable(record):                  # 코퍼스 밖·무응답 기대는 검색 몫이 아니다
             findings.append(_pick(record, _RETRIEVAL_CAUSE))
-        findings.append(corpus_gap(record))             # D: 코퍼스에 gold 없음 (additive)
-        findings.append(corpus_gap_partial_hop(record))
+        # D(corpus_gap / corpus_gap_partial_hop)는 배선에서 제외 — dormant(팀 결정).
+        # 라벨 함수는 그대로 두어 재배선만으로 되살아난다. 단 지금은 gold 가 전부 코퍼스 밖인
+        # 실패에 어떤 라벨도 남지 않는다(A 는 _retrieval_fixable 로 닫히고 D 는 여기서 빠짐).
     if _generation_failed(record):                      # B: 생성 실패
         findings.append(_pick(record, _GENERATION_CAUSE))
     if _context_failed(record):                         # C: context 구조
