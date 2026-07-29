@@ -101,6 +101,24 @@ def make_report(overall, pass_threshold=False, label="too_long_context"):
     )
 
 
+class OptimizeManualLogTest(unittest.TestCase):
+    def test_manual_prescriptions_are_logged(self):
+        """D그룹(manual) 결정이면 라벨 헤드라인 + 매뉴얼 스텝이 출력로그에 남는다."""
+        from agents.optimize.schemas import OptimizeDecision
+        dec = OptimizeDecision(
+            mode="manual_required", status="manual_required",
+            requires_user_confirmation=True, next_route="serve",
+            reason="사람 개입 필요(D그룹)", manual_labels=["corpus_gap"],
+        )
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_manual_prescriptions(dec)
+        out = buf.getvalue()
+        self.assertIn("수동 조치 필요: corpus_gap", out)
+        self.assertIn("코퍼스에서 빠진 근거를 특정", out)  # 매뉴얼 스텝
+        self.assertIn("재색인", out)
+
+
 class OptimizeCandidateLogTest(unittest.TestCase):
     def test_request_skip_does_not_reassign_reason_to_first_candidate(self):
         result = OptimizationResult(

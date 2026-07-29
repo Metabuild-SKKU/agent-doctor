@@ -36,7 +36,7 @@ from typing import Any
 
 from core.state import AgentDoctorState
 from core.schema import DiagnosticReport
-from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate
+from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate, rules
 from agents.optimize.schemas import (
     ConfigDiff,
     OptimizationHistoryItem,
@@ -294,6 +294,21 @@ def _log_optimize_verdict(
     )
 
 
+def _log_manual_prescriptions(decision: OptimizeDecision) -> None:
+    """D그룹(manual) 라벨의 사람 조치를 로그에 남긴다. config 처방과 달리 자동 적용되지
+    않으므로, 어떤 라벨에 무슨 매뉴얼 스텝이 필요한지 출력로그에도 드러낸다."""
+    labels = getattr(decision, "manual_labels", None) or []
+    for label in labels:
+        rule = rules.get_rule(label) or {}
+        headline = (rule.get("manual_action", "") or "").strip()
+        print(f"[Optimize] 수동 조치 필요: {label}" + (f" — {headline}" if headline else ""))
+        for i, presc in enumerate(rule.get("prescriptions", []), start=1):
+            if not presc.get("manual"):
+                continue
+            action = presc.get("action", "") or presc.get("id", "")
+            print(f"[Optimize]   {i}. {action}")
+
+
 def _log_optimize_decision(
     state: AgentDoctorState,
     decision: OptimizeDecision,
@@ -301,6 +316,7 @@ def _log_optimize_decision(
     next_step = "Serve 이동" if decision.next_route == "serve" else decision.next_route
     action = "SKIP" if decision.status == "skipped" else decision.status.upper()
     print(f"[Optimize] 행동 결정: {action}, reason={decision.reason or '-'}")
+    _log_manual_prescriptions(decision)
 
     _log_optimize_transition(
         label=None,
