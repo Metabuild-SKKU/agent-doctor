@@ -314,7 +314,7 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
         return {}
 
 
-_MODE_NAMES = {Mode.FAST: "fast", Mode.STANDARD: "standard", Mode.DEEP: "deep", Mode.FULL: "full"}
+_MODE_NAMES = {Mode.FAST: "fast", Mode.STANDARD: "standard", Mode.DEEP: "deep"}
 
 
 def _maybe_regenerate_bad_gold(

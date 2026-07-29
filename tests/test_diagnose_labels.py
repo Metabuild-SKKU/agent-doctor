@@ -20,10 +20,11 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.schema import Probe, Chunk
-from agents.eval import metrics_common, diagnose
+from agents.eval import metrics_common, metrics_search, diagnose
 from agents.eval.types import (
     EvalRecord, Mode,
     F1_PASS_THRESHOLD, RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
+    CONTEXT_CHARS_MAX,
 )
 
 
@@ -250,6 +251,28 @@ class RetrievalMismatchTest(_DiagnoseTestBase):
         self.assertIsNone(diagnose.retrieval_lexical_mismatch(rec))
         self.assertTrue(diagnose.retrieval_low_rank(rec).confirmed)      # 배타 상대는 low_rank
 
+    def test_semantic_confirmed_for_mixed_corpus_gold(self):
+        """놓친 gold 가 {코퍼스 있음+없음} 혼합 — 코퍼스에 있는 몫은 검색 실패로 남아야 한다.
+        (예전엔 probe 단위 bool 이라 라벨이 통째로 소실되고 corpus_gap 만 남았다.)"""
+        self._with(keyword=["zzz"])
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0)
+        finding = diagnose.retrieval_semantic_mismatch(rec)
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+        self.assertIn("missed_gold_in_corpus=1/2", finding.metadata["reason"])
+
+    def test_semantic_silent_when_every_missed_gold_is_outside_corpus(self):
+        self._with(keyword=["zzz"])
+        rec = _record(("unknown", "unknown2"), ("x",), recall=0.0)
+        self.assertIsNone(diagnose.retrieval_semantic_mismatch(rec))
+
+    def test_bm25_target_excludes_gold_outside_corpus(self):
+        """코퍼스 밖 gold 를 BM25 가 잡는 건 lexical 근거가 아니다 — corpus_gap 몫."""
+        self._with(keyword=["unknown"])
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0)
+        self.assertIs(metrics_search._bm25_hits_gold(rec), False)
+        self.assertIsNone(diagnose.retrieval_lexical_mismatch(rec))
+
     def test_semantic_preliminary_when_corpus_membership_unknown(self):
         """BM25 는 놓쳤으나 코퍼스 멤버십 미측정(None) → 확정 못 하고 예비(missing_gold 와 동일)."""
         metrics_common.set_context(chunks=[], keyword_fn=_FakeKeyword(["zzz"]))   # corpus_ids 빔 → None
@@ -275,6 +298,17 @@ class RetrievalMissingGoldTest(_DiagnoseTestBase):
 
     def test_silent_when_gold_absent_from_corpus(self):
         rec = _record(("g_a", "unknown"), ("g_a",), recall=0.5)
+        self.assertIsNone(diagnose.retrieval_missing_gold(rec))
+
+    def test_confirmed_for_mixed_corpus_gold(self):
+        """코퍼스에 있는데 못 찾은 gold 가 하나라도 있으면 검색 실패다(나머지는 corpus_gap)."""
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0)
+        finding = diagnose.retrieval_missing_gold(rec)
+        self.assertTrue(finding.confirmed)
+        self.assertIn("missed_gold_in_corpus=1/2", finding.metadata["reason"])
+
+    def test_silent_when_every_missed_gold_is_outside_corpus(self):
+        rec = _record(("unknown", "unknown2"), ("x",), recall=0.0)
         self.assertIsNone(diagnose.retrieval_missing_gold(rec))
 
     def test_carries_gold_ranks_for_planner_when_measured(self):
@@ -409,7 +443,7 @@ class RetrievalBridgeTest(_DiagnoseTestBase):
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5, qtype="bridge")
         finding = diagnose.retrieval_missing_bridge_dependency(rec)
         self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)          # tier4 제거 → 확정 불가
+        self.assertFalse(finding.confirmed)          # hop 의존 판별 신호 미측정 → 확정 불가
 
     def test_silent_for_single_hop(self):
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5, qtype=None)
@@ -449,13 +483,83 @@ class RetrievalBridgeTest(_DiagnoseTestBase):
         self.assertIsNone(diagnose.retrieval_missing_bridge_dependency(rec))
 
 
-class RetrievalRollupTest(_DiagnoseTestBase):
-    def test_rollup_always_yields_preliminary_finding(self):
-        """_RETRIEVAL_CAUSE 맨 뒤 — 세부 원인을 못 고를 때 슬롯이 비지 않게 한다."""
+class RollupTest(_DiagnoseTestBase):
+    """롤업 3종 — 슬롯 맨 뒤·항상 예비. 구체 라벨이 하나라도 서면 밀려난다."""
+
+    ROLLUPS = (
+        (diagnose.retrieval_failure, "retrieval_failure", "A"),
+        (diagnose.generation_failure, "generation_failure", "B"),
+        (diagnose.context_failure, "context_failure", "C"),
+    )
+
+    def test_rollups_are_always_preliminary(self):
+        """_pick 맨 뒤 — 세부 원인을 못 고를 때 슬롯이 비지 않게 한다."""
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
-        finding = diagnose.retrieval_failure(rec)
-        self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)
+        for fn, label, group in self.ROLLUPS:
+            with self.subTest(label=label):
+                finding = fn(rec)
+                self.assertFalse(finding.confirmed)
+                self.assertEqual(finding.label, label)
+                self.assertEqual(finding.metadata["group"], group)
+
+    def test_rollup_reason_records_mode_when_metrics_are_blank(self):
+        """저모드에선 지표가 전부 '-' 라, 왜 롤업인지는 실행 모드로만 알 수 있다."""
+        metrics_common.set_mode(Mode.FAST)
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        reason = diagnose.retrieval_failure(rec).metadata["reason"]
+        self.assertIn(f"mode={Mode.FAST}", reason)
+        self.assertIn("faithfulness=-", reason)
+
+    def test_rollup_yields_to_any_specific_cause(self):
+        """구체 라벨이 예비여도 롤업보다 앞이라 채택된다(롤업은 최후)."""
+        metrics_common.set_mode(Mode.FAST)                     # tier2 없음 → 구체 라벨도 예비
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertNotEqual(diagnose._pick(rec, diagnose._RETRIEVAL_CAUSE).label,
+                            "retrieval_failure")
+
+    def test_rollups_have_no_prescription_and_stay_report_only(self):
+        """롤업은 rules.py 에 항목이 없어 optimize 가 건너뛴다 — 리포트 전용이라는 계약."""
+        from agents.optimize import rules
+        for _fn, label, _group in self.ROLLUPS:
+            with self.subTest(label=label):
+                self.assertIsNone(rules.get_rule(label))
+                self.assertFalse(rules.is_actionable(label))
+
+
+# ══════════════════════════════════════════════════════════════════
+#  A 슬롯 진입 전제 — recall<1 만으로는 열지 않는다
+#    구체 라벨은 self-scope 로 빠져도 롤업이 무조건 붙어 '검색을 고쳐라'가 남기 때문에,
+#    검색으로 고칠 수 없는 실패는 슬롯 자체를 닫아야 한다.
+# ══════════════════════════════════════════════════════════════════
+
+class RetrievalSlotGateTest(_DiagnoseTestBase):
+    def _a_labels(self, rec):
+        return {f.label for f in diagnose.diagnose(rec, Mode.STANDARD)
+                if f.metadata["group"] == "A"}
+
+    def test_closed_when_every_gold_is_outside_corpus(self):
+        """자료가 없는 걸 검색이 고칠 수는 없다 — corpus_gap 만 남아야 한다."""
+        rec = _record(("unknown",), ("x",), recall=0.0, answer="엉뚱한 말")
+        self.assertFalse(diagnose._retrieval_fixable(rec))
+        self.assertEqual(self._a_labels(rec), set())
+
+    def test_open_on_partial_gap(self):
+        """코퍼스에 있는 몫은 실제로 검색이 놓친 것 — '전부 없음'이 아니면 닫지 않는다."""
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0, answer="엉뚱한 말")
+        self.assertTrue(diagnose._retrieval_fixable(rec))
+        self.assertTrue(self._a_labels(rec))
+
+    def test_closed_for_false_premise_probe(self):
+        """answer_exists=False 의 gold 는 답의 근거가 아니라 전제를 반박하는 청크라
+        recall 이 성립하지 않는다 — 그걸 미검색으로 세면 무응답 probe 에 검색 처방이 붙는다."""
+        rec = _record(("g_a",), ("x",), recall=0.0, answer_exists=False,
+                      ground_truth=None, answer="지어낸 답")
+        self.assertFalse(diagnose._retrieval_fixable(rec))
+        self.assertEqual(self._a_labels(rec), set())
+
+    def test_open_when_gold_is_in_corpus(self):
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertTrue(diagnose._retrieval_fixable(rec))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -643,6 +747,41 @@ class GenerationLabelTest(_DiagnoseTestBase):
         rec = _record(oracle_f1=0.1, faith_oracle=0.9, rel_oracle=0.9)
         self.assertIsNotNone(diagnose.bad_gold_answer_oracle(rec))
 
+    def test_count_fallback_beats_bad_gold_answer_in_slot(self):
+        """분류기 미측정이어도 카운트가 결합 오류를 지목하면 '정답셋 오류'는 반증된다.
+        (예전엔 bad_gold_answer_oracle 이 튜플상 앞이라 이 확정을 선점했다.)"""
+        rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, rel_oracle=0.9,
+                      counts_oracle=(3, 2, 0))
+        self.assertIsNone(diagnose.bad_gold_answer_oracle(rec))
+        picked = diagnose._pick(rec, diagnose._GENERATION_CAUSE)
+        self.assertEqual(picked.label, "generation_hop_binding_error")
+        self.assertTrue(picked.confirmed)
+
+    def test_count_fallback_keeps_bad_gold_when_counts_unmeasured(self):
+        """카운트도 없으면 결합 오류는 예비뿐이라 확정 bad_gold_answer 를 밀어내지 않는다."""
+        rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, rel_oracle=0.9)
+        self.assertIsNotNone(diagnose.bad_gold_answer_oracle(rec))
+        self.assertEqual(diagnose._pick(rec, diagnose._GENERATION_CAUSE).label,
+                         "bad_gold_answer")
+
+    def test_measured_other_is_not_overridden_by_counts(self):
+        """분류기가 실제로 돌아 '구체적 실패 없음'이라고 했으면, 약한 카운트 휴리스틱이
+        그 판정을 뒤엎으면 안 된다 — 양보만 하고 라벨은 아무것도 안 나와 롤업으로 강등됐다."""
+        self._with(ragas=_FakeReasoningJudge("other"))
+        rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, rel_oracle=0.9,
+                      counts_oracle=(3, 2, 0))              # 카운트상으론 hop_binding 조건
+        self.assertIsNone(diagnose.generation_reasoning_failure(rec))   # 'other' → 침묵
+        self.assertIsNotNone(diagnose.bad_gold_answer_oracle(rec))      # 반증당하지 않는다
+        self.assertEqual(diagnose._pick(rec, diagnose._GENERATION_CAUSE).label,
+                         "bad_gold_answer")                 # 롤업으로 안 떨어진다
+
+    def test_counts_fallback_still_wins_when_classifier_unmeasured(self):
+        rec = _record(oracle_f1=0.1, qtype="bridge", faith_oracle=0.9, rel_oracle=0.9,
+                      counts_oracle=(3, 2, 0))              # 분류기 자원 미주입
+        self.assertIsNone(diagnose.bad_gold_answer_oracle(rec))
+        self.assertEqual(diagnose._pick(rec, diagnose._GENERATION_CAUSE).label,
+                         "generation_hop_binding_error")
+
     def test_classifier_memoized_once(self):
         judge = _FakeReasoningJudge("contradiction")
         self._with(ragas=judge)
@@ -787,7 +926,9 @@ class GenerationLabelTest(_DiagnoseTestBase):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  C그룹: context 구조 (tier4 제거로 3개는 dormant)
+#  C그룹: context 구조
+#    faith 높음(노이즈에 근거) / faith 낮음(어디에도 근거 없음)으로 갈리고,
+#    후자는 길이·gold 배치로 too_long_context / lost_in_the_middle 이 나뉜다.
 # ══════════════════════════════════════════════════════════════════
 
 class ContextLabelTest(_DiagnoseTestBase):
@@ -801,19 +942,92 @@ class ContextLabelTest(_DiagnoseTestBase):
         self.assertFalse(diagnose._context_failed(
             _record(recall=0.5, oracle_f1=1.0, f1=0.1)))       # 검색 실패는 A그룹
 
-    def test_tier4_labels_are_dormant(self):
-        """확정 신호(재실행)가 제거돼 optimize 재실행으로 대체됨 — 항상 None."""
-        rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1)
+    def _long_context(self, *, gold_at, n=5, faith=RAGAS_FAITHFULNESS_MIN - 0.01,
+                      chars=CONTEXT_CHARS_MAX, precision=None, spans=None):
+        """검색 결과 n건 중 gold_at 위치에 gold 를 둔 record. 총 context 길이는 chars."""
+        ids = [f"x{i}" for i in range(n)]
+        ids[gold_at] = "g_a"
+        rec = _record(("g_a",), tuple(ids), recall=1.0, oracle_f1=1.0, f1=0.1,
+                      gold_spans=spans)
+        rec.retrieved_context = ["가" * (chars // n)] * n
+        rec.ragas = {"faithfulness": faith}
+        if precision is not None:
+            rec.ragas["context_precision"] = precision
+        rec.ragas_done = True
+        return rec
+
+    def test_lost_in_the_middle_confirmed_when_gold_buried(self):
+        """gold 는 검색됐는데 답이 어디에도 근거하지 않고, gold 가 긴 context 한가운데 있다.
+
+        확정이다 — 위치·길이·faithfulness 가 전부 실측이라(confirmed 는 '처방이 통한다'가 아니라
+        '판별 신호가 측정됐다'는 뜻) 더 올라갈 tier 도 없다.
+        """
+        rec = self._long_context(gold_at=2)                    # 상대 위치 0.5
+        finding = diagnose.lost_in_the_middle(rec)
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+        self.assertEqual(finding.metadata["group"], "C")
+        self.assertIsNone(diagnose.too_long_context(rec))      # 위치로 배타
+
+    def test_too_long_context_confirmed_when_gold_at_edge(self):
+        """gold 가 맨 앞인데도 못 썼다 — 배치가 아니라 길이·과부하 쪽."""
+        rec = self._long_context(gold_at=0)
+        finding = diagnose.too_long_context(rec)
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))    # 배타
+
+    def test_both_silent_when_context_is_short(self):
+        """짧은 context 에서 근거를 못 쓴 건 길이·배치 문제가 아니라 생성측 이탈 → 롤업."""
+        rec = self._long_context(gold_at=2, chars=1000)
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))
+        self.assertIsNone(diagnose.too_long_context(rec))
+
+    def test_both_silent_when_answer_is_grounded(self):
+        """faith 높음 = 노이즈 청크에 근거함 → context_noise_interference 영역."""
+        rec = self._long_context(gold_at=2, faith=0.9)
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))
+        self.assertIsNone(diagnose.too_long_context(rec))
+        self.assertIsNotNone(diagnose.context_noise_interference(rec))
+
+    def test_both_silent_below_deep(self):
+        """faithfulness 는 tier3 — DEEP 미만이면 갈릴 근거가 없다."""
+        metrics_common.set_mode(Mode.STANDARD)
+        rec = self._long_context(gold_at=2)
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))
+        self.assertIsNone(diagnose.too_long_context(rec))
+
+    def test_both_silent_when_gold_position_is_unmeasurable(self):
+        """gold id 드리프트(재청킹 후 recall 은 span 기준으로 1인데 chunk-id 는 안 맞음) —
+        위치를 못 재면 too_long_context 가 전부 흡수해선 안 된다(처방이 재배치와 갈린다)."""
+        rec = self._long_context(gold_at=0)
+        rec.retrieved_chunk_ids = [f"drifted{i}" for i in range(5)]   # gold id 가 하나도 안 맞음
+        self.assertIsNone(diagnose._gold_in_middle_band(rec))
         self.assertIsNone(diagnose.too_long_context(rec))
         self.assertIsNone(diagnose.lost_in_the_middle(rec))
 
-    def test_noise_interference_preliminary_when_answer_grounded_but_wrong(self):
+    def test_both_silent_when_results_too_few_to_have_a_middle(self):
+        """결과가 3건 미만이면 앞·중간·뒤가 안 갈린다 — 같은 이유로 둘 다 침묵."""
+        rec = self._long_context(gold_at=0, n=2)
+        self.assertIsNone(diagnose._gold_in_middle_band(rec))
+        self.assertIsNone(diagnose.too_long_context(rec))
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))
+
+    def test_yield_to_underchunking_when_noise_is_inside_chunk(self):
+        """노이즈가 청크 '안'이면 길이·배치가 아니라 청크 크기 문제다(C그룹 3자 배타)."""
+        rec = self._long_context(gold_at=2, precision=0.1,
+                                 spans=[{"doc_id": "d1", "start": 0, "end": 10}])
+        self.assertIsNone(diagnose.lost_in_the_middle(rec))
+        self.assertEqual(diagnose._pick(rec, diagnose._CONTEXT_CAUSE).label,
+                         "chunking_underchunking")
+
+    def test_noise_interference_confirmed_when_answer_grounded_but_wrong(self):
         """faithfulness 는 retrieved_context(gold+노이즈) 기준 — 근거는 있는데 답이 틀리면
         gold 아닌 청크에 근거했다는 뜻이다."""
         rec = _record(recall=1.0, oracle_f1=1.0, f1=0.1, faith=0.9, rel=0.9)
         finding = diagnose.context_noise_interference(rec)
         self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)                    # 회복 검증은 optimize 위임
+        self.assertTrue(finding.confirmed)
         self.assertEqual(finding.metadata["group"], "C")
 
     def test_noise_interference_silent_when_answer_ungrounded(self):
@@ -849,12 +1063,12 @@ class ContextLabelTest(_DiagnoseTestBase):
         rec.retrieval_details = {"reranked": reranked}
         return rec
 
-    def test_underchunking_preliminary_when_evidence_buried_in_big_chunk(self):
+    def test_underchunking_confirmed_when_evidence_buried_in_big_chunk(self):
         """근거가 청크의 10% 뿐 + precision 낮음 → 청크가 근거보다 큼."""
         rec = self._chunky(span_len=10)
         finding = diagnose.chunking_underchunking(rec)
         self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)                 # 축소 회복 검증은 optimize 위임
+        self.assertTrue(finding.confirmed)
         self.assertEqual(finding.metadata["group"], "A")    # 청킹은 전부 A그룹
 
     def test_underchunking_silent_when_evidence_dense(self):
@@ -876,8 +1090,28 @@ class ContextLabelTest(_DiagnoseTestBase):
         rec = self._chunky(span_len=80, reranked=True)      # 밀도는 높음(청크 안 문제 아님)
         finding = diagnose.reranker_low_precision(rec)
         self.assertIsNotNone(finding)
-        self.assertFalse(finding.confirmed)                 # 전/후 순위 비교 불가 → 예비
+        self.assertFalse(finding.confirmed)                 # 전/후 순위 비교 불가 → C그룹 유일 예비
         self.assertEqual(finding.metadata["group"], "A")
+
+    def test_confirmed_length_cause_beats_preliminary_reranker(self):
+        """리랭커와 길이 원인이 함께 성립하면 확정 쪽을 채택한다 — 순서가 아니라 confirmed 로 갈린다.
+
+        예전엔 셋 다 예비라 튜플 순서(리랭커 우선)가 결정했다. 이제 리랭커만 예비로 남아
+        (인과 미측정) _pick 이 확정된 길이 원인을 먼저 뽑는다.
+        """
+        rec = self._long_context(gold_at=0, precision=0.1)   # gold 양끝 + precision 낮음
+        rec.retrieval_details = {"reranked": True}
+        self.assertTrue(diagnose.too_long_context(rec).confirmed)
+        self.assertFalse(diagnose.reranker_low_precision(rec).confirmed)
+        self.assertEqual(diagnose._pick(rec, diagnose._CONTEXT_CAUSE).label, "too_long_context")
+
+    def test_reranker_owns_slot_when_no_confirmed_cause(self):
+        """길이·배치가 성립하지 않으면(짧은 context) 예비 리랭커가 슬롯을 가져간다."""
+        rec = self._long_context(gold_at=0, precision=0.1, chars=1000)
+        rec.retrieval_details = {"reranked": True}
+        self.assertIsNone(diagnose.too_long_context(rec))
+        self.assertEqual(diagnose._pick(rec, diagnose._CONTEXT_CAUSE).label,
+                         "reranker_low_precision")
 
     def test_reranker_silent_when_not_reranked(self):
         rec = self._chunky(span_len=80, reranked=False)
@@ -957,10 +1191,151 @@ class GapLabelTest(_DiagnoseTestBase):
         self.assertTrue(diagnose.corpus_gap_partial_hop(rec).confirmed)
         self.assertIsNone(diagnose.corpus_gap(rec))                    # 배타
 
+    def _gap(self, *, answer="지어낸 답", f1=0.1):
+        """gold 가 코퍼스에 없는 probe(= corpus_gap 전제)."""
+        return _record(("unknown",), ("x",), recall=0.0, f1=f1, answer=answer)
+
+    def test_abstention_failure_on_gap_confirmed_when_model_makes_something_up(self):
+        """corpus_gap 은 '자료를 채워라'까지만 말한다 — 기권했어야 하는데 지어낸 건 별개 문제."""
+        finding = diagnose.generation_abstention_failure(self._gap())
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+        self.assertEqual(finding.severity, "critical")
+        self.assertEqual(finding.metadata["group"], "B")
+
+    def test_abstention_failure_on_gap_silent_when_model_abstains(self):
+        """올바른 동작 — 근거가 없다고 말했으면 생성 실패가 아니다."""
+        self.assertIsNone(diagnose.generation_abstention_failure(
+            self._gap(answer="제공된 정보로는 알 수 없습니다")))
+
+    def test_abstention_failure_on_gap_silent_when_answer_is_correct(self):
+        """근거 없이 맞힌 건 parametric_overreliance 영역."""
+        self.assertIsNone(diagnose.generation_abstention_failure(self._gap(f1=1.0)))
+
+    def test_abstention_failure_on_gap_silent_when_answer_is_empty(self):
+        """빈 답변은 지어낸 게 아니라 생성 실패 → 롤업 몫."""
+        self.assertIsNone(diagnose.generation_abstention_failure(self._gap(answer="")))
+
+    def test_abstention_failure_silent_on_partial_gap(self):
+        """gold 하나라도 코퍼스에 있으면 근거 있는 부분 답변일 수 있다 — 환각으로 몰면 안 된다."""
+        rec = _record(("g_a", "unknown"), ("g_a",), recall=0.5, f1=0.1, qtype="bridge")
+        self.assertIsNone(diagnose.generation_abstention_failure(rec))
+
+    def test_abstention_failure_on_gap_silent_when_gold_is_in_corpus(self):
+        rec = _record(("g_a",), ("x",), recall=0.0, f1=0.1)
+        self.assertIsNone(diagnose.generation_abstention_failure(rec))
+
+    def test_abstention_judge_not_called_when_abstention_is_not_expected(self):
+        """근거가 있는 probe 까지 AspectCritic 을 부르면 실패 probe 마다 LLM 1회가 는다."""
+        metrics_common.set_mode(Mode.DEEP)
+        judge = _FakeAbstentionJudge(False)
+        self._with(ragas=judge)
+        rec = _record(("g_a",), ("x",), recall=0.0, f1=0.1)      # gold 는 코퍼스에 있음
+        self.assertIsNone(diagnose.generation_abstention_failure(rec))
+        self.assertNotIn("abstention", judge.calls)
+
+    def test_abstention_failure_on_gap_silent_without_tier2(self):
+        """코퍼스 멤버십은 tier2 — 미측정이면 gap 전제를 못 세운다."""
+        metrics_common.set_mode(Mode.FAST)
+        self.assertIsNone(diagnose.generation_abstention_failure(self._gap()))
+
+    def test_gap_emits_both_corpus_gap_and_abstention_label(self):
+        """자료 보강(D)과 기권 동작(B)은 처방이 달라 둘 다 남아야 한다.
+        (B 슬롯은 오라클 답이 없어 안 열리므로 additive 경로로만 도달한다.)"""
+        labels = {f.label for f in diagnose.diagnose(self._gap(), Mode.STANDARD)}
+        self.assertIn("corpus_gap", labels)
+        self.assertIn("generation_abstention_failure", labels)
+
+    def test_mixed_corpus_emits_both_retrieval_and_gap_labels(self):
+        """혼합 코퍼스 — 코퍼스에 있는 몫은 A 라벨, 없는 몫은 D 라벨로 함께 남는다.
+
+        기권 라벨은 붙으면 안 된다: 근거 일부는 실제로 코퍼스에 있으니 '기권했어야 했다'가
+        같은 record 의 A 라벨(검색을 고쳐라)과 정면으로 모순되는 처방이 된다.
+        """
+        # 답이 틀려야 기권 분기까지 실제로 도달한다(_compute_metrics 가 f1 을 다시 계산하므로
+        # 여기서 f1 을 주입하지 않고 답변 자체를 틀리게 둔다). 이게 없으면 assertNotIn 이 공허하다.
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0, answer="엉뚱한 말")
+        labels = {f.label for f in diagnose.diagnose(rec, Mode.STANDARD)}
+        self.assertFalse(diagnose._f1_ok(rec))                 # 기권 분기 도달 전제
+        self.assertIn("retrieval_missing_gold", labels)
+        self.assertIn("corpus_gap", labels)
+        self.assertNotIn("generation_abstention_failure", labels)
+
+    def test_missing_gold_ids_lists_only_absent_gold(self):
+        """비율(n/N)만으론 '코퍼스 어디가 빈지'를 못 적는다 — optimize 는 멤버십을 스스로 못 구한다."""
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0, qtype="bridge")
+        finding = diagnose.corpus_gap_partial_hop(rec)
+        self.assertEqual(finding.metadata["missing_gold_ids"], ["unknown"])
+
+    def test_missing_gold_ids_covers_every_gold_on_full_gap(self):
+        rec = _record(("unknown", "unknown2"), ("x",), recall=0.0)
+        self.assertEqual(set(diagnose.corpus_gap(rec).metadata["missing_gold_ids"]),
+                         {"unknown", "unknown2"})
+
+    def test_missing_gold_ids_empty_when_membership_unmeasured(self):
+        """멤버십은 tier2 — 미측정이면 라벨 자체가 안 서므로 키를 소비할 일도 없다."""
+        metrics_common.set_mode(Mode.FAST)
+        self.assertIsNone(diagnose.corpus_gap(_record(("unknown",), ("x",), recall=0.0)))
+
+    def test_critical_findings_do_not_move_reliability(self):
+        """critical 이 additive 로 늘어도 점수축은 안 움직인다 — findings 는 gold 대조 probe 의
+        신뢰도 식(recall × 답변축)에 들어가지 않는다(무응답 기대 probe 만 findings 유무로 1/0).
+
+        recall=0.5 · 정답 일치로 잡아 값이 0 이 아닌 지점에서 본다 — gap probe(recall=0)로
+        비교하면 0 == 0 이라 findings 무관함을 증명하지 못한다.
+        """
+        from agents.eval import scoring
+        # gold 를 둘 다 코퍼스에 둬야 missing_gold(critical)가 확정으로 선다 — 코퍼스 밖이면
+        # 그 라벨이 self-scope 로 빠지고 예비 enumeration 만 남아 critical 이 사라진다.
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5, answer="정답")
+        rec.findings = diagnose.diagnose(rec, Mode.STANDARD)
+        self.assertTrue(any(f.severity == "critical" for f in rec.findings))
+        self.assertEqual(scoring._probe_reliability(rec), 0.5)   # 0.5(recall) × 1.0(정답)
+
+    def test_abstention_label_is_additive_not_a_score_penalty(self):
+        """기권 실패가 붙는 corpus_gap probe 의 신뢰도 0 은 recall=0 탓이다 — 라벨 탓이 아니다."""
+        from agents.eval import scoring
+        rec = self._gap()
+        rec.findings = diagnose.diagnose(rec, Mode.STANDARD)
+        self.assertIn("generation_abstention_failure", {f.label for f in rec.findings})
+        self.assertEqual(rec.recall_at_k, 0.0)
+        self.assertEqual(scoring._probe_reliability(rec), 0.0)
+
+    def test_corpus_gap_reason_shows_membership_ratio(self):
+        """'gold_in_corpus=False' 만 적으면 부분 gap 을 '전부 없음'으로 오독한다."""
+        rec = _record(("g_a", "unknown"), ("x",), recall=0.0)
+        self.assertIn("gold_in_corpus=1/2", diagnose.corpus_gap(rec).metadata["reason"])
+
     def test_both_silent_when_gold_present_in_corpus(self):
         rec = _record(("g_a",), ("x",), recall=0.0)
         self.assertIsNone(diagnose.corpus_gap(rec))
         self.assertIsNone(diagnose.corpus_gap_partial_hop(rec))
+
+    def test_both_silent_for_no_answer_probe(self):
+        """답이 애초에 없는 질문엔 채울 자료도 없다 — '문서를 추가 수집하라'가 거짓 처방이 된다."""
+        for qtype in (None, "bridge"):
+            with self.subTest(qtype=qtype):
+                rec = _record(("unknown",), ("x",), recall=0.0, qtype=qtype,
+                              answer_exists=False, ground_truth=None)
+                self.assertIsNone(diagnose.corpus_gap(rec))
+                self.assertIsNone(diagnose.corpus_gap_partial_hop(rec))
+
+    def test_trigger_metadata_separates_the_two_causes(self):
+        """처방은 같지만 '자료를 채우면 사라질 기권 실패'인지는 갈라야 한다 — reason 파싱 없이."""
+        gap = diagnose.generation_abstention_failure(self._gap())
+        self.assertEqual(gap.metadata["trigger"], "corpus_gap")
+
+        no_answer = _record((), ("x",), recall=-1.0, answer_exists=False,
+                            ground_truth=None, answer="지어낸 답")
+        self.assertEqual(diagnose.generation_abstention_failure(no_answer).metadata["trigger"],
+                         "no_answer_expected")
+
+    def test_no_answer_probe_emits_only_the_abstention_label(self):
+        """무응답 기대 probe 는 D(자료)·A(검색) 어디에도 걸리지 않는다 — 고칠 건 생성 동작뿐."""
+        rec = _record(("g_a",), ("x",), recall=0.0, answer_exists=False,
+                      ground_truth=None, answer="지어낸 답")
+        self.assertEqual({f.label for f in diagnose.diagnose(rec, Mode.STANDARD)},
+                         {"generation_abstention_failure"})
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1012,6 +1387,19 @@ class AssemblyTest(_DiagnoseTestBase):
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
         dup = [diagnose.retrieval_missing_gold(rec), diagnose.retrieval_missing_gold(rec)]
         self.assertEqual(len(diagnose._dedup(dup)), 1)
+
+    def test_full_mode_folds_into_deep(self):
+        """tier4 는 없앴다 — 다만 'full' 은 웹 UI depth 문자열이라 DEEP 으로 접어야 한다.
+        지우면 EVAL_MODE=full 이 DEFAULT_MODE(fast)로 조용히 강등된다."""
+        from agents.eval import types
+        self.assertFalse(hasattr(Mode, "FULL"))
+        for raw in ("full", "4"):
+            with self.subTest(raw=raw):
+                os.environ["EVAL_MODE"] = raw
+                try:
+                    self.assertEqual(types.resolve_mode(), Mode.DEEP)
+                finally:
+                    os.environ.pop("EVAL_MODE", None)
 
     def test_group_derivation_matches_prescription_order(self):
         self.assertEqual(diagnose._group_of("corpus_gap", "gap"), "D")

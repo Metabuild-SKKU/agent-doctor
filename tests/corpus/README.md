@@ -33,7 +33,7 @@ python tests/run_corpus.py --loop      # 품질 미달 시 Optimize→재색인 
 결과가 `out/report.html` 안에 그대로 박혀 있어서, 나중에 그 파일을 다시 열어도 된다.
 실행 로그는 `output/logs/corpus_*.log` 에 쌓인다.
 
-진단 깊이는 항상 `EVAL_MODE=full` + `EVAL_ENABLE_LLM=1` 로 고정한다(RAGAS·tier4 검증까지).
+진단 깊이는 항상 `EVAL_MODE=full`(= `deep`) + `EVAL_ENABLE_LLM=1` 로 고정한다(RAGAS 까지).
 LLM 을 실제로 호출하므로 비용이 들지만, findings 가 '예비'에 머물지 않고 확정된다.
 
 ## QA셋을 왜 저장하나
