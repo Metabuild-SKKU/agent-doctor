@@ -183,6 +183,8 @@ def _report_use_current(decision: OptimizeDecision) -> OptimizationReport:
     """변경 없이 현재 설정을 유지하는 경우(already_optimal / skipped)."""
     if decision.status == "already_optimal":
         summary = "이미 모든 목표 지표를 달성해 설정을 변경하지 않았습니다."
+    elif decision.reason:
+        summary = decision.reason
     else:
         summary = "적용할 수 있는 처방이 없어 현재 설정을 유지합니다."
     return OptimizationReport(

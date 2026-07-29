@@ -475,6 +475,13 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
             {item["prescription_id"] for item in deferred},
             {"enable_reranker", "widen_rerank_candidates"},
         )
+        widen = next(
+            item
+            for item in deferred
+            if item["prescription_id"] == "widen_rerank_candidates"
+        )
+        self.assertEqual(widen["reason"], "reranker_disabled")
+        self.assertFalse(widen["retryable"])
 
     def test_incomplete_reranker_execution_does_not_reopen_same_prescription(self):
         state = AgentDoctorState(
