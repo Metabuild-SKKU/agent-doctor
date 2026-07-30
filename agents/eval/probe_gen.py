@@ -372,60 +372,109 @@ def _from_chunks(
     for chunk, generated in zip(targets, results):
         if len(probes) >= size:
             break
-        heuristic_quote: str | None = None
-        if generated is None:
-            question, ground_truth = _heuristic_single_hop(chunk.text)
-            heuristic_quote = ground_truth
-            gen_method = "heuristic_evidence"
-        else:
-            question, ground_truth = generated
-            gen_method = "llm_single_hop"
-        issue = probe_quality_issue(question, ground_truth)
-        if issue:
-            print(f"  Probe 폐기({issue}) — {question[:40]}")
-            continue
-        probe = Probe(
-            probe_id=f"probe_gen_{len(probes):03d}",
-            question=question,
-            source="llm_generated",
-            expected_difficulty="medium",
-            answer_exists=True,
-            ground_truth=ground_truth,
-            gold_chunk_ids=[chunk.chunk_id],
-            qtype=None,                 # 단일홉
-            metadata={"gen_method": gen_method},
+        probe = _assemble_single_hop_probe(
+            chunk, f"probe_gen_{len(probes):03d}", generated, documents_by_id, chunks,
         )
-        document = (documents_by_id or {}).get(chunk.doc_id)
-        spans = []
-        exact_span_count = 0
-        fallback_span_count = 0
-        if document is not None:
-            span = None
-            if heuristic_quote:
-                span = _locate_evidence_in_chunk(
-                    heuristic_quote,
-                    chunk,
-                    document,
-                    chunks,
-                )
-            if span is None:
-                span = _chunk_fallback_span(chunk, document, chunks)
-            if span is not None:
-                spans.append(span)
-                if span.get("_grounding_quality") == "exact":
-                    exact_span_count = 1
-                else:
-                    fallback_span_count = 1
-        _set_probe_gold_spans(
-            probe,
-            spans,
-            expected_sources=1,
-            located_sources=len(spans),
-            exact_span_count=exact_span_count,
-            fallback_span_count=fallback_span_count,
-        )
-        probes.append(probe)
+        if probe is not None:
+            probes.append(probe)
     return probes
+
+
+def _assemble_single_hop_probe(
+    chunk: Chunk,
+    probe_id: str,
+    generated: tuple[str, str] | None,
+    documents_by_id: dict[str, Document] | None,
+    chunks: list[Chunk],
+) -> Probe | None:
+    """청크 + LLM 생성결과(None 이면 휴리스틱)로 단일홉 Probe 하나를 조립한다.
+    품질 게이트 탈락이면 None. _from_chunks 와 regenerate_probes 가 공유한다."""
+    heuristic_quote: str | None = None
+    if generated is None:
+        question, ground_truth = _heuristic_single_hop(chunk.text)
+        heuristic_quote = ground_truth
+        gen_method = "heuristic_evidence"
+    else:
+        question, ground_truth = generated
+        gen_method = "llm_single_hop"
+    issue = probe_quality_issue(question, ground_truth)
+    if issue:
+        print(f"  Probe 폐기({issue}) — {question[:40]}")
+        return None
+    probe = Probe(
+        probe_id=probe_id,
+        question=question,
+        source="llm_generated",
+        expected_difficulty="medium",
+        answer_exists=True,
+        ground_truth=ground_truth,
+        gold_chunk_ids=[chunk.chunk_id],
+        qtype=None,                 # 단일홉
+        metadata={"gen_method": gen_method},
+    )
+    document = (documents_by_id or {}).get(chunk.doc_id)
+    spans = []
+    exact_span_count = 0
+    fallback_span_count = 0
+    if document is not None:
+        span = None
+        if heuristic_quote:
+            span = _locate_evidence_in_chunk(heuristic_quote, chunk, document, chunks)
+        if span is None:
+            span = _chunk_fallback_span(chunk, document, chunks)
+        if span is not None:
+            spans.append(span)
+            if span.get("_grounding_quality") == "exact":
+                exact_span_count = 1
+            else:
+                fallback_span_count = 1
+    _set_probe_gold_spans(
+        probe,
+        spans,
+        expected_sources=1,
+        located_sources=len(spans),
+        exact_span_count=exact_span_count,
+        fallback_span_count=fallback_span_count,
+    )
+    return probe
+
+
+def _is_regeneratable(probe: Probe) -> bool:
+    """재생성 대상인가 — 우리가 만든 단일홉(llm_generated) + 아직 재생성 1회 미만.
+    멀티홉/타 소스(user_log·taxonomy)는 같은 근거 청크에서 Q/A만 갈아끼우는 방식이
+    성립하지 않고, regenerated>=1 은 무한 재생성 방지 가드다(이후엔 사용자 요청으로 에스컬레이션)."""
+    return (
+        probe.source == "llm_generated"
+        and len(probe.gold_chunk_ids) == 1
+        and int((probe.metadata or {}).get("regenerated", 0)) < 1
+    )
+
+
+def regenerate_probes(probes: list[Probe], state: AgentDoctorState) -> dict[str, Probe]:
+    """bad_gold_answer 로 판정된 우리 probe 를 같은 근거 청크에서 재합성한다.
+    Option A: 이번 방문은 안 건드리고, 교체된 probe 를 저장해 다음 실행이 재평가한다.
+    반환: {probe_id: 재생성 probe} — 실제로 교체된 것만(불가분은 원본 유지)."""
+    chunks_by_id = {c.chunk_id: c for c in state.chunks}
+    documents_by_id = {d.doc_id: d for d in state.documents}
+    replaced: dict[str, Probe] = {}
+    for probe in probes:
+        if not _is_regeneratable(probe):
+            continue
+        chunk = chunks_by_id.get(probe.gold_chunk_ids[0])
+        if chunk is None:
+            continue
+        generated = _llm_generate_single_hop(chunk.text)
+        if generated is None:
+            continue  # 휴리스틱은 원 gold 와 같을 수 있어 재생성에 쓰지 않는다(LLM 성공 시만)
+        new_probe = _assemble_single_hop_probe(
+            chunk, probe.probe_id, generated, documents_by_id, state.chunks,
+        )
+        if new_probe is None:
+            continue
+        new_probe.metadata["regenerated"] = int((probe.metadata or {}).get("regenerated", 0)) + 1
+        new_probe.metadata["regenerated_from_gold"] = probe.ground_truth  # 감사 추적
+        replaced[probe.probe_id] = new_probe
+    return replaced
 
 
 def _heuristic_single_hop(text: str) -> tuple[str, str]:
