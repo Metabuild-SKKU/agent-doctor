@@ -198,6 +198,9 @@ def _rule_means(records: list[EvalRecord]) -> dict:
     recalls = [max(0.0, r.recall_at_k) for r in records if r.recall_at_k >= 0]
     gt = [r for r in records if r.probe.ground_truth]
     f1s = [r.f1_score for r in gt]
+    # 판정에 쓰이는 값은 f1 단독이 아니라 혼합 점수(answer_score)다 — 의미축이 측정된 실행에서는
+    # 그 평균도 함께 남긴다. f1 만 보면 '판정 기준'과 '표시 숫자'가 어긋난다.
+    answer_scores = [r.answer_score for r in gt if r.answer_semantic is not None]
     oracles = [r.oracle_f1 for r in gt]
     ems = [1.0 if r.exact_match else 0.0 for r in gt]
     out = {}
@@ -207,6 +210,8 @@ def _rule_means(records: list[EvalRecord]) -> dict:
         out["mean_f1"] = sum(f1s) / len(f1s)
     if ems:
         out["mean_exact_match"] = sum(ems) / len(ems)   # KorQuAD EM (F1 과 나란히, 관측)
+    if answer_scores:
+        out["mean_answer_score"] = sum(answer_scores) / len(answer_scores)
     if oracles:
         out["mean_oracle_f1"] = sum(oracles) / len(oracles)
     return out
@@ -254,7 +259,10 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
           f" · overall {report.overall_score} · pass {pass_mark}")
     rs = report.ragas_scores
     if "mean_f1" in rs:   # KorQuAD식 관측 지표: F1 과 EM 을 나란히
-        print(f"  정답매칭(관측) F1={rs['mean_f1']:.3f}  EM={rs.get('mean_exact_match', 0.0):.3f}")
+        line = f"  정답매칭(관측) F1={rs['mean_f1']:.3f}  EM={rs.get('mean_exact_match', 0.0):.3f}"
+        if "mean_answer_score" in rs:   # 실제 판정 기준(혼합 점수) 평균
+            line += f"  판정점수={rs['mean_answer_score']:.3f}"
+        print(line)
     if rs.get("answer_correctness_degraded"):
         print(f"  ⚠ 정답 판정 degrade {rs['answer_correctness_degraded']}건 — "
               f"판정기(TP/FP/FN 분류) 실패로 의미유사도 단독 계산. 근접 오답을 못 걸렀을 수 있음")
