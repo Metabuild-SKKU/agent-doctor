@@ -338,12 +338,12 @@ def _maybe_regenerate_bad_gold(
         # 재생성 불가(전부 user_log·멀티홉·LLM 실패 등) → 리포트의 검수 요청으로만 남는다.
         return False
     updated = [replaced.get(p.probe_id, p) for p in probes]
-    try:
-        save_probes(updated, probe_version)
-    except OSError as exc:
-        # 저장이 실패하면 파일엔 옛 probe 가 남는다 → 캐시를 건드리거나 snapshot 을 건너뛰면
-        # 오히려 재평가 기회를 잃는다. 이번 실행은 기존 probe/캐시를 그대로 유지한다.
-        print(f"[Eval] bad_gold probe 재생성 저장 실패: {exc} — 기존 probe 유지")
+    # save_probes 는 OSError 를 내부에서 삼키고 성공 여부만 bool 로 돌려준다(예외가 밖으로
+    # 안 나옴). 저장이 실패하면 파일엔 옛 probe 가 남으므로, 캐시 무효화·성공 로그·snapshot
+    # skip 을 하면 안 된다(안 그러면 다음 실행이 옛 probe 를 다시 읽어 재생성을 무한 반복,
+    # 1회 가드도 파일에 반영 안 됨). 이번 실행은 기존 probe/캐시를 그대로 유지한다.
+    if not save_probes(updated, probe_version):
+        print("[Eval] bad_gold probe 재생성 저장 실패 — 기존 probe 유지(다음 실행 재시도)")
         return False
     _invalidate_regenerated_caches(state, set(replaced))
     print(f"[Eval] bad_gold probe {len(replaced)}개 재생성 → 다음 실행에서 재평가 "

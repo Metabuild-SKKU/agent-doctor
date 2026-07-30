@@ -133,7 +133,9 @@ class BadGoldRegenerationTest(unittest.TestCase):
         self.assertIsNone(eval_agent._find_eval_snapshot(st, key))
 
     def test_regeneration_save_failure_keeps_caches_and_returns_false(self):
-        # 저장 실패 시엔 재생성이 반영 안 됐으므로 무효화·snapshot skip 을 하면 안 된다.
+        # 저장 실패 시엔 재생성이 파일에 반영 안 됐으므로 무효화·snapshot skip 을 하면 안 된다.
+        # 실제 save_probes 는 OSError 를 내부에서 삼켜 False 를 돌려주므로(예외가 밖으로 안 나옴),
+        # save_probes 를 직접 예외 mock 하지 말고 Path.write_text 실패를 재현해 진짜 계약을 검증한다.
         from agents.eval import agent as eval_agent
         st = self._state()
         probe = Probe(probe_id="probe_gen_000", question="구질문?", source="llm_generated",
@@ -141,7 +143,7 @@ class BadGoldRegenerationTest(unittest.TestCase):
         st.diagnosis_cache = {"probe_gen_000": {"sig": 1}}
         with patch.object(pg, "_llm_generate_single_hop", return_value=("재택 며칠?", "주 2일")), \
              patch.object(pg, "probe_quality_issue", return_value=None), \
-             patch.object(eval_agent, "save_probes", side_effect=OSError("disk full")):
+             patch("agents.eval.probe_store.Path.write_text", side_effect=OSError("disk full")):
             did = eval_agent._maybe_regenerate_bad_gold(st, [self._bad_gold_record(probe)], [probe], "v1")
         self.assertFalse(did)                                 # 저장 실패 → False(STEP5 는 정상 저장)
         self.assertIn("probe_gen_000", st.diagnosis_cache)    # 무효화 안 함
