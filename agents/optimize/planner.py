@@ -340,20 +340,33 @@ def _available_prescriptions(
 
     findings 를 주면 applies_when(topic_cluster 등) 신호로 후보를 거른다. 안 주면(레거시
     호출) 블랙리스트만 본다 — 신호 대조는 findings 가 있어야 성립하기 때문.
+
+    신호로 걸러 후보가 0개가 되면 신호 조건을 완화해 블랙리스트만 적용한 목록을 돌려준다.
+    신호는 처방 순서를 '선호'하게 만들 뿐 라벨을 통째로 막아선 안 되기 때문이다 — 예를 들어
+    topic_cluster=spread 인데 swap_embedding_model 이 블랙리스트에 오르면, 완화가 없으면
+    이 라벨의 후보가 전부 사라져 _pick_top 이 라벨 자체를 건너뛴다(신호 배선 이전에는 청킹
+    처방으로 넘어가던 경로라 회귀). 임계값이 아직 캘리브레이션 안 된 임의값이라 더욱,
+    신호 때문에 고칠 기회를 잃는 쪽보다 덜 맞는 처방이라도 시도하는 쪽이 안전하다.
     """
-    return [
-        p
-        for p in rule.get("prescriptions", [])
-        if (label, p["id"]) not in blacklist
-        and (findings is None or _prescription_applies(p, findings))
+    unblacklisted = [
+        p for p in rule.get("prescriptions", []) if (label, p["id"]) not in blacklist
     ]
+    if findings is None:
+        return unblacklisted
+    preferred = [p for p in unblacklisted if _prescription_applies(p, findings)]
+    return preferred or unblacklisted
 
 
 def _pick_top(
     ranked: list[tuple[str, list[Finding], dict, float]],
     blacklist: set[tuple[str, str]],
 ) -> tuple[str, list[Finding], dict, float] | None:
-    """정렬된 목록에서 '아직 시도할 처방이 남은' 최상위 라벨 묶음을 고른다."""
+    """정렬된 목록에서 '아직 시도할 처방이 남은' 최상위 라벨 묶음을 고른다.
+
+    라벨이 스킵되는 조건은 블랙리스트로 처방이 전부 소진됐을 때뿐이다 — applies_when 신호는
+    _available_prescriptions 안에서 후보가 0개가 되면 완화되므로, 신호만으로는 라벨이
+    통째로 건너뛰어지지 않는다.
+    """
     for label, findings, rule, score in ranked:
         if _available_prescriptions(rule, label, blacklist, findings):
             return label, findings, rule, score

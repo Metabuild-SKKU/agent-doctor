@@ -105,8 +105,10 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         #     "spread"       → Case3(임베딩 모델 자체 약함) → 임베딩 교체
         #     "concentrated" → Case2(특정 도메인 약함)      → 임베딩 교체(도메인특화/파인튜닝)
         #     "none"         → Case1(청크 희석)             → 청킹 조정
-        
-        #   신호가 없으면(미측정) planner가 리스트 순서대로 순차 시도(fallback).
+
+        #   신호가 없으면(미측정/"unmeasured") planner가 리스트 순서대로 순차 시도(fallback).
+        #   신호가 고른 처방이 블랙리스트로 소진되면 planner가 조건을 완화해 나머지를
+        #   시도한다 — 신호는 선호일 뿐 라벨을 통째로 막지 않는다.
         #   신호 생산: agents/eval/topic_cluster.py + agent.py::_annotate_topic_cluster
         #   신호 소비: planner::_prescription_applies (finding.metadata["topic_cluster"] 대조)
 

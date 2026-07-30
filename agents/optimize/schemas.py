@@ -112,6 +112,9 @@ class PrescriptionCandidate:
             (planner._prescription_applies). 비어있으면(또는 신호 미측정이면) 신호
             판단 없이 순서대로 순차 시도(fallback). optimizer 는 걸러진 뒤의
             search_space 만 소비하며 applies_when 을 직접 보지 않는다.
+            신호는 '선호'이지 '차단'이 아니다 — 걸러서 후보가 0개가 되면 planner 가
+            조건을 완화해 블랙리스트만 적용한다. 신호 때문에 라벨이 통째로 스킵돼
+            고칠 기회를 잃는 일을 막기 위해서다(planner._available_prescriptions).
         reason: 이 처방을 제안한 이유.
         tradeoffs: latency, cost, precision 하락 등 예상되는 부작용.
         metadata: 실험적 신호나 원본 rule dict 같은 확장 정보.

@@ -580,6 +580,43 @@ class TopicClusterAppliesWhenTest(unittest.TestCase):
         avail = planner._available_prescriptions(rule, label, set(), [f])
         self.assertEqual(len(avail), len(rule["prescriptions"]))
 
+    def test_unmeasured_signal_keeps_all_prescriptions(self):
+        # 판정 불가(unmeasured)는 어느 허용 리스트에도 없지만, 완화 경로로 전부 통과해야
+        # 한다 — 근거가 없을 때는 신호 배선 이전의 순차 fallback 과 같아야 하기 때문.
+        rule = self._rule()
+        self.assertEqual(self._ids("unmeasured"), [p["id"] for p in rule["prescriptions"]])
+
+    def test_signal_relaxes_when_blacklist_exhausts_preferred(self):
+        """신호가 고른 처방이 블랙리스트에 걸리면 나머지로 완화된다(라벨 스킵 금지).
+
+        spread + swap_embedding_model 블랙리스트 조합. 완화가 없으면 후보가 []가 되어
+        _pick_top 이 라벨을 통째로 건너뛴다 — 신호 배선 이전에는 청킹 처방으로 넘어가던
+        경로라 회귀다.
+        """
+        rule = self._rule()
+        blacklist = {(self.LABEL, "swap_embedding_model")}
+        finding = self._finding_with_signal("spread")
+
+        avail = planner._available_prescriptions(rule, self.LABEL, blacklist, [finding])
+        ids = [p["id"] for p in avail]
+        self.assertNotIn("swap_embedding_model", ids)      # 블랙리스트는 계속 유효
+        self.assertIn("shrink_chunk_size", ids)            # 신호 조건은 완화됨
+
+        ranked = [(self.LABEL, [finding], rule, 1.0)]
+        self.assertIsNotNone(planner._pick_top(ranked, blacklist))
+
+    def test_blacklist_still_skips_label_when_fully_exhausted(self):
+        # 완화는 신호에만 적용된다 — 블랙리스트로 전부 소진되면 라벨은 그대로 스킵.
+        rule = self._rule()
+        blacklist = {(self.LABEL, p["id"]) for p in rule["prescriptions"]}
+        finding = self._finding_with_signal("spread")
+
+        self.assertEqual(
+            planner._available_prescriptions(rule, self.LABEL, blacklist, [finding]), []
+        )
+        ranked = [(self.LABEL, [finding], rule, 1.0)]
+        self.assertIsNone(planner._pick_top(ranked, blacklist))
+
 
 if __name__ == "__main__":
     unittest.main()
