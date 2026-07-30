@@ -90,6 +90,12 @@ _DEFAULT_CURRENT: dict[str, int] = {
     "reranker.candidate_count": 20,
 }
 
+_CONTEXT_NOISE_LABEL = "context_noise_interference"
+_TOP_K_EXPANSION_LABELS = {
+    "retrieval_incomplete_enumeration",
+    "retrieval_missing_gold",
+}
+
 
 # ── 진입점 ────────────────────────────────────────────────────────
 
@@ -289,13 +295,48 @@ def _rank_groups(
         if not rule:
             continue
         ranked.append((label, findings, rule, _score(findings, rule)))
+    noise_precedes_top_k = _context_noise_precedes_top_k_expansion(ranked)
     ranked.sort(
         key=lambda item: (
-            _GROUP_ORDER.get(item[2].get("group"), 99),
+            _effective_group_order(item, noise_precedes_top_k),
             -item[3],
+            0 if item[0] == _CONTEXT_NOISE_LABEL else 1,
         )
     )
     return ranked
+
+
+def _context_noise_precedes_top_k_expansion(
+    ranked: list[tuple[str, list[Finding], dict, float]],
+) -> bool:
+    """노이즈가 top-k 확장 라벨만큼 강하면 컨텍스트 압축을 먼저 검증한다.
+
+    top_k 증가는 누락된 근거를 회수할 수 있지만, 동시에 모델에 넣는 잡음도 늘린다.
+    따라서 context_noise_interference가 이미 같은 수준 이상으로 확인된 방문에서는
+    먼저 재색인 없는 압축/필터링 처방을 실험해 노이즈 악화를 막는다.
+    """
+    noise_score = next(
+        (score for label, _findings, _rule, score in ranked if label == _CONTEXT_NOISE_LABEL),
+        None,
+    )
+    if noise_score is None:
+        return False
+    top_k_scores = [
+        score
+        for label, _findings, _rule, score in ranked
+        if label in _TOP_K_EXPANSION_LABELS
+    ]
+    return bool(top_k_scores) and noise_score >= max(top_k_scores)
+
+
+def _effective_group_order(
+    item: tuple[str, list[Finding], dict, float],
+    noise_precedes_top_k: bool,
+) -> int:
+    label, _findings, rule, _score_value = item
+    if noise_precedes_top_k and label == _CONTEXT_NOISE_LABEL:
+        return _GROUP_ORDER["A"]
+    return _GROUP_ORDER.get(rule.get("group"), 99)
 
 
 # ── 4. 최상위 선택 + 블랙리스트 ───────────────────────────────────

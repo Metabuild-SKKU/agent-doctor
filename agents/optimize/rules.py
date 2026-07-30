@@ -624,10 +624,16 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     "context_noise_interference": {
         "group": "C",
         "assigned": "권성우",
-        "status": "draft",              # filtering/MMR/reranker 필드 합의 필요
+        "status": "ready",              # context_compression은 현재 index_config에 매핑됨
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["noise_sensitivity"],  # 비-gold 상충 청크가 답변을 오염
         "prescriptions": [
+            {
+                "id": "context_compression",
+                "patch": {"context.compression.enabled": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
             {
                 "id": "enable_noise_filter",
                 "patch": {"noise_filter": True},
@@ -647,7 +653,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: noise_filter/mmr/generation_config 필드가 아직 없음.
+        # BLOCKER: noise_filter/mmr/generation_config 필드는 아직 없음.
     },
 
     # ═══════════════════════════════════════════════════════════════

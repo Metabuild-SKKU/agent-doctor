@@ -228,6 +228,25 @@ class GroupingTest(unittest.TestCase):
 
         self.assertEqual(request.failure_label, "retrieval_incomplete_enumeration")
 
+    def test_context_noise_can_precede_top_k_expansion_when_dominant(self):
+        findings = [
+            make_finding("noise1", "context_noise_interference"),
+            make_finding("noise2", "context_noise_interference"),
+            make_finding("noise3", "context_noise_interference"),
+            make_finding("enum1", "retrieval_incomplete_enumeration", gold_n=4),
+        ]
+
+        request, decision = planner.plan(make_state(findings, top_k=5))
+
+        self.assertEqual(decision.mode, "apply_optimize")
+        self.assertEqual(request.failure_label, "context_noise_interference")
+        first = request.candidates[0]
+        self.assertEqual(first.id, "context_compression")
+        self.assertEqual(
+            first.search_space,
+            {"context.compression.enabled": [True]},
+        )
+
 
 class ConfirmedGatingTest(unittest.TestCase):
     """예비(confirmed=False) 진단에는 비싼 처방 trial 을 쓰지 않는다."""
