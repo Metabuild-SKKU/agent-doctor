@@ -43,7 +43,9 @@ from agents.eval.types import (
     resolve_llm_concurrency, resolve_probe_source,
     PROBE_SOURCE_MADE, PROBE_SOURCE_TAXONOMY,
 )
-from agents.eval.probe_gen import generate_probes, uses_user_log, _resync_gold_chunk_ids
+from agents.eval.probe_gen import (
+    generate_probes, uses_user_log, _resync_gold_chunk_ids, regenerate_probes,
+)
 from agents.eval.probe_store import (
     DEFAULT_STORE_PATH,
     save_probes,
@@ -60,7 +62,7 @@ from agents.eval.metrics_ragas import (
 from agents.eval.metrics_common import set_context as set_diag_context
 from agents.eval.metrics_basic import _compute_metrics
 from agents.eval.diagnose import diagnose, _is_success
-from agents.eval.report import build_report
+from agents.eval.report import build_report, is_bad_gold_probe
 
 
 _EVAL_CACHE_ENV_KEYS = (
@@ -315,6 +317,58 @@ def _ragas_track(record: EvalRecord, track: str) -> dict:
 _MODE_NAMES = {Mode.FAST: "fast", Mode.STANDARD: "standard", Mode.DEEP: "deep"}
 
 
+def _maybe_regenerate_bad_gold(
+    state: AgentDoctorState,
+    records: list[EvalRecord],
+    probes: list[Probe],
+    probe_version: str,
+) -> bool:
+    """bad_gold_answer 로 확정된 우리 probe 를 재생성해 probe 파일에 반영한다(Option A).
+
+    반환: 실제로 재생성·저장이 일어났으면 True. 그 경우 호출부(STEP5)는 이번 실행의 eval
+    snapshot 을 저장하지 않아야 한다 — 재생성 probe 는 같은 probe_version(=cache key)을
+    유지하므로, 옛 probe/report 로 만든 snapshot 을 저장하면 다음 Eval 이 새 probe 파일을
+    읽기 전에 그 snapshot 을 cache hit 해 옛 성적표를 복원한다(리뷰 blocker: 루프 미완결).
+    저장 실패 시엔 재생성이 반영되지 않은 것이므로 무효화·성공 로그·skip 을 하지 않는다."""
+    bad_probes = [r.probe for r in records if is_bad_gold_probe(r)]
+    if not bad_probes:
+        return False
+    replaced = regenerate_probes(bad_probes, state)
+    if not replaced:
+        # 재생성 불가(전부 user_log·멀티홉·LLM 실패 등) → 리포트의 검수 요청으로만 남는다.
+        return False
+    updated = [replaced.get(p.probe_id, p) for p in probes]
+    # save_probes 는 OSError 를 내부에서 삼키고 성공 여부만 bool 로 돌려준다(예외가 밖으로
+    # 안 나옴). 저장이 실패하면 파일엔 옛 probe 가 남으므로, 캐시 무효화·성공 로그·snapshot
+    # skip 을 하면 안 된다(안 그러면 다음 실행이 옛 probe 를 다시 읽어 재생성을 무한 반복,
+    # 1회 가드도 파일에 반영 안 됨). 이번 실행은 기존 probe/캐시를 그대로 유지한다.
+    if not save_probes(updated, probe_version):
+        print("[Eval] bad_gold probe 재생성 저장 실패 — 기존 probe 유지(다음 실행 재시도)")
+        return False
+    _invalidate_regenerated_caches(state, set(replaced))
+    print(f"[Eval] bad_gold probe {len(replaced)}개 재생성 → 다음 실행에서 재평가 "
+          f"(재생성 불가 {len(bad_probes) - len(replaced)}개는 사용자 검수 요청)")
+    return True
+
+
+def _invalidate_regenerated_caches(state: AgentDoctorState, regenerated_ids: set[str]) -> None:
+    """재생성 probe 의 stale 캐시를 무효화한다.
+
+    재생성 probe 는 같은 probe_id·probe_version 을 유지하므로(corpus_version 기반), 그 id 를
+    담은 캐시가 남으면 다음 평가가 옛 진단 신호/리포트를 그대로 재사용해 재생성이 조용히
+    무효화될 수 있다(리뷰 blocker#3). 해당 probe 의 진단 신호와, 그 probe 를 담은 eval
+    스냅샷을 제거해 다음 평가가 새 probe 로 처음부터 진단·채점하게 강제한다."""
+    if not regenerated_ids:
+        return
+    for pid in regenerated_ids:
+        state.diagnosis_cache.pop(pid, None)
+    state.eval_cache = [
+        snapshot
+        for snapshot in state.eval_cache
+        if not any(p.probe_id in regenerated_ids for p in snapshot.probes)
+    ]
+
+
 def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
@@ -458,8 +512,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             parallel_note = (f" 병렬 (동시성 {concurrency})"
                              if concurrency > 1 and len(gen_tasks) > 1 else " 순차")
             print(f"  probe {len(probes)}개 · 답변 {len(gen_tasks)}건{parallel_note}")
-            answers = parallel_map(lambda t: generate_answer(t[0].probe.question, t[2]),
-                                   gen_tasks, concurrency)
+            # index_config 를 전달해 Optimize(B그룹)의 프롬프트·온도 처방(temperature,
+            # grounding_strict 등)이 실제 답변 생성에 반영되게 한다. generator 는 아는
+            # 키만 읽고 나머지(chunk_size 등)는 무시한다. 없으면 기본값이 현 동작 유지.
+            gen_config = state.index_config or {}
+            answers = parallel_map(
+                lambda t: generate_answer(t[0].probe.question, t[2], config=gen_config),
+                gen_tasks, concurrency)
             for (rec, track, _ctx), answer in zip(gen_tasks, answers):
                 if track == "real":
                     rec.generated_answer = answer
@@ -507,6 +566,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 _log_probe(i, len(records), rec)
             _log_diagnosis_summary(records)
 
+        # ── STEP4.5: bad_gold probe 재생성 (Option A — 다음 실행에서 재평가) ──
+        # 정답셋 오류로 확정된 '우리(llm_generated)' probe 를 같은 근거 청크에서 재합성해
+        # probe 파일에 반영한다. 이번 방문의 report/records/snapshot 은 건드리지 않아(현
+        # 진단·점수 일관) 다음 파이프라인 실행이 재생성된 probe 를 로드해 재평가한다.
+        # (user_log·멀티홉은 regenerate_probes 가 제외 → 리포트의 사용자 검수 요청으로 남는다.)
+        regenerated = _maybe_regenerate_bad_gold(state, records, probes, probe_version)
+
         # ── STEP5: 리포트 ─────────────────────────────────────
         with step("Eval", 5, "리포트"):
             state.probes = probes
@@ -518,7 +584,14 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 version,
                 probe_version,
             )
-            _store_eval_snapshot(state, eval_cache_key)
+            # 재생성이 일어났으면 이번 report/probes 는 곧 옛 시험지 기준이라, 같은 cache key
+            # 로 snapshot 을 저장하면 다음 Eval 이 새 probe 대신 이 옛 성적표를 cache hit 한다.
+            # 저장을 건너뛰어 다음 Eval 이 cache miss → 새 probe 로 재평가하게 한다.
+            if regenerated:
+                print("[Eval] bad_gold 재생성 실행 → 이번 평가 snapshot 저장 생략"
+                      "(다음 실행이 새 probe 로 재평가)")
+            else:
+                _store_eval_snapshot(state, eval_cache_key)
 
     except Exception as e:  # 계약: 예외를 밖으로 던지지 않는다
         state.status = "error"

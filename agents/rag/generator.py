@@ -255,7 +255,9 @@ def _llm_generate(
         _warn_unknown_provider_once(selected)
         return None
     providers = ["openai", "gemini", "github"] if selected == "auto" else [selected]
-    system, user = _build_prompt(question, contexts, max_context_chars=max_context_chars)
+    system, user = _build_prompt(
+        question, contexts, max_context_chars=max_context_chars, config=config
+    )
 
     for name in providers:
         # config/env에서 다시 결정
@@ -296,11 +298,24 @@ def _llm_generate(
 
 
 # LLM에 전달할 system/user prompt
+def _gen_flag(config: dict | None, name: str, default: bool) -> bool:
+    """generation_config 의 bool 플래그를 읽는다(문자열 'true' 등도 정규화). 없으면 default."""
+    if not config or name not in config:
+        return default
+    value = config.get(name)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 def _build_prompt(
     question: str,
     contexts: list[str],
     *,
     max_context_chars: int,
+    config: dict | None = None,
 ) -> tuple[str, str]:
     context_block = ""
     for index, context in enumerate(contexts, 1):
@@ -310,12 +325,30 @@ def _build_prompt(
             break
         context_block += next_block
 
-    # context 밖의 내용을 지어내지 않도록 답변 규칙을 고정한다.
-    system = (
-        "너는 사내 문서 QA 어시스턴트다. 반드시 제공된 컨텍스트만 근거로 한국어로 답하라. "
-        "컨텍스트에 근거가 없으면 '제공된 정보로는 알 수 없습니다'라고 답하라. "
-        "답변 끝에는 근거 번호를 대괄호로 표시하라."
-    )
+    # generation_config 플래그로 시스템 프롬프트를 조립한다. rules.py 처방은 플래그만
+    # 넘기고 실제 문구는 여기서 소유한다(use_hybrid/use_reranker와 같은 패턴).
+    # 기본값(grounding_strict·require_citation=True, 나머지 False)은 과거 하드코딩
+    # 프롬프트를 그대로 재현하므로, Optimize가 손대기 전엔 동작이 바뀌지 않는다.
+    clauses = ["너는 사내 문서 QA 어시스턴트다."]
+    if _gen_flag(config, "grounding_strict", True):
+        clauses.append(
+            "반드시 제공된 컨텍스트만 근거로 한국어로 답하라. "
+            "컨텍스트에 근거가 없으면 '제공된 정보로는 알 수 없습니다'라고 답하라."
+        )
+    else:
+        clauses.append("한국어로 답하라.")
+    if _gen_flag(config, "abstention_strict", False):
+        clauses.append(
+            "조금이라도 확신이 없으면 지어내지 말고 반드시 "
+            "'제공된 정보로는 알 수 없습니다'라고 답하라."
+        )
+    if _gen_flag(config, "completeness_mode", False):
+        clauses.append("질문에 여러 항목이나 하위 질문이 있으면 빠짐없이 모두 답하라.")
+    if _gen_flag(config, "restate_question", False):
+        clauses.append("답변을 시작하기 전에 질문을 한 문장으로 재진술하라.")
+    if _gen_flag(config, "require_citation", True):
+        clauses.append("답변 끝에는 근거 번호를 대괄호로 표시하라.")
+    system = " ".join(clauses)
     user = f"[컨텍스트]\n{context_block.strip()}\n\n[질문]\n{question.strip()}"
     return system, user
 
@@ -324,17 +357,31 @@ def _build_prompt(
 # 여기 래퍼는 RAG 규약(키 없으면 None, 빈 응답 None, RAG_* 모델 env)만 담당.
 
 # OpenAI (openai SDK)
+def _generation_temperature(config: dict | None) -> float:
+    """generation_config 의 temperature(기본 0.0). 파싱 실패 시 0.0."""
+    raw = _config_value(config, "temperature")
+    if raw is None:
+        return 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _openai_generate(
     system: str,
     user: str,
     *,
     model: str | None = None,
-    config: dict | None = None,   # 미사용(호출부 시그니처 호환용)
+    config: dict | None = None,
 ) -> str | None:
     if not os.getenv("OPENAI_API_KEY"):
         return None
     selected_model = model or os.getenv("RAG_OPENAI_MODEL", "gpt-4o")
-    return openai_chat(system, user, selected_model, tag="RAG").strip() or None
+    return openai_chat(
+        system, user, selected_model,
+        temperature=_generation_temperature(config), tag="RAG",
+    ).strip() or None
 
 
 # GitHub Models (OpenAI 호환 API, GitHub PAT 인증)
@@ -353,7 +400,8 @@ def _github_generate(
     selected_model = model or os.getenv("RAG_GITHUB_MODEL", "openai/gpt-4o")
     return openai_chat(
         system, user, selected_model,
-        api_key=api_key, base_url=GITHUB_MODELS_BASE_URL, tag="RAG",
+        api_key=api_key, base_url=GITHUB_MODELS_BASE_URL,
+        temperature=_generation_temperature(config), tag="RAG",
     ).strip() or None
 
 
@@ -363,9 +411,12 @@ def _gemini_generate(
     user: str,
     *,
     model: str | None = None,
-    config: dict | None = None,   # base_url 등은 SDK가 처리하므로 현재 미사용(시그니처 호환용)
+    config: dict | None = None,
 ) -> str | None:
     if not os.getenv("GEMINI_API_KEY"):
         return None
     selected_model = model or os.getenv("RAG_GEMINI_MODEL", "gemini-flash-latest")
-    return gemini_chat(system, user, selected_model, tag="RAG").strip() or None
+    return gemini_chat(
+        system, user, selected_model,
+        temperature=_generation_temperature(config), tag="RAG",
+    ).strip() or None
