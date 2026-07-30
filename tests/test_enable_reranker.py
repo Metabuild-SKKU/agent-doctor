@@ -464,17 +464,42 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
             ("retrieval_low_rank", "enable_reranker"),
             optimized.blacklist,
         )
-        self.assertNotIn(
-            ("retrieval_low_rank", "widen_rerank_candidates"),
-            optimized.blacklist,
-        )
         deferred = optimized.optimization_report.metadata[
             "runtime_deferred_prescriptions"
         ]
+        # low_rank 의 처방은 enable_reranker 하나다 — 후보창 확대는
+        # retrieval_rerank_candidate_miss 로 분리됐다(아래 테스트가 그쪽을 덮는다).
         self.assertEqual(
             {item["prescription_id"] for item in deferred},
-            {"enable_reranker", "widen_rerank_candidates"},
+            {"enable_reranker"},
         )
+
+    def test_candidate_widening_is_deferred_while_reranker_is_off(self):
+        """후보창 확대는 리랭커가 꺼져 있으면 의미가 없다 — 재시도 불가로 미룬다."""
+        finding = Finding(
+            finding_id="p1:retrieval_rerank_candidate_miss",
+            type="retrieval_failure",
+            severity="warning",
+            description="정답 청크가 리랭커 후보창 밖",
+            label="retrieval_rerank_candidate_miss",
+            confirmed=True,
+            affected_probes=["p1"],
+        )
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="unavailable",
+                findings=[finding],
+                overall_score=0.3,
+                ragas_scores={"context_precision": 0.2},
+                pass_threshold=False,
+            ),
+        )
+
+        optimized = run_optimize(state)
+
+        deferred = optimized.optimization_report.metadata[
+            "runtime_deferred_prescriptions"
+        ]
         widen = next(
             item
             for item in deferred
@@ -482,6 +507,10 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
         )
         self.assertEqual(widen["reason"], "reranker_disabled")
         self.assertFalse(widen["retryable"])
+        self.assertNotIn(
+            ("retrieval_rerank_candidate_miss", "widen_rerank_candidates"),
+            optimized.blacklist,
+        )
 
     def test_incomplete_reranker_execution_does_not_reopen_same_prescription(self):
         state = AgentDoctorState(

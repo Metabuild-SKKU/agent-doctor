@@ -472,9 +472,8 @@ class OptimizeAgentForwardTest(unittest.TestCase):
             ["retrieval_low_rank"],
         )
 
-    def test_enabled_reranker_widens_candidate_count(self):
-        """reranker가 이미 켜져 있으면 다음 처방이 후보 수를 실제 config에 반영한다."""
-        state = make_state(overall=30.0, label="retrieval_low_rank")
+    def _reranker_on_state(self, label):
+        state = make_state(overall=30.0, label=label)
         state.index_config.update(
             {
                 "use_reranker": True,
@@ -490,6 +489,11 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                 "reason": None,
             }
         }
+        return state
+
+    def test_candidate_miss_widens_candidate_count(self):
+        """후보창 밖 gold(candidate_miss)는 후보 수를 실제 config에 반영한다."""
+        state = self._reranker_on_state("retrieval_rerank_candidate_miss")
 
         out = agent.run(state)
 
@@ -498,6 +502,24 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertFalse(out.reindex_required)
         self.assertEqual(
             out.optimization_history[-1].selected_prescription_id,
+            "widen_rerank_candidates",
+        )
+
+    def test_low_rank_does_not_widen_candidate_count(self):
+        """low_rank 는 'gold 가 후보창 안'이라는 신호라 창 확대가 처방이 아니다.
+
+        예전에는 같은 라벨에 enable_reranker → widen_rerank_candidates 가 순차로 달려 있어,
+        리랭커가 이미 켜진 상태에서 신호 없이 창을 넓혔다. 창을 넓혀야 하는 케이스는
+        retrieval_rerank_candidate_miss 로 분리됐다.
+        """
+        state = self._reranker_on_state("retrieval_low_rank")
+
+        out = agent.run(state)
+
+        self.assertEqual(out.index_config["rerank_candidates"], 20)   # 그대로
+        self.assertNotEqual(
+            getattr(out.optimization_history[-1], "selected_prescription_id", None)
+            if out.optimization_history else None,
             "widen_rerank_candidates",
         )
 

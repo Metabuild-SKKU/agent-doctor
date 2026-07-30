@@ -31,6 +31,7 @@ import json
 import os
 import sys
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 from core.schema import Probe, EvalSnapshot
@@ -57,7 +58,11 @@ from agents.eval.metrics_ragas import (
     evaluate_real_track, evaluate_oracle_track, evaluate_abstention,
     evaluate_reasoning_mode, _judge as _ragas_judge,
 )
-from agents.eval.metrics_common import set_context as set_diag_context
+from agents.eval.metrics_common import (
+    DEFAULT_MAX_RERANK_CANDIDATES,
+    DEFAULT_RERANK_CANDIDATES,
+    set_context as set_diag_context,
+)
 from agents.eval.metrics_basic import _compute_metrics
 from agents.eval.diagnose import diagnose, _is_success
 from agents.eval.report import build_report
@@ -288,7 +293,43 @@ def _pending_baseline_eval_key(state: AgentDoctorState) -> str:
 
 
 def _retrieve_with_rag(retriever: Retriever, chunks, question: str, top_k: int) -> list[dict]:
-    return retriever.search(question, top_k=top_k)
+    """순위 측정용 wide 재검색 — **리랭크는 끈다**.
+
+    리랭크를 태우면 wide_n(=100) 개를 재정렬한 순서가 나오는데 프로덕션 검색은
+    rerank_candidates(=20) 개만 재정렬한다. 두 순서가 달라 '후보창 밖'과 '리랭커가 강등'을
+    가르는 기준값이 오염되므로, 여기서는 융합 단계까지의 순위만 잰다
+    (리랭크 이후 순위는 record.retrieval_details 로 프로덕션 검색에서 그대로 온다).
+    부수 효과로 probe 마다 cross-encoder 100쌍을 태우던 비용도 사라진다.
+    """
+    return retriever.search(question, top_k=top_k, apply_rerank=False)
+
+
+def _dense_only_view(retriever: Retriever) -> Retriever | None:
+    """같은 인덱스를 dense 단일 채널로만 보는 Retriever(probe 마다 재생성하지 않게 캐시)."""
+    if not getattr(retriever.settings, "use_hybrid", False):
+        return None                      # 융합이 없으면 대조할 채널도 없다
+    view = getattr(retriever, "_dense_only_cache", None)
+    if view is None:
+        view = Retriever(
+            retriever.chunks,
+            replace(retriever.settings, use_hybrid=False),
+            client=retriever.client,
+        )
+        retriever._dense_only_cache = view
+    return view
+
+
+def _dense_retrieve_with_rag(
+    retriever: Retriever, chunks, question: str, top_k: int
+) -> list[dict]:
+    """dense 단일 채널 wide 재검색 — 융합 손실(한 채널은 상위인데 융합이 밀어냄) 판정용.
+
+    하이브리드가 꺼져 있으면 융합 자체가 없어 대조할 게 없으므로 빈 결과를 준다.
+    """
+    view = _dense_only_view(retriever)
+    if view is None:
+        return []
+    return view.search(question, top_k=top_k, apply_rerank=False)
 
 
 def _ragas_track(record: EvalRecord, track: str) -> dict:
@@ -431,10 +472,21 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         chunk_text = {c.chunk_id: c.text for c in state.chunks}
         top_k = int(state.index_config.get("top_k", DEFAULT_TOP_K))
 
-        # tier2/tier3 판별 훅(재검색·코퍼스·RAGAS)이 쓸 자원 주입
+        # tier2/tier3 판별 훅(재검색·코퍼스·RAGAS)이 쓸 자원 주입.
+        # rerank_candidates 는 순위 라벨의 '도달 가능 창'(metrics_common.reachable_window)이다 —
+        # 그보다 뒤 순위의 gold 는 리랭커 처방이 원리적으로 닿지 못한다.
         set_diag_context(client=retriever, chunks=state.chunks,
                          retrieve_fn=_retrieve_with_rag, keyword_fn=keyword_search,
-                         ragas_fn=_ragas_track)
+                         dense_fn=_dense_retrieve_with_rag, ragas_fn=_ragas_track,
+                         rerank_candidates=int(
+                             state.index_config.get("rerank_candidates")
+                             or DEFAULT_RERANK_CANDIDATES
+                         ),
+                         max_rerank_candidates=int(
+                             (state.index_config.get("rerank_candidate_policy") or {})
+                             .get("max_candidates")
+                             or DEFAULT_MAX_RERANK_CANDIDATES
+                         ))
 
         # ── STEP2: 검색 + 답변 생성 ───────────────────────────
         #   각 probe 의 신호 캐시(state.diagnosis_cache[probe_id])를 record 에 뷰로 주입 →

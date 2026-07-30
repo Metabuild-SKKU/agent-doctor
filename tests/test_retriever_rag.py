@@ -38,6 +38,38 @@ class RetrieverTests(unittest.TestCase):
         self.assertEqual(response["search_mode"], "keyword")
         self.assertEqual(response["results"][0]["chunk_id"], "remote")
 
+    def _policy_chunks(self):
+        return [
+            Chunk(chunk_id="remote", doc_id="policy",
+                  text="재택근무는 주 2일까지 가능합니다."),
+            Chunk(chunk_id="vacation", doc_id="policy", text="연차는 15일입니다."),
+        ]
+
+    def test_pre_rerank_ids_expose_the_reranker_input(self):
+        """리랭크 직전 후보 순서를 남긴다 — Eval 이 '후보창 밖'과 '강등'을 가르는 유일한 신호."""
+        retriever = build_retriever(self._policy_chunks(), config={"top_k": 1})
+
+        response = retriever.search_with_details("재택근무", top_k=1)
+
+        self.assertEqual(response["pre_rerank_ids"], ["remote"])
+        self.assertIn("rerank_candidate_count", response)
+
+    def test_apply_rerank_override_skips_the_rerank_stage(self):
+        """순위 측정용 wide 재검색은 리랭크를 건너뛴다(프로덕션 순위와 다른 함수가 되지 않게)."""
+        retriever = build_retriever(
+            self._policy_chunks(),
+            config={"top_k": 1, "use_reranker": True},
+        )
+
+        response = retriever.search_with_details(
+            "재택근무", top_k=2, apply_rerank=False
+        )
+
+        self.assertFalse(response["reranked"])
+        self.assertFalse(response["reranker_attempted"])
+        self.assertEqual(response["reranker_status"], "disabled")
+        self.assertEqual(response["results"][0]["chunk_id"], "remote")
+
     def test_dense_search_uses_index_embeddings(self):
         retriever = build_retriever(
             [

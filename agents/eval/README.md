@@ -214,7 +214,11 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | 라벨 | 그룹 | tier | 확정 자원 |
 |---|---|:---:|---|
 | `retrieval_incomplete_enumeration` | A 검색 | 1 | gold수 vs top-k 순수 규칙 |
-| `retrieval_low_rank` | A 검색 | 2 | top-N 재검색 |
+| `retrieval_rank_fusion_loss` | A 검색 | 2 | 채널별(dense/BM25) 순위 vs 융합 순위 |
+| `retrieval_duplicate_crowding` | A 검색 | 2 | 상위 경쟁청크 중복 분석(재검색 0회) |
+| `retrieval_rerank_candidate_miss` | A 검색 | 2 | 리랭크 직전 후보 목록(`pre_rerank_ids`) |
+| `retrieval_reranker_demotion` | A 검색 | 2 | 리랭크 직전 후보 목록(`pre_rerank_ids`) |
+| `retrieval_low_rank` | A 검색 | 2 | top-N 재검색 (위 넷이 아닌 잔여) |
 | `retrieval_lexical_mismatch` | A 검색 | 2 | BM25 조회 |
 | `retrieval_semantic_mismatch` | A 검색 | 2 | BM25 + 코퍼스 확인 |
 | `retrieval_missing_gold` | A 검색 | 2 | 코퍼스 멤버십 조회 |
@@ -233,6 +237,24 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `reranker_low_precision` | A 청킹 | 3 | 예비만 (리랭크 전/후 대조 불가 → 인과 미측정) |
 | `bad_gold_answer` | D 데이터 | 3 | RAGAS 2지표(진짜 확정은 사람) |
 | `corpus_gap` | D 데이터 | 2 | 코퍼스 조회(누락 gold id 는 `metadata.missing_gold_ids`) |
+
+#### 순위 원인은 단계로 나뉜다
+
+최종 순위는 `채널 검색(dense/BM25) → 융합 → 후보창 → 리랭크 → top_k 컷` 을 거쳐 만들어진다.
+"순위가 낮다"는 증상이고, **어느 단계에서 gold 를 잃었는지가 처방을 정한다**.
+
+| 잃은 단계 | 라벨 | 처방 |
+|---|---|---|
+| 융합 | `retrieval_rank_fusion_loss` | `hybrid_dense_weight` 를 우세 채널 쪽으로 |
+| 경쟁 구성 | `retrieval_duplicate_crowding` | 중복 제거 / MMR (리랭커로는 안 고쳐진다) |
+| 후보창 | `retrieval_rerank_candidate_miss` | `rerank_candidates` 확대 |
+| 리랭크 | `retrieval_reranker_demotion` | 리랭커 되돌리기 / 모델 교체 |
+| (잔여) | `retrieval_low_rank` | `use_reranker` 켜기 |
+
+판정 범위는 **도달 가능 창**(`metrics_common.reachable_window`)으로 제한한다 —
+`rerank_candidate_policy.max_candidates` 보다 뒤 순위의 gold 는 리랭커를 켜도 후보를 넓혀도
+닿지 않으므로 순위 문제가 아니라 표현 문제(`semantic`/`lexical mismatch`)로 인계한다.
+이 경계가 없으면 wide-N(=100) 안의 모든 검색 실패가 `low_rank` 하나로 흡수된다.
 | `corpus_gap_partial_hop` | D 데이터 | 2 | 코퍼스 조회(hop별) |
 
 >  "확정(`confirmed`)"은 처방이 통한다는 뜻이 아니라 **그 원인의 판별 신호가 실제로 측정됐다**는

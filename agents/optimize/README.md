@@ -59,7 +59,7 @@ Eval에서 넘어온 finding label은 우선 다음 그룹으로 분류한다.
 
 | 그룹 | 의미 | 예시 label | 기본 대응 |
 | --- | --- | --- | --- |
-| A | 검색 실패 | `retrieval_low_rank`, `retrieval_lexical_mismatch`, `retrieval_missing_gold` | retrieval/index config 조정 |
+| A | 검색 실패 | `retrieval_low_rank`(+순위 원인 4형제), `retrieval_lexical_mismatch`, `retrieval_missing_gold` | retrieval/index config 조정 |
 | B | 생성 실패 | `generation_hallucination`, `generation_partial_answer` | generation config 또는 prompt 계열 조정 |
 | C | context 구조 문제 | `too_long_context`, `lost_in_the_middle`, `context_noise_interference` | top-k, reorder, compression 계열 조정 |
 | D | 데이터/평가셋 문제 | `corpus_gap`, `bad_gold_answer`, `corpus_gap_partial_hop` | 자동 optimize 대신 수동 조치 안내 |
@@ -80,7 +80,11 @@ Planner는 최상위 failure label을 기준으로 조정 가능한 config 후�
 
 | Label | 처방 | Search space |
 | --- | --- | --- |
-| `retrieval_low_rank` | reranker 도입 | `use_reranker`, `reranker_model`, `rerank_top_n` |
+| `retrieval_low_rank` | reranker 도입 | `use_reranker` |
+| `retrieval_rank_fusion_loss` | 융합 가중치 재조정 | `hybrid_dense_weight` (우세 채널은 Eval 실측) |
+| `retrieval_duplicate_crowding` | 중복 억제 | `deduplicate`, `mmr`(미구현) |
+| `retrieval_rerank_candidate_miss` | 후보창 확대 | `rerank_candidates` (목표값은 gold 순위 무릎) |
+| `retrieval_reranker_demotion` | reranker 되돌리기/교체 | `use_reranker=False`, `reranker_model` |
 | `retrieval_lexical_mismatch` | hybrid search 적용 | `use_hybrid`, `retriever_type`, `bm25_top_k`, `rrf_weight` |
 | `retrieval_missing_gold` | top-k 또는 chunk 조정 | `top_k`, `chunk_size`, `chunk_overlap` |
 | `retrieval_incomplete_enumeration` | 동적 검색량 확대 | `top_k`, `adaptive_retrieval` |
@@ -93,6 +97,10 @@ Planner는 최상위 failure label을 기준으로 조정 가능한 config 후�
 현재 공통 Retriever는 `top_k`, `use_hybrid`, `use_reranker`,
 `reranker_model`, `rerank_candidates`를 Eval과 Serve에서 함께 사용한다.
 `retrieval_low_rank` 처방은 재색인 없이 reranker를 켜고 다음 Eval에서 효과를 검증한다.
+켠 뒤에도 gold가 top_k 밖이면 Eval이 리랭크 단계를 실측해
+`retrieval_rerank_candidate_miss`(후보창 밖) 또는 `retrieval_reranker_demotion`(보고도 강등)으로
+가른다 — 두 라벨은 서로의 처방이 무효라 반드시 분리해야 한다(후보창을 넓혀도 이미 창 안에
+있던 gold는 올라오지 않는다).
 그 외 필드는 향후 Index/Serve/Eval 연동을 위한 확장 필드로 둔다.
 
 ## RAGBuilder / AutoRAG 연동 방향

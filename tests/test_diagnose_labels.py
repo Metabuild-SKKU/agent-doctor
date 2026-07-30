@@ -35,7 +35,7 @@ def _record(
     recall=1.0, f1=1.0, oracle_f1=1.0, qtype=None,
     answer_exists=None, ground_truth="정답", answer="답변", oracle_answer="오라클 답변",
     faith=None, rel=None, faith_oracle=None, rel_oracle=None,
-    gold_spans=None, counts_oracle=None,
+    gold_spans=None, counts_oracle=None, retrieval_details=None,
 ):
     """라벨 함수가 읽는 필드만 채운 EvalRecord. RAGAS 는 *_done 을 세워 LLM 경로를 막는다."""
     probe = Probe(
@@ -53,6 +53,8 @@ def _record(
     rec.recall_at_k = recall
     rec.f1_score = f1
     rec.oracle_f1 = oracle_f1
+    if retrieval_details is not None:
+        rec.retrieval_details = dict(retrieval_details)
     if faith is not None or rel is not None:
         rec.ragas = {"faithfulness": faith, "response_relevancy": rel}
     rec.ragas_done = True
@@ -130,12 +132,15 @@ class _DiagnoseTestBase(unittest.TestCase):
         metrics_common.set_context()
         metrics_common.set_mode(Mode.FAST)
 
-    def _with(self, *, retrieve=None, keyword=None, ragas=None):
+    def _with(self, *, retrieve=None, keyword=None, ragas=None, dense=None,
+              chunks=None, **window):
         metrics_common.set_context(
-            chunks=self._chunks,
+            chunks=chunks if chunks is not None else self._chunks,
             retrieve_fn=_FakeRetriever(retrieve) if retrieve is not None else None,
+            dense_fn=_FakeRetriever(dense) if dense is not None else None,
             keyword_fn=_FakeKeyword(keyword) if keyword is not None else None,
             ragas_fn=ragas,
+            **window,
         )
 
 
@@ -211,6 +216,173 @@ class RetrievalLowRankTest(_DiagnoseTestBase):
         self._with(retrieve=["g_a", "x", "g_b"])
         rec = _record(("g_a", "g_b"), (), recall=0.0)
         self.assertIsNone(diagnose.retrieval_low_rank(rec))
+
+
+class ReachableWindowTest(_DiagnoseTestBase):
+    """순위 라벨은 '처방이 닿는 범위'(reachable_window) 안에서만 발동한다.
+
+    예전에는 wide_n(=100) 안에 gold 가 있기만 하면 low_rank 가 확정으로 붙어, 리랭커가
+    보지도 못할 순위(예: 90위)에까지 리랭커를 처방했다. 그 구간은 표현 문제라
+    lexical/semantic 이 맡는다.
+    """
+
+    def _deep_ranked(self, rank):
+        """gold 를 지정 순위에 두는 wide 결과(앞은 전부 노이즈)."""
+        return [f"n{i}" for i in range(rank - 1)] + ["g_b"]
+
+    def test_silent_beyond_reachable_window(self):
+        self._with(retrieve=self._deep_ranked(60))          # 도달 상한(기본 50) 밖
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertIsNone(diagnose.retrieval_low_rank(rec))
+
+    def test_confirmed_inside_reachable_window(self):
+        self._with(retrieve=self._deep_ranked(40))          # 상한 안
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertTrue(diagnose.retrieval_low_rank(rec).confirmed)
+
+    def test_window_follows_config_policy(self):
+        """상한은 임의 상수가 아니라 config 정책값에서 온다 — 넓히면 판정 창도 넓어진다."""
+        self._with(retrieve=self._deep_ranked(60), max_rerank_candidates=80)
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertTrue(diagnose.retrieval_low_rank(rec).confirmed)
+
+    def test_lexical_mismatch_takes_over_beyond_window(self):
+        """BM25 1위인데 융합 60위면 리랭커로 못 고친다 → 어휘 불일치(하이브리드 활성화)."""
+        self._with(retrieve=self._deep_ranked(60), keyword=["g_b"])
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertIsNone(diagnose.retrieval_low_rank(rec))
+        self.assertTrue(diagnose.retrieval_lexical_mismatch(rec).confirmed)
+
+    def test_lexical_mismatch_still_yields_inside_window(self):
+        """창 안이면 순위 문제라 lexical 은 양보한다(기존 배타 관계 유지)."""
+        self._with(retrieve=self._deep_ranked(8), keyword=["g_b"])
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertIsNone(diagnose.retrieval_lexical_mismatch(rec))
+        self.assertTrue(diagnose.retrieval_low_rank(rec).confirmed)
+
+
+class RankFusionLossTest(_DiagnoseTestBase):
+    """단일 채널은 gold 를 상위에 뒀는데 융합이 깎은 경우 — 처방이 리랭커가 아니라 가중치."""
+
+    HYBRID = {"search_mode": "hybrid"}
+
+    def _rec(self, details=None):
+        return _record(("g_a", "g_b"), ("n1", "n2", "n3"), recall=0.5,
+                       retrieval_details=details if details is not None else self.HYBRID)
+
+    def test_confirmed_when_dense_channel_has_gold_in_top_k(self):
+        self._with(retrieve=["n1", "n2", "n3", "x", "y", "z", "w", "g_b"],  # 융합 8위
+                   dense=["g_b", "n1", "n2"])                               # dense 1위
+        finding = diagnose.retrieval_rank_fusion_loss(self._rec())
+        self.assertTrue(finding.confirmed)
+        self.assertEqual(finding.metadata["favored_channel"], "dense")
+
+    def test_confirmed_when_lexical_channel_has_gold_in_top_k(self):
+        self._with(retrieve=["n1", "n2", "n3", "x", "g_b"],
+                   dense=["n1", "n2", "n3", "x", "g_b"],   # dense 도 5위(밖)
+                   keyword=["g_b", "n1"])                  # BM25 1위
+        finding = diagnose.retrieval_rank_fusion_loss(self._rec())
+        self.assertTrue(finding.confirmed)
+        self.assertEqual(finding.metadata["favored_channel"], "lexical")
+
+    def test_silent_when_search_was_not_hybrid(self):
+        """dense 단일 모드면 융합 자체가 없다 — BM25 적중은 lexical_mismatch 몫."""
+        self._with(retrieve=["n1", "n2", "n3", "x", "g_b"], keyword=["g_b"])
+        rec = self._rec({"search_mode": "dense"})
+        self.assertIsNone(diagnose.retrieval_rank_fusion_loss(rec))
+
+    def test_silent_when_no_channel_has_gold_in_top_k(self):
+        self._with(retrieve=["n1", "n2", "n3", "x", "g_b"],
+                   dense=["n1", "n2", "n3", "x", "g_b"])   # 두 채널 다 밖
+        self.assertIsNone(diagnose.retrieval_rank_fusion_loss(self._rec()))
+
+    def test_low_rank_yields_to_fusion_loss(self):
+        """앞단 원인이 실측되면 잔여 롤업은 침묵한다(튜플 순서가 아니라 신호로 배타)."""
+        self._with(retrieve=["n1", "n2", "n3", "x", "g_b"], dense=["g_b"])
+        self.assertIsNone(diagnose.retrieval_low_rank(self._rec()))
+
+
+class RerankStageTest(_DiagnoseTestBase):
+    """리랭크 단계에서 잃었나 — '후보로도 못 봤다'와 '보고도 떨어뜨렸다'는 처방이 반대다."""
+
+    def _rec(self, pre_rerank_ids, reranked=True):
+        details = {"search_mode": "dense", "reranked": reranked,
+                   "reranker_status": "applied" if reranked else "disabled"}
+        if pre_rerank_ids is not None:
+            details["pre_rerank_ids"] = list(pre_rerank_ids)
+        return _record(("g_a", "g_b"), ("n1", "n2"), recall=0.5,
+                       retrieval_details=details)
+
+    def setUp(self):
+        super().setUp()
+        self._with(retrieve=["n1", "n2", "n3", "n4", "g_b"])   # 융합 5위, top_k=2
+
+    def test_candidate_miss_when_gold_absent_from_candidate_list(self):
+        rec = self._rec(["n1", "n2", "n3"])                    # g_b 가 후보 목록에 없음
+        finding = diagnose.retrieval_rerank_candidate_miss(rec)
+        self.assertTrue(finding.confirmed)
+        self.assertIsNone(diagnose.retrieval_reranker_demotion(rec))   # 배타
+
+    def test_demotion_when_gold_was_inside_candidate_list(self):
+        rec = self._rec(["n1", "n2", "n3", "n4", "g_b"])       # 봤는데도 top_k 밖
+        finding = diagnose.retrieval_reranker_demotion(rec)
+        self.assertTrue(finding.confirmed)
+        self.assertEqual(finding.metadata["pre_rerank_ranks"], {"g_b": 5})
+        self.assertIsNone(diagnose.retrieval_rerank_candidate_miss(rec))  # 배타
+
+    def test_both_silent_when_reranker_did_not_run(self):
+        rec = self._rec(["n1", "n2"], reranked=False)
+        self.assertIsNone(diagnose.retrieval_rerank_candidate_miss(rec))
+        self.assertIsNone(diagnose.retrieval_reranker_demotion(rec))
+        self.assertTrue(diagnose.retrieval_low_rank(rec).confirmed)      # 잔여가 맡음
+
+    def test_low_rank_is_preliminary_when_stage_is_invisible(self):
+        """리랭크는 돌았는데 후보 목록이 없으면 단계 귀속 불가 → 예비(자동 처방 제외)."""
+        rec = self._rec(None, reranked=True)
+        finding = diagnose.retrieval_low_rank(rec)
+        self.assertFalse(finding.confirmed)
+
+    def test_low_rank_silent_when_stage_is_visible(self):
+        rec = self._rec(["n1", "n2", "n3", "n4", "g_b"])
+        self.assertIsNone(diagnose.retrieval_low_rank(rec))
+
+
+class DuplicateCrowdingTest(_DiagnoseTestBase):
+    """상위 슬롯을 중복 청크가 먹어 gold 가 밀린 경우 — 리랭커로 안 고쳐지는 유일한 순위 원인."""
+
+    def _make_chunks(self, texts):
+        """doc_id 를 전부 다르게 줘서 좌표 규칙이 아니라 본문 유사도로만 판정되게 한다."""
+        return [Chunk(cid, f"d_{cid}", text, char_span=(0, len(text)))
+                for cid, text in texts.items()]
+
+    def _rec(self):
+        return _record(("g_a",), ("n1", "n2"), recall=0.0)
+
+    def test_confirmed_when_dedup_lifts_gold_into_top_k(self):
+        same = "완전히 동일한 안내 문구가 반복되는 청크입니다"
+        self._with(retrieve=["n1", "n2", "n3", "g_a"],
+                   chunks=self._make_chunks({"n1": same, "n2": same, "n3": same,
+                                        "g_a": "정답 근거가 담긴 다른 청크"}))
+        finding = diagnose.retrieval_duplicate_crowding(self._rec())
+        self.assertTrue(finding.confirmed)
+        self.assertEqual(finding.metadata["crowding_analysis"]["g_a"],
+                         {"rank": 4, "redundant": 2, "projected_rank": 2})
+
+    def test_silent_when_dedup_is_not_enough(self):
+        same = "완전히 동일한 안내 문구가 반복되는 청크입니다"
+        self._with(retrieve=["n1", "n2", "n3", "g_a"],
+                   chunks=self._make_chunks({"n1": same, "n2": same,
+                                        "n3": "전혀 다른 주제를 다루는 문단이다",
+                                        "g_a": "정답 근거가 담긴 다른 청크"}))
+        # 중복 1개만 접혀 3위 → top_k(2) 안으로 못 들어옴
+        self.assertIsNone(diagnose.retrieval_duplicate_crowding(self._rec()))
+
+    def test_low_rank_yields_to_duplicate_crowding(self):
+        same = "완전히 동일한 안내 문구가 반복되는 청크입니다"
+        self._with(retrieve=["n1", "n2", "n3", "g_a"],
+                   chunks=self._make_chunks({"n1": same, "n2": same, "n3": same,
+                                        "g_a": "정답 근거가 담긴 다른 청크"}))
+        self.assertIsNone(diagnose.retrieval_low_rank(self._rec()))
 
 
 class RetrievalMismatchTest(_DiagnoseTestBase):

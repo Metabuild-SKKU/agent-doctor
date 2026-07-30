@@ -50,6 +50,12 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     #  A그룹 — 검색 실패 (Oracle Test 통과)
     # ═══════════════════════════════════════════════════════════════
 
+    # ── 순위 원인 4형제 + 잔여 롤업 ────────────────────────────────
+    # 최종 순위는 `채널 검색 → 융합 → 후보창 → 리랭크 → top_k 컷` 을 거쳐 만들어진다.
+    # "순위가 낮다"는 증상이고 어느 단계에서 잃었는지가 레버를 정하므로, 라벨도 단계로 나눈다.
+    # 처방이 서로 대체 가능하지 않다는 게 분할 근거다 — 특히 candidate_miss(창 넓히기)와
+    # reranker_demotion(리랭커 교체)은 서로의 처방이 무효라 반드시 갈라야 한다.
+
     "retrieval_low_rank": {
         "group": "A",
 
@@ -64,16 +70,116 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "reindex": False,
                 "cost": None, # 숫자 튜닝 필요
             },
+        ],
+        # NOTE: 단계 귀속 후 남는 잔여 라벨이라 처방이 하나다. gold 는 이미 후보창 안에 있고
+        #   리랭커는 꺼져 있는 구간이므로, 켜는 것만이 이 라벨의 레버다.
+        #   창을 넓히는 처방은 retrieval_rerank_candidate_miss 로, 리랭커 교체는
+        #   retrieval_reranker_demotion 으로 옮겼다 — 여기서 순차 시도하면 신호 없이
+        #   찍는 것과 같아진다(이 라벨의 신호는 '후보창 안'이라 창 확대를 반증한다).
+    },
+
+    "retrieval_rank_fusion_loss": {
+        "group": "A",
+        "assigned": "이승준",
+        "status": "ready",
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 한 채널이 이미 찾은 gold를 최종 결과에 살림
+        "prescriptions": [
             {
-                # 이미 reranker가 켜져 있는데도 low-rank가 남으면 더 넓은
-                # 1차 후보군을 재정렬해 gold가 reranker 입력에 들어올 기회를 늘린다.
+                # 실측된 우세 채널(finding.metadata["favored_channel"]) 쪽으로 가중치를 옮긴다.
+                # 구체 후보값은 planner 가 계산한다(방향은 측정, 폭은 정책).
+                "id": "rebalance_hybrid_weight",
+                "patch": {"retriever.hybrid_dense_weight": "shift_to_favored_channel"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                # 가중치 조정으로 안 되면 cross-encoder 로 다시 정렬한다(더 비싼 차선).
+                "id": "enable_reranker",
+                "patch": {"reranker.enabled": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # NOTE: 이 라벨은 검색이 실제로 hybrid 였을 때만 뜬다(diagnose 게이트).
+        #   dense 단일 모드에서 BM25 만 gold 를 잡는 건 retrieval_lexical_mismatch(=enable_hybrid).
+    },
+
+    "retrieval_duplicate_crowding": {
+        "group": "A",
+        "assigned": "이승준",
+        "status": "ready",              # deduplicate 는 index_config 에 이미 있음
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 중복이 먹던 슬롯을 gold에 돌려줌
+        "prescriptions": [
+            {
+                "id": "enable_deduplicate",
+                "patch": {"deduplicate": True},
+                "reindex": True,        # 청크 집합 자체가 바뀜
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                # 관련성만이 아니라 다양성까지 고려해 상위 슬롯 쏠림을 줄인다.
+                "id": "enable_mmr",
+                "patch": {"mmr": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+                # BLOCKER: mmr 필드가 index_config에 없음(retrieval_incomplete_enumeration 과 동일).
+                #   # TODO(index-합의)
+            },
+        ],
+        # NOTE: 리랭커는 이 라벨의 처방이 아니다 — cross-encoder 는 중복 청크를 상위에 그대로
+        #   둔다(각각이 질문과 실제로 관련 있어 점수가 높다). 리랭커를 처방하면 실패 후
+        #   blacklist 만 쌓인다.
+    },
+
+    "retrieval_rerank_candidate_miss": {
+        "group": "A",
+        "assigned": "이승준",
+        "status": "ready",
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 리랭커 입력에 gold가 들어오게
+        "prescriptions": [
+            {
+                # candidate_count 목표값은 planner 가 실측 순위의 무릎으로 계산한다
+                # (방향 키워드 ×2 추측이 아니라 "가장 늦게 나오는 gold 의 순위").
                 "id": "widen_rerank_candidates",
                 "patch": {"reranker.candidate_count": "increase"},
                 "reindex": False,
-                "cost": None,
+                "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # NOTE: baseline에서는 먼저 켜고, 문제가 남으면 후보 수를 한 단계 넓힌다.
+        # NOTE: 이 라벨은 리랭크가 실제로 돈 검색에서만 뜬다(pre_rerank_ids 실측).
+        #   리랭커가 꺼져 있는 구간은 retrieval_low_rank(=enable_reranker)가 맡고,
+        #   켠 뒤에도 gold 가 후보창 밖이면 다음 iteration 에서 이 라벨이 잡는다.
+        #   한 처방에 enabled+candidate_count 를 같이 넣으면 단일 축 sweep(방식2)이 깨진다.
+    },
+
+    "retrieval_reranker_demotion": {
+        "group": "A",
+        "assigned": "권성우",
+        "status": "ready",              # 모델 교체 후보는 미정이나 롤백 경로는 실행 가능
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 리랭커가 떨어뜨린 gold를 다시 살림
+        "prescriptions": [
+            {
+                # 우리가 켠 리랭커가 역효과라는 실측이므로, 되돌리는 게 가장 싸고 확실하다.
+                "id": "disable_reranker",
+                "patch": {"reranker.enabled": False},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "swap_reranker_model",
+                "patch": {"reranker_model": "upgrade"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+                # BLOCKER: 모델 교체 후보가 아직 정해지지 않음(reranker_low_precision 과 동일).
+            },
+        ],
+        # NOTE: widen_rerank_candidates 는 여기 두면 안 된다 — gold 는 이미 후보창 안에 있었고
+        #   리랭커 점수가 낮았을 뿐이라, 창을 넓히면 gold 아래로 후보만 더 들어온다.
+        #   이 라벨은 reranker_low_recall(draft)의 실측판이기도 하다.
     },
 
     "retrieval_lexical_mismatch": {

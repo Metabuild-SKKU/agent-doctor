@@ -150,6 +150,70 @@ class GroundedValueTest(unittest.TestCase):
 
         self.assertEqual(request.search_space, {"retriever.top_k": [14]})
 
+    def test_candidate_miss_grounds_window_from_gold_rank_knee(self):
+        # 후보창은 '가장 늦게 나오는 gold 의 순위'가 근거다 — ×2 추측(40)이 아니라 무릎(28).
+        findings = [
+            make_finding(f"p{i}", "retrieval_rerank_candidate_miss",
+                         gold_ranks={"g": rank})
+            for i, rank in enumerate([24, 25, 26, 27, 28])
+        ]
+        state = make_state(findings)
+        state.index_config.update({"use_reranker": True, "rerank_candidates": 20})
+
+        request, _decision = planner.plan(state)
+
+        self.assertEqual(request.search_space, {"reranker.candidate_count": [28]})
+
+    def test_candidate_miss_respects_policy_ceiling(self):
+        # 후보 1개 = cross-encoder 추론 1쌍이라 상한을 넘는 후보는 내지 않는다.
+        findings = [
+            make_finding("p1", "retrieval_rerank_candidate_miss",
+                         gold_ranks={"g": 90}),
+        ]
+        state = make_state(findings)
+        state.index_config.update({
+            "use_reranker": True,
+            "rerank_candidates": 20,
+            "rerank_candidate_policy": {"max_candidates": 50},
+        })
+
+        request, _decision = planner.plan(state)
+
+        # 근거값이 상한 밖 → 방향 키워드 폴백(20×2=40)으로 내려간다. 90 은 나오지 않는다.
+        self.assertEqual(request.search_space, {"reranker.candidate_count": [40]})
+
+    def test_fusion_loss_shifts_weight_toward_favored_channel(self):
+        findings = [
+            make_finding("p1", "retrieval_rank_fusion_loss"),
+            make_finding("p2", "retrieval_rank_fusion_loss"),
+        ]
+        for finding in findings:
+            finding.metadata["favored_channel"] = "lexical"
+        state = make_state(findings)
+        state.index_config.update({"use_hybrid": True, "hybrid_dense_weight": 0.7})
+
+        request, _decision = planner.plan(state)
+
+        # lexical 우세 → dense 가중치를 내린다(정책 폭 0.1/0.2).
+        self.assertEqual(
+            request.search_space, {"retriever.hybrid_dense_weight": [0.6, 0.5]}
+        )
+
+    def test_fusion_loss_drops_key_without_direction_evidence(self):
+        """우세 채널이 동수면 근거가 없다 — 자리표시자 문자열이 config 에 새지 않아야 한다."""
+        findings = [
+            make_finding("p1", "retrieval_rank_fusion_loss"),
+            make_finding("p2", "retrieval_rank_fusion_loss"),
+        ]
+        findings[0].metadata["favored_channel"] = "dense"
+        findings[1].metadata["favored_channel"] = "lexical"
+        state = make_state(findings)
+        state.index_config.update({"use_hybrid": True, "hybrid_dense_weight": 0.7})
+
+        request, _decision = planner.plan(state)
+
+        self.assertNotIn("retriever.hybrid_dense_weight", request.search_space)
+
     def test_low_rank_does_not_ground_top_k(self):
         # low_rank 처방은 리랭커(use_reranker)뿐 — top_k 를 처방하지 않으므로
         # 순위가 있어도 top_k search_space 가 생기지 않는다(옵션 1).
