@@ -207,6 +207,17 @@ def _split_math_problem_sections(document: Document) -> list[_SectionDraft]:
         return []
 
     sections: list[_SectionDraft] = []
+    first_start = starts[0][0]
+    preamble, preamble_start, preamble_end = _trimmed_slice(text, 0, first_start)
+    if preamble:
+        sections.append(
+            _SectionDraft(
+                text=preamble,
+                section="preamble",
+                start=preamble_start,
+                end=preamble_end,
+            )
+        )
     for index, (start, marker) in enumerate(starts):
         end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
         body, body_start, body_end = _trimmed_slice(text, start, end)

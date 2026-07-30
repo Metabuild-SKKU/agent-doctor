@@ -149,6 +149,38 @@ class ChunkingTests(unittest.TestCase):
                 self.assertNotIn("173번", draft.text)
             self.assertEqual(document.content[draft.start : draft.end], draft.text)
 
+    def test_math_problem_sections_preserve_preamble_before_first_problem(self):
+        document = _document(
+            "math",
+            "\n".join(
+                [
+                    "# 미적분 개요",
+                    "이 장에서 사용할 핵심 정의와 공식입니다.",
+                    "1. 첫 번째 문제와 풀이입니다.",
+                    "2. 두 번째 문제와 풀이입니다.",
+                ]
+            ),
+        )
+        document.metadata["document_type"] = "math"
+
+        drafts = _chunk_document(
+            document,
+            chunk_size=120,
+            chunk_overlap=20,
+            strategy="markdown_recursive",
+        )
+
+        self.assertEqual(drafts[0].section, "preamble")
+        self.assertIn("미적분 개요", drafts[0].text)
+        self.assertIn("핵심 정의와 공식", drafts[0].text)
+        problem_sections = [draft.section for draft in drafts[1:]]
+        self.assertTrue(any(str(section).endswith("1") for section in problem_sections))
+        self.assertTrue(any(str(section).endswith("2") for section in problem_sections))
+        covered = "".join(document.content[draft.start : draft.end] for draft in drafts)
+        compact_original = "".join(document.content.split())
+        compact_covered = "".join(covered.split())
+        self.assertEqual(compact_covered, compact_original)
+
     def test_general_numbered_document_does_not_use_math_problem_sections(self):
         document = _document(
             "policy",

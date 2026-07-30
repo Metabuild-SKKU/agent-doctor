@@ -275,10 +275,18 @@ def _ingest_json_corpus(source_url: str) -> list[Document]:
 
         src = item.get("source", str(path.resolve()))
         fmt = Path(src).suffix.lstrip(".").lower() or "txt"
+        item_metadata = item.get("metadata") or {}
+        if not isinstance(item_metadata, dict):
+            raise ValueError(f"item[{i}]의 metadata는 객체(dict)여야 합니다.")
+        item_metadata = dict(item_metadata)
+        item_metadata.setdefault("source_file", item.get("source", path.name))
+        for key in ("document_type", "retrieval_profile"):
+            if item.get(key) is not None:
+                item_metadata.setdefault(key, item[key])
 
         metadata = annotate_document_metadata(
             content,
-            _declared_metadata({"source_file": item.get("source", path.name)}),
+            _declared_metadata(item_metadata),
         )
 
         docs.append(Document(
