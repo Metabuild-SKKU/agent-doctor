@@ -41,6 +41,16 @@ class OptimizerPolicyTest(unittest.TestCase):
 
         self.assertEqual(values, [100])
 
+    def test_both_chunking_strategies_survive_constraint(self):
+        # 리뷰 blocker: rules 가 2-후보 스윕(recursive_sentence·markdown_recursive)을 등록하는데
+        # allowed 가 recursive_sentence 만이면 markdown_recursive 가 필터돼 스윕이 1개가 된다.
+        values = filter_candidate_values(
+            "chunker.strategy",
+            ["recursive_sentence", "markdown_recursive"],
+            {"chunk_strategy": "fixed"},
+        )
+        self.assertEqual(values, ["recursive_sentence", "markdown_recursive"])
+
     def test_reranker_is_enabled_because_common_retriever_consumes_it(self):
         supported, reason = is_capability_supported("reranker")
 

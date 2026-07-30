@@ -47,7 +47,10 @@ DEFAULT_CONSTRAINTS: dict[str, dict[str, Any]] = {
     "reranker.candidate_count": {"min": 4, "max": 100},
     "chunker.chunk_size": {"min": 200, "max": 1500},
     "chunker.chunk_overlap": {"min": 0, "max": 300},
-    "chunker.strategy": {"allowed": ["recursive_sentence"]},
+    # rules 가 청킹 교체를 2-후보 스윕(recursive_sentence·markdown_recursive)으로 등록하므로
+    # 둘 다 허용해야 한다 — recursive_sentence 만 두면 markdown_recursive 후보가 실행 전에
+    # 필터돼 스윕이 사실상 1개가 된다(이 PR 목표인 '실행 불가 처방 언블록'과 충돌).
+    "chunker.strategy": {"allowed": ["recursive_sentence", "markdown_recursive"]},
     "generation.temperature": {"min": 0.0, "max": 1.0},
 }
 
@@ -72,7 +75,7 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
     "context_compression": False,
     # Index(agent.py)가 CHUNK_STRATEGIES 레지스트리에 recursive_sentence 를 등록해
     # config["chunk_strategy"] 로 실제 소비한다. config_mapper 가 chunker.strategy 를
-    # chunk_strategy 로 매핑하고 제약(allowed=["recursive_sentence"])·REINDEX 경로도
+    # chunk_strategy 로 매핑하고 제약(allowed=recursive_sentence·markdown_recursive)·REINDEX 경로도
     # 있어 소비처가 확인됨 → 허용으로 전환.
     "chunking_strategy": True,
     # generator(_build_prompt)가 프롬프트 플래그를, provider가 temperature를 실제
