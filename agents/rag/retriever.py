@@ -247,7 +247,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 def _mmr_select(
-    results: list[dict], top_k: int, lambda_: float
+    results: list[dict], top_k: int, lambda_: float, embeddings: list[list[float] | None]
 ) -> list[dict] | None:
     """MMR(Maximal Marginal Relevance)로 후보풀에서 top_k 를 고른다.
 
@@ -256,10 +256,11 @@ def _mmr_select(
     임베딩의 코사인을 쓴다 — 질의 벡터에 의존하지 않아 dense/hybrid/keyword/rerank 결과
     모두에 동일하게 적용된다.
 
-    후보 중 임베딩이 하나라도 없으면 다양성을 잴 수 없어 None 을 돌려주고, 호출부는
-    기존 점수 순서를 그대로 쓴다(안전 폴백)."""
-    embeddings = [r.get("embedding") for r in results]
-    if any(not emb for emb in embeddings):
+    embeddings 는 results 와 같은 순서의 청크 임베딩 리스트다(호출부가 chunk_id 로
+    _chunks_by_id 에서 조회해 넘긴다 — 검색 결과 dict 에 embedding 을 싣지 않아도 되게).
+    하나라도 없으면 다양성을 잴 수 없어 None 을 돌려주고, 호출부는 기존 점수 순서를
+    그대로 쓴다(안전 폴백)."""
+    if len(embeddings) != len(results) or any(not emb for emb in embeddings):
         return None
     scores = [float(r.get("score") or 0.0) for r in results]
     hi = max(scores) if scores else 0.0
@@ -448,7 +449,16 @@ class Retriever:
 
         mmr_applied = False
         if self.settings.use_mmr and len(results) > requested_top_k:
-            selected = _mmr_select(results, requested_top_k, self.settings.mmr_lambda)
+            # 임베딩은 검색 결과 dict 가 아니라 원본 청크(_chunks_by_id)에서 chunk_id 로
+            # 조회한다 — keyword/dense/hybrid/rerank 어느 경로든 결과에 embedding 을 싣지
+            # 않으므로(과거 MMR 이 항상 no-op 이던 원인) 여기서 확실히 붙여 넘긴다.
+            embeddings = [
+                (self._chunks_by_id.get(r.get("chunk_id")) or {}).get("embedding")
+                for r in results
+            ]
+            selected = _mmr_select(
+                results, requested_top_k, self.settings.mmr_lambda, embeddings
+            )
             if selected is not None:
                 results = selected
                 mmr_applied = True

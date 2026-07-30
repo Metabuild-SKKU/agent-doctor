@@ -79,6 +79,33 @@ class RetrieverTests(unittest.TestCase):
         self.assertEqual(response["search_mode"], "dense")
         self.assertEqual(response["results"][0]["chunk_id"], "remote")
 
+    def test_mmr_applies_end_to_end_and_diversifies(self):
+        # 리뷰 blocker#1 회귀: 실제 dense 경로(결과 dict 에 embedding 없음)에서도 MMR 이
+        # 원본 청크 임베딩을 chunk_id 로 조회해 발동하고 다양화하는지 end-to-end 로 고정.
+        client = build_client(":memory:")
+        chunks = [
+            Chunk(chunk_id="a", doc_id="d", text="재택근무 규정 A", embedding=[1.0, 0.0, 0.0]),
+            Chunk(chunk_id="b", doc_id="d", text="재택근무 규정 B", embedding=[0.99, 0.01, 0.0]),
+            Chunk(chunk_id="c", doc_id="d", text="재택근무 규정 C", embedding=[0.98, 0.02, 0.0]),
+            Chunk(chunk_id="z", doc_id="d", text="연차 규정", embedding=[0.0, 1.0, 0.0]),
+        ]
+        cfg = {
+            "embedding_model": "test-model", "embedding_dimension": 3,
+            "use_mmr": True, "mmr_lambda": 0.5, "mmr_candidates": 10, "top_k": 2,
+        }
+        retriever = build_retriever(chunks, config=cfg, client=client)
+        with patch("agents.rag.retriever.embed", return_value=[1.0, 0.0, 0.0]):
+            resp = retriever.search_with_details("재택근무", top_k=2)
+
+        self.assertEqual(resp["search_mode"], "dense")
+        self.assertTrue(resp["mmr_enabled"])
+        self.assertTrue(resp["mmr_applied"], "MMR 이 실제 경로에서 발동해야 한다(no-op 회귀 방지)")
+        picked = [r["chunk_id"] for r in resp["results"]]
+        # 순수 관련성이면 근접중복 a,b 가 뽑히지만, MMR 은 다양한 z 를 끌어올린다.
+        self.assertIn("z", picked)
+        # 검색 결과 dict 에 무거운 embedding 을 싣지 않는다(조회는 _chunks_by_id 로).
+        self.assertNotIn("embedding", resp["results"][0])
+
     def test_shared_qdrant_client_is_limited_to_current_corpus(self):
         client = build_client(":memory:")
         build_retriever(
@@ -198,8 +225,13 @@ class MmrSelectTests(unittest.TestCase):
             self._cand("e", 0.50, [0.0, 0.0, 1.0]),
         ]
 
+    @staticmethod
+    def _embs(pool: list[dict]) -> list[list[float]]:
+        return [r["embedding"] for r in pool]
+
     def test_balances_relevance_and_diversity(self):
-        picked = [r["chunk_id"] for r in _mmr_select(self._pool(), 3, 0.5)]
+        pool = self._pool()
+        picked = [r["chunk_id"] for r in _mmr_select(pool, 3, 0.5, self._embs(pool))]
         # 최상위 a 채택 후 중복(b,c) 대신 다양한 d,e 를 고른다.
         self.assertEqual(picked[0], "a")
         self.assertIn("d", picked)
@@ -207,12 +239,13 @@ class MmrSelectTests(unittest.TestCase):
         self.assertNotIn("b", picked)
 
     def test_lambda_one_is_pure_relevance(self):
-        picked = [r["chunk_id"] for r in _mmr_select(self._pool(), 3, 1.0)]
+        pool = self._pool()
+        picked = [r["chunk_id"] for r in _mmr_select(pool, 3, 1.0, self._embs(pool))]
         self.assertEqual(picked, ["a", "b", "c"])
 
     def test_missing_embedding_returns_none(self):
         pool = [{"chunk_id": "x", "score": 1.0}]  # embedding 없음
-        self.assertIsNone(_mmr_select(pool, 1, 0.5))
+        self.assertIsNone(_mmr_select(pool, 1, 0.5, [None]))
 
 
 class GenerationConfigTests(unittest.TestCase):
