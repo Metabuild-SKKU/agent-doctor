@@ -148,11 +148,11 @@ class _DiagnoseTestBase(unittest.TestCase):
 class MissedGoldGuardTest(_DiagnoseTestBase):
     def test_missed_is_empty_when_all_gold_retrieved(self):
         rec = _record(("g_a", "g_b"), ("g_a", "g_b", "x"), recall=0.5)
-        self.assertEqual(metrics_common._missed_gold_ids(rec), set())
+        self.assertEqual(metrics_common.missed_gold_ids(rec), set())
 
     def test_missed_lists_only_unretrieved_gold(self):
         rec = _record(("g_a", "g_b"), ("g_a", "x"), recall=0.5)
-        self.assertEqual(metrics_common._missed_gold_ids(rec), {"g_b"})
+        self.assertEqual(metrics_common.missed_gold_ids(rec), {"g_b"})
 
     def test_missing_gold_silent_when_nothing_missed(self):
         """수정 전에는 'gold 가 top-k 에 없다'를 confirmed·critical 로 주장했다."""

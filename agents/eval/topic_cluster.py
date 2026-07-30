@@ -20,9 +20,9 @@ planner 가 미측정 신호를 fallback 으로 처리한다).
 함께 봐야 나온다. 그래서 diagnose() 밖(agent.py STEP4 직후, 전 record 가 준비된 뒤)에서
 _annotate_topic_cluster 가 이 모듈을 호출한다.
 
-비용: 코사인만 쓴다(LLM 0). baseline 은 표본을 잘라 O(n^2) 폭발을 막는다. 임베딩은
-state.chunks 에 이미 실려 있어(Chunk.embedding) 별도 조회가 없다 — knowledge_graph 와
-같은 소스·같은 _cosine 을 쓴다.
+비용: 코사인만 쓴다(LLM 0). baseline·실패 gold 양쪽 다 표본을 잘라 O(n^2) 폭발을 막는다.
+임베딩은 state.chunks 에 이미 실려 있어(Chunk.embedding) 별도 조회가 없다 —
+knowledge_graph 와 같은 소스·같은 cosine 을 쓴다.
 
 절대 코사인 임계값은 쓰지 않는다: 코퍼스마다 임베딩이 깔린 수준이 달라(같은 도메인 문서는
 무관 쌍도 cos 0.4~0.5) 절대값으로는 "뭉침"을 못 가른다. 그래서 실패 gold 응집도를 코퍼스
@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
-from agents.eval.knowledge_graph import _cosine
+from agents.eval.knowledge_graph import cosine
 from agents.eval.types import (
     TOPIC_CLUSTER_BASELINE_SAMPLE,
     TOPIC_CLUSTER_CONCENTRATED_RATIO,
@@ -67,7 +67,7 @@ def _mean_pairwise_cosine(vectors: list[Vector]) -> Optional[float]:
     count = 0
     for i in range(len(usable)):
         for j in range(i + 1, len(usable)):
-            total += _cosine(list(usable[i]), list(usable[j]))
+            total += cosine(list(usable[i]), list(usable[j]))
             count += 1
     return total / count if count else None
 

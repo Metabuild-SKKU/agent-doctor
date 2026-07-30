@@ -11,7 +11,7 @@ agents/eval/metrics_search.py
 from __future__ import annotations
 
 from agents.eval.types import Mode, EvalRecord
-from agents.eval.metrics_common import _ctx, _cache, active_mode, _missed_gold_ids
+from agents.eval.metrics_common import _ctx, _cache, active_mode, missed_gold_ids
 
 
 def _gold_ranks(record: EvalRecord):
@@ -54,7 +54,7 @@ def _bm25_hits_gold(record: EvalRecord):
     def compute():
         missed = _missed_gold_in_corpus(record)
         if missed is None:
-            missed = _missed_gold_ids(record)
+            missed = missed_gold_ids(record)
         if not missed:
             return None
         hits = _ctx.keyword_fn(_ctx.chunks, record.probe.question, _ctx.wide_n)  # 위와 같으나 검색 함수만 다름
@@ -106,4 +106,4 @@ def _missed_gold_in_corpus(record: EvalRecord):
     membership = _gold_corpus_membership(record)
     if membership is None:
         return None
-    return {g for g in _missed_gold_ids(record) if membership.get(g)}
+    return {g for g in missed_gold_ids(record) if membership.get(g)}

@@ -57,7 +57,7 @@ from agents.eval.metrics_ragas import (
     evaluate_real_track, evaluate_oracle_track, evaluate_abstention,
     evaluate_reasoning_mode, _judge as _ragas_judge,
 )
-from agents.eval.metrics_common import set_context as set_diag_context, _missed_gold_ids
+from agents.eval.metrics_common import set_context as set_diag_context, missed_gold_ids
 from agents.eval import topic_cluster
 from agents.eval.metrics_basic import _compute_metrics
 from agents.eval.diagnose import diagnose, _is_success
@@ -566,10 +566,15 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
     failed_ids: set[str] = set()
     for r in records:
         if any(f.label == "retrieval_semantic_mismatch" for f in r.findings):
-            failed_ids |= _missed_gold_ids(r)
+            failed_ids |= missed_gold_ids(r)
 
-    failed_vecs = [embed_by_id[cid] for cid in failed_ids if embed_by_id.get(cid)]
+    # sorted: set 순회 순서는 회차마다 달라질 수 있어, 표본을 자를 때 신호가 흔들린다.
+    failed_vecs = [embed_by_id[cid] for cid in sorted(failed_ids) if embed_by_id.get(cid)]
     corpus_vecs = [c.embedding for c in chunks if c.embedding]
+
+    # 실패 gold 도 baseline 과 같은 상한을 건다 — 보통 수십 개지만 수백 개가 되면
+    # 1024차원 코사인이 수만 쌍으로 늘어난다(O(m^2)).
+    failed_vecs = topic_cluster.stride_sample(failed_vecs)
 
     signal = topic_cluster.classify(failed_vecs, corpus_vecs)
     for f in sem_findings:
