@@ -102,6 +102,37 @@ class ServeApiTests(unittest.TestCase):
             api._retriever = original_retriever
             api._chunks_raw = original_chunks
 
+    def test_answer_uses_context_compression_config_from_chunk_metadata(self):
+        original_retriever = api._retriever
+        original_chunks = api._chunks_raw
+        try:
+            api._chunks_raw = [
+                {
+                    "chunk_id": "c1",
+                    "metadata": {
+                        "context_compression": True,
+                        "context_compression_max_contexts": 2,
+                        "context_compression_min_contexts": 1,
+                    },
+                }
+            ]
+            api._retriever = self._fake_retriever()
+            with (
+                patch.dict("os.environ", {}, clear=True),
+                patch("agents.serve.api.answer_question", return_value={"answer": "ok"}) as answer_question,
+            ):
+                response = api.answer("?ы깮洹쇰Т 媛???쇱닔??")
+
+            self.assertEqual(response, {"answer": "ok"})
+            config = answer_question.call_args.kwargs["config"]
+            self.assertTrue(config["context_compression"])
+            self.assertTrue(config["context.compression.enabled"])
+            self.assertEqual(config["context_compression_max_contexts"], 2)
+            self.assertEqual(config["context_compression_min_contexts"], 1)
+        finally:
+            api._retriever = original_retriever
+            api._chunks_raw = original_chunks
+
 
 if __name__ == "__main__":
     unittest.main()

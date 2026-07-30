@@ -595,6 +595,27 @@ class RerankerMetadataValidationTest(unittest.TestCase):
             1_000_000,
         )
 
+    def test_context_compression_runtime_metadata_is_preserved(self):
+        refreshed = _refresh_runtime_metadata(
+            [Chunk("c1", "d1", "body")],
+            {
+                "context_compression": True,
+                "context_compression_max_contexts": 2,
+                "context_compression_min_contexts": 1,
+                "context_compression_max_sentences": 3,
+            },
+        )
+
+        metadata = refreshed[0].metadata
+        self.assertTrue(metadata["context_compression"])
+        self.assertTrue(metadata["context.compression.enabled"])
+        self.assertEqual(metadata["context_compression_max_contexts"], 2)
+        self.assertEqual(metadata["context_filter_max_contexts"], 2)
+        self.assertEqual(metadata["context_compression_min_contexts"], 1)
+        self.assertEqual(metadata["context_filter_min_contexts"], 1)
+        self.assertEqual(metadata["context_compression_max_sentences"], 3)
+        self.assertEqual(metadata["context_filter_max_sentences"], 3)
+
     def test_index_normalizes_invalid_candidate_counts(self):
         cases = [
             (None, 20),

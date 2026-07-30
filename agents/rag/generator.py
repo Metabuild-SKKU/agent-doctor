@@ -61,7 +61,7 @@ def generate_answer(
     )
     if answer:
         return answer
-    return _extractive_answer(cleaned_contexts)
+    return _extractive_answer([context.text for context in prompt_contexts])
 
 # retriever 검색 ~ 답변 생성 (전체 RAG 흐름)
 def answer_question(
@@ -189,9 +189,15 @@ def _compress_contexts_for_question(
         _config_value(config, "context_compression_max_sentences", "context_filter_max_sentences"),
         4,
     )
-    max_contexts = _positive_int(
-        _config_value(config, "context_compression_max_contexts", "context_filter_max_contexts"),
-        len(contexts),
+    raw_max_contexts = _config_value(
+        config,
+        "context_compression_max_contexts",
+        "context_filter_max_contexts",
+    )
+    max_contexts = (
+        _positive_int(raw_max_contexts, len(contexts))
+        if raw_max_contexts is not None
+        else None
     )
     min_contexts = min(
         len(contexts),
@@ -201,8 +207,9 @@ def _compress_contexts_for_question(
         ),
     )
 
-    compressed: list[tuple[float, PromptContext]] = []
+    compressed: list[tuple[float, bool, PromptContext]] = []
     matched_any = False
+    matched_count = 0
     for context_index, context in enumerate(contexts):
         sentences = _split_sentences(context)
         scored: list[tuple[float, int, str]] = []
@@ -213,6 +220,7 @@ def _compress_contexts_for_question(
 
         if scored:
             matched_any = True
+            matched_count += 1
             best_score = max(item[0] for item in scored)
             picked = sorted(
                 sorted(scored, key=lambda item: item[0], reverse=True)[:max_sentences],
@@ -221,6 +229,7 @@ def _compress_contexts_for_question(
             compressed.append(
                 (
                     best_score,
+                    True,
                     PromptContext(
                         citation_index=context_index + 1,
                         text=" ".join(item[2] for item in picked),
@@ -228,20 +237,26 @@ def _compress_contexts_for_question(
                 )
             )
         else:
+            fallback_text = " ".join(sentences[:max_sentences])
             compressed.append(
-                (0.0, PromptContext(citation_index=context_index + 1, text=context))
+                (
+                    0.0,
+                    False,
+                    PromptContext(citation_index=context_index + 1, text=fallback_text),
+                )
             )
 
     if not matched_any:
         return original
 
-    if max_contexts < len(compressed):
-        compressed = sorted(
-            compressed,
-            key=lambda item: (-item[0], item[1].citation_index),
-        )[:max_contexts]
-    compressed = sorted(compressed, key=lambda item: item[1].citation_index)
-    return [context for _score, context in compressed if context.text.strip()] or original
+    target_contexts = max_contexts if max_contexts is not None else matched_count
+    target_contexts = min(len(compressed), max(min_contexts, target_contexts))
+    compressed = sorted(
+        compressed,
+        key=lambda item: (-item[0], not item[1], item[2].citation_index),
+    )[:target_contexts]
+    compressed = sorted(compressed, key=lambda item: item[2].citation_index)
+    return [context for _score, _matched, context in compressed if context.text.strip()] or original
 
 
 def _context_compression_enabled(config: dict | None = None) -> bool:

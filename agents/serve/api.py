@@ -37,6 +37,17 @@ _chunks_raw: list[dict] = []
 _chunks_file: str | None = None
 _fingerprint: str = ""
 
+_GENERATION_CONFIG_KEYS = (
+    "context_compression",
+    "context.compression.enabled",
+    "context_compression_max_contexts",
+    "context_filter_max_contexts",
+    "context_compression_min_contexts",
+    "context_filter_min_contexts",
+    "context_compression_max_sentences",
+    "context_filter_max_sentences",
+)
+
 
 def init_qdrant(chunks_file: str) -> None:
     global _retriever, _chunks_raw, _chunks_file, _fingerprint
@@ -85,13 +96,40 @@ def _public_index_settings(retriever: Retriever | None) -> dict:
 
 def _answer_generation_config(retriever: Retriever) -> dict:
     settings = retriever.settings
-    return {
+    config = _stored_generation_config()
+    env_context_compression = os.getenv("RAG_CONTEXT_COMPRESSION")
+    if env_context_compression is not None:
+        config["context_compression"] = env_context_compression
+        config["context.compression.enabled"] = env_context_compression
+
+    enabled = config.get("context_compression")
+    if enabled is None:
+        enabled = config.get("context.compression.enabled")
+    if enabled is not None:
+        config["context_compression"] = enabled
+        config["context.compression.enabled"] = enabled
+
+    config.update(
+        {
         "top_k": settings.top_k,
         "use_hybrid": settings.use_hybrid,
         "use_reranker": settings.use_reranker,
-        "context_compression": os.getenv("RAG_CONTEXT_COMPRESSION"),
-        "context.compression.enabled": os.getenv("RAG_CONTEXT_COMPRESSION"),
-    }
+        }
+    )
+    return config
+
+
+def _stored_generation_config() -> dict:
+    config: dict = {}
+    for chunk in _chunks_raw:
+        metadata = chunk.get("metadata", {}) or {}
+        if not isinstance(metadata, dict):
+            continue
+        for key in _GENERATION_CONFIG_KEYS:
+            value = metadata.get(key)
+            if value is not None and key not in config:
+                config[key] = value
+    return config
 
 
 @app.get("/health")
