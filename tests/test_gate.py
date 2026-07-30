@@ -78,8 +78,8 @@ class PassesReportCompositeTest(unittest.TestCase):
     """composite 가 있으면 그 값(품질×신뢰도)으로 게이트를 판정한다."""
 
     def test_high_composite_passes_even_if_pass_threshold_false(self):
-        # composite 89 → 통과. overall 기반 pass_threshold 가 False 여도 composite 가 이긴다.
-        r = _FakeReport(False, {"mean_recall_at_k": 0.9}, _composite(89))
+        # composite 92 → 통과. overall 기반 pass_threshold 가 False 여도 composite 가 이긴다.
+        r = _FakeReport(False, {"mean_recall_at_k": 0.9}, _composite(92))
         self.assertTrue(gate.passes_report(r))
 
     def test_low_composite_fails_even_if_pass_threshold_true(self):
@@ -93,7 +93,7 @@ class PassesReportCompositeTest(unittest.TestCase):
 
     def test_high_composite_still_needs_recall_floor(self):
         # composite 통과여도 검색이 새면(recall<floor) 최적화로.
-        r = _FakeReport(False, {"mean_recall_at_k": 0.4}, _composite(89))
+        r = _FakeReport(False, {"mean_recall_at_k": 0.4}, _composite(92))
         self.assertFalse(gate.passes_report(r))
 
 

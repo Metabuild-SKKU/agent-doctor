@@ -497,6 +497,26 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     }
                 )
 
+        # route_after_eval 이 '품질 통과 + 판정 대기' 상태에서 이리로 보낸 경우:
+        # 방금 판정한 처방을 유지(keep)했다면 이미 목표 품질에 도달했으므로 새 처방을
+        # 더 붙이지 않고 그대로 Serve 로 확정한다(치료경과·유지 카운트 마감용 1회 방문).
+        # 롤백됐다면 복원된 config 로 재색인·재평가가 필요하니 이 단축을 타지 않는다.
+        if (
+            judged_item is not None
+            and not rolled_back
+            and gate.passes_report(state.report)
+        ):
+            state.status = "verified"
+            _log_optimize_verdict(
+                state,
+                judged_item,
+                verdict,
+                next_step="Serve 이동 (verified, 품질 통과)",
+            )
+            state.optimization_report = reporter.build_trial_report(judged_item, verdict)
+            _attach_runtime_deferred(state.optimization_report, deferred_runtime)
+            return state
+
         # (2) 새 처방 선택. 저비용 사전검증에서 baseline이 이기면 현재 처방을
         # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
         while True:
