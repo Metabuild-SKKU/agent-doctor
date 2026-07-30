@@ -1,6 +1,7 @@
 """
 tests/run_corpus.py
-코퍼스 폴더 하나(원본 PDF + QA셋)로 파이프라인을 돌리고, 결과를 진단서 HTML 로 떨군다.
+코퍼스 폴더 하나(원본 PDF + QA셋) 또는 KorQuAD 전처리본으로 파이프라인을 돌리고,
+결과를 진단서 HTML 로 떨군다.
 
 서버(web_api 8767 / api 8766)를 띄우지 않는다. report.html 이 fetch 로 받아가던
 JSON 을 report_view.build_report_view() 로 직접 만들어 HTML 안에 심어버리기 때문에,
@@ -18,6 +19,9 @@ Run:
     python tests/run_corpus.py             # 돌리고 진단서까지 자동으로 띄움
     python tests/run_corpus.py --no-open   # 브라우저 안 띄움(CI·원격 등)
     python tests/run_corpus.py --regen-qa  # qa.json 무시하고 새로 생성
+    python tests/run_corpus.py --korquad --loop
+        # .env 의 SOURCE_URL/EVAL_TAXONOMY_QA를 사용해 반복 처방 후
+        # output/korquad_test/out/report.html 생성
 
 진단 깊이는 항상 EVAL_MODE=full(= deep) + EVAL_ENABLE_LLM=1 로 고정한다(RAGAS 까지).
 LLM 을 실제로 호출하므로 비용이 든다 — 대신 findings 가 '예비'에 머물지 않고 확정된다.
@@ -57,6 +61,7 @@ def _load_env() -> None:
 
 
 CORPUS_ROOT = Path(__file__).resolve().parent / "corpus"
+KORQUAD_REPORT_ROOT = REPO_ROOT / "output" / "korquad_test"
 REPORT_TEMPLATE = REPO_ROOT / "web" / "prototype" / "report.html"
 
 DOC_SUFFIXES = (".pdf", ".md", ".txt")
@@ -92,7 +97,13 @@ def find_source_doc(corpus_dir: Path = CORPUS_ROOT) -> Path:
     return docs[0]
 
 
-def run_pipeline_for(corpus_dir: Path, *, regen_qa: bool, loop: bool):
+def run_pipeline_for(
+    corpus_dir: Path,
+    *,
+    regen_qa: bool,
+    loop: bool,
+    korquad: bool = False,
+):
     """코퍼스 하나에 대해 Ingest→Index→Eval→Optimize 를 돌리고 최종 state 를 반환한다.
 
     Serve 노드는 타지 않는다 — 이 스크립트의 목적은 진단 결과를 파일로 받는 것이고,
@@ -100,17 +111,26 @@ def run_pipeline_for(corpus_dir: Path, *, regen_qa: bool, loop: bool):
     """
     from core.state import AgentDoctorState
 
-    source_doc = find_source_doc(corpus_dir)
-    qa_path = corpus_dir / QA_FILENAME
+    if korquad:
+        source_url = os.getenv("SOURCE_URL", "data/corpus.jsonl")
+        qa_path = os.getenv("EVAL_TAXONOMY_QA", "data/qa_pairs.jsonl")
+        os.environ["EVAL_PROBE_SOURCE"] = "taxonomy"
+        print(f"  KorQuAD corpus: {source_url}")
+        print(f"  KorQuAD QA    : {qa_path}")
+        if regen_qa:
+            print("  주의: --regen-qa는 KorQuAD taxonomy 모드에서 사용하지 않습니다")
+    else:
+        source_doc = find_source_doc(corpus_dir)
+        qa_path = corpus_dir / QA_FILENAME
 
-    # Eval 의 Probe 영속화 기본 경로는 레포 루트 eval_probes.json 이다. 코퍼스마다
-    # QA셋을 따로 들고 있어야 하므로 이 코퍼스의 qa.json 으로 돌린다
-    # (probe_store.resolve_store_path 가 호출 시점에 이 환경변수를 읽는다).
-    os.environ["EVAL_PROBE_STORE"] = str(qa_path)
+        # Eval 의 Probe 영속화 기본 경로는 레포 루트 eval_probes.json 이다. 코퍼스마다
+        # QA셋을 따로 들고 있어야 하므로 이 코퍼스의 qa.json 으로 돌린다
+        # (probe_store.resolve_store_path 가 호출 시점에 이 환경변수를 읽는다).
+        os.environ["EVAL_PROBE_STORE"] = str(qa_path)
 
-    if regen_qa and qa_path.exists():
-        qa_path.unlink()
-        print(f"  --regen-qa → 기존 {QA_FILENAME} 삭제, 새로 생성합니다")
+        if regen_qa and qa_path.exists():
+            qa_path.unlink()
+            print(f"  --regen-qa → 기존 {QA_FILENAME} 삭제, 새로 생성합니다")
 
     # 진단 깊이는 항상 full(= deep 으로 접힘) — 가장 깊은 모드로 고정한다.
     # 모드만으로는 부족하고 EVAL_ENABLE_LLM 이 같이 켜져야 RAGAS(LLM-as-Judge)가
@@ -119,17 +139,18 @@ def run_pipeline_for(corpus_dir: Path, *, regen_qa: bool, loop: bool):
     os.environ["EVAL_MODE"] = "full"
     os.environ["EVAL_ENABLE_LLM"] = "1"
 
-    # made: 코퍼스 버전과 무관하게 저장된 QA셋을 그대로 재사용. 파일이 없으면
-    # Eval 이 자동 생성 후 같은 경로에 저장한다(첫 실행 = QA셋 생성 실행).
-    os.environ["EVAL_PROBE_SOURCE"] = "made"
-    if qa_path.exists():
-        print(f"  QA셋 재사용: {qa_path.relative_to(REPO_ROOT)}")
-    else:
-        print(f"  QA셋 없음 → 이번 실행에서 생성해 {QA_FILENAME} 로 저장합니다")
+    if not korquad:
+        # made: 코퍼스 버전과 무관하게 저장된 QA셋을 그대로 재사용. 파일이 없으면
+        # Eval 이 자동 생성 후 같은 경로에 저장한다(첫 실행 = QA셋 생성 실행).
+        os.environ["EVAL_PROBE_SOURCE"] = "made"
+        if qa_path.exists():
+            print(f"  QA셋 재사용: {qa_path.relative_to(REPO_ROOT)}")
+        else:
+            print(f"  QA셋 없음 → 이번 실행에서 생성해 {QA_FILENAME} 로 저장합니다")
 
     state = AgentDoctorState()
-    state.source_type = "file"
-    state.source_url = str(source_doc)
+    state.source_type = "korquad" if korquad else "file"
+    state.source_url = source_url if korquad else str(source_doc)
 
     if loop:
         # 품질 미달이면 Optimize→재색인→재평가를 예산까지 반복(graph.py 와 동일 라우팅).
@@ -273,6 +294,8 @@ def main():
     parser.add_argument("--regen-qa", action="store_true", help="기존 qa.json 을 버리고 재생성")
     parser.add_argument("--loop", action="store_true",
                         help="품질 미달 시 Optimize→재색인→재평가 반복(기본은 1회)")
+    parser.add_argument("--korquad", action="store_true",
+                        help=".env의 KorQuAD corpus/QA를 사용하고 output/에 진단서 저장")
     args = parser.parse_args()
 
     _load_env()   # 실제 실행할 때만 .env 를 적용한다(import 부작용 방지)
@@ -282,12 +305,26 @@ def main():
     from core.run_logger import setup_run_logging
     log_path = setup_run_logging(prefix="corpus")
 
-    print(f"  문서   : {find_source_doc().name}")
+    report_root = KORQUAD_REPORT_ROOT if args.korquad else CORPUS_ROOT
+    report_root.mkdir(parents=True, exist_ok=True)
+
+    if args.korquad:
+        print(f"  문서   : {os.getenv('SOURCE_URL', 'data/corpus.jsonl')}")
+        print(f"  QA셋   : {os.getenv('EVAL_TAXONOMY_QA', 'data/qa_pairs.jsonl')}")
+        print(f"  제한   : 문서 {os.getenv('KORQUAD_MAX_DOCS', '전체')} / "
+              f"QA {os.getenv('KORQUAD_QA_LIMIT', '전체')}")
+    else:
+        print(f"  문서   : {find_source_doc().name}")
     print(f"  진단   : EVAL_MODE=full (RAGAS 포함)")
 
     try:
-        state = run_pipeline_for(CORPUS_ROOT, regen_qa=args.regen_qa, loop=args.loop)
-        html_path, view = write_report(state, CORPUS_ROOT)
+        state = run_pipeline_for(
+            CORPUS_ROOT,
+            regen_qa=args.regen_qa,
+            loop=args.loop,
+            korquad=args.korquad,
+        )
+        html_path, view = write_report(state, report_root)
         print_summary(state, view, html_path)
     except BaseException:
         # 실패해도 로그 파일 위치는 알려준다 — 콘솔이 길어 앞부분이 밀려도 찾을 수 있게.
