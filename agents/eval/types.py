@@ -90,7 +90,20 @@ KG_TOP_K_NEIGHBORS = 2
 #   ratio <= SPREAD       → "spread"       (전 주제 흩어져 실패 → 임베딩 모델 자체 약함)
 #   그 사이               → "none"         (재봤으나 주제 응집 안 보임 → 청킹 조정)
 # "못 잰" 경우는 이 임계값과 무관하게 "unmeasured" 로 따로 나간다(topic_cluster.py 참고).
+#
 # 임의값 — 실측 캘리브레이션 필요(rules.py 의 diagnosis_confidence: None 과 같은 미완성 상태).
+# TODO(eval-캘리브레이션) 현재 두 값은 ratio 추정량의 분산에 비해 너무 촘촘하다.
+#   시뮬(문서 10×50청크, 실패를 무작위로 뽑아 '주제 신호 없음'을 만든 60회) 실측:
+#     실패 gold  10개 → ratio 중앙값 1.04, stdev 0.93
+#     실패 gold  20개 → ratio 중앙값 1.00, stdev 0.50
+#     실패 gold 100개 → ratio 중앙값 1.06, stdev 0.21
+#   중앙값은 1.0 에 제대로 붙지만(= baseline 추정은 편향 없음), 실패가 보통 수십 개인
+#   구간에서 stdev(~0.5)가 none 대의 폭(1.1~1.3 = 0.2)보다 훨씬 크다. 그래서 신호가
+#   없는 회차도 우연히 spread/concentrated 로 튄다(60회 중 none 은 7회뿐).
+#   캘리브레이션 때는 임계값만 옮길 게 아니라 (a) none 대 폭을 분산에 맞춰 넓히거나
+#   (b) 실패 gold 수에 따라 폭을 조절하는 쪽을 함께 봐야 한다.
+#   지금 이 좁은 폭이 안전한 이유는 spread/concentrated 가 같은 처방(임베딩 교체)으로
+#   수렴해서 오분류의 라우팅 영향이 없기 때문이다 — 둘이 갈리는 순간 이 TODO 가 급해진다.
 TOPIC_CLUSTER_CONCENTRATED_RATIO = 1.3
 TOPIC_CLUSTER_SPREAD_RATIO = 1.1
 # 평균 응집도를 잴 때 뽑는 청크 표본 수 상한(전량 O(n^2) 회피). baseline·실패 gold 공용.
