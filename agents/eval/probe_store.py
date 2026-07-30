@@ -27,7 +27,7 @@ from core.schema import Chunk, Document, Probe
 
 DEFAULT_STORE_PATH = "eval_probes.json"
 # gold_spans 생성 계약이 바뀌면 이전 Probe 캐시를 재사용하지 않는다.
-PROBE_SCHEMA_VERSION = "gold-spans-v2"
+PROBE_SCHEMA_VERSION = "gold-spans-v3"
 
 
 def corpus_version(

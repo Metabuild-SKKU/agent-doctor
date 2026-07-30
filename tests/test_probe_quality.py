@@ -14,7 +14,11 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from agents.eval.probe_gen import _probe_surplus_count, probe_quality_issue
+from agents.eval.probe_gen import (
+    _clean_topic_of,
+    _probe_surplus_count,
+    probe_quality_issue,
+)
 
 
 class ProbeQualityGateTest(unittest.TestCase):
@@ -87,6 +91,59 @@ class ProbeQualityGateTest(unittest.TestCase):
         for answer in ("185명", "1,234억 원", "전체의 60%", "3.5% 인상되었습니다."):
             with self.subTest(answer=answer):
                 self.assertIsNone(probe_quality_issue("직원 수는 몇 명인가요?", answer))
+
+
+class TableSeparatorFurnitureTest(unittest.TestCase):
+    """표 셀 구분자 잔여물이 섞인 깨진 질문을 게이트가 잡는지.
+
+    실측(corpus 로그의 probe_held_out_000): 무응답 probe 가 원문 표 행을 주제로 긁어와
+    "...ㅣ 영 세율 제도..." 처럼 셀 구분자가 질문에 박혔다. GT 없는 무응답 probe 라 GT="" 로
+    질문 텍스트만 검사한다.
+    """
+
+    def test_rejects_hangul_bar_separator(self):
+        # ㅣ(U+3163 한글호환자모) — 실제 로그의 깨진 30번 질문.
+        issue = probe_quality_issue(
+            "자에 대한 과세정보를 활용 ㅣ 영 세율 제도 하여 추징한다는 것이 "
+            "국세청과 관련해 아직 공개되지 않은 세부 내규는 무엇인가요?",
+            "",
+        )
+        self.assertIsNotNone(issue)
+
+    def test_rejects_boxdrawing_and_spaced_pipe(self):
+        for question in (
+            "매출 │ 영업이익 항목과 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+            "가 | 나 항목과 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+        ):
+            with self.subTest(question=question):
+                self.assertIsNotNone(probe_quality_issue(question, ""))
+
+    def test_accepts_clean_no_answer_question(self):
+        # 구분자 없는 정상 무응답 질문은 통과해야 한다.
+        self.assertIsNone(probe_quality_issue(
+            "영농조합법인 배당소득 저율과세와 관련해 아직 공개되지 않은 세부 내규는 무엇인가요?",
+            "",
+        ))
+
+
+class CleanTopicOfTest(unittest.TestCase):
+    """_clean_topic_of: furniture 문장을 건너뛰고 깨끗한 주제를 고른다(무응답 전용)."""
+
+    def test_skips_furniture_first_line(self):
+        text = (
+            "활용 ㅣ 영 세율 제도 하여 추징\n"
+            "영농조합법인으로부터 받는 배당소득에 대한 저율 과세 혜택 규정입니다."
+        )
+        topic = _clean_topic_of(text)
+        self.assertIsNotNone(topic)
+        self.assertNotIn("ㅣ", topic)
+
+    def test_returns_none_when_all_furniture(self):
+        # 깨끗한 문장이 없으면 None → 호출부가 그 청크를 버린다.
+        self.assertIsNone(_clean_topic_of("페이지 522 ㅣ 전자공시시스템"))
+
+    def test_returns_none_for_empty(self):
+        self.assertIsNone(_clean_topic_of(""))
 
 
 class ProbeSurplusCountTest(unittest.TestCase):

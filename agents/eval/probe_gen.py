@@ -243,7 +243,13 @@ _FURNITURE_RE = re.compile(
     r"(?:https?://|www\.)\S+"           # URL
     r"|\b[\w.-]+\.(?:or|co|com|go|net)\.?kr\b"  # dart.fss.or.kr 등 국내 도메인
     r"|\b(?:page|p\.)\s*\d+\b"          # Page 522
-    r"|전자공시시스템",
+    r"|전자공시시스템"
+    # 표 셀 구분자 잔여물 — 전처리가 놓친 표 행을 원문에서 통째로 긁어오면 셀 사이에
+    # 구분자가 남는다("과세정보를 활용 ㅣ 영 세율 제도"). ㅣ(U+3163 한글호환자모)·
+    # │(U+2502 박스드로잉)는 그 자체로 furniture 신호. 파이프(|)는 공백에 둘러싸인
+    # 표 구분자 용법만 잡아 정규식·불리언 표기의 정상 파이프와 구분한다.
+    r"|[ㅣ│]"
+    r"| \| ",
     re.IGNORECASE,
 )
 
@@ -513,6 +519,33 @@ def _topic_of(text: str) -> str:
     first = first.strip().strip("#•-*> ").strip()
     # 너무 길면 앞 40자만
     return first[:40] if len(first) > 40 else first
+
+
+def _clean_topic_of(text: str) -> str | None:
+    """무응답 probe 전용 주제 추출 — furniture 문장을 건너뛰고 깨끗한 첫 문장을 고른다.
+
+    _topic_of 는 무조건 첫 문장을 쓰므로, 전처리가 놓친 표 행·페이지 푸터가 첫 줄이면
+    그 잔여물이 그대로 질문에 박힌다(실측: held_out probe 의 "...ㅣ 영 세율 제도..."). 여기서는
+    문장 후보를 순회하며 furniture(_FURNITURE_RE)가 없고 최소 길이를 넘는 첫 문장을 고르고,
+    그런 문장이 하나도 없으면 None 을 돌려 호출부가 그 청크를 버리고 다른 청크로 넘어가게 한다.
+
+    _topic_of 를 대체하지 않고 별도 함수로 둔다 — _topic_of 는 단일홉·RAGAS/DataMorgana 휴리스틱
+    폴백도 쓰는 공유 헬퍼라, 그쪽은 조립 단계 probe_quality_issue 게이트가 이미 깨진 걸 폐기한다.
+    게이트를 우회하는 무응답 경로에만 이 furniture-safe 선택을 적용해 영향 범위를 가둔다.
+    """
+    candidates: list[str] = []
+    for segment in _SENT_SPLIT.split((text or "").strip()):
+        candidate = segment.strip().strip("#•-*> \t")
+        if candidate:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        if _FURNITURE_RE.search(candidate):
+            continue
+        if len(candidate) < _HEURISTIC_EVIDENCE_MIN_CHARS:
+            continue
+        return candidate[:40] if len(candidate) > 40 else candidate
+    return None
 
 
 # ── gold span / 위치-인덱스 유틸 ──────────────────────────────────
@@ -1219,17 +1252,42 @@ def _generate_held_out_probes(chunks: list[Chunk], n: int) -> list[Probe]:
     코퍼스에 없는 정보를 묻는 질문. 실제 청크 하나를 주제로 삼되 gold_chunk_ids 를
     비워(코퍼스에서 답을 찾을 수 없는 것처럼) 검색이 반드시 실패하게 만든다
     (완전한 코퍼스 제외는 Index Agent 쪽 정보가 필요해 Eval 단독으로는 시뮬레이션만 가능).
+
+    질문은 false_premise 와 같은 plan→parallel→assemble 구조로 만든다 — LLM 이 주제와
+    관련되지만 컨텍스트엔 없는 세부를 새로 묻고(원문 조각을 템플릿에 박지 않는다), 실패 시
+    _clean_topic_of 기반 템플릿으로 폴백한다. 조립 단계는 probe_quality_issue 게이트를 태워
+    깨진 질문을 폐기하고(GT 없으니 빈 문자열로 질문 텍스트만 검사), 폐기·폴백 실패로 목표에
+    못 미칠 수 있으니 여유분(surplus)까지 후보로 잡는다.
+
+    gold_chunk_ids 는 반드시 비운다([]) — 채우면 recall_at_k 가 -1 이 아니라 실수값이 되어
+    diagnose 의 검색(A)·자료(D) 슬롯이 열리고, held-out 인데 답을 지어낸 probe 에 retrieval_*·
+    corpus_gap 이 오탐으로 붙는다(판정은 오직 기권 여부로만 나야 한다).
     """
     usable = [c for c in chunks if c.text and len(c.text.strip()) >= 20]
-    probes: list[Probe] = []
-    for i in range(n):
+    # plan(순차): 청크 샘플링 확정 → 질문 생성(병렬, 태스크 내 휴리스틱 폴백) → 조립(순차)
+    # RAGAS/false_premise 경로와 같은 이유로 여유분을 얹는다(게이트 폐기·폴백 실패 보충).
+    specs: list[dict] = []
+    for i in range(n + _probe_surplus_count(n)):
         if not usable:
             break
-        chunk = random.choice(usable)
-        topic = _topic_of(chunk.text)
+        specs.append({"index": i, "node": random.choice(usable)})
+    results = parallel_map(lambda s: _held_out_question(s["node"].text),
+                           specs, resolve_llm_concurrency())
+
+    probes: list[Probe] = []
+    for spec, question in zip(specs, results):
+        if len(probes) >= n:
+            break
+        if question is None:
+            continue
+        issue = probe_quality_issue(question, "")
+        if issue:
+            print(f"  Probe 폐기({issue}) — {question[:40]}")
+            continue
         probes.append(Probe(
-            probe_id=f"probe_held_out_{i:03d}",
-            question=f"{topic}과 관련해 아직 공개되지 않은 세부 내규는 무엇인가요?",
+            # 폐기가 생겨도 번호가 비지 않도록 조립 순번(len(probes))을 쓴다.
+            probe_id=f"probe_held_out_{len(probes):03d}",
+            question=question,
             source="llm_generated",
             expected_difficulty="medium",
             answer_exists=False,
@@ -1238,7 +1296,38 @@ def _generate_held_out_probes(chunks: list[Chunk], n: int) -> list[Probe]:
             qtype=None,
             metadata={"gen_method": "no_answer_held_out"},
         ))
+    if len(probes) < n:
+        print(f"  Held-out Probe {len(probes)}/{n}개 — 품질 게이트 통과분 부족")
     return probes
+
+
+def _held_out_question(chunk_text: str) -> str | None:
+    """
+    LLM(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택)으로 held-out 무응답 질문을
+    만든다 — 주제는 컨텍스트와 관련되지만 답은 컨텍스트에 없는(그래서 기권해야 하는) 질문.
+    키 없거나 실패 시 _clean_topic_of 기반 템플릿으로 폴백하되, topic 을 못 고르면(furniture
+    뿐인 청크) None 을 돌려 호출부가 그 청크를 버린다(false_premise 와 달리 폴백이 None 가능).
+    """
+    if llm_provider.has_key():
+        try:
+            data = llm_provider.chat_json(
+                system=("너는 RAG 파이프라인 평가용 테스트 질문을 설계하는 평가자다. "
+                        "주어진 컨텍스트의 주제와 관련은 있지만, 컨텍스트에는 답이 나오지 않는 "
+                        "구체적인 세부사항(아직 공개되지 않은 내규·예외·향후 계획 등)을 묻는 "
+                        "질문 하나를 한국어로 만들어라. 컨텍스트만으로는 답할 수 없어야 한다 "
+                        "(정답이 컨텍스트 안에 있으면 안 된다). "
+                        "반드시 {\"question\": str} 형태의 JSON으로만 답하라."),
+                user=f"[컨텍스트]\n{chunk_text}",
+            )
+            question = (data.get("question") or "").strip()
+            if question:
+                return question
+        except Exception as e:
+            print(f"  Held-out 질문 생성 실패({e}) → 휴리스틱 폴백")
+    topic = _clean_topic_of(chunk_text)
+    if topic is None:
+        return None
+    return f"{topic}과 관련해 아직 공개되지 않은 세부 내규는 무엇인가요?"
 
 
 def _generate_false_premise_probes(graph: knowledge_graph.KGraph, n: int, start_index: int = 0) -> list[Probe]:
@@ -1261,8 +1350,11 @@ def _generate_false_premise_probes(graph: knowledge_graph.KGraph, n: int, start_
 
     probes: list[Probe] = []
     for spec, question in zip(specs, results):
-        node = spec["node"]
         if question is None:
+            continue
+        issue = probe_quality_issue(question, "")
+        if issue:
+            print(f"  Probe 폐기({issue}) — {question[:40]}")
             continue
         probes.append(Probe(
             probe_id=f"probe_false_premise_{start_index + spec['index']:03d}",
@@ -1271,7 +1363,10 @@ def _generate_false_premise_probes(graph: knowledge_graph.KGraph, n: int, start_
             expected_difficulty="medium",
             answer_exists=False,
             ground_truth=None,
-            gold_chunk_ids=[node.chunk_id],
+            # gold 를 비운다 — answer_exists=False 와 일관하고, recall_at_k 를 -1 로 유지해
+            # held-out 과 같은 이유로 검색(A)·자료(D) 슬롯 오탐을 막는다(오라클 gold 는 애초에
+            # 없으니 gold_chunk_ids 를 채워도 소비처가 없었다).
+            gold_chunk_ids=[],
             qtype=None,
             metadata={"gen_method": "no_answer_false_premise"},
         ))
@@ -1300,7 +1395,9 @@ def _false_premise_question(chunk_text: str) -> str | None:
                 return question
         except Exception as e:
             print(f"  False Premise 질문 생성 실패({e}) → 휴리스틱 폴백")
-    topic = _topic_of(chunk_text)
+    # furniture 를 거른 topic 을 우선 쓰고, 깨끗한 문장이 없으면 _topic_of 로 값을 보장한다
+    # (false_premise 폴백은 항상 값 있게 유지 — 깨진 결과는 조립부 probe_quality_issue 가 폐기).
+    topic = _clean_topic_of(chunk_text) or _topic_of(chunk_text)
     return f"{topic}과 관련된 특별 예외 규정은 정확히 몇 조 몇 항에 명시되어 있나요?"
 
 
