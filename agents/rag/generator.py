@@ -87,7 +87,15 @@ def answer_question(
     generation_mode = "llm" if _has_provider(provider, config=config) else "extractive"
 
     # top context 그대로 반환 -> fallback
-    if answer == _extractive_answer(contexts):
+    cleaned_contexts = [
+        context.strip() for context in contexts if context and context.strip()
+    ]
+    prompt_contexts = _compress_contexts_for_question(
+        question,
+        cleaned_contexts,
+        config=config,
+    )
+    if answer == _extractive_answer([context.text for context in prompt_contexts]):
         generation_mode = "extractive"
 
     result = GeneratedAnswer(

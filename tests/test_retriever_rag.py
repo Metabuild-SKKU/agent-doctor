@@ -252,6 +252,35 @@ class RagGeneratorTests(unittest.TestCase):
 
         self.assertEqual(answer, "Remote work is allowed two days per week.")
 
+    def test_answer_question_marks_compressed_fallback_as_extractive(self):
+        retriever = build_retriever(
+            [
+                Chunk(
+                    chunk_id="remote",
+                    doc_id="policy",
+                    text="Remote work is allowed two days per week. Cafeteria menu changes daily.",
+                )
+            ]
+        )
+
+        with (
+            patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}),
+            patch("agents.rag.generator._llm_generate", return_value=None),
+        ):
+            response = answer_question(
+                "How many remote work days are allowed?",
+                retriever,
+                provider="openai",
+                top_k=1,
+                config={
+                    "context_compression": True,
+                    "context_compression_max_contexts": 1,
+                },
+            )
+
+        self.assertEqual(response["answer"], "Remote work is allowed two days per week.")
+        self.assertEqual(response["generation_mode"], "extractive")
+
     def test_context_compression_preserves_original_when_all_scores_are_zero(self):
         contexts = [
             "복리후생 제도는 별도 공지합니다.",
