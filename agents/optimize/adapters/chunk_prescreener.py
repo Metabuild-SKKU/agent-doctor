@@ -4,7 +4,7 @@ agents/optimize/adapters/chunk_prescreener.py
 Chunk size/overlap 후보를 DB 쓰기와 임베딩 없이 사전선별한다.
 
 읽기: OptimizationRequest의 baseline_config, 단일 축 search_space,
-      metadata.chunk_precheck_context(documents, gold_spans, chunk_strategy)
+      metadata.chunk_precheck_context(documents, evidence_spans, chunk_strategy)
 쓰기: AgentDoctorState를 수정하지 않고 InternalAdapterResult만 반환
 
 이 결과는 검색·생성 품질의 최종 증명이 아니라 기하 조건으로 고른 예상 best다.
@@ -40,7 +40,8 @@ def run(
         path, values = _search_axis(request.search_space)
         context = _precheck_context(request)
         documents = _documents(context)
-        gold_spans = _gold_spans(context, documents)
+        evidence_spans = _measurement_spans(context, documents)
+        span_source = context.get("span_source", "gold_spans")
         strategy = context.get(
             "chunk_strategy",
             request.baseline_config.get("chunk_strategy", "markdown_recursive"),
@@ -72,7 +73,7 @@ def run(
             )
             metrics = _measure_candidate(
                 documents=documents,
-                gold_spans=gold_spans,
+                evidence_spans=evidence_spans,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 strategy=strategy,
@@ -164,6 +165,7 @@ def run(
             "budget_used": len(values[: request.max_trials]),
             "max_trials": request.max_trials,
             "selection_reason": _selection_reason(path, best_value, best_metrics),
+            "span_source": span_source,
             "candidate_metrics": [
                 {
                     "value": value,
@@ -210,13 +212,13 @@ def _documents(context: dict[str, Any]) -> dict[str, Document]:
     return documents
 
 
-def _gold_spans(
+def _measurement_spans(
     context: dict[str, Any],
     documents: dict[str, Document],
 ) -> list[dict[str, Any]]:
-    raw_spans = context.get("gold_spans")
+    raw_spans = context.get("evidence_spans", context.get("gold_spans"))
     if not isinstance(raw_spans, (list, tuple)):
-        raise ValueError("chunk_precheck_context.gold_spans는 목록이어야 합니다.")
+        raise ValueError("chunk_precheck_context.evidence_spans는 목록이어야 합니다.")
     spans: list[dict[str, Any]] = []
     for raw in raw_spans:
         if not isinstance(raw, dict):
@@ -238,7 +240,7 @@ def _gold_spans(
             continue
         spans.append({"doc_id": doc_id, "start": start, "end": end})
     if not spans:
-        raise ValueError("유효한 gold_spans가 없어 chunk 자동 사전검증을 건너뜁니다.")
+        raise ValueError("유효한 evidence_spans가 없어 chunk 자동 사전검증을 건너뜁니다.")
     return spans
 
 
@@ -267,7 +269,7 @@ def _candidate_config(
 def _measure_candidate(
     *,
     documents: dict[str, Document],
-    gold_spans: list[dict[str, Any]],
+    evidence_spans: list[dict[str, Any]],
     chunk_size: int,
     chunk_overlap: int,
     strategy: str | int,
@@ -281,7 +283,7 @@ def _measure_candidate(
     span_fit = 0
     wastes: list[int] = []
     contained_indices: list[int] = []
-    for span_index, span in enumerate(gold_spans):
+    for span_index, span in enumerate(evidence_spans):
         span_length = span["end"] - span["start"]
         if span_length <= chunk_size:
             span_fit += 1
@@ -296,7 +298,7 @@ def _measure_candidate(
             smallest = min(end - start for start, end in containing)
             wastes.append(max(0, smallest - span_length))
 
-    total_spans = len(gold_spans)
+    total_spans = len(evidence_spans)
     total_document_chars = sum(len(document.content) for document in documents.values())
     total_chunk_chars = sum(
         end - start

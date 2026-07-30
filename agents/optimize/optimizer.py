@@ -557,10 +557,25 @@ def _run_internal(
         )
 
     if adapter_result.status == "skipped":
-        metadata["error_code"] = adapter_result.metadata.get(
+        error_code = adapter_result.metadata.get(
             "error_code",
             "internal_skipped",
         )
+        if (
+            path in {"chunker.chunk_size", "chunker.chunk_overlap"}
+            and error_code in {
+                "missing_chunk_precheck_context",
+                "chunk_precheck_unavailable",
+            }
+        ):
+            return _run_rules(
+                request,
+                candidate,
+                search_space,
+                skipped=skipped,
+                fallback_reason=error_code,
+            )
+        metadata["error_code"] = error_code
         return OptimizationResult(
             request_id=request.request_id,
             status="skipped",

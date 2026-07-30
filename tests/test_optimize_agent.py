@@ -581,7 +581,11 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         state = agent.run(state)                            # 방문2: 판정 → 롤백
         self.assertEqual(state.status, "applied")           # 같은 라벨의 다음 처방은 계속 진행
         self.assertEqual(state.index_config["top_k"], 4)    # 첫 후보는 baseline으로 복원
-        self.assertEqual(state.index_config["chunk_size"], 256)
+        self.assertTrue(state.index_config["context_compression"])
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "context_compression",
+        )
         self.assertEqual(len(state.blacklist), 1)
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
@@ -688,7 +692,11 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         state.report = make_report(50.0)                    # 악화
         state = agent.run(state)                            # 방문2: 같은 라벨의 다음 처방
         self.assertEqual(state.iteration, 3)                # 후보/처방 전환은 증가 없음
-        self.assertEqual(state.index_config["chunk_size"], 256)
+        self.assertTrue(state.index_config["context_compression"])
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "context_compression",
+        )
         self.assertEqual(state.status, "applied")
 
     def test_baseline_dead_end_preserves_same_visit_rollback(self):
@@ -1040,6 +1048,23 @@ class GraphRoutingTest(unittest.TestCase):
     def test_route_after_eval_pass_goes_serve(self):
         state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
                                  iteration=1, max_iterations=3)
+        self.assertEqual(self._route(graph.route_after_eval, state), "serve")
+
+    def test_route_after_eval_pass_with_pending_goes_optimize_to_finalize(self):
+        # 방금 적용한 처방으로 품질이 통과했는데 아직 판정(마감) 안 됐으면,
+        # Optimize 를 한 번 더 태워 pending 을 확정한 뒤 Serve 로 보낸다.
+        state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
+                                 iteration=1, max_iterations=3,
+                                 optimization_history=[self._pending()])
+        self.assertEqual(self._route(graph.route_after_eval, state), "optimize")
+
+    def test_route_after_eval_pass_with_active_study_pending_goes_serve(self):
+        # 진행 중 sweep(active_study)은 통과 시 기존대로 그대로 Serve.
+        item = self._pending()
+        item.metadata["active_study"] = True
+        state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
+                                 iteration=1, max_iterations=3,
+                                 optimization_history=[item])
         self.assertEqual(self._route(graph.route_after_eval, state), "serve")
 
     def test_route_after_eval_budget_left_goes_optimize(self):
