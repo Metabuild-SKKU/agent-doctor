@@ -206,6 +206,26 @@ class OptimizerExecutionTest(unittest.TestCase):
         )
         self.assertFalse(result.needs_reindex)
 
+    def test_context_compression_is_mappable_and_does_not_reindex(self):
+        candidate = self.make_candidate(
+            prescription_id="context_compression",
+            search_space={"context.compression.enabled": [True]},
+            reindex=False,
+        )
+        request = self.make_request(
+            baseline_config={"context_compression": False},
+            candidates=[candidate],
+        )
+
+        result = run(request)
+
+        self.assertEqual(result.status, "proposed")
+        self.assertEqual(
+            result.config_patch.changes,
+            {"context.compression.enabled": True},
+        )
+        self.assertFalse(result.needs_reindex)
+
     def test_unavailable_runtime_reranker_is_skipped(self):
         candidate = self.make_candidate(
             prescription_id="enable_reranker",

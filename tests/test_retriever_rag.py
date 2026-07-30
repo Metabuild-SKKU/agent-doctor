@@ -136,6 +136,34 @@ class RagGeneratorTests(unittest.TestCase):
 
         self.assertEqual(answer, "재택근무는 주 2일까지 가능합니다.")
 
+    def test_context_compression_filters_noise_before_generation(self):
+        contexts = [
+            "Remote work is allowed two days per week. Cafeteria menu changes daily.",
+            "Parking registration is handled by the facilities team.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            answer = generate_answer(
+                "How many remote work days are allowed?",
+                contexts,
+                config={"context_compression": True},
+            )
+
+        self.assertEqual(answer, "ok")
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual(prompt_contexts, ["Remote work is allowed two days per week."])
+
+    def test_context_compression_disabled_preserves_contexts(self):
+        contexts = [
+            "Remote work is allowed two days per week. Cafeteria menu changes daily.",
+            "Parking registration is handled by the facilities team.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer("How many remote work days are allowed?", contexts)
+
+        self.assertEqual(generate.call_args.args[1], contexts)
+
     def test_answer_question_returns_citations(self):
         retriever = build_retriever(
             [

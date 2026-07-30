@@ -6,6 +6,7 @@ LLM 설정 X, LLM 호출 실패 시 -> 추출식 fallback 사용
 from __future__ import annotations
 
 import os
+import re
 import threading
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -41,10 +42,12 @@ def generate_answer(
     if not cleaned_contexts:
         return ""
 
+    prompt_contexts = _compress_contexts_for_question(question, cleaned_contexts, config=config)
+
     # LLM 답변 생성 -> 실패 시 none 반환, extractive fallback으로 넘어가기
     answer = _llm_generate(
         question,
-        cleaned_contexts,
+        prompt_contexts,
         provider=provider,
         model=model,
         config=config,
@@ -144,6 +147,122 @@ def _extractive_answer(contexts: list[str]) -> str:
         if context and context.strip():
             return context.strip()
     return ""
+
+
+_TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+|\n+")
+_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "what", "when", "where", "how",
+    "에", "의", "을", "를", "이", "가", "은", "는", "와", "과", "로", "으로",
+    "및", "또는", "그리고", "대해", "설명", "하십시오", "주세요",
+}
+
+
+def _compress_contexts_for_question(
+    question: str,
+    contexts: list[str],
+    *,
+    config: dict | None = None,
+) -> list[str]:
+    """Keep question-relevant sentences before generation when explicitly enabled."""
+
+    if not _context_compression_enabled(config):
+        return contexts
+
+    query_tokens = _keywords(question)
+    query_numbers = set(re.findall(r"\d+(?:[.,]\d+)*", question))
+    if not query_tokens and not query_numbers:
+        return contexts
+
+    max_sentences = _positive_int(
+        _config_value(config, "context_compression_max_sentences", "context_filter_max_sentences"),
+        4,
+    )
+    max_contexts = _positive_int(
+        _config_value(config, "context_compression_max_contexts", "context_filter_max_contexts"),
+        len(contexts),
+    )
+    min_contexts = min(
+        len(contexts),
+        _positive_int(
+            _config_value(config, "context_compression_min_contexts", "context_filter_min_contexts"),
+            1,
+        ),
+    )
+
+    compressed: list[tuple[int, str]] = []
+    for context_index, context in enumerate(contexts):
+        sentences = _split_sentences(context)
+        scored: list[tuple[float, int, str]] = []
+        for sentence_index, sentence in enumerate(sentences):
+            score = _sentence_relevance_score(sentence, query_tokens, query_numbers)
+            if score > 0:
+                scored.append((score, sentence_index, sentence))
+
+        if scored:
+            picked = sorted(
+                sorted(scored, key=lambda item: item[0], reverse=True)[:max_sentences],
+                key=lambda item: item[1],
+            )
+            compressed.append((context_index, " ".join(item[2] for item in picked)))
+        elif context_index < min_contexts:
+            compressed.append((context_index, " ".join(sentences[:max_sentences])))
+
+    if not compressed:
+        return contexts
+
+    compressed = compressed[:max_contexts]
+    return [context for _, context in compressed if context.strip()] or contexts
+
+
+def _context_compression_enabled(config: dict | None = None) -> bool:
+    value = _config_value(
+        config,
+        "context_compression",
+        "context_filtering",
+        "context.compression.enabled",
+    )
+    if value is None:
+        value = os.getenv("RAG_CONTEXT_COMPRESSION")
+    return _as_bool(value)
+
+
+def _split_sentences(text: str) -> list[str]:
+    sentences = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text) if part.strip()]
+    return sentences or [text.strip()]
+
+
+def _sentence_relevance_score(
+    sentence: str,
+    query_tokens: set[str],
+    query_numbers: set[str],
+) -> float:
+    sentence_tokens = _keywords(sentence)
+    overlap = len(query_tokens & sentence_tokens)
+    sentence_numbers = set(re.findall(r"\d+(?:[.,]\d+)*", sentence))
+    number_overlap = len(query_numbers & sentence_numbers)
+    return float(overlap) + (2.0 * number_overlap)
+
+
+def _keywords(text: str) -> set[str]:
+    tokens = {token.lower() for token in _TOKEN_RE.findall(text or "")}
+    return {token for token in tokens if len(token) > 1 and token not in _STOPWORDS}
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 # config 안에서 여러 후보 key 중 첫 번째 유효 값 반환 (이름 달라도 설정 동일하게)

@@ -22,6 +22,7 @@ CANONICAL_INDEX_CONFIG_KEYS: dict[str, str] = {
     "retriever.top_k": "top_k",
     "reranker.enabled": "use_reranker",
     "reranker.candidate_count": "rerank_candidates",
+    "context.compression.enabled": "context_compression",
     "chunker.chunk_size": "chunk_size",
     "chunker.chunk_overlap": "chunk_overlap",
     "embedding.model": "embedding_model",

@@ -63,7 +63,7 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
     "embedding_model": False,
     # 공통 Retriever가 Eval과 Serve에서 같은 설정으로 CrossEncoder를 실행한다.
     "reranker": True,
-    "context_compression": False,
+    "context_compression": True,
     "chunking_strategy": False,
 }
 
@@ -89,6 +89,7 @@ STATE_MAPPABLE_PATHS: set[str] = {
     "retriever.search_type",
     "reranker.enabled",
     "reranker.candidate_count",
+    "context.compression.enabled",
     "chunker.chunk_size",
     "chunker.chunk_overlap",
     "embedding.model",

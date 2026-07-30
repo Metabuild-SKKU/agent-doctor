@@ -58,6 +58,9 @@ class AgentDoctorState:
         # metadata 기록에 소비한다. 둘 다 미지정 시 5를 폴백으로 쓰고 있어 같은 값을
         # 명시해 동작을 바꾸지 않으면서 Optimize가 조정할 baseline을 드러낸다.
         "top_k": 5,
+        # 답변 생성 직전에 질문 관련 문장만 남기는 선택적 context filtering.
+        # 기본은 꺼 두고, context_noise/too_long 계열 처방이 켜면 RAG generator가 소비한다.
+        "context_compression": False,
         "chunk_strategy": "fixed",
         "embedding_dimension": 1024,
         "deduplicate": True,
