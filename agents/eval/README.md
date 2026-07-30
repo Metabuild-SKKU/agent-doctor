@@ -88,9 +88,19 @@ lexical 통과를 **강등**한다(부정문·`3월`↔`3일` 같은 근접 오�
 즉 **화면에 보이는 "신뢰도" 숫자는 "findings 없는 probe의 비율"이 아니라 "probe별 soft 신뢰도의
 평균"이다.** 자세한 배경은 `agents/optimize/history.py`의 `judge`/`_read_score` 주석과 PR #47 참고.
 
-실패로 판정되면 전제별로 해당 그룹만 검사한다 — A(검색, `0 <= recall < 1`) / B(생성, `_generation_failed`)
-/ C(컨텍스트, `_context_failed`). 슬롯마다 `_pick()`으로 확정(confirmed) 우선 하나씩 채택하고,
-D(데이터, `corpus_gap` 계열)는 additive로 더 붙는다.
+실패로 판정되면 전제별로 해당 그룹만 검사한다 — A(검색, `0 <= recall < 1` + `_retrieval_fixable`)
+/ B(생성, `_generation_failed`) / C(컨텍스트, `_context_failed`). 슬롯마다 `_pick()`으로
+확정(confirmed) 우선 하나씩 채택하고, D(데이터, `corpus_gap` 계열)는 additive로 더 붙는다.
+
+검색으로 고칠 수 없는 실패는 A 슬롯을 아예 닫는다(`_retrieval_fixable`) — gold가 전부 코퍼스
+밖이거나 `answer_exists=False` probe인 경우. 안 닫으면 구체 라벨이 self-scope로 다 빠져도 롤업
+`retrieval_failure`가 남아 "검색을 고쳐라"가 처방된다.
+
+`corpus_gap` / `corpus_gap_partial_hop`은 A 슬롯과 별개로 additive로 붙는다 — 검색을 고치는 것과
+자료를 채우는 것은 처방이 다르다. 누락된 gold 목록은 `metadata["missing_gold_ids"]`로 넘긴다
+(optimize는 코퍼스 멤버십을 스스로 구할 수 없다 — `_ctx.corpus_ids`는 Eval 자원).
+무응답 기대 probe(`answer_exists=False`)에는 D도 붙지 않는다(채울 자료가 없으므로) —
+남는 건 B의 `generation_abstention_failure` 하나다.
 
 ---
 
@@ -125,7 +135,7 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, confirmed
 
 | 변수 | 기본 | 설명 |
 |------|------|------|
-| `EVAL_MODE` | `fast` | **진단 깊이(비용 tier)**: `fast`/`standard`/`deep`/`full` 또는 `1`~`4`. 아래 표 참고 |
+| `EVAL_MODE` | `fast` | **진단 깊이(비용 tier)**: `fast`/`standard`/`deep` 또는 `1`~`3`. `full`/`4` 는 `deep` 으로 접힌다. 아래 표 참고 |
 | `EVAL_ENABLE_LLM` | off | `1/true` 면 RAGAS(LLM-as-Judge) 진단 허용 (**+ `EVAL_MODE≥deep` 이어야 실제 실행**) |
 | `EVAL_LLM_PROVIDER` | `openai` | LLM 호출 provider 선택: `openai` / `gemini` / `github` (아래 참고) |
 | `OPENAI_API_KEY` | — | provider=openai 일 때 필요 |
@@ -174,12 +184,18 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 |------|----|----------|-----------------|
 | `fast` | 1 | 규칙·기존 지표만(추가 쿼리 없음) | `retrieval_incomplete_enumeration` (gold수 vs top-k 순수 규칙) |
 | `standard` | 2 | + 추가 검색 쿼리(top-N 재검색·BM25·코퍼스) | 검색 원인(`low_rank`/`lexical`/`semantic`/`missing_gold`), `corpus_gap(_partial_hop)` |
-| `deep` | 3 | + **LLM(RAGAS/AspectCritic)** | 생성 원인(`hallucination`/`partial`/`hop_binding`/`contradiction`), `bad_gold_answer` |
+| `deep` | 3 | + **LLM(RAGAS/AspectCritic)** | 생성 원인(`hallucination`/`partial`/`hop_binding`/`contradiction`), context 원인(`too_long_context`/`lost_in_the_middle`/`underchunking`/`noise_interference`), `bad_gold_answer` |
 
-- **tier4(파이프라인 재실행/ablation)는 제거됐다.** context 원인을 재실행으로 확정하던 경로는
-  Optimize 가 config 를 바꿔 재실행·검증하는 것과 중복이라 Optimize 로 넘겼다. 해당 라벨
-  (`chunking_context_mismatch`/`bridge_dependency` 등)은 **예비 Finding 으로만** 남는다.
-  `Mode.FULL(4)` 값 자체는 남아 있지만 self-gate 하는 측정이 없어 `deep` 과 동작이 같다.
+- **tier4(파이프라인 재실행/ablation)는 없앴다.** context 원인을 재실행으로 확정하던 경로는
+  Optimize 가 config 를 바꿔 재실행·검증하는 것과 중복이라 Optimize 로 넘겼다. `Mode.FULL`
+  상수도 제거해 `deep` 이 가장 깊은 모드다 — 단 `EVAL_MODE=full`/`4` 는 웹 UI depth 문자열이라
+  `deep` 으로 접는다(지우면 `fast` 로 조용히 강등된다).
+- **C그룹 라벨은 `deep` 에서 확정된다.** 예비로 둔 이유가 "tier4 가 확정해 줄 것"이었으나 그
+  tier 가 없으니, 실측 신호(context 길이·gold 위치=tier1, faithfulness·context_precision=tier3)가
+  발동하면 확정으로 낸다. `confirmed` 는 '처방이 통한다'가 아니라 '판별 신호가 측정됐다'는 뜻이라
+  이 정의에 맞다. **예외는 `reranker_low_precision` 하나** — 리랭크 전/후 순위를 대조해야
+  인과가 서는데 retriever 가 리랭크 전 후보를 남기지 않아 예비로 남는다.
+  길이 원인과 리랭커가 함께 성립하면 `_pick` 이 확정 쪽을 채택한다(튜플 순서 비의존).
 - **생성 원인은 전부 RAGAS(=deep) 의존** → `deep` 미만이면 하나의 예비 `generation_failure` 로 롤업된다
   (LLM 없이는 hallucination/bad_gold 를 싸게 구분할 수 없다는 정직한 한계).
 - **STEP3-2 RAGAS 는 `deep` 이상에서만 실행**된다(`metrics_ragas` 의 DEEP 게이트). `EVAL_ENABLE_LLM` 과 AND 조건.
@@ -202,26 +218,32 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `retrieval_lexical_mismatch` | A 검색 | 2 | BM25 조회 |
 | `retrieval_semantic_mismatch` | A 검색 | 2 | BM25 + 코퍼스 확인 |
 | `retrieval_missing_gold` | A 검색 | 2 | 코퍼스 멤버십 조회 |
-| `retrieval_missing_bridge_dependency` | A 검색 | — | 예비만 (decompose 재검색 확정은 Optimize) |
+| `retrieval_missing_bridge_dependency` | A 검색 | — | 예비만 (decompose 재검색 회복 미측정) |
 | `generation_hallucination` | B 생성 | 3 | RAGAS faithfulness |
 | `generation_partial_answer` | B 생성 | 3 | RAGAS relevancy |
 | `generation_hop_binding_error` | B 생성 | 3 | RAGAS faithfulness(+추론검증) |
-| `generation_contradiction` | B 생성 | 3 | AspectCritic(LLM) |
+| `generation_contradiction` / `numerical_error` / `misinterpretation` | B 생성 | 3 | 추론 실패 모드 단일분류(LLM 1회) |
+| `generation_abstention_failure` | B 생성 | 2~3 | 기권했어야 하는데 지어냄(두 갈래는 `metadata.trigger`로 구분 — `no_answer_expected` / `corpus_gap`) |
+| `generation_parametric_overreliance` | B 생성 | 3 | 정답이지만 real faithfulness 낮음 |
 | `generation_failure` (롤업) | B 생성 | 3 | DEEP에서 세분화 (항상 예비) |
-| `too_long_context` | C context | — | dormant (tier4 제거, 발동 조건 재설계 대기) |
-| `lost_in_the_middle` | C context | — | dormant (tier4 제거, 발동 조건 재설계 대기) |
-| `context_noise_interference` | C context | — | dormant (tier4 제거, 발동 조건 재설계 대기) |
+| `too_long_context` | C context | 3 | context 길이 + 근거 없음, gold 는 양끝 |
+| `lost_in_the_middle` | C context | 3 | gold 가 긴 context 중간 + 근거 없음 |
+| `context_noise_interference` | C context | 3 | real faithfulness 높음 = 노이즈에 근거 |
+| `chunking_underchunking` | A 청킹 | 3 | 근거 밀도 낮음 + context_precision 낮음 |
+| `reranker_low_precision` | A 청킹 | 3 | 예비만 (리랭크 전/후 대조 불가 → 인과 미측정) |
 | `bad_gold_answer` | D 데이터 | 3 | RAGAS 2지표(진짜 확정은 사람) |
-| `corpus_gap` | D 데이터 | 2 | 코퍼스 조회 |
+| `corpus_gap` | D 데이터 | 2 | 코퍼스 조회(누락 gold id 는 `metadata.missing_gold_ids`) |
 | `corpus_gap_partial_hop` | D 데이터 | 2 | 코퍼스 조회(hop별) |
 
-> "확정"은 원인 검증(처방이 실제로 통함)을 뜻한다. C그룹·`bridge_dependency` 는 재실행으로만
-> 확정되는데, 그 재실행을 Eval 이 직접 하던 tier4 를 없애고 Optimize 로 넘겼다 — 그래서 Eval 에서는
-> **예비까지만** 낸다. `bad_gold_answer` 는 자동으론 tier3까지만 의심 가능하고 진짜 확정은 사람 검수 몫.
+>  "확정(`confirmed`)"은 처방이 통한다는 뜻이 아니라 **그 원인의 판별 신호가 실제로 측정됐다**는
+> 뜻이다. C그룹은 신호가 전부 실측이라 `deep` 에서 확정된다. 예비로 남는 건 판별 신호 자체가
+> 없는 둘 — `reranker_low_precision`(리랭크 전/후 순위 미기록)과 `retrieval_missing_bridge_dependency`
+> (decompose 재검색 회복 미측정). `bad_gold_answer` 는 tier3까지만 의심 가능하고 진짜 확정은 사람 검수 몫.
 >
-> ⚠️ 현재 Optimize(`planner._split_findings`)는 예비 Finding 을 자동 처방에서 제외한다. 따라서
-> 이 라벨들은 지금 **어느 쪽에서도 확정되지 않는다** — Optimize 쪽에 "예비 라벨을 실험 후보로
-> 받아 pending 으로 검증" 하는 경로가 붙어야 인수인계가 완성된다(별도 작업).
+> Optimize(`planner._split_findings`)는 예비 Finding 을 자동 처방에서 제외한다 — C그룹을 확정으로
+> 올린 이유가 이것이다(예비로 두면 `rules.py` 가 ready 여도 처방이 영원히 트리거되지 않는다).
+> 남은 예비 2종은 Optimize 쪽에 "예비를 실험 후보로 받아 pending 으로 검증" 경로가 붙어야
+> 인수인계가 완성된다(별도 작업).
 
 ---
 
@@ -271,7 +293,7 @@ SOURCE_URL=data/corpus.jsonl
 EVAL_TAXONOMY_QA=data/qa_pairs.jsonl
 KORQUAD_MAX_DOCS=20        # 스모크: 앞 20문서만. 전체는 비우거나 0
 KORQUAD_QA_LIMIT=50        # 스모크: qa 50개. 전체는 비우거나 0
-EVAL_MODE=1               # 1=fast(무비용) … 3=deep/4=full(생성·RAGAS, API 비용)
+EVAL_MODE=1               # 1=fast(무비용) … 3=deep(생성·RAGAS, API 비용). full/4 → deep
 # EVAL_ENABLE_LLM=1       # RAGAS 켜기(EVAL_MODE>=deep 과 AND). 켜면 API 비용
 ```
 
@@ -376,12 +398,11 @@ agents/eval/
 6. **STEP4 라벨 세트 확장** (`diagnose.py`) — `chunking_context_mismatch`는 구현됨.
    exact `gold_spans`가 현재 청크들의 합집합에는 포함되지만 한 청크에는 온전히 포함되지
    않는 검색 실패를 FAST 모드에서 확정한다(LLM·추가 검색 불필요). 그 밖에 Notion 설계
-   문서엔 현재 라벨보다 많은
-   후보 라벨이 있다(`chunking_*`, `reranker_*`, `generation_contradiction/misinterpretation/
-   abstention_failure/parametric_overreliance/numerical_error` 등). `generation_contradiction`은
-   `metrics_ragas.py::evaluate_aspect_critics`가 이미 `record.aspect["contradiction"]`을 계산해둬서
-   라벨 함수만 추가하면 저비용으로 확장 가능(diagnose.py 주석상 "나중에 개발"로 자리만 표시돼 있음).
-   `chunking_*`/`reranker_*`는 Index Agent 쪽(청킹 전략 정보·리랭커)이 선행돼야 판별 가능.
+   문서엔 현재 라벨보다 많은 후보 라벨이 있다.
+   `generation_contradiction/misinterpretation/numerical_error/hop_binding_error`는
+   `generation_reasoning_failure`(오라클 답변 단일분류)로, `abstention_failure`·
+   `parametric_overreliance`·`chunking_over/underchunking`·`reranker_low_precision`도 구현됐다.
+   `reranker_low_recall`은 리랭크 전/후 순위 기록이 선행돼야 판별 가능.
 7. **임시 검색 제거** — ✅ 완료. `retrieval_temp.py` 는 삭제됐고, `agent.py` 는
    `agents/rag/retriever.py`(`build_retriever`) 검색과 `agents/rag/generator.py`
    (`generate_answer`) 생성을 호출한다.

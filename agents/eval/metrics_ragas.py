@@ -9,7 +9,7 @@ agents/eval/metrics_ragas.py
 RAGAS 4개 지표 + AspectCritic 을 **LLM-as-Judge** 로 측정한다.
     - 실제 트랙  : Faithfulness, Context Precision/Recall, Response Relevancy, Answer Correctness
     - 오라클 트랙 : Faithfulness, Response Relevancy, Answer Correctness (gold context 투입 결과)
-    - AspectCritic: contradiction 이진 판정
+    - AspectCritic: 기권 여부 이진 판정
 
 프롬프트 출처:
     RAGAS 라이브러리는 이 환경(langchain 1.x + langgraph)과 의존성 충돌로 import가 불가하다.
@@ -192,8 +192,6 @@ _ASPECT_INSTRUCTION_TMPL = (
     "as verdict.\nCriteria Definition: {definition}"
 )
 # 커스텀 criteria (RAGAS AspectCritic definition 슬롯에 주입)
-_ASPECT_CONTRADICTION = ("Does the response contain information that contradicts the "
-                         "retrieved context?")
 _ASPECT_ABSTENTION = ("Does the response decline to answer — stating that it does not know, "
                       "that the information is unavailable, or that the question cannot be "
                       "answered from the given context — instead of asserting a substantive answer?")
@@ -396,21 +394,8 @@ def answer_similarity(record: EvalRecord, track: str):
     return _cosine(vecs[0], vecs[1])
 
 
-def evaluate_aspect_critics(record: EvalRecord, judge) -> dict:
-    """커스텀 AspectCritic(이진): contradiction.
-    [예약] 현재 라이브 진단 경로는 record.aspect 를 소비하지 않는다 — diagnose.generation_contradiction
-    라벨(주석처리, '나중에 개발')이 이 값을 쓸 예정. 그 라벨을 켤 때 함께 배선한다."""
-    q = record.probe.question
-    ans = record.generated_answer
-    ctx = record.retrieved_context
-    return {
-        "contradiction": _aspect_critic(judge, _ASPECT_CONTRADICTION, q, ans, ctx),
-    }
-
-
 def evaluate_reasoning_mode(record: EvalRecord, judge) -> dict:
-    """오라클 답변의 추론 실패 모드 단일 분류(모순/수치/해석/결합/기타).
-    real 트랙 contradiction(evaluate_aspect_critics)과는 답변·컨텍스트가 달라 별도 키를 쓴다."""
+    """오라클 답변의 추론 실패 모드 단일 분류(모순/수치/해석/결합/기타)."""
     inp = {
         "user_input": record.probe.question,
         "response": record.oracle_answer or "",

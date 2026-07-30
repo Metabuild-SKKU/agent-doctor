@@ -433,7 +433,7 @@ def _resolve_chunk_strategy(strategy: str | int) -> str:
 def _configured_chunk_strategy(config: dict) -> str:
     raw_strategy = config.get(
         "chunk_stage",
-        config.get("chunk_strategy", "markdown_recursive"),
+        config.get("chunk_strategy", "fixed"),
     )
     return _resolve_chunk_strategy(raw_strategy)
 
@@ -456,7 +456,7 @@ def _chunk_document(
     document: Document,
     chunk_size: int,
     chunk_overlap: int,
-    strategy: str | int = "markdown_recursive",
+    strategy: str | int = "fixed",
 ) -> list[_ChunkDraft]:
     resolved_strategy = _resolve_chunk_strategy(strategy)
     chunker = CHUNK_STRATEGIES[resolved_strategy]

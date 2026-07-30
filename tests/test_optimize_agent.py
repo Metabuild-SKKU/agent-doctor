@@ -272,6 +272,47 @@ def make_state(overall=60.0, chunk_size=512, iteration=0, max_iterations=3,
 
 
 class OptimizeAgentForwardTest(unittest.TestCase):
+    def test_unjudgeable_exclusions_only_returns_recorded_failures(self):
+        unjudgeable = OptimizationHistoryItem(
+            trial_id="u1",
+            request_id="r1",
+            iteration=1,
+            failure_labels=["retrieval_low_rank"],
+            optimizer="rules",
+            status="failed",
+            selected_prescription_id="enable_reranker",
+            metadata={"unjudgeable": True},
+        )
+        judged = OptimizationHistoryItem(
+            trial_id="u2",
+            request_id="r2",
+            iteration=1,
+            failure_labels=["retrieval_missing_gold"],
+            optimizer="rules",
+            status="failed",
+            selected_prescription_id="increase_top_k",
+            metadata={"unjudgeable": False},
+        )
+
+        self.assertEqual(
+            agent._unjudgeable_exclusions([unjudgeable, judged]),
+            {("retrieval_low_rank", "enable_reranker")},
+        )
+
+    def test_absolute_visit_limit_stops_before_new_prescription(self):
+        state = make_state()
+        state.optimize_visit_count = 19
+        before = dict(state.index_config)
+
+        state = agent.run(state)
+
+        self.assertEqual(state.optimize_visit_count, 20)
+        self.assertEqual(state.status, "verified")
+        self.assertEqual(state.index_config, before)
+        self.assertEqual(state.optimization_history, [])
+        self.assertEqual(state.optimization_report.status, "skipped")
+        self.assertIn("절대 방문 상한", state.optimization_report.summary)
+
     def test_apply_creates_pending_and_increments_iteration(self):
         state = agent.run(make_state())
         self.assertEqual(state.status, "applied")
@@ -612,6 +653,7 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         state = agent.run(state)                             # 방문2: 판정 불가 → 롤백(차단 X)
         self.assertEqual(len(state.blacklist), 0)             # 처방이 소진/차단되지 않음
         self.assertEqual(state.optimization_history[0].status, "failed")
+        self.assertTrue(state.optimization_history[0].metadata["unjudgeable"])
 
     def test_rollback_reindex_survives_followup_search_time_rx(self):
         # index-time 처방(shrink_chunk_size, reindex=True)이 롤백된 뒤 같은 방문에서
@@ -784,7 +826,46 @@ class OptimizeTopKSweepTest(unittest.TestCase):
         self.assertEqual(state.iteration, 1)
         self.assertIsNone(history.find_pending(state.optimization_history))
         self.assertEqual(len(state.optimization_history[0].metadata["trial_results"]), 4)
+        self.assertIn(
+            ("retrieval_missing_gold", "increase_top_k"),
+            state.completed_prescriptions,
+        )
         self.assertIn("다음 단계: Index 경유(물리 재색인 생략) 후 Eval 재실행", buf.getvalue())
+
+        state.report = self._report(65.0)
+        state = agent.run(state)
+        self.assertNotEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "increase_top_k",
+        )
+
+    def test_absolute_visit_limit_restores_active_sweep_baseline(self):
+        state = agent.run(self._state())
+        self.assertEqual(state.index_config["top_k"], 7)
+        state.optimize_visit_count = 19
+
+        state = agent.run(state)
+
+        self.assertEqual(state.optimize_visit_count, 20)
+        self.assertEqual(state.index_config["top_k"], 5)
+        self.assertEqual(state.status, "rolled_back")
+        self.assertIsNone(history.find_active_study(state.optimization_history))
+        self.assertTrue(
+            state.optimization_history[0].metadata["visit_limit_reached"]
+        )
+        self.assertEqual(state.optimization_report.status, "failed")
+        self.assertIn("절대 방문 상한", state.optimization_report.summary)
+
+        rollback_report = state.optimization_report
+        state.report = self._report(60.0)
+        state = agent.run(state)
+
+        self.assertEqual(state.optimize_visit_count, 20)
+        self.assertEqual(state.status, "verified")
+        self.assertIsNot(state.optimization_report, rollback_report)
+        self.assertEqual(state.optimization_report.status, "skipped")
+        self.assertIn("절대 방문 상한", state.optimization_report.summary)
+        self.assertEqual(graph.route_after_optimize(state), "serve")
 
     def test_baseline_is_restored_only_after_all_candidates(self):
         state = self._state()
@@ -959,6 +1040,23 @@ class GraphRoutingTest(unittest.TestCase):
     def test_route_after_eval_pass_goes_serve(self):
         state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
                                  iteration=1, max_iterations=3)
+        self.assertEqual(self._route(graph.route_after_eval, state), "serve")
+
+    def test_route_after_eval_pass_with_pending_goes_optimize_to_finalize(self):
+        # 방금 적용한 처방으로 품질이 통과했는데 아직 판정(마감) 안 됐으면,
+        # Optimize 를 한 번 더 태워 pending 을 확정한 뒤 Serve 로 보낸다.
+        state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
+                                 iteration=1, max_iterations=3,
+                                 optimization_history=[self._pending()])
+        self.assertEqual(self._route(graph.route_after_eval, state), "optimize")
+
+    def test_route_after_eval_pass_with_active_study_pending_goes_serve(self):
+        # 진행 중 sweep(active_study)은 통과 시 기존대로 그대로 Serve.
+        item = self._pending()
+        item.metadata["active_study"] = True
+        state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
+                                 iteration=1, max_iterations=3,
+                                 optimization_history=[item])
         self.assertEqual(self._route(graph.route_after_eval, state), "serve")
 
     def test_route_after_eval_budget_left_goes_optimize(self):
