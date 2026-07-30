@@ -75,7 +75,11 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
     confirmed = [f for f in findings if f.confirmed]
 
     kept = sum(1 for h in history if h.status == "applied" and not h.metadata.get("pending"))
-    rolled = sum(1 for h in history if h.status == "failed")
+    errors = sum(1 for h in history if _is_study_error(h))
+    rolled = sum(
+        1 for h in history
+        if h.status == "failed" and not _is_study_error(h)
+    )
     pending = sum(1 for h in history if h.metadata.get("pending"))
 
     # 헤드라인 '종합 점수' = 설계 종합점수(composite, 0~100). 없으면 overall×100 폴백.
@@ -98,6 +102,7 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
             "findings_count": len(findings),
             "kept": kept,
             "rolled": rolled,
+            "errors": errors,
             "pending": pending,
         },
         "priority": _build_priority(confirmed),
@@ -112,6 +117,7 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
             "rx_count": len(history),
             "rx_kept": kept,
             "rx_rolled": rolled,
+            "rx_errors": errors,
             "chunk_count": len(state.chunks),
         },
     }
@@ -217,6 +223,11 @@ def _course_point_score(item, key: str, fallback: float) -> float:
     return _to_100(raw) if raw is not None else fallback
 
 
+def _is_study_error(item) -> bool:
+    """후보 평가가 끝나기 전에 study 자체가 실패한 이력인지 구분한다."""
+    return "study_error" in item.metadata
+
+
 def _course_point_label(item, prescription_index: int) -> str:
     """차트 폭에 맞는 짧은 처방명. Rx 순번 대신 실제 처방의 의미를 보여준다.
 
@@ -240,6 +251,11 @@ def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
         "kind": "baseline",
     }]
     for prescription_index, item in enumerate(history, start=1):
+        # study 오류는 전후 점수가 관측되지 않았다. baseline 폴백으로 가짜 하락·복구
+        # 점을 만들지 말고, 오류 상세는 처방 이력 카드에만 남긴다.
+        if _is_study_error(item):
+            continue
+
         kept = item.status == "applied" and not item.metadata.get("pending")
         rolled_back = item.status == "failed"
         before = _course_point_score(item, "before", baseline_score)
@@ -284,9 +300,13 @@ def _changed_keys(before: dict, after: dict) -> list[str]:
 def _build_rxs(history: list) -> list[dict[str, Any]]:
     out = []
     for idx, item in enumerate(history, start=1):
+        study_error = _is_study_error(item)
         kept = item.status == "applied" and not item.metadata.get("pending")
-        rolled_back = item.status == "failed"
-        state_key = "kept" if kept else ("rolled" if rolled_back else "pending")
+        rolled_back = item.status == "failed" and not study_error
+        state_key = (
+            "error" if study_error else
+            ("kept" if kept else ("rolled" if rolled_back else "pending"))
+        )
 
         changed = _changed_keys(item.before_config, item.after_config)
         if changed:
@@ -298,9 +318,12 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
         # 헤드라인(composite)과 일관되게 처방 카드 점수도 종합점수로 표시.
         # (유지/롤백 판정 자체는 overall 탐색 신호 기준이므로 direction 과 verdict 이
         #  드물게 어긋날 수 있으나, 표시 점수는 사용자가 보는 종합점수로 통일한다.)
-        before_head = _course_point_score(item, "before", 0.0)
-        after_head = _course_point_score(item, "after", before_head)
-        direction = "up" if after_head >= before_head else "down"
+        score = None
+        if not study_error:
+            before_head = _course_point_score(item, "before", 0.0)
+            after_head = _course_point_score(item, "after", before_head)
+            direction = "up" if after_head >= before_head else "down"
+            score = [str(before_head), str(after_head), direction]
 
         out.append({
             "state": state_key,
@@ -308,20 +331,21 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             "change": change,
             "target": ", ".join(item.failure_labels),
             "reason": ["처방 근거", item.reason or ""],
-            "score": [
-                str(before_head),
-                str(after_head),
-                direction,
-            ],
+            "score": score,
             "verdict": (
+                ["error", "실험 오류 · 설정 원복"] if study_error else
                 ["keep", "유지"] if kept else
                 ["roll", "롤백"] if rolled_back else
                 ["pending", "판정 대기"]
             ),
             "drill": {
-                "label": "판정 근거",
+                "label": "오류 원인" if study_error else "판정 근거",
                 "rows": [],
-                "caption": item.rollback_reason or item.reason or "",
+                "caption": (
+                    str(item.metadata.get("study_error", ""))
+                    if study_error else
+                    (item.rollback_reason or item.reason or "")
+                ),
             },
         })
     return out

@@ -76,7 +76,7 @@
   .hero-side p { color: var(--muted); font-size: 14.5px; margin: 12px 0 0; max-width: 52ch; }
   .hero-stats { display: flex; gap: 28px; margin-top: 24px; }
   .hero-stat .n { font-size: 22px; font-weight: 620; font-variant-numeric: tabular-nums; }
-  .hero-stat .n.up { color: var(--good); } .hero-stat .n.warn { color: var(--warning); }
+  .hero-stat .n.up { color: var(--good); } .hero-stat .n.warn { color: var(--warning); } .hero-stat .n.error { color: var(--critical); }
   .hero-stat .l { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 3px; }
 
   /* priority top3 */
@@ -133,6 +133,7 @@
   .rx-num { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font-family: var(--mono); font-size: 12px; border: 1px solid var(--border); color: var(--muted); }
   .rx-card.kept .rx-num { border-color: transparent; background: var(--good-glow); color: var(--good); }
   .rx-card.rolled .rx-num { border-color: transparent; background: var(--surface-2); color: var(--faint); }
+  .rx-card.error .rx-num { border-color: transparent; background: var(--critical-glow); color: var(--critical); }
   .rx-body .rx-change { font-family: var(--mono); font-size: 13.5px; font-weight: 500; }
   .rx-body .rx-change .arrow { color: var(--accent); margin: 0 5px; }
   .rx-body .rx-target { font-size: 12.5px; color: var(--muted); margin-top: 5px; }
@@ -141,9 +142,11 @@
   .rx-right { text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
   .rx-scoredelta { font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; color: var(--muted); }
   .rx-scoredelta b.up { color: var(--good); } .rx-scoredelta b.down { color: var(--critical); }
+  .rx-scoredelta.error { color: var(--faint); }
   .rx-verdict { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: 6px; }
   .rx-verdict.keep { color: var(--good); background: var(--good-glow); }
   .rx-verdict.roll { color: var(--warning); background: var(--warning-glow); }
+  .rx-verdict.error { color: var(--critical); background: var(--critical-glow); }
   .rx-drill { border-top: 1px solid var(--border); padding: 0 20px; max-height: 0; overflow: hidden; transition: max-height .3s ease, padding .3s ease; background: var(--bg-2); }
   .rx-card.open .rx-drill { max-height: 320px; padding: 18px 20px; }
   .drill-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-bottom: 12px; }
@@ -540,7 +543,7 @@
     document.getElementById('verdictText').textContent = pass ? '처방 후 기준선 통과' : '기준선 미달';
     var before = score.before != null ? score.before : 0;
     var after = score.after != null ? score.after : 0;
-    var rxCount = (score.kept || 0) + (score.rolled || 0) + (score.pending || 0);
+    var rxCount = (score.kept || 0) + (score.rolled || 0) + (score.errors || 0) + (score.pending || 0);
     var trend = after > before ? '올랐습니다.' : (after < before ? '내려갔습니다.' : '변화가 없었습니다.');
     document.getElementById('heroHeadline').innerHTML =
       '문제 ' + (score.findings_count || 0) + '건을 찾아 ' + rxCount + '번 처방했고, 종합점수가 ' +
@@ -550,6 +553,7 @@
       '<div class="hero-stat"><div class="n">' + (score.findings_count || 0) + '</div><div class="l">발견된 문제</div></div>' +
       '<div class="hero-stat"><div class="n up">' + (score.kept || 0) + '</div><div class="l">채택된 처방</div></div>' +
       '<div class="hero-stat"><div class="n warn">' + (score.rolled || 0) + '</div><div class="l">롤백</div></div>' +
+      ((score.errors || 0) ? '<div class="hero-stat"><div class="n error">' + score.errors + '</div><div class="l">실험 오류</div></div>' : '') +
       '<div class="hero-stat"><div class="n">' + (score.pending || 0) + '</div><div class="l">추가 확인 필요</div></div>';
   }
 
@@ -669,8 +673,13 @@
 
   /* ── prescriptions ── */
   function rxCard(r) {
-    var scoreCls = r.score[2] === 'up' ? 'up' : 'down';
-    var arrowUp = r.score[2] === 'up';
+    var hasScore = Array.isArray(r.score);
+    var scoreCls = hasScore && r.score[2] === 'up' ? 'up' : 'down';
+    var arrowUp = hasScore && r.score[2] === 'up';
+    var verdictIcon = r.verdict[0] === 'keep' ? '✓' : (r.verdict[0] === 'error' ? '!' : '↩');
+    var scoreHtml = hasScore ?
+      '<div class="rx-scoredelta">종합 ' + esc(r.score[0]) + ' <b class="' + scoreCls + '">→ ' + esc(r.score[1]) + (arrowUp ? ' ↑' : ' ↓') + '</b></div>' :
+      '<div class="rx-scoredelta error">종합 점수 측정 안 됨</div>';
     var rowsHtml = r.drill.rows.length ? '<div class="sweep">' + r.drill.rows.map(function (s) {
       return '<div class="sweep-row' + (s.win ? ' win' : '') + '"><span class="sweep-k' + (s.win ? ' win' : '') + '">' + esc(s.k) + '</span>' +
         '<span class="sweep-bar"><i style="width:' + s.w + '%"></i></span><span class="sweep-val">' + esc(s.val) + '</span></div>';
@@ -684,8 +693,8 @@
           '<div class="rx-reason"><span class="rl">' + esc(r.reason[0]) + '</span> ' + esc(r.reason[1]) + '</div>' +
         '</div>' +
         '<div class="rx-right">' +
-          '<div class="rx-verdict ' + r.verdict[0] + '">' + (r.verdict[0] === 'keep' ? '✓' : '↩') + ' ' + esc(r.verdict[1]) + '</div>' +
-          '<div class="rx-scoredelta">종합 ' + esc(r.score[0]) + ' <b class="' + scoreCls + '">→ ' + esc(r.score[1]) + (arrowUp ? ' ↑' : ' ↓') + '</b></div>' +
+          '<div class="rx-verdict ' + r.verdict[0] + '">' + verdictIcon + ' ' + esc(r.verdict[1]) + '</div>' +
+          scoreHtml +
           '<div class="rx-expand">상세 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>' +
         '</div>' +
       '</div>' +

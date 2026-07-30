@@ -67,7 +67,13 @@ class ReportViewCompositeTest(unittest.TestCase):
 
 class TreatmentCourseViewTest(unittest.TestCase):
     @staticmethod
-    def _history_item(index, status, before, after, prescription):
+    def _history_item(index, status, before, after, prescription, **metadata):
+        score_metadata = {"pending": False}
+        if before is not None:
+            score_metadata["before_composite"] = before
+        if after is not None:
+            score_metadata["after_composite"] = after
+        score_metadata.update(metadata)
         return OptimizationHistoryItem(
             trial_id=f"trial-{index}",
             request_id=f"request-{index}",
@@ -76,11 +82,7 @@ class TreatmentCourseViewTest(unittest.TestCase):
             optimizer="rules",
             status=status,
             selected_prescription_id=prescription,
-            metadata={
-                "pending": False,
-                "before_composite": before,
-                "after_composite": after,
-            },
+            metadata=score_metadata,
         )
 
     def test_rollback_adds_failed_score_and_restored_score_as_separate_points(self):
@@ -91,7 +93,8 @@ class TreatmentCourseViewTest(unittest.TestCase):
             self._history_item(3, "applied", 70, 84, "enable_reranker"),
         ]
 
-        course = build_report_view(state)["course"]
+        view = build_report_view(state)
+        course = view["course"]
 
         self.assertEqual(
             [(point["kind"], point["score"]) for point in course],
@@ -107,6 +110,8 @@ class TreatmentCourseViewTest(unittest.TestCase):
         self.assertEqual(course[2]["label"], "청크 축소 실패")
         self.assertEqual(course[3]["label"], "원상 복구")
         self.assertEqual(course[4]["label"], "리랭커 활성화")
+        self.assertEqual(view["score"]["rolled"], 1)
+        self.assertEqual(view["score"]["errors"], 0)
 
     def test_fallback_label_uses_prescription_order_not_chart_point_order(self):
         state = make_state(make_report(composite_total=84))
@@ -120,6 +125,42 @@ class TreatmentCourseViewTest(unittest.TestCase):
 
         # 두 번째 처방이 실패·복구 두 점을 만들더라도 다음 항목은 세 번째 처방이다.
         self.assertEqual(course[-1]["label"], "처방 3")
+
+    def test_study_error_is_not_plotted_as_measured_rollback(self):
+        state = make_state(make_report(composite_total=84))
+        state.optimization_history = [
+            self._history_item(1, "applied", 62, 78, "increase_top_k"),
+            self._history_item(
+                2,
+                "failed",
+                None,
+                None,
+                "switch_chunking_strategy",
+                study_error="adapter 연결 실패",
+            ),
+            self._history_item(3, "applied", 78, 84, "enable_reranker"),
+        ]
+
+        view = build_report_view(state)
+
+        self.assertEqual(
+            [(point["kind"], point["score"]) for point in view["course"]],
+            [("baseline", 62), ("kept", 78), ("kept", 84)],
+        )
+        self.assertEqual(view["score"]["rolled"], 0)
+        self.assertEqual(view["score"]["errors"], 1)
+        self.assertEqual(view["transparency"]["rx_rolled"], 0)
+        self.assertEqual(view["transparency"]["rx_errors"], 1)
+
+        error_rx = view["rxs"][1]
+        self.assertEqual(error_rx["state"], "error")
+        self.assertIsNone(error_rx["score"])
+        self.assertEqual(error_rx["verdict"], ["error", "실험 오류 · 설정 원복"])
+        self.assertEqual(error_rx["drill"], {
+            "label": "오류 원인",
+            "rows": [],
+            "caption": "adapter 연결 실패",
+        })
 
 
 class FailedQuestionViewTest(unittest.TestCase):
