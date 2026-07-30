@@ -71,6 +71,23 @@ class AgentDoctorState:
             "path_fractions": [0.33, 0.66, 1.0],
             "candidate_count": 3,
             "min_span_count": 3,
+            # 한 번의 처방에서 현재 chunk_size의 ±25% 밖으로 움직이지 않는다.
+            # evidence 분포의 긴 꼬리나 짧은 answer span 하나가 과격한 재청킹을
+            # 일으키지 않도록 하는 탐색 범위 안전장치다.
+            "max_step_ratio": 0.25,
+            "min_chunk_size": 200,
+            # evidence_window_policy.max_chars는 일반 문맥 확장 상한이고 아래 값은
+            # margin 적용 후 후보의 절대 상한이다. gold 자체가 window 상한보다
+            # 길면 gold 보존이 우선하므로 두 값은 같은 제한을 뜻하지 않는다.
+            "max_chunk_size": 1500,
+        },
+        # gold 정답 문자열을 그대로 재지 않고, 정답을 이해하는 데 필요한
+        # 문장·문단·표 행·리스트 항목의 연속 문맥으로 확장하는 정책.
+        "evidence_window_policy": {
+            "min_chars": 100,
+            "max_chars": 1000,
+            "heading_max_distance": 200,
+            "adjacent_context_blocks": 1,
         },
         # 청크 경계에서 잘린 gold span이 한 청크에 다시 들어오도록
         # chunk_overlap 후보를 만드는 정책. 후보의 최종 선택은 실제 청커

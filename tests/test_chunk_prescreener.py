@@ -40,7 +40,8 @@ class ChunkPrescreenerTest(unittest.TestCase):
             metadata={
                 "chunk_precheck_context": {
                     "documents": [document],
-                    "gold_spans": spans,
+                    "evidence_spans": spans,
+                    "span_source": "structural_evidence_windows",
                     "chunk_strategy": "fixed",
                 }
             },
@@ -62,6 +63,28 @@ class ChunkPrescreenerTest(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.best_config, {"chunker.chunk_size": 400})
         self.assertTrue(result.metadata["proxy_only"])
+        self.assertFalse(result.metadata["best_is_baseline"])
+        self.assertEqual(
+            result.metadata["span_source"],
+            "structural_evidence_windows",
+        )
+
+    def test_single_chunk_candidate_is_compared_with_baseline(self):
+        request = self.make_request(
+            path="chunker.chunk_size",
+            values=[400],
+            baseline={"chunk_size": 512, "chunk_overlap": 0},
+            spans=[
+                {"doc_id": "doc-1", "start": 100, "end": 350},
+            ],
+        )
+
+        result = run(request, previewer=fixed_previewer)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.best_config, {"chunker.chunk_size": 400})
+        self.assertEqual(len(result.trial_results), 2)
+        self.assertEqual(result.metadata["budget_used"], 1)
         self.assertFalse(result.metadata["best_is_baseline"])
 
     def test_chunk_overlap_selects_smallest_boundary_recovery(self):
@@ -115,6 +138,22 @@ class ChunkPrescreenerTest(unittest.TestCase):
 
         self.assertEqual(result.status, "skipped")
         self.assertEqual(result.metadata["error_code"], "chunk_precheck_unavailable")
+
+    def test_legacy_gold_spans_context_remains_supported(self):
+        request = self.make_request(
+            path="chunker.chunk_size",
+            values=[400, 600],
+            baseline={"chunk_size": 512, "chunk_overlap": 0},
+            spans=[{"doc_id": "doc-1", "start": 100, "end": 200}],
+        )
+        context = request.metadata["chunk_precheck_context"]
+        context["gold_spans"] = context.pop("evidence_spans")
+        context.pop("span_source")
+
+        result = run(request, previewer=fixed_previewer)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.metadata["span_source"], "gold_spans")
 
 
 if __name__ == "__main__":
