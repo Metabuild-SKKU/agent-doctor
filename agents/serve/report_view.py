@@ -217,14 +217,18 @@ def _course_point_score(item, key: str, fallback: float) -> float:
     return _to_100(raw) if raw is not None else fallback
 
 
-def _course_point_label(item, index: int) -> str:
-    """차트 폭에 맞는 짧은 처방명. Rx 순번 대신 실제 처방의 의미를 보여준다."""
+def _course_point_label(item, prescription_index: int) -> str:
+    """차트 폭에 맞는 짧은 처방명. Rx 순번 대신 실제 처방의 의미를 보여준다.
+
+    prescription_index는 차트 점 번호가 아니라 optimization history의 처방 순번이다.
+    실패한 처방이 실패·복구 두 점을 만들더라도 다음 처방의 순번은 하나만 증가한다.
+    """
     prescription_id = item.selected_prescription_id or ""
     if prescription_id in _PRESCRIPTION_POINT_LABELS:
         return _PRESCRIPTION_POINT_LABELS[prescription_id]
     if prescription_id:
         return prescription_id.replace("_", " ")[:18]
-    return f"처방 {index}"
+    return f"처방 {prescription_index}"
 
 
 def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
@@ -235,14 +239,14 @@ def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
         "kept": True,
         "kind": "baseline",
     }]
-    for idx, item in enumerate(history, start=1):
+    for prescription_index, item in enumerate(history, start=1):
         kept = item.status == "applied" and not item.metadata.get("pending")
         rolled_back = item.status == "failed"
         before = _course_point_score(item, "before", baseline_score)
         after = _course_point_score(item, "after", before)
         # 같은 진단 라벨에 여러 처방을 시도해도 Rx 순번만으로 뭉뚱그리지 않고,
         # 차트에서는 실제 처방 이름을 점 이름으로 쓴다.
-        label = _course_point_label(item, idx)
+        label = _course_point_label(item, prescription_index)
 
         if rolled_back:
             # 실패한 처방은 롤백 전 실측 점수와 복원된 점수를 각각 한 점으로 남긴다.
@@ -342,7 +346,10 @@ def _build_qas(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
     """실패한 검증 질문을 실제 Eval 답변과 함께 UI 데이터로 변환한다.
 
     한 probe에 Finding이 여러 개여도 질문 카드는 하나만 만들고 진단 설명과 처방을
-    합친다. 예비 Finding도 평가상 실패한 질문이므로 숨기지 않는다.
+    합친다. 예비 Finding도 평가상 실패한 질문이므로 숨기지 않는다. 이 섹션은 최신
+    Eval의 실제 실패 질문만 다루므로, 질문·답변 근거가 없는 과거 처방 이력에서
+    "해결됨" 카드를 추정하지 않는다. 실패 질문은 DiagnosticReport에 보존된 만큼
+    모두 전달하며 표시 상한을 임의로 두지 않는다.
     """
     report = state.report
     failed_questions = getattr(report, "failed_questions", []) if report else []
@@ -359,7 +366,10 @@ def _build_qas(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
             f"{finding.metadata.get('group', '')} · {finding.label or finding.type}".strip(" ·")
             for finding in related
         ]
-        descriptions = list(dict.fromkeys(finding.description for finding in related))
+        reasons = list(dict.fromkeys(
+            str(finding.metadata.get("reason") or "").strip() or finding.description
+            for finding in related
+        ))
         prescriptions = list(dict.fromkeys(
             finding.prescription or "미처방" for finding in related
         ))
@@ -368,7 +378,7 @@ def _build_qas(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
             "q": result.get("question", ""),
             "gold": result.get("expected_answer", ""),
             "actual": result.get("actual_answer", ""),
-            "diagnosis": " ".join(descriptions) or "실패 원인을 확인하지 못했습니다.",
+            "diagnosis": " / ".join(reasons) or "실패 원인을 확인하지 못했습니다.",
             "fix": " / ".join(prescriptions) or "미처방",
         })
 
