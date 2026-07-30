@@ -203,10 +203,62 @@ def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
     if not beyond:
         return None
     ranked = ", ".join(f"{g}:{r}" for g, r in sorted(beyond.items(), key=lambda kv: kv[1]))
-    return _finding(
+    cause = _low_rank_cause(record, ranks, beyond, top_k)
+    finding = _finding(
         record, "retrieval_low_rank", "retrieval_failure", confirmed=True,
-        reason=f"missed_gold_ranks=[{ranked}] > top_k={top_k}, recall@k={_v(record.recall_at_k)}",
+        reason=(
+            f"missed_gold_ranks=[{ranked}] > top_k={top_k}, "
+            f"cause={cause['low_rank_cause']}, suggested={cause['suggested_prescription']}, "
+            f"recall@k={_v(record.recall_at_k)}"
+        ),
     )
+    finding.metadata.update(cause)
+    return finding
+
+
+def _low_rank_cause(
+    record: EvalRecord,
+    ranks: dict,
+    beyond: dict,
+    top_k: int,
+) -> dict:
+    """retrieval_low_rank를 처방 기준으로 설명하는 운영 메타데이터."""
+    details = record.retrieval_details or {}
+    reranked = bool(details.get("reranked"))
+    reranker_enabled = bool(details.get("reranker_enabled") or reranked)
+    rerank_candidates = details.get("rerank_candidates")
+    if rerank_candidates is None:
+        rerank_candidates = details.get("candidate_count")
+    try:
+        rerank_candidates = int(rerank_candidates)
+    except (TypeError, ValueError):
+        rerank_candidates = None
+
+    lowest_rank = max(beyond.values()) if beyond else None
+    bm25 = _bm25_hits_gold(record)
+    if rerank_candidates is not None and lowest_rank is not None and lowest_rank > rerank_candidates:
+        cause = "candidate_miss"
+        suggested = "widen_rerank_candidates"
+    elif reranked:
+        cause = "reranker_applied_but_insufficient"
+        suggested = "widen_rerank_candidates"
+    elif bm25 is True:
+        cause = "lexical_overlap_low_rank"
+        suggested = "enable_reranker"
+    else:
+        cause = "dense_low_rank"
+        suggested = "enable_reranker" if not reranker_enabled else "widen_rerank_candidates"
+
+    return {
+        "low_rank_cause": cause,
+        "suggested_prescription": suggested,
+        "top_k": top_k,
+        "lowest_missed_gold_rank": lowest_rank,
+        "reranker_enabled": reranker_enabled,
+        "reranker_applied": reranked,
+        "rerank_candidates": rerank_candidates,
+        "bm25_hits_gold": bm25,
+    }
 
 
 def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:

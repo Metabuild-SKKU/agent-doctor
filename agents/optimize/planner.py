@@ -1132,6 +1132,8 @@ def _build_request(
         metadata["candidate_grounding"] = dict(
             candidates[0].metadata["candidate_grounding"]
         )
+    if label == "retrieval_low_rank":
+        metadata["low_rank_diagnosis"] = _low_rank_diagnosis_summary(findings)
     if use_internal and _space_path(selected_space) in {
         "chunker.chunk_size",
         "chunker.chunk_overlap",
@@ -1157,6 +1159,28 @@ def _build_request(
         propose_only=False,
         metadata=metadata,
     )
+
+
+def _low_rank_diagnosis_summary(findings: list[Finding]) -> dict[str, Any]:
+    """retrieval_low_rank finding을 처방 기준 원인별로 집계한다."""
+    causes: dict[str, int] = {}
+    suggestions: dict[str, int] = {}
+    max_rank = None
+    for finding in findings:
+        cause = finding.metadata.get("low_rank_cause")
+        if cause:
+            causes[str(cause)] = causes.get(str(cause), 0) + 1
+        suggestion = finding.metadata.get("suggested_prescription")
+        if suggestion:
+            suggestions[str(suggestion)] = suggestions.get(str(suggestion), 0) + 1
+        rank = finding.metadata.get("lowest_missed_gold_rank")
+        if isinstance(rank, (int, float)) and not isinstance(rank, bool):
+            max_rank = rank if max_rank is None else max(max_rank, rank)
+    return {
+        "cause_counts": causes,
+        "suggested_prescription_counts": suggestions,
+        "max_missed_gold_rank": max_rank,
+    }
 
 
 def _space_path(search_space: dict[str, Any]) -> str | None:

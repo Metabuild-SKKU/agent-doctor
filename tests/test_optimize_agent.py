@@ -77,7 +77,7 @@ except ImportError:  # pragma: no cover
 import graph
 from core.schema import DiagnosticReport, Finding
 from core.state import AgentDoctorState
-from agents.optimize import agent, history
+from agents.optimize import agent, history, planner
 from agents.optimize.schemas import (
     ConfigPatch,
     OptimizationHistoryItem,
@@ -470,6 +470,74 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertEqual(
             out.optimization_history[-1].failure_labels,
             ["retrieval_low_rank"],
+        )
+
+    def test_retrieval_low_rank_request_summarizes_cause_counts(self):
+        """low_rank finding 원인 분포를 request metadata에 남겨 처방 논의 근거로 쓴다."""
+        findings = [
+            Finding(
+                finding_id="p1:retrieval_low_rank",
+                type="retrieval_failure",
+                severity="warning",
+                description="정답 청크의 순위가 낮음",
+                label="retrieval_low_rank",
+                confirmed=True,
+                affected_probes=["p1"],
+                metadata={
+                    "low_rank_cause": "candidate_miss",
+                    "suggested_prescription": "widen_rerank_candidates",
+                    "lowest_missed_gold_rank": 32,
+                },
+            ),
+            Finding(
+                finding_id="p2:retrieval_low_rank",
+                type="retrieval_failure",
+                severity="warning",
+                description="정답 청크의 순위가 낮음",
+                label="retrieval_low_rank",
+                confirmed=True,
+                affected_probes=["p2"],
+                metadata={
+                    "low_rank_cause": "dense_low_rank",
+                    "suggested_prescription": "enable_reranker",
+                    "lowest_missed_gold_rank": 9,
+                },
+            ),
+        ]
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="r",
+                findings=findings,
+                overall_score=30.0,
+                ragas_scores={"context_recall": 0.4},
+                pass_threshold=False,
+            ),
+            runtime_capabilities={
+                "reranker": {
+                    "status": "verified",
+                    "model": "BAAI/bge-reranker-v2-m3",
+                    "retryable": False,
+                    "reason": None,
+                }
+            },
+        )
+
+        request, decision = planner.plan(state)
+
+        self.assertEqual(decision.mode, "apply_optimize")
+        self.assertEqual(
+            request.metadata["low_rank_diagnosis"],
+            {
+                "cause_counts": {
+                    "candidate_miss": 1,
+                    "dense_low_rank": 1,
+                },
+                "suggested_prescription_counts": {
+                    "widen_rerank_candidates": 1,
+                    "enable_reranker": 1,
+                },
+                "max_missed_gold_rank": 32,
+            },
         )
 
     def test_enabled_reranker_widens_candidate_count(self):

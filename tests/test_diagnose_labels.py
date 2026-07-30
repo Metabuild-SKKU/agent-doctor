@@ -207,6 +207,56 @@ class RetrievalLowRankTest(_DiagnoseTestBase):
         rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
         self.assertIn("g_b:4", diagnose.retrieval_low_rank(rec).metadata["reason"])
 
+    def test_metadata_marks_candidate_miss_when_gold_is_outside_rerank_window(self):
+        self._with(retrieve=["g_a", "x", "y", "g_b"])
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        rec.retrieval_details = {
+            "reranker_enabled": True,
+            "reranked": True,
+            "rerank_candidates": 2,
+        }
+
+        finding = diagnose.retrieval_low_rank(rec)
+
+        self.assertEqual(finding.metadata["low_rank_cause"], "candidate_miss")
+        self.assertEqual(
+            finding.metadata["suggested_prescription"],
+            "widen_rerank_candidates",
+        )
+        self.assertEqual(finding.metadata["lowest_missed_gold_rank"], 4)
+
+    def test_metadata_marks_reranker_insufficient_when_gold_was_reranked(self):
+        self._with(retrieve=["g_a", "x", "y", "g_b"])
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        rec.retrieval_details = {
+            "reranker_enabled": True,
+            "reranked": True,
+            "rerank_candidates": 10,
+        }
+
+        finding = diagnose.retrieval_low_rank(rec)
+
+        self.assertEqual(
+            finding.metadata["low_rank_cause"],
+            "reranker_applied_but_insufficient",
+        )
+        self.assertEqual(
+            finding.metadata["suggested_prescription"],
+            "widen_rerank_candidates",
+        )
+
+    def test_metadata_marks_lexical_overlap_when_bm25_also_hits_gold(self):
+        self._with(retrieve=["g_a", "x", "y", "g_b"], keyword=["g_b"])
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+
+        finding = diagnose.retrieval_low_rank(rec)
+
+        self.assertEqual(finding.metadata["low_rank_cause"], "lexical_overlap_low_rank")
+        self.assertEqual(
+            finding.metadata["suggested_prescription"],
+            "enable_reranker",
+        )
+
     def test_silent_when_retrieval_returned_nothing(self):
         self._with(retrieve=["g_a", "x", "g_b"])
         rec = _record(("g_a", "g_b"), (), recall=0.0)

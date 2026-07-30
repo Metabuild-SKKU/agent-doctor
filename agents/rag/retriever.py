@@ -306,6 +306,9 @@ class Retriever:
                     else "disabled"
                 ),
                 "reranker_fallback_used": False,
+                "top_k": self.settings.top_k,
+                "candidate_k": 0,
+                "rerank_candidates": self.settings.rerank_candidates,
                 "search_fallback_used": False,
                 "fallback_used": False,
                 "results": [],
@@ -391,6 +394,9 @@ class Retriever:
             "reranker_fallback_used": (
                 reranker_attempted and reranker_status != "applied"
             ),
+            "top_k": requested_top_k,
+            "candidate_k": candidate_k,
+            "rerank_candidates": self.settings.rerank_candidates,
             "search_fallback_used": fallback_used,
             "fallback_used": fallback_used,
             "results": results,
