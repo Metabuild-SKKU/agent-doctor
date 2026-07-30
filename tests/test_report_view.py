@@ -62,5 +62,30 @@ class ReportViewCompositeTest(unittest.TestCase):
         self.assertEqual(view["score"]["delta"], 0.0)
 
 
+    def test_low_rank_vote_metadata_is_visible_in_diagnosis_card(self):
+        report = make_report(composite_total=70)
+        report.findings = [
+            Finding(
+                finding_id="p1:retrieval_low_rank",
+                type="retrieval_failure",
+                severity="warning",
+                description="정답 청크 순위 낮음",
+                label="retrieval_low_rank",
+                affected_probes=["p1"],
+                metadata={
+                    "low_rank_cause": "candidate_miss",
+                    "suggested_prescription": "widen_rerank_candidates",
+                    "lowest_missed_gold_rank": 17,
+                },
+            )
+        ]
+
+        view = build_report_view(make_state(report))
+
+        self.assertIn("low_rank_vote", view["dxs"][0]["desc"])
+        self.assertIn("candidate_miss", view["dxs"][0]["desc"])
+        self.assertIn("widen_rerank_candidates", view["dxs"][0]["desc"])
+
+
 if __name__ == "__main__":
     unittest.main()

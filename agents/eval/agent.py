@@ -613,6 +613,16 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
     for f in rec.findings:
         mark = "" if f.confirmed else "(예비)"
         print(f"    ! {f.label}{mark}: {f.metadata.get('reason') or '-'}")
+        if f.label == "retrieval_low_rank":
+            print(
+                "      low_rank_vote: "
+                f"cause={f.metadata.get('low_rank_cause', 'unknown')}, "
+                f"suggested={f.metadata.get('suggested_prescription', 'unknown')}, "
+                f"rank={f.metadata.get('lowest_missed_gold_rank', '-')}, "
+                f"top_k={f.metadata.get('top_k', '-')}, "
+                f"rerank_candidates={f.metadata.get('rerank_candidates', '-')}, "
+                f"bm25_hits_gold={f.metadata.get('bm25_hits_gold', '-')}"
+            )
     print()  # 블록 구분 빈 줄
 
 

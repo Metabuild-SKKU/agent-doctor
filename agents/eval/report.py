@@ -125,7 +125,7 @@ def _findings_summary(records: list[EvalRecord], mode: int) -> dict:
             bucket = conf_w if f.confirmed else prelim_w
             bucket[f.label] = bucket.get(f.label, 0.0) + w
 
-    return {
+    summary = {
         "mode": mode,
         "total": len(all_findings),
         "confirmed": len(confirmed),
@@ -133,6 +133,46 @@ def _findings_summary(records: list[EvalRecord], mode: int) -> dict:
         "weighted_total": round(sum(conf_w.values()) + sum(prelim_w.values()), 3),
         "confirmed_labels": {k: round(v, 3) for k, v in conf_w.items()},
         "preliminary_labels": {k: round(v, 3) for k, v in prelim_w.items()},
+    }
+    low_rank = _retrieval_low_rank_breakdown(all_findings)
+    if low_rank["total"]:
+        summary["retrieval_low_rank_breakdown"] = low_rank
+    return summary
+
+
+def _retrieval_low_rank_breakdown(findings: list) -> dict:
+    """KorQuAD 실험에서 retrieval_low_rank 처방 투표에 쓸 원인 분포를 집계한다."""
+    targets = [f for f in findings if f.label == "retrieval_low_rank"]
+    cause_counts: dict[str, int] = {}
+    suggestion_counts: dict[str, int] = {}
+    examples: list[dict] = []
+    max_rank = None
+    for finding in targets:
+        meta = finding.metadata or {}
+        cause = str(meta.get("low_rank_cause") or "unknown")
+        suggestion = str(meta.get("suggested_prescription") or "unknown")
+        cause_counts[cause] = cause_counts.get(cause, 0) + 1
+        suggestion_counts[suggestion] = suggestion_counts.get(suggestion, 0) + 1
+        rank = meta.get("lowest_missed_gold_rank")
+        if isinstance(rank, (int, float)) and not isinstance(rank, bool):
+            max_rank = rank if max_rank is None else max(max_rank, rank)
+        if len(examples) < 5:
+            examples.append({
+                "finding_id": finding.finding_id,
+                "probe_ids": list(finding.affected_probes or []),
+                "cause": cause,
+                "suggested_prescription": suggestion,
+                "lowest_missed_gold_rank": rank,
+                "top_k": meta.get("top_k"),
+                "rerank_candidates": meta.get("rerank_candidates"),
+                "bm25_hits_gold": meta.get("bm25_hits_gold"),
+            })
+    return {
+        "total": len(targets),
+        "cause_counts": cause_counts,
+        "suggested_prescription_counts": suggestion_counts,
+        "max_missed_gold_rank": max_rank,
+        "examples": examples,
     }
 
 
@@ -276,5 +316,13 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
         # Finding 개수(확정/예비)는 STEP4 마감줄이 이미 보고했다 — 여기선 분포만.
         print(f"  가중 타입분포 {by_type}")
         print(f"  가중 라벨분포 {dict(sorted(by_label.items(), key=lambda kv: -kv[1]))}")
+        low_rank = fs.get("retrieval_low_rank_breakdown") or {}
+        if low_rank.get("total"):
+            print(
+                "  retrieval_low_rank breakdown "
+                f"causes={low_rank.get('cause_counts', {})} "
+                f"suggested={low_rank.get('suggested_prescription_counts', {})} "
+                f"max_rank={low_rank.get('max_missed_gold_rank')}"
+            )
         if fs.get("preliminary"):
             print(f"  예비 {fs['preliminary']}개는 더 깊은 모드(EVAL_MODE=deep/full)에서 확정 가능")

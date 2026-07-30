@@ -249,12 +249,22 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
 def _build_dxs(findings: list) -> list[dict[str, Any]]:
     out = []
     for f in findings:
+        desc = f.description
+        if f.label == "retrieval_low_rank":
+            cause = f.metadata.get("low_rank_cause")
+            suggestion = f.metadata.get("suggested_prescription")
+            rank = f.metadata.get("lowest_missed_gold_rank")
+            if cause or suggestion:
+                desc += (
+                    f"\nlow_rank_vote: cause={cause or 'unknown'}, "
+                    f"suggested={suggestion or 'unknown'}, rank={rank or '-'}"
+                )
         out.append({
             "grp": f.metadata.get("group", ""),
             "title": f.description.split("\n")[0][:60],
             "code": f.label or f.type,
             "badge": ["confirm", "확정"] if f.confirmed else ["prelim", "의심"],
-            "desc": f.description,
+            "desc": desc,
             "foot": f"질문 {len(f.affected_probes)}건 영향",
             "rx": f.prescription or "미처방",
         })

@@ -342,6 +342,40 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
             },
         )
 
+    def test_report_summarizes_low_rank_vote_breakdown(self):
+        record = EvalRecord(probe=Probe("p1", "질문1", "test"))
+        record.findings = [
+            Finding(
+                finding_id="p1:retrieval_low_rank",
+                type="retrieval_failure",
+                severity="warning",
+                description="정답 청크 순위 낮음",
+                label="retrieval_low_rank",
+                confirmed=True,
+                affected_probes=["p1"],
+                metadata={
+                    "low_rank_cause": "candidate_miss",
+                    "suggested_prescription": "widen_rerank_candidates",
+                    "lowest_missed_gold_rank": 17,
+                    "top_k": 5,
+                    "rerank_candidates": 10,
+                    "bm25_hits_gold": False,
+                },
+            )
+        ]
+
+        report = build_report([record], iteration=1)
+        breakdown = report.findings_summary["retrieval_low_rank_breakdown"]
+
+        self.assertEqual(breakdown["total"], 1)
+        self.assertEqual(breakdown["cause_counts"], {"candidate_miss": 1})
+        self.assertEqual(
+            breakdown["suggested_prescription_counts"],
+            {"widen_rerank_candidates": 1},
+        )
+        self.assertEqual(breakdown["max_missed_gold_rank"], 17)
+        self.assertEqual(breakdown["examples"][0]["probe_ids"], ["p1"])
+
     def test_incomplete_reranker_eval_is_not_cached(self):
         report = DiagnosticReport(
             report_id="failed-reranker",
