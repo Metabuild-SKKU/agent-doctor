@@ -300,14 +300,52 @@ def _rank_groups(
 
 # ── 4. 최상위 선택 + 블랙리스트 ───────────────────────────────────
 
+def _finding_signal(findings: list[Finding], key: str) -> str | None:
+    """findings metadata 에서 신호값 하나를 읽는다(applies_when 대조용).
+
+    같은 라벨의 findings 는 Eval 이 라벨 단위로 같은 신호를 실으므로(예: topic_cluster),
+    첫 값을 대표로 쓴다. 신호가 없으면 None → 호출부가 '태그 무시(순차 fallback)'로 처리.
+    """
+    for f in findings:
+        val = f.metadata.get(key)
+        if val is not None:
+            return val
+    return None
+
+
+def _prescription_applies(pres: dict, findings: list[Finding]) -> bool:
+    """처방의 applies_when 신호 조건을 finding metadata 와 대조한다.
+
+    계약(schemas.py PrescriptionCandidate.applies_when / rules.py 주석):
+      - 처방에 applies_when 이 없으면          → 항상 적용(신호 무관 처방)
+      - 신호 키는 있는데 finding 에 값이 없으면 → 적용(미측정 = 순차 fallback, 기존 동작)
+      - 값이 있으면 허용 리스트 membership 검사 → 포함될 때만 적용
+    키가 여러 개면 전부(AND) 만족해야 한다. 지금 유일한 소비 키는 topic_cluster.
+    """
+    applies_when = pres.get("applies_when") or {}
+    for key, allowed in applies_when.items():
+        signal = _finding_signal(findings, key)
+        if signal is None:
+            continue                    # 미측정 → 이 조건은 통과(fallback)
+        if signal not in allowed:
+            return False
+    return True
+
+
 def _available_prescriptions(
-    rule: dict, label: str, blacklist: set[tuple[str, str]]
+    rule: dict, label: str, blacklist: set[tuple[str, str]],
+    findings: list[Finding] | None = None,
 ) -> list[dict]:
-    """블랙리스트에 걸리지 않은 처방만 순서대로 반환."""
+    """블랙리스트·applies_when 신호에 걸리지 않은 처방만 순서대로 반환.
+
+    findings 를 주면 applies_when(topic_cluster 등) 신호로 후보를 거른다. 안 주면(레거시
+    호출) 블랙리스트만 본다 — 신호 대조는 findings 가 있어야 성립하기 때문.
+    """
     return [
         p
         for p in rule.get("prescriptions", [])
         if (label, p["id"]) not in blacklist
+        and (findings is None or _prescription_applies(p, findings))
     ]
 
 
@@ -317,7 +355,7 @@ def _pick_top(
 ) -> tuple[str, list[Finding], dict, float] | None:
     """정렬된 목록에서 '아직 시도할 처방이 남은' 최상위 라벨 묶음을 고른다."""
     for label, findings, rule, score in ranked:
-        if _available_prescriptions(rule, label, blacklist):
+        if _available_prescriptions(rule, label, blacklist, findings):
             return label, findings, rule, score
     return None
 
@@ -1052,7 +1090,7 @@ def _build_candidates(
     candidates: list[PrescriptionCandidate] = []
     target_metrics = list(rule.get("target_metrics", []))
     reason = findings[0].description if findings else ""
-    for pres in _available_prescriptions(rule, label, blacklist):
+    for pres in _available_prescriptions(rule, label, blacklist, findings):
         changes = dict(pres.get("patch", {}))
         search_space, grounding_metadata = _finding_search_space(
             findings, changes, state

@@ -57,7 +57,8 @@ from agents.eval.metrics_ragas import (
     evaluate_real_track, evaluate_oracle_track, evaluate_abstention,
     evaluate_reasoning_mode, _judge as _ragas_judge,
 )
-from agents.eval.metrics_common import set_context as set_diag_context
+from agents.eval.metrics_common import set_context as set_diag_context, _missed_gold_ids
+from agents.eval import topic_cluster
 from agents.eval.metrics_basic import _compute_metrics
 from agents.eval.diagnose import diagnose, _is_success
 from agents.eval.report import build_report
@@ -506,6 +507,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 rec.findings = diagnose(rec, mode)
                 _log_probe(i, len(records), rec)
             _log_diagnosis_summary(records)
+            _annotate_topic_cluster(records, state.chunks)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
         with step("Eval", 5, "리포트"):
@@ -528,6 +530,48 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         print_summary(tag="Eval", stage="전체", since=run_usage)
 
     return state
+
+
+def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
+    """STEP4 후처리 — retrieval_semantic_mismatch 실패의 토픽 분포 신호를 finding 에 기록.
+
+    개별 probe 로는 못 내는 cross-probe 신호라 diagnose() 밖(전 record 준비 후)에서 계산한다.
+    실패한 semantic_mismatch probe 들의 '놓친 gold' 임베딩이 서로 뭉쳤나 흩어졌나를
+    코퍼스 baseline 대비 비율로 판정해(agents/eval/topic_cluster.py), 그 값을 해당 라벨의
+    모든 finding metadata['topic_cluster'] 에 실어 Optimize(planner)가 처방을 가르게 한다.
+
+    'none' 도 명시적으로 단다 — rules.py 의 semantic_mismatch 처방은 none 을 "청크 희석
+    (Case1) → 청킹 조정" 신호로 쓴다(shrink_chunk_size / switch_chunking 의
+    applies_when={"topic_cluster":["none"]}). 여기서 none 을 안 달면 planner 가 '미측정
+    =순차 fallback'으로 보아 임베딩 교체 처방까지 통과시켜, none 이 청킹만 선택하려던
+    rules.py 계약이 깨진다. 임베딩이 아예 없어(fallback/미부착) 응집도를 못 잰 경우와
+    '주제 응집이 안 보임'은 rules.py 관점에선 둘 다 "임베딩 교체로 풀 문제가 아님"이라
+    같은 none 으로 수렴한다.
+    """
+    sem_findings = [
+        f
+        for r in records
+        for f in r.findings
+        if f.label == "retrieval_semantic_mismatch"
+    ]
+    if not sem_findings:
+        return
+
+    embed_by_id = {c.chunk_id: c.embedding for c in chunks}
+
+    # 실패 gold = semantic_mismatch probe 들이 '놓친' gold 청크(검색된 건 실패 근거가 아님).
+    failed_ids: set[str] = set()
+    for r in records:
+        if any(f.label == "retrieval_semantic_mismatch" for f in r.findings):
+            failed_ids |= _missed_gold_ids(r)
+
+    failed_vecs = [embed_by_id[cid] for cid in failed_ids if embed_by_id.get(cid)]
+    corpus_vecs = [c.embedding for c in chunks if c.embedding]
+
+    signal = topic_cluster.classify(failed_vecs, corpus_vecs)
+    for f in sem_findings:
+        f.metadata["topic_cluster"] = signal
+    print(f"  topic_cluster={signal} (semantic_mismatch {len(sem_findings)}건)")
 
 
 def _log_diagnosis_summary(records: list[EvalRecord]) -> None:

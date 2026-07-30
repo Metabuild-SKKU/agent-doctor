@@ -520,5 +520,66 @@ class PlannerCandidateListTest(unittest.TestCase):
         )
 
 
+class TopicClusterAppliesWhenTest(unittest.TestCase):
+    """applies_when.topic_cluster 신호가 semantic_mismatch 처방을 어떻게 가르는지.
+
+    rules.py 계약: spread/concentrated → swap_embedding_model 만, none → 청킹 처방만,
+    신호 미측정 → 셋 다(순차 fallback). 기존 동작(신호 없음)이 안 깨지는 게 핵심.
+    """
+
+    LABEL = "retrieval_semantic_mismatch"
+
+    def _rule(self):
+        from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
+        return LABEL_TO_PRESCRIPTIONS[self.LABEL]
+
+    def _finding_with_signal(self, signal):
+        f = make_finding("p0", self.LABEL)
+        if signal is not None:
+            f.metadata["topic_cluster"] = signal
+        return f
+
+    def _ids(self, signal):
+        rule = self._rule()
+        avail = planner._available_prescriptions(
+            rule, self.LABEL, set(), [self._finding_with_signal(signal)]
+        )
+        return [p["id"] for p in avail]
+
+    def test_concentrated_keeps_only_embedding_swap(self):
+        self.assertEqual(self._ids("concentrated"), ["swap_embedding_model"])
+
+    def test_spread_keeps_only_embedding_swap(self):
+        self.assertEqual(self._ids("spread"), ["swap_embedding_model"])
+
+    def test_none_keeps_only_chunking(self):
+        ids = self._ids("none")
+        self.assertNotIn("swap_embedding_model", ids)
+        self.assertIn("shrink_chunk_size", ids)
+        self.assertIn("switch_chunking_strategy", ids)
+
+    def test_missing_signal_keeps_all_prescriptions(self):
+        # 신호 미측정 → 전부 통과 = 기존 순차 fallback (동작 불변).
+        rule = self._rule()
+        all_ids = [p["id"] for p in rule["prescriptions"]]
+        self.assertEqual(self._ids(None), all_ids)
+
+    def test_no_findings_arg_is_legacy_blacklist_only(self):
+        # findings 를 안 주는 레거시 호출은 applies_when 을 보지 않는다(블랙리스트만).
+        rule = self._rule()
+        ids = [p["id"] for p in planner._available_prescriptions(rule, self.LABEL, set())]
+        self.assertEqual(ids, [p["id"] for p in rule["prescriptions"]])
+
+    def test_prescription_without_applies_when_always_passes(self):
+        # applies_when 이 없는 라벨(예: retrieval_lexical_mismatch)은 신호와 무관하게 통과.
+        from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
+        label = "retrieval_lexical_mismatch"
+        rule = LABEL_TO_PRESCRIPTIONS[label]
+        f = make_finding("p0", label)
+        f.metadata["topic_cluster"] = "concentrated"   # 무관 신호
+        avail = planner._available_prescriptions(rule, label, set(), [f])
+        self.assertEqual(len(avail), len(rule["prescriptions"]))
+
+
 if __name__ == "__main__":
     unittest.main()

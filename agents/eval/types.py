@@ -82,6 +82,19 @@ KG_EMBEDDING_SIM_MIN = 0.5      # chunk.embedding 코사인 유사도(무관 쌍
 # 멀티홉이 대폭 줄었다. 예산(멀티홉 30%)을 채우기 충분한 최소값으로 2 를 기본값으로 둔다.
 KG_TOP_K_NEIGHBORS = 2
 
+# STEP4 토픽클러스터 신호 임계값 (retrieval_semantic_mismatch 처방 라우팅용)
+# 실패한 gold 청크들이 임베딩 공간에서 얼마나 뭉쳤는지를 코퍼스 baseline 대비 비율로 본다.
+# 절대 코사인은 코퍼스마다 깔린 수준이 달라(위 KG 주석: 무관 쌍도 cos 0.46) 쓸 수 없어,
+# "실패 gold 응집도 / 코퍼스 전체 평균 응집도" 비율로 상대 판정한다(KG_TOP_K 와 같은 철학).
+#   ratio >= CONCENTRATED → "concentrated" (특정 도메인만 약함 → 도메인특화 임베딩)
+#   ratio <= SPREAD       → "spread"       (전 주제 흩어져 실패 → 임베딩 모델 자체 약함)
+#   그 사이               → "none"         (신호 약함 → planner 순차 fallback)
+# 임의값 — 실측 캘리브레이션 필요(rules.py 의 diagnosis_confidence: None 과 같은 미완성 상태).
+TOPIC_CLUSTER_CONCENTRATED_RATIO = 1.3
+TOPIC_CLUSTER_SPREAD_RATIO = 1.1
+# baseline 평균 응집도를 잴 때 뽑는 청크 표본 수 상한(전량 O(n^2) 회피, 결정적 seed).
+TOPIC_CLUSTER_BASELINE_SAMPLE = 100
+
 # STEP1 시나리오 샘플링 후보 (RAGAS Scenario 파라미터)
 PERSONAS = ["신입사원", "실무 담당자"]
 QUERY_STYLES = ["web_search", "conversational", "imperative"]

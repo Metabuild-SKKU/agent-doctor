@@ -106,10 +106,10 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         #     "concentrated" → Case2(특정 도메인 약함)      → 임베딩 교체(도메인특화/파인튜닝)
         #     "none"         → Case1(청크 희석)             → 청킹 조정
         
-        #   신호가 없으면(MVP) planner가 리스트 순서대로 순차 시도(fallback).
-        
-        # TODO(eval-합의): topic_cluster 신호 키/값을 Eval과 확정.
-        
+        #   신호가 없으면(미측정) planner가 리스트 순서대로 순차 시도(fallback).
+        #   신호 생산: agents/eval/topic_cluster.py + agent.py::_annotate_topic_cluster
+        #   신호 소비: planner::_prescription_applies (finding.metadata["topic_cluster"] 대조)
+
         "prescriptions": [
             {
                 # 임베딩 모델 바꾸기 case 3 2에 해당
