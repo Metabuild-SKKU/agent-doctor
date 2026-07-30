@@ -246,10 +246,12 @@ _FURNITURE_RE = re.compile(
     r"|전자공시시스템"
     # 표 셀 구분자 잔여물 — 전처리가 놓친 표 행을 원문에서 통째로 긁어오면 셀 사이에
     # 구분자가 남는다("과세정보를 활용 ㅣ 영 세율 제도"). ㅣ(U+3163 한글호환자모)·
-    # │(U+2502 박스드로잉)는 그 자체로 furniture 신호. 파이프(|)는 공백에 둘러싸인
-    # 표 구분자 용법만 잡아 정규식·불리언 표기의 정상 파이프와 구분한다.
+    # │(U+2502 박스드로잉)는 정상 텍스트에 나올 일이 거의 없어 그 자체로 furniture 신호.
+    # 파이프(|)는 단독 1개면 비트연산 "A | B"·논리 OR·정규식 등 정상 표현이라 폐기하면
+    # 안 되고, 표 행일 때만("| 셀 | 셀 |") 구분자가 2개 이상 나온다. 파이프 사이에 내용이
+    # 있고 다시 파이프가 나오는 경우(=최소 2개)만 표로 보고, 단독 파이프는 통과시킨다.
     r"|[ㅣ│]"
-    r"| \| ",
+    r"|\|[^|\n]*\|",
     re.IGNORECASE,
 )
 
@@ -1301,12 +1303,58 @@ def _generate_held_out_probes(chunks: list[Chunk], n: int) -> list[Probe]:
     return probes
 
 
+def _held_out_deterministic_fallback(chunk_text: str) -> str | None:
+    """확실히 무응답이 보장되는 결정적 fallback 질문.
+
+    "아직 공개되지 않은 세부 내규"는 정의상 컨텍스트에 있을 수 없으므로(공개된 규정이면
+    "아직 공개되지 않은"과 모순), answer_exists=False 계약이 프레이밍만으로 보장된다.
+    topic 을 못 고르면(furniture 뿐인 청크) None 을 돌려 호출부가 그 청크를 버린다.
+    """
+    topic = _clean_topic_of(chunk_text)
+    if topic is None:
+        return None
+    return f"{topic}과 관련해 아직 공개되지 않은 세부 내규는 무엇인가요?"
+
+
+def _is_answerable_from_context(question: str, chunk_text: str) -> bool:
+    """생성된 질문이 컨텍스트만으로 답할 수 있는지 LLM 으로 판정한다(held-out 검증용).
+
+    LLM 이 프롬프트를 어기고 컨텍스트에 이미 있는 내용을 물으면, RAG 는 정상적으로 답을
+    찾는데 probe 는 answer_exists=False("기권해야 정답")로 라벨돼 정상 답변이 실패로 오판된다.
+    이 함수가 True 를 돌리면 호출부가 그 질문을 버리고 결정적 fallback 으로 떨어진다.
+    판정 자체가 실패(키 없음·예외)하면 검증 불가이므로 안전하게 False(=버리지 않음)를 돌린다
+    — 검증할 수 없는 경우까지 폐기하면 held-out 이 통째로 사라질 수 있어, fallback 프레이밍이
+    최종 방어선이 되게 둔다.
+    """
+    if not llm_provider.has_key():
+        return False
+    try:
+        data = llm_provider.chat_json(
+            system=("너는 RAG 평가용 질문의 answerability 를 판정하는 검증자다. "
+                    "주어진 컨텍스트만으로 질문에 답할 수 있으면 answerable=true, "
+                    "컨텍스트에 답이 없으면(추론·외부지식이 필요하면) answerable=false 다. "
+                    "반드시 {\"answerable\": bool} 형태의 JSON으로만 답하라."),
+            user=f"[컨텍스트]\n{chunk_text}\n\n[질문]\n{question}",
+        )
+        return bool(data.get("answerable"))
+    except Exception as e:
+        print(f"  Held-out answerability 검증 실패({e}) → 검증 생략")
+        return False
+
+
 def _held_out_question(chunk_text: str) -> str | None:
     """
     LLM(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택)으로 held-out 무응답 질문을
     만든다 — 주제는 컨텍스트와 관련되지만 답은 컨텍스트에 없는(그래서 기권해야 하는) 질문.
-    키 없거나 실패 시 _clean_topic_of 기반 템플릿으로 폴백하되, topic 을 못 고르면(furniture
-    뿐인 청크) None 을 돌려 호출부가 그 청크를 버린다(false_premise 와 달리 폴백이 None 가능).
+
+    LLM 생성 질문은 answer_exists=False 로 저장되므로 반드시 무응답이어야 한다. 그런데 LLM 이
+    프롬프트를 어기고 컨텍스트에 있는 내용을 물으면 정상 답변이 실패로 오판되므로(리뷰 지적 2),
+    생성 후 _is_answerable_from_context 로 answerability 를 검증한다 — 답할 수 있다고 나오면
+    그 질문을 버리고 결정적 fallback(정의상-무응답 프레이밍)으로 떨어진다.
+
+    키 없거나 생성 실패 시에도 _held_out_deterministic_fallback 으로 폴백하되, topic 을 못
+    고르면(furniture 뿐인 청크) None 을 돌려 호출부가 그 청크를 버린다(false_premise 와 달리
+    폴백이 None 가능).
     """
     if llm_provider.has_key():
         try:
@@ -1320,14 +1368,14 @@ def _held_out_question(chunk_text: str) -> str | None:
                 user=f"[컨텍스트]\n{chunk_text}",
             )
             question = (data.get("question") or "").strip()
-            if question:
+            # answerability 검증: LLM 이 컨텍스트에 답이 있는 질문을 냈으면 버린다(오판 방지).
+            if question and not _is_answerable_from_context(question, chunk_text):
                 return question
+            if question:
+                print(f"  Held-out 폐기(컨텍스트에서 답 가능) — {question[:40]} → 결정적 fallback")
         except Exception as e:
             print(f"  Held-out 질문 생성 실패({e}) → 휴리스틱 폴백")
-    topic = _clean_topic_of(chunk_text)
-    if topic is None:
-        return None
-    return f"{topic}과 관련해 아직 공개되지 않은 세부 내규는 무엇인가요?"
+    return _held_out_deterministic_fallback(chunk_text)
 
 
 def _generate_false_premise_probes(graph: knowledge_graph.KGraph, n: int, start_index: int = 0) -> list[Probe]:

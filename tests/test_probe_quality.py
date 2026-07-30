@@ -10,15 +10,20 @@ LLM 응답이 토큰 상한 없이 잘리며 JSON 파싱에 실패 → 휴리스
 import os
 import sys
 import unittest
+from unittest import mock
 
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from agents.eval import probe_gen
 from agents.eval.probe_gen import (
     _clean_topic_of,
+    _generate_held_out_probes,
+    _held_out_question,
     _probe_surplus_count,
     probe_quality_issue,
 )
+from core.schema import Chunk
 
 
 class ProbeQualityGateTest(unittest.TestCase):
@@ -110,13 +115,24 @@ class TableSeparatorFurnitureTest(unittest.TestCase):
         )
         self.assertIsNotNone(issue)
 
-    def test_rejects_boxdrawing_and_spaced_pipe(self):
+    def test_rejects_boxdrawing_and_repeated_pipe(self):
+        # │(U+2502)는 단독으로도 furniture. 파이프(|)는 표 행처럼 2개 이상 반복될 때만.
         for question in (
             "매출 │ 영업이익 항목과 관련해 아직 공개되지 않은 내규는 무엇인가요?",
-            "가 | 나 항목과 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+            "가 | 나 | 다 항목과 관련해 아직 공개되지 않은 내규는 무엇인가요?",
         ):
             with self.subTest(question=question):
                 self.assertIsNotNone(probe_quality_issue(question, ""))
+
+    def test_accepts_single_pipe_expression(self):
+        # 단독 파이프(비트연산·논리 OR·정규식)는 정상 표현이라 통과해야 한다(리뷰 지적 1).
+        # `_FURNITURE_RE` 는 공용 게이트라 일반 코퍼스의 정상 질문까지 폐기하면 안 된다.
+        for question in (
+            "A | B 비트 연산의 결과는 무엇인가요?",
+            "x | y 논리 OR 연산은 무엇을 의미하나요?",
+        ):
+            with self.subTest(question=question):
+                self.assertIsNone(probe_quality_issue(question, ""))
 
     def test_accepts_clean_no_answer_question(self):
         # 구분자 없는 정상 무응답 질문은 통과해야 한다.
@@ -144,6 +160,79 @@ class CleanTopicOfTest(unittest.TestCase):
 
     def test_returns_none_for_empty(self):
         self.assertIsNone(_clean_topic_of(""))
+
+
+class HeldOutQuestionContractTest(unittest.TestCase):
+    """held-out 무응답 probe 조립 경로(LLM / 휴리스틱 폴백)의 계약을 회귀로 고정한다.
+
+    계약(리뷰 지적 2): held-out 은 반드시 무응답(answer_exists=False)이어야 하고, gold_chunk_ids
+    는 비어야 하며, LLM 이 컨텍스트에서 답 가능한 질문을 내면 결정적 fallback 으로 떨어져야 한다.
+    """
+
+    CTX = ("영농조합법인으로부터 받는 배당소득에 대한 저율 과세 혜택 규정입니다. "
+           "적용 세율은 5퍼센트입니다.")
+
+    def _chunks(self, n=3):
+        return [Chunk(chunk_id=f"c{i}", doc_id="d0", text=self.CTX) for i in range(n)]
+
+    def test_llm_answerable_question_falls_back_to_deterministic(self):
+        # LLM 이 컨텍스트에서 답 가능한 질문을 내면 버리고 결정적(정의상-무응답) fallback 사용.
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=True), \
+             mock.patch.object(probe_gen.llm_provider, "chat_json") as cj:
+            cj.side_effect = [
+                {"question": "배당소득의 적용 세율은 몇 퍼센트인가요?"},  # 생성(답이 컨텍스트에 있음)
+                {"answerable": True},                                     # 검증: 답 가능 → 폐기
+            ]
+            question = _held_out_question(self.CTX)
+        self.assertIn("아직 공개되지 않은", question)  # 결정적 fallback 프레이밍
+        self.assertNotIn("몇 퍼센트", question)         # answerable 생성물은 안 쓰임
+
+    def test_llm_unanswerable_question_is_kept(self):
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=True), \
+             mock.patch.object(probe_gen.llm_provider, "chat_json") as cj:
+            cj.side_effect = [
+                {"question": "이 규정의 2027년 개정 예정 세부 내용은 무엇인가요?"},  # 생성
+                {"answerable": False},                                              # 검증: 무응답
+            ]
+            question = _held_out_question(self.CTX)
+        self.assertEqual(question, "이 규정의 2027년 개정 예정 세부 내용은 무엇인가요?")
+
+    def test_no_key_uses_deterministic_fallback(self):
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
+            question = _held_out_question(self.CTX)
+        self.assertIsNotNone(question)
+        self.assertIn("아직 공개되지 않은", question)
+
+    def test_furniture_only_chunk_returns_none(self):
+        # 깨끗한 문장이 없는 청크는 None → 호출부가 그 청크를 버린다.
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
+            self.assertIsNone(_held_out_question("페이지 522 ㅣ 전자공시시스템"))
+
+    def test_assembled_probes_are_no_answer_with_empty_gold(self):
+        # 조립부 계약: answer_exists=False, gold_chunk_ids=[], recall 오탐 차단.
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
+            probes = _generate_held_out_probes(self._chunks(), n=2)
+        self.assertEqual(len(probes), 2)
+        for p in probes:
+            self.assertFalse(p.answer_exists)
+            self.assertEqual(p.gold_chunk_ids, [])
+            self.assertIsNone(p.ground_truth)
+            self.assertIsNone(probe_quality_issue(p.question, ""))  # 게이트 통과분만 조립
+
+    def test_assembled_probes_drop_answerable_llm_output(self):
+        # LLM 생성물이 전부 answerable 이어도, fallback 으로 떨어져 무응답 계약이 유지된다.
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=True), \
+             mock.patch.object(probe_gen.llm_provider, "chat_json") as cj:
+            def _route(system, user, **kw):
+                if "answerable" in system:
+                    return {"answerable": True}          # 항상 답 가능하다고 판정
+                return {"question": "적용 세율은 몇 퍼센트인가요?"}  # 항상 answerable 생성
+            cj.side_effect = _route
+            probes = _generate_held_out_probes(self._chunks(), n=2)
+        self.assertEqual(len(probes), 2)
+        for p in probes:
+            self.assertFalse(p.answer_exists)
+            self.assertIn("아직 공개되지 않은", p.question)  # 전부 결정적 fallback
 
 
 class ProbeSurplusCountTest(unittest.TestCase):
