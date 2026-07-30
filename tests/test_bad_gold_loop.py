@@ -12,7 +12,7 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from unittest.mock import patch
-from core.schema import Probe, Finding, Chunk, Document
+from core.schema import Probe, Finding, Chunk, Document, EvalSnapshot
 from core.state import AgentDoctorState
 from agents.eval.types import EvalRecord
 from agents.eval.report import build_report, _is_bad_gold_probe
@@ -102,6 +102,38 @@ class BadGoldRegenerationTest(unittest.TestCase):
         save.assert_called_once()
         saved_probes = save.call_args[0][0]
         self.assertEqual(saved_probes[0].ground_truth, "주 2일")  # 교체본 저장
+
+    def test_regeneration_invalidates_stale_caches(self):
+        # blocker#3 회귀: 재생성 probe 는 같은 probe_id·probe_version 을 유지하므로,
+        # 그 id 의 진단 신호와 그 probe 를 담은 eval 스냅샷을 무효화해야 다음 평가가
+        # 옛 신호/리포트를 재사용(재생성 무효화)하지 않는다.
+        from agents.eval import agent as eval_agent
+        st = self._state()
+        probe = Probe(probe_id="probe_gen_000", question="구질문?", source="llm_generated",
+                      ground_truth="틀린", gold_chunk_ids=["c1"], metadata={})
+        other = Probe(probe_id="keep_me", question="q2", source="llm_generated",
+                      ground_truth="ok", gold_chunk_ids=["c1"])
+        st.diagnosis_cache = {"probe_gen_000": {"sig": 1}, "keep_me": {"sig": 2}}
+        st.eval_cache = [
+            EvalSnapshot(cache_key="k_with", index_key="i", probes=[probe, other],
+                         report=None, diagnosis_cache={}, diagnosis_cache_version="v"),
+            EvalSnapshot(cache_key="k_without", index_key="i", probes=[other],
+                         report=None, diagnosis_cache={}, diagnosis_cache_version="v"),
+        ]
+        rec = EvalRecord(probe=probe)
+        rec.findings = [Finding(finding_id="probe_gen_000", type="gap", severity="warning",
+                                description="bad", label="bad_gold_answer", confirmed=True,
+                                affected_probes=["probe_gen_000"])]
+        with patch.object(pg, "_llm_generate_single_hop", return_value=("재택 며칠?", "주 2일")), \
+             patch.object(pg, "probe_quality_issue", return_value=None), \
+             patch.object(eval_agent, "save_probes"):
+            eval_agent._maybe_regenerate_bad_gold(st, [rec], [probe, other], "v1")
+        # 재생성 id 의 진단 신호는 제거, 무관한 id 는 유지
+        self.assertNotIn("probe_gen_000", st.diagnosis_cache)
+        self.assertIn("keep_me", st.diagnosis_cache)
+        # 재생성 probe 를 담은 스냅샷만 제거, 나머지는 유지
+        keys = {s.cache_key for s in st.eval_cache}
+        self.assertEqual(keys, {"k_without"})
 
 
 if __name__ == "__main__":

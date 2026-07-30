@@ -334,8 +334,27 @@ def _maybe_regenerate_bad_gold(
         return
     updated = [replaced.get(p.probe_id, p) for p in probes]
     save_probes(updated, probe_version)
+    _invalidate_regenerated_caches(state, set(replaced))
     print(f"[Eval] bad_gold probe {len(replaced)}개 재생성 → 다음 실행에서 재평가 "
           f"(재생성 불가 {len(bad_probes) - len(replaced)}개는 사용자 검수 요청)")
+
+
+def _invalidate_regenerated_caches(state: AgentDoctorState, regenerated_ids: set[str]) -> None:
+    """재생성 probe 의 stale 캐시를 무효화한다.
+
+    재생성 probe 는 같은 probe_id·probe_version 을 유지하므로(corpus_version 기반), 그 id 를
+    담은 캐시가 남으면 다음 평가가 옛 진단 신호/리포트를 그대로 재사용해 재생성이 조용히
+    무효화될 수 있다(리뷰 blocker#3). 해당 probe 의 진단 신호와, 그 probe 를 담은 eval
+    스냅샷을 제거해 다음 평가가 새 probe 로 처음부터 진단·채점하게 강제한다."""
+    if not regenerated_ids:
+        return
+    for pid in regenerated_ids:
+        state.diagnosis_cache.pop(pid, None)
+    state.eval_cache = [
+        snapshot
+        for snapshot in state.eval_cache
+        if not any(p.probe_id in regenerated_ids for p in snapshot.probes)
+    ]
 
 
 def run(state: AgentDoctorState) -> AgentDoctorState:
