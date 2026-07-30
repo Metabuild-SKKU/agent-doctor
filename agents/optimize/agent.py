@@ -1133,6 +1133,12 @@ def _judge_pending_trial(
         )
     else:
         verdict = history.judge(before_report, after_report)
+        verdict = _relax_reranker_precision_floor(
+            pending,
+            before_report,
+            after_report,
+            verdict,
+        )
 
     # 롤백 전의 '실제 적용되어 측정된' config 를 이력에 남긴다.
     after_config = dict(state.index_config)
@@ -1156,6 +1162,60 @@ def _judge_pending_trial(
     history.finalize_item(pending, verdict, after_config, after_report)
     rollback_baseline_report = before_report if not verdict.keep else None
     return pending, verdict, rollback_baseline_report
+
+
+def _relax_reranker_precision_floor(
+    pending: OptimizationHistoryItem,
+    before_report: DiagnosticReport,
+    after_report: DiagnosticReport,
+    verdict: Verdict,
+) -> Verdict:
+    """Reranker 처방은 검색 순위 개선 신호가 있으면 precision 단독 위반을 완화한다.
+
+    Reranker는 관련 청크를 더 위로 올리는 과정에서 context_precision이 일시적으로
+    흔들릴 수 있다. 그런데 종합점수와 low-rank 라벨이 함께 개선됐는데도
+    context_precision 하나만으로 롤백하면 실제 검색 개선 처방을 학습하지 못한다.
+    """
+    if verdict.keep:
+        return verdict
+    if pending.selected_prescription_id not in {
+        "enable_reranker",
+        "widen_rerank_candidates",
+    }:
+        return verdict
+    if verdict.floor_violations != ["context_precision"]:
+        return verdict
+    if verdict.after_score <= verdict.before_score:
+        return verdict
+
+    before_low_rank = _label_count(before_report, "retrieval_low_rank")
+    after_low_rank = _label_count(after_report, "retrieval_low_rank")
+    if before_low_rank <= 0 or after_low_rank >= before_low_rank:
+        return verdict
+
+    return Verdict(
+        keep=True,
+        before_score=verdict.before_score,
+        after_score=verdict.after_score,
+        before_composite=verdict.before_composite,
+        after_composite=verdict.after_composite,
+        floor_violations=[],
+        reason=(
+            "reranker 적용 후 context_precision 단독 하한선 위반이 있었지만 "
+            f"종합점수 상승 {verdict.before_score:.3f}→{verdict.after_score:.3f}, "
+            f"retrieval_low_rank 감소 {before_low_rank}→{after_low_rank}로 유지"
+        ),
+        unjudgeable=verdict.unjudgeable,
+    )
+
+
+def _label_count(report: DiagnosticReport, label: str) -> int:
+    """리포트에서 특정 라벨의 확정 finding 개수를 센다."""
+    return sum(
+        1
+        for finding in report.findings
+        if finding.confirmed and finding.label == label
+    )
 
 
 def _reranker_execution_incomplete(
