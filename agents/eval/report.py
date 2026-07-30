@@ -24,7 +24,7 @@ from collections import Counter
 
 from core.schema import DiagnosticReport
 from agents.eval.types import (
-    EvalRecord, RAGAS_WEIGHTS, PASS_SCORE_THRESHOLD,
+    EvalRecord, RAGAS_WEIGHTS, PASS_SCORE_THRESHOLD, F1_PASS_THRESHOLD,
     resolve_mode,
 )
 from agents.eval.scoring import compute_composite, format_composite
@@ -64,6 +64,12 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     degraded = _degraded_correctness_count(records)
     if degraded:
         scores["answer_correctness_degraded"] = degraded
+
+    # lexical 미달인데 의미축으로 통과한 probe 수 — 채점 방식 변경의 영향 크기이자
+    # gold 품질 검수 후보(_semantic_rescued_count 주석 참고).
+    rescued = _semantic_rescued_count(records)
+    if rescued:
+        scores["semantic_rescued"] = rescued
 
     # 평가 신호(GT 규칙지표/RAGAS)가 전혀 없으면 진단 불가 →
     # eval 한계로 파이프라인을 막지 않도록 통과 처리(overall_score=None).
@@ -134,6 +140,25 @@ def _findings_summary(records: list[EvalRecord], mode: int) -> dict:
         "confirmed_labels": {k: round(v, 3) for k, v in conf_w.items()},
         "preliminary_labels": {k: round(v, 3) for k, v in prelim_w.items()},
     }
+
+
+def _semantic_rescued_count(records: list[EvalRecord]) -> int:
+    """lexical(f1) 은 문턱 미달인데 의미축 덕에 통과한 probe 수 — gold 품질 검수 후보.
+
+    두 가지 용도로 남긴다.
+      1) 이번 실행에서 혼합 점수가 판정을 몇 건 뒤집었는지 = 채점 방식 변경의 영향 크기.
+         (composite 재베이스라인·문턱 재보정 때 '점수가 왜 올랐나'의 답이 이 수치다.)
+      2) 그 probe 들은 대개 gold 가 질문이 묻지 않은 요소까지 담아 lexical 이 구조적으로
+         낮게 나온 경우다 — bad_gold_answer 가 '정답셋 이상'으로 잡던 유형인데, 이제
+         통과하므로 라벨로는 안 남는다(성공 probe 는 findings 가 비어야 한다는 보장 때문).
+         라벨 대신 이 카운터가 그 신호를 들고 있다.
+    """
+    return sum(
+        1 for r in records
+        if r.probe.ground_truth
+        and r.answer_semantic is not None
+        and r.f1_score < F1_PASS_THRESHOLD <= r.answer_score
+    )
 
 
 def _degraded_correctness_count(records: list[EvalRecord]) -> int:
@@ -263,6 +288,9 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
         if "mean_answer_score" in rs:   # 실제 판정 기준(혼합 점수) 평균
             line += f"  판정점수={rs['mean_answer_score']:.3f}"
         print(line)
+    if rs.get("semantic_rescued"):
+        print(f"  · lexical 미달인데 의미축으로 통과 {rs['semantic_rescued']}건 — "
+              f"gold 가 질문이 안 물은 요소까지 담았는지 검수 후보(정답셋 품질)")
     if rs.get("answer_correctness_degraded"):
         print(f"  ⚠ 정답 판정 degrade {rs['answer_correctness_degraded']}건 — "
               f"판정기(TP/FP/FN 분류) 실패로 의미유사도 단독 계산. 근접 오답을 못 걸렀을 수 있음")

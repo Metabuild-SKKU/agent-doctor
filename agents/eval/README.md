@@ -135,6 +135,15 @@ answer_score = 0.4·lexical + 0.6·semantic                          # ANSWER_SE
 - `_oracle_ok` 도 완화됐으므로 `_generation_failed`(B) 전제가 덜 성립하고 `_context_failed`(C)
   전제는 더 자주 성립한다 — 같은 실패가 B에서 C로 **재분류**될 수 있다(원인 자체는 C 가 더 맞지만,
   라벨 분포·처방 순서가 이전 실행과 달라진다).
+- `bad_gold_answer`(사람 검수 큐로 가는 D 라벨)는 `_oracle_ok` 실패가 전제라 **발동이 줄기만 한다**
+  — 새 게이트의 통과집합이 옛 게이트의 상위집합이기 때문(전수 격자로 고정:
+  `tests/test_answer_match.py::TestGateMonotonicity`). 줄어드는 대부분은 '오라클 답이 gold 와
+  의미상 같은데 표현만 달라서 정답셋 오류로 몰리던' 오탐이지만, **gold 가 질문이 묻지 않은 요소까지
+  담아 lexical 이 낮던 유형은 이제 통과**해 라벨로 남지 않는다(성공 probe 는 findings 가 비어야
+  하므로 라벨을 붙일 수 없다). 그 신호는 리포트 카운터 `semantic_rescued` 가 대신 들고 있다 —
+  'lexical 미달인데 의미축으로 통과' 건수 = 정답셋 품질 검수 후보이자 채점 변경의 영향 크기.
+  (C 슬롯의 `bad_gold_answer` 는 슬롯 전제가 `_oracle_ok` 를 요구하는데 함수는 그 반대를 요구해
+  이번 변경과 무관하게 원래부터 도달 불가다 — 실질 발동 경로는 B 슬롯 하나뿐.)
 - 점수 스케일이 전반적으로 올라간다. `composite`/`reliability`/`oracle_accuracy` 를 이 변경 **이전
   실행과 직접 비교하면 개선으로 오독**된다(optimize history 의 before/after 포함) — 재베이스라인 필요.
 

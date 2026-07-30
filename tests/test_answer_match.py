@@ -8,6 +8,7 @@ tests/test_answer_match.py
 여기서는 창(window) 경로가 그 저평가를 되살리면서도, 길게 쓴 무관한 답변은 통과시키지 않는
 분리(separation)를 못 박는다.
 """
+import itertools
 import os
 import sys
 import unittest
@@ -15,11 +16,12 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.schema import Probe
+from agents.eval import diagnose, metrics_common
 from agents.eval.metrics_basic import answer_match, best_window_char_f1, char_f1
 from agents.eval.scoring import reliability_score
 from agents.eval.types import (
-    ANSWER_PASS_THRESHOLD, ANSWER_SEMANTIC_WEIGHT, EvalRecord, F1_PASS_THRESHOLD,
-    blend_answer_score,
+    ANSWER_CORRECTNESS_MIN, ANSWER_PASS_THRESHOLD, ANSWER_SEMANTIC_WEIGHT,
+    EvalRecord, F1_PASS_THRESHOLD, Mode, blend_answer_score,
 )
 
 
@@ -160,6 +162,75 @@ class TestBlendedAnswerScore(unittest.TestCase):
         })
         self.assertAlmostEqual(reliability_score([rec]), rec.answer_score)
         self.assertGreaterEqual(rec.answer_score, ANSWER_PASS_THRESHOLD)
+
+
+class TestGateMonotonicity(unittest.TestCase):
+    """새 게이트의 통과집합이 옛 게이트(lexical 단독 + ac 강등)의 상위집합인지 전수 확인.
+
+    왜 고정하나: `_oracle_ok` 실패를 전제로 하는 라벨(bad_gold_answer, B그룹 생성 실패)의
+    발동률이 '줄기만 하고 늘지 않는다'가 이 성질에서 바로 나온다. 리뷰에서 나온 '발동 이동'
+    질문을 실행 없이 정적으로 답할 수 있는 근거이자, 앞으로 문턱을 만질 때 그 보장이 조용히
+    깨지지 않게 하는 잠금장치다. (degrade 값이 승격에서 빠지면서 강등 권한까지 잃어
+    실제로 이 성질이 한 번 깨졌었다 — _degraded_near_miss 로 복구.)
+    """
+
+    def _old_pass(self, lexical, ac):
+        """이 PR 이전 게이트: lexical 문턱 + answer_correctness 강등."""
+        if lexical < F1_PASS_THRESHOLD:
+            return False
+        return True if ac is None else ac >= ANSWER_CORRECTNESS_MIN
+
+    def _record(self, lexical, ragas):
+        probe = Probe(probe_id="p1", question="질문", source="taxonomy",
+                      gold_chunk_ids=["g_a"], ground_truth="정답")
+        rec = EvalRecord(probe=probe)
+        rec.recall_at_k, rec.f1_score = 1.0, lexical
+        rec.ragas, rec.ragas_done = dict(ragas), True
+        return rec
+
+    def test_new_gate_never_stricter_than_old(self):
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            grid = [i / 10 for i in range(11)]
+            counts_cases = [None, (0, 0, 4), (2, 0, 2), (4, 0, 0), (5, 6, 0)]
+            checked = 0
+            for lexical, ac, faith in itertools.product(grid, grid + [None], grid + [None]):
+                for counts in counts_cases:
+                    for degraded in (False, True):
+                        if degraded and counts is not None:
+                            continue            # degrade = factual 미측정 = 카운트 없음
+                        ragas = {}
+                        if ac is not None:
+                            ragas["answer_correctness"] = ac
+                            if degraded:
+                                ragas["answer_correctness_degraded"] = True
+                        if faith is not None:
+                            ragas["faithfulness"] = faith
+                        if counts is not None:
+                            tp, fp, fn = counts
+                            ragas.update({"answer_correctness_tp": tp,
+                                          "answer_correctness_fp": fp,
+                                          "answer_correctness_fn": fn})
+                        checked += 1
+                        if self._old_pass(lexical, ac):
+                            self.assertTrue(
+                                diagnose._f1_ok(self._record(lexical, ragas)),
+                                f"옛 게이트는 통과인데 새 게이트가 실패: "
+                                f"lexical={lexical}, ragas={ragas}",
+                            )
+            self.assertGreater(checked, 1000)   # 격자가 비어 공허하게 통과하지 않도록
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
+    def test_degraded_correctness_still_demotes(self):
+        """degrade 값은 승격엔 못 쓰지만 강등엔 쓴다 — 판정기가 죽어도 게이트가 안 헐거워진다."""
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            rec = self._record(0.6, {"answer_correctness": 0.1,
+                                     "answer_correctness_degraded": True})
+            self.assertFalse(diagnose._f1_ok(rec))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
 
 
 if __name__ == "__main__":

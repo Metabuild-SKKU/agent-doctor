@@ -33,7 +33,8 @@ from typing import Optional
 from core.schema import Finding
 from agents.eval.types import (
     DEFAULT_TOP_K, EvalRecord, Mode, resolve_mode,
-    F1_PASS_THRESHOLD, ANSWER_PASS_THRESHOLD, ANSWER_SEMANTIC_FLOOR, EVIDENCE_DENSITY_MIN,
+    F1_PASS_THRESHOLD, ANSWER_PASS_THRESHOLD, ANSWER_SEMANTIC_FLOOR,
+    ANSWER_CORRECTNESS_MIN, EVIDENCE_DENSITY_MIN,
     CONTEXT_CHARS_MAX, CONTEXT_MIDDLE_BAND,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN, RAGAS_CONTEXT_PRECISION_MIN,
 )
@@ -61,6 +62,21 @@ def _recall_ok(record: EvalRecord) -> bool:
     """검색 성공"""
     return record.recall_at_k >= 1
 
+def _degraded_near_miss(record: EvalRecord, *, oracle: bool) -> bool:
+    """유사도 단독으로 계산된 answer_correctness 가 근접 오답 문턱 미만인가 — 강등 전용 신호.
+
+    degraded(=factual TP/FP/FN 분류 실패) 값은 의미축(승격)에서 빼지만, 강등에서까지 빼면
+    'degrade 는 판정을 느슨하게 만들지 않는다'는 규약(metrics_ragas._answer_correctness 주석)이
+    깨진다 — 실제로 lexical 0.5·degraded ac 0.0 이 옛 게이트에선 실패, 새 게이트에선 통과였다.
+    승격은 막고 강등만 남겨, 판정기가 죽었을 때 게이트가 헐거워지지 않게 한다.
+    """
+    ragas = record.oracle_ragas if oracle else record.ragas
+    if not ragas.get("answer_correctness_degraded"):
+        return False
+    ac = record.oracle_ragas_answer_correctness if oracle else record.ragas_answer_correctness
+    return ac is not None and ac < ANSWER_CORRECTNESS_MIN
+
+
 def _answer_ok(record: EvalRecord, *, oracle: bool) -> bool:
     """정답 판정 — lexical 과 RAGAS 의미축을 섞은 한 점수(answer_score)로 판정한다.
 
@@ -71,14 +87,22 @@ def _answer_ok(record: EvalRecord, *, oracle: bool) -> bool:
     처방을 받았다. 반대로 의미축(RAGAS)만 쓰면 판정기 편차에 그대로 노출된다 —
     그래서 가중합(types.blend_answer_score)으로 서로의 흔들림을 흡수시킨다.
 
+    · 판정기 degrade + 근접 오답 문턱 미만(_degraded_near_miss): 실패 — 승격은 못 하지만
+      강등은 하는 값이라, 판정기가 죽었을 때 게이트가 헐거워지지 않게 막는다.
     · 의미축 미측정(DEEP 미만·판정기 degrade): lexical 단독 F1_PASS_THRESHOLD (기존 동작).
     · 의미축 < ANSWER_SEMANTIC_FLOOR: lexical 이 아무리 높아도 실패 — 표면형만 비슷한
       근접 오답(부정문·'3월'↔'3일')을 거르던 강등 규칙을 이 바닥선이 이어받는다.
     · 그 밖: answer_score >= ANSWER_PASS_THRESHOLD.
 
+    통과집합은 옛 게이트(lexical 단독 + ac 강등)의 상위집합이다 — 전수 격자로 '옛 통과 →
+    새 실패' 0건을 확인했다(tests/test_answer_match.py::TestGateMonotonicity). 그래서
+    _oracle_ok 실패를 전제로 하는 라벨(bad_gold_answer·B그룹)은 발동이 줄기만 하고 늘지 않는다.
+
     비용: 두 트랙 모두 record dict 만 읽는다(LLM 트리거 없음). _oracle_ok 은
     report._oracle_accuracy 가 성공 probe 에도 부르므로 이 성질이 지켜져야 한다.
     """
+    if _degraded_near_miss(record, oracle=oracle):
+        return False
     lexical = record.oracle_f1 if oracle else record.f1_score
     semantic = record.oracle_answer_semantic if oracle else record.answer_semantic
     if semantic is None:
