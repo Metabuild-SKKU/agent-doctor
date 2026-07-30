@@ -19,7 +19,6 @@ from typing import Any
 
 from qdrant_client import QdrantClient
 
-from agents.ingest.document_type import has_math_signal, is_math_document
 from agents.index.qdrant_store import (
     COLLECTION,
     DEFAULT_EMBEDDING_MODEL,
@@ -247,10 +246,6 @@ class Retriever:
             for chunk in self.chunks
             if chunk.get("chunk_id")
         }
-        self._corpus_has_math = any(
-            is_math_document(chunk.get("metadata", {}) or {})
-            for chunk in self.chunks
-        )
         self.retrieval_scope_id = (
             _first_metadata(self.chunks).get("retrieval_scope_id")
             if self.chunks
@@ -400,10 +395,6 @@ class Retriever:
             "fallback_used": fallback_used,
             "results": results,
         }
-
-
-def _looks_like_math_query(query: str) -> bool:
-    return has_math_signal(query)
 
 def _populate(
     raw_chunks: list[dict],
