@@ -185,9 +185,10 @@ class RagGeneratorTests(unittest.TestCase):
             )
 
         prompt_contexts = generate.call_args.args[1]
-        self.assertEqual(len(prompt_contexts), 1)
-        self.assertEqual(prompt_contexts[0].citation_index, 2)
-        self.assertEqual(prompt_contexts[0].text, "재택근무는 주 2일까지 가능합니다.")
+        self.assertEqual(len(prompt_contexts), 2)
+        self.assertEqual(prompt_contexts[0].citation_index, 1)
+        self.assertEqual(prompt_contexts[1].citation_index, 2)
+        self.assertEqual(prompt_contexts[1].text, "재택근무는 주 2일까지 가능합니다.")
 
     def test_context_compression_trims_unmatched_contexts(self):
         contexts = [
@@ -310,14 +311,37 @@ class RagGeneratorTests(unittest.TestCase):
                 contexts,
                 config={
                     "context_compression": True,
+                    "context_compression_max_contexts": 2,
+                },
+            )
+
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual(len(prompt_contexts), 2)
+        self.assertEqual(prompt_contexts[0].citation_index, 1)
+        self.assertEqual(prompt_contexts[1].citation_index, 3)
+        self.assertEqual(prompt_contexts[1].text, "재택근무는 주 2일까지 가능합니다.")
+
+    def test_context_compression_keeps_rank_one_when_synonym_has_no_overlap(self):
+        contexts = [
+            "To use vacation, get manager approval first. Then register it in HR.",
+            "PTO questions can be sent to the HR team.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer(
+                "What is the PTO request procedure?",
+                contexts,
+                config={
+                    "context_compression": True,
                     "context_compression_max_contexts": 1,
                 },
             )
 
         prompt_contexts = generate.call_args.args[1]
-        self.assertEqual(len(prompt_contexts), 1)
-        self.assertEqual(prompt_contexts[0].citation_index, 3)
-        self.assertEqual(prompt_contexts[0].text, "재택근무는 주 2일까지 가능합니다.")
+        self.assertEqual(len(prompt_contexts), 2)
+        self.assertEqual(prompt_contexts[0].citation_index, 1)
+        self.assertIn("manager approval", prompt_contexts[0].text)
+        self.assertEqual(prompt_contexts[1].citation_index, 2)
 
     def test_answer_question_returns_citations(self):
         retriever = build_retriever(

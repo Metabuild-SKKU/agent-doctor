@@ -258,10 +258,17 @@ def _compress_contexts_for_question(
         return original
 
     target_contexts = max_contexts if max_contexts is not None else matched_count
+    if compressed and not compressed[0][1] and matched_count > 0 and len(compressed) > 1:
+        target_contexts = max(target_contexts, 2)
     target_contexts = min(len(compressed), max(min_contexts, target_contexts))
     compressed = sorted(
         compressed,
-        key=lambda item: (-item[0], not item[1], item[2].citation_index),
+        key=lambda item: (
+            item[2].citation_index != 1,
+            -item[0],
+            not item[1],
+            item[2].citation_index,
+        ),
     )[:target_contexts]
     compressed = sorted(compressed, key=lambda item: item[2].citation_index)
     return [context for _score, _matched, context in compressed if context.text.strip()] or original
