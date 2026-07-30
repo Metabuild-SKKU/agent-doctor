@@ -1042,6 +1042,23 @@ class GraphRoutingTest(unittest.TestCase):
                                  iteration=1, max_iterations=3)
         self.assertEqual(self._route(graph.route_after_eval, state), "serve")
 
+    def test_route_after_eval_pass_with_pending_goes_optimize_to_finalize(self):
+        # 방금 적용한 처방으로 품질이 통과했는데 아직 판정(마감) 안 됐으면,
+        # Optimize 를 한 번 더 태워 pending 을 확정한 뒤 Serve 로 보낸다.
+        state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
+                                 iteration=1, max_iterations=3,
+                                 optimization_history=[self._pending()])
+        self.assertEqual(self._route(graph.route_after_eval, state), "optimize")
+
+    def test_route_after_eval_pass_with_active_study_pending_goes_serve(self):
+        # 진행 중 sweep(active_study)은 통과 시 기존대로 그대로 Serve.
+        item = self._pending()
+        item.metadata["active_study"] = True
+        state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
+                                 iteration=1, max_iterations=3,
+                                 optimization_history=[item])
+        self.assertEqual(self._route(graph.route_after_eval, state), "serve")
+
     def test_route_after_eval_budget_left_goes_optimize(self):
         state = AgentDoctorState(report=make_report(50.0), iteration=1, max_iterations=3)
         self.assertEqual(self._route(graph.route_after_eval, state), "optimize")
