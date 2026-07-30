@@ -17,9 +17,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from agents.eval import probe_gen
 from agents.eval.probe_gen import (
+    _HELD_OUT_FRAMES,
     _clean_topic_of,
     _generate_held_out_probes,
     _held_out_question,
+    _llm_topic,
     _probe_surplus_count,
     probe_quality_issue,
 )
@@ -142,6 +144,44 @@ class TableSeparatorFurnitureTest(unittest.TestCase):
         ))
 
 
+class TruncatedUrlFurnitureTest(unittest.TestCase):
+    """청킹에 잘린 URL·위키/LaTeX 잔여물이 게이트를 빠져나가지 않는지(리뷰 Blocker).
+
+    _FURNITURE_RE 의 URL 규칙이 http/www. 접두를 요구하고 도메인 규칙이 .kr 만 잡아,
+    청크 경계에서 스킴이 잘린 조각("s://...")·위키 쿼리·LaTeX 마크업이 furniture 인데도
+    통과해 그대로 held-out 질문에 박혔다(실측: doc_6ecb97872f82_9).
+    """
+
+    def test_rejects_scheme_truncated_url(self):
+        for q in (
+            "s://ko.wikipedia.org/w/index.php?title=타 와 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+            "ttps://example.com/path 와 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+        ):
+            with self.subTest(q=q):
+                self.assertIsNotNone(probe_quality_issue(q, ""))
+
+    def test_rejects_schemeless_domain_with_path(self):
+        self.assertIsNotNone(probe_quality_issue(
+            "ko.wikipedia.org/w/index.php?title=x 와 관련해 아직 공개되지 않은 내규는 무엇인가요?", ""))
+
+    def test_rejects_wiki_and_latex_residue(self):
+        for q in (
+            "d {\\displaystyle a+ib+jc+kd} 와 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+            "문서 &oldid=12345 판과 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+        ):
+            with self.subTest(q=q):
+                self.assertIsNotNone(probe_quality_issue(q, ""))
+
+    def test_accepts_plain_domain_word_without_path(self):
+        # 경로 슬래시 없는 ".com"·".org" 로 끝나는 정상 단어는 통과해야 한다(오탐 방지).
+        for q in (
+            "회사 이메일 도메인이 example.com 인 이유는 무엇인가요?",
+            "이 조직이 .org 도메인을 쓰는 근거는 무엇인가요?",
+        ):
+            with self.subTest(q=q):
+                self.assertIsNone(probe_quality_issue(q, ""))
+
+
 class CleanTopicOfTest(unittest.TestCase):
     """_clean_topic_of: furniture 문장을 건너뛰고 깨끗한 주제를 고른다(무응답 전용)."""
 
@@ -163,10 +203,13 @@ class CleanTopicOfTest(unittest.TestCase):
 
 
 class HeldOutQuestionContractTest(unittest.TestCase):
-    """held-out 무응답 probe 조립 경로(LLM / 휴리스틱 폴백)의 계약을 회귀로 고정한다.
+    """held-out 무응답 probe 조립 경로(LLM 주제 / 휴리스틱 폴백)의 계약을 회귀로 고정한다.
 
-    계약(리뷰 지적 2): held-out 은 반드시 무응답(answer_exists=False)이어야 하고, gold_chunk_ids
-    는 비어야 하며, LLM 이 컨텍스트에서 답 가능한 질문을 내면 결정적 fallback 으로 떨어져야 한다.
+    계약(리뷰 High): held-out 은 반드시 코퍼스 전체에서 무응답이어야 한다. LLM 에게 질문 전체를
+    맡기지 않고 "주제"만 뽑게 한 뒤, 무응답 프레임(_HELD_OUT_FRAMES)을 템플릿이 유지한다 —
+    "아직 공개되지 않은…" 류 프레임은 정의상 코퍼스 어디에도 답이 없으므로 구성적으로 무응답이
+    보장된다(다른 청크가 topic 을 담고 있어도 그 세부는 부재). 조립부는 answer_exists=False,
+    gold_chunk_ids=[] 를 유지한다.
     """
 
     CTX = ("영농조합법인으로부터 받는 배당소득에 대한 저율 과세 혜택 규정입니다. "
@@ -175,41 +218,52 @@ class HeldOutQuestionContractTest(unittest.TestCase):
     def _chunks(self, n=3):
         return [Chunk(chunk_id=f"c{i}", doc_id="d0", text=self.CTX) for i in range(n)]
 
-    def test_llm_answerable_question_falls_back_to_deterministic(self):
-        # LLM 이 컨텍스트에서 답 가능한 질문을 내면 버리고 결정적(정의상-무응답) fallback 사용.
-        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=True), \
-             mock.patch.object(probe_gen.llm_provider, "chat_json") as cj:
-            cj.side_effect = [
-                {"question": "배당소득의 적용 세율은 몇 퍼센트인가요?"},  # 생성(답이 컨텍스트에 있음)
-                {"answerable": True},                                     # 검증: 답 가능 → 폐기
-            ]
-            question = _held_out_question(self.CTX)
-        self.assertIn("아직 공개되지 않은", question)  # 결정적 fallback 프레이밍
-        self.assertNotIn("몇 퍼센트", question)         # answerable 생성물은 안 쓰임
+    def _all_frames_are_no_answer(self, question):
+        # 어떤 프레임이 쓰였든 무응답-보장 문구 중 하나로 끝나야 한다.
+        return any(frame.split("{topic}")[-1] in question for frame in _HELD_OUT_FRAMES)
 
-    def test_llm_unanswerable_question_is_kept(self):
+    def test_llm_topic_is_wrapped_in_no_answer_frame(self):
+        # LLM 은 주제만 뽑고, 무응답 프레임은 템플릿이 유지한다.
         with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=True), \
-             mock.patch.object(probe_gen.llm_provider, "chat_json") as cj:
-            cj.side_effect = [
-                {"question": "이 규정의 2027년 개정 예정 세부 내용은 무엇인가요?"},  # 생성
-                {"answerable": False},                                              # 검증: 무응답
-            ]
-            question = _held_out_question(self.CTX)
-        self.assertEqual(question, "이 규정의 2027년 개정 예정 세부 내용은 무엇인가요?")
+             mock.patch.object(probe_gen.llm_provider, "chat_json",
+                               return_value={"topic": "배당소득 저율과세"}):
+            question = _held_out_question(self.CTX, frame_index=0)
+        self.assertIn("배당소득 저율과세", question)          # LLM 주제가 들어감
+        self.assertTrue(self._all_frames_are_no_answer(question))  # 무응답 프레임 유지
 
-    def test_no_key_uses_deterministic_fallback(self):
-        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
-            question = _held_out_question(self.CTX)
+    def test_llm_topic_with_furniture_falls_back_to_heuristic(self):
+        # LLM 이 furniture 섞인 주제를 내면 게이트가 걸러 휴리스틱 주제로 폴백한다.
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=True), \
+             mock.patch.object(probe_gen.llm_provider, "chat_json",
+                               return_value={"topic": "s://ko.wikipedia.org/w/index.php?title=x"}):
+            question = _held_out_question(self.CTX, frame_index=0)
         self.assertIsNotNone(question)
-        self.assertIn("아직 공개되지 않은", question)
+        self.assertNotIn("://", question)                     # furniture 주제는 안 쓰임
+        self.assertTrue(self._all_frames_are_no_answer(question))
+
+    def test_no_key_uses_heuristic_topic_and_frame(self):
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
+            question = _held_out_question(self.CTX, frame_index=0)
+        self.assertIsNotNone(question)
+        self.assertTrue(self._all_frames_are_no_answer(question))
+
+    def test_frame_index_rotates(self):
+        # frame_index 로 문형을 순환해 단조로움을 피한다.
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
+            qs = {_held_out_question(self.CTX, frame_index=i) for i in range(len(_HELD_OUT_FRAMES))}
+        self.assertEqual(len(qs), len(_HELD_OUT_FRAMES))       # 모두 서로 다른 프레임
 
     def test_furniture_only_chunk_returns_none(self):
-        # 깨끗한 문장이 없는 청크는 None → 호출부가 그 청크를 버린다.
+        # 깨끗한 주제가 없는 청크는 None → 호출부가 그 청크를 버린다.
         with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
             self.assertIsNone(_held_out_question("페이지 522 ㅣ 전자공시시스템"))
 
+    def test_llm_topic_returns_none_without_key(self):
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
+            self.assertIsNone(_llm_topic(self.CTX))
+
     def test_assembled_probes_are_no_answer_with_empty_gold(self):
-        # 조립부 계약: answer_exists=False, gold_chunk_ids=[], recall 오탐 차단.
+        # 조립부 계약: answer_exists=False, gold_chunk_ids=[], 무응답 프레임, 게이트 통과.
         with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
             probes = _generate_held_out_probes(self._chunks(), n=2)
         self.assertEqual(len(probes), 2)
@@ -217,22 +271,8 @@ class HeldOutQuestionContractTest(unittest.TestCase):
             self.assertFalse(p.answer_exists)
             self.assertEqual(p.gold_chunk_ids, [])
             self.assertIsNone(p.ground_truth)
+            self.assertTrue(self._all_frames_are_no_answer(p.question))
             self.assertIsNone(probe_quality_issue(p.question, ""))  # 게이트 통과분만 조립
-
-    def test_assembled_probes_drop_answerable_llm_output(self):
-        # LLM 생성물이 전부 answerable 이어도, fallback 으로 떨어져 무응답 계약이 유지된다.
-        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=True), \
-             mock.patch.object(probe_gen.llm_provider, "chat_json") as cj:
-            def _route(system, user, **kw):
-                if "answerable" in system:
-                    return {"answerable": True}          # 항상 답 가능하다고 판정
-                return {"question": "적용 세율은 몇 퍼센트인가요?"}  # 항상 answerable 생성
-            cj.side_effect = _route
-            probes = _generate_held_out_probes(self._chunks(), n=2)
-        self.assertEqual(len(probes), 2)
-        for p in probes:
-            self.assertFalse(p.answer_exists)
-            self.assertIn("아직 공개되지 않은", p.question)  # 전부 결정적 fallback
 
 
 class ProbeSurplusCountTest(unittest.TestCase):
