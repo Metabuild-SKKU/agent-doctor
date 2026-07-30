@@ -80,12 +80,19 @@ def stride_sample(vectors: list[Vector], limit: int = TOPIC_CLUSTER_BASELINE_SAM
     (실측 시뮬: 전체 0.082 vs head-100 0.538, 약 7배) 모든 ratio 가 눌린다 — 실패가 실제로
     뭉쳐 있어도 "코퍼스 대비 안 뭉침"으로 읽혀 concentrated 를 놓친다.
 
-    stride 로 뽑으면 코퍼스 전 구간을 훑으므로 그 편향이 사라지고, 무작위가 아니라 결정적
-    이라 회차 간 신호도 흔들리지 않는다(probe_gen 전반의 결정성 원칙과 동일).
+    전 구간에 고르게 걸친 인덱스를 직접 계산해 뽑으므로 그 편향이 사라지고, 무작위가 아니라
+    결정적이라 회차 간 신호도 흔들리지 않는다(probe_gen 전반의 결정성 원칙과 동일).
+
+    정수 stride(`vectors[::n//limit]`)를 쓰면 안 된다: n < 2*limit 구간에서 몫이 1 로
+    뭉개져 앞에서 limit 개를 자른 것과 똑같아진다(n=150·limit=100 이면 앞 100개 = 코퍼스의
+    66% 만 훑는다). 그 구간이 바로 head 편향이 되살아나는 지점이라, 실측으로 concentrated
+    코퍼스가 spread 로 뒤집히는 걸 확인했다.
     """
-    if limit <= 0 or len(vectors) <= limit:
+    n = len(vectors)
+    if limit <= 0 or n <= limit:
         return list(vectors)
-    return vectors[:: len(vectors) // limit][:limit]
+    # i*n//limit — 마지막 표본이 항상 끝 구간에서 나오도록 전 구간을 균등 분할한다.
+    return [vectors[i * n // limit] for i in range(limit)]
 
 
 def _baseline_cohesion(corpus_vectors: list[Vector]) -> Optional[float]:

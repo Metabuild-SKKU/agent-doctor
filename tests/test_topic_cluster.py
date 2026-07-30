@@ -77,6 +77,27 @@ class TopicClusterClassifyTest(unittest.TestCase):
         stride_baseline = tc._mean_pairwise_cosine(tc.stride_sample(corpus))
         self.assertLess(stride_baseline, head_baseline)
 
+    def test_sample_covers_full_range_at_every_corpus_size(self):
+        """정수 stride 붕괴 회귀 — n < 2*limit 이면 몫이 1 로 뭉개져 head 표본이 된다.
+
+        n=150·limit=100 에서 `v[::150//100]` = `v[::1][:100]` = 앞 100개다. 그 구간이
+        곧 head 편향이 되살아나는 지점이라, 크기별로 전 구간을 훑는지 직접 고정한다.
+        """
+        for n in (101, 150, 199, 200, 299, 300, 1000):
+            sample = tc.stride_sample(list(range(n)), limit=100)
+            self.assertEqual(len(sample), 100, f"n={n}")
+            self.assertEqual(len(set(sample)), 100, f"n={n} 중복 표본")
+            # 마지막 표본이 코퍼스 끝 근처에서 나와야 한다(앞쪽에 갇히면 편향).
+            self.assertGreater((sample[-1] + 1) / n, 0.98, f"n={n} 앞쪽 편향")
+
+    def test_concentrated_survives_stride_collapse_corpus_size(self):
+        # 위 붕괴가 실제 판정을 뒤집는지 — 앞 100청크가 한 문서(응집), 뒤 50이 흩어짐.
+        # 정수 stride 였을 때 baseline 0.9998(실제 0.527)로 부풀어 spread 로 오판했다.
+        tight = [[math.cos(a * 0.0005), math.sin(a * 0.0005)] for a in range(100)]
+        scattered = [[math.cos(a * 0.06), math.sin(a * 0.06)] for a in range(50)]
+        corpus = tight + scattered
+        self.assertEqual(tc.classify(tight[:10], corpus), tc.CONCENTRATED)
+
     def test_stride_sample_is_deterministic_and_capped(self):
         vectors = [[float(i), 0.0] for i in range(1000)]
         first = tc.stride_sample(vectors, limit=100)
