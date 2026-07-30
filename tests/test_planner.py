@@ -520,14 +520,87 @@ class PlannerCandidateListTest(unittest.TestCase):
         )
 
 
-class TopicClusterAppliesWhenTest(unittest.TestCase):
-    """applies_when.topic_cluster 신호가 semantic_mismatch 처방을 어떻게 가르는지.
+class TopicClusterSignalDeferredTest(unittest.TestCase):
+    """topic_cluster 신호 소비가 꺼진 현재 동작 — 관측용 신호로만 유지.
 
-    rules.py 계약: spread/concentrated → swap_embedding_model 만, none → 청킹 처방만,
-    신호 미측정 → 셋 다(순차 fallback). 기존 동작(신호 없음)이 안 깨지는 게 핵심.
+    planner._CONSUME_TOPIC_CLUSTER_SIGNAL=False 인 동안 _available_prescriptions 는
+    findings 를 줘도 applies_when 을 보지 않고, 신호값과 무관하게 전 처방을 순서대로
+    돌려줘야 한다(신호 배선 이전 = 순차 fallback 과 동작 동일). 소비를 켰을 때의 대조
+    로직 계약은 아래 TopicClusterAppliesWhenConsumeOnTest 가 별도로 고정한다.
     """
 
     LABEL = "retrieval_semantic_mismatch"
+
+    def _rule(self):
+        from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
+        return LABEL_TO_PRESCRIPTIONS[self.LABEL]
+
+    def _finding_with_signal(self, signal):
+        f = make_finding("p0", self.LABEL)
+        if signal is not None:
+            f.metadata["topic_cluster"] = signal
+        return f
+
+    def _ids(self, signal):
+        rule = self._rule()
+        avail = planner._available_prescriptions(
+            rule, self.LABEL, set(), [self._finding_with_signal(signal)]
+        )
+        return [p["id"] for p in avail]
+
+    def test_consume_flag_is_off(self):
+        # 이 PR 이 착지시키는 상태 = 소비 OFF. 켜지면 아래 회귀들이 의미를 잃으므로
+        # 플래그 자체를 명시적으로 고정한다(소비를 켤 때 이 테스트가 먼저 걸린다).
+        self.assertFalse(planner._CONSUME_TOPIC_CLUSTER_SIGNAL)
+
+    def test_all_signals_keep_all_prescriptions(self):
+        # 신호값이 무엇이든(소비 OFF) 전 처방이 순서대로 통과해야 한다.
+        rule = self._rule()
+        all_ids = [p["id"] for p in rule["prescriptions"]]
+        for signal in ("concentrated", "spread", "none", "unmeasured", None):
+            with self.subTest(signal=signal):
+                self.assertEqual(self._ids(signal), all_ids)
+
+    def test_no_findings_arg_is_legacy_blacklist_only(self):
+        # findings 를 안 주는 레거시 호출도 블랙리스트만 본다(소비 OFF 와 결과 동일).
+        rule = self._rule()
+        ids = [p["id"] for p in planner._available_prescriptions(rule, self.LABEL, set())]
+        self.assertEqual(ids, [p["id"] for p in rule["prescriptions"]])
+
+    def test_blacklist_still_filters_under_deferred_consume(self):
+        # 소비가 꺼져 있어도 블랙리스트는 계속 유효하다(신호와 무관한 기존 경로).
+        rule = self._rule()
+        blacklist = {(self.LABEL, "swap_embedding_model")}
+        finding = self._finding_with_signal("spread")
+        ids = [
+            p["id"]
+            for p in planner._available_prescriptions(
+                rule, self.LABEL, blacklist, [finding]
+            )
+        ]
+        self.assertNotIn("swap_embedding_model", ids)
+        self.assertIn("shrink_chunk_size", ids)
+
+
+class TopicClusterAppliesWhenConsumeOnTest(unittest.TestCase):
+    """소비를 켰을 때(_CONSUME_TOPIC_CLUSTER_SIGNAL=True)의 applies_when 대조 계약.
+
+    소비는 현재 꺼져 있지만 대조 로직(_prescription_applies)과 완화 경로는 그대로 배선돼
+    있다. 향후 캘리브레이션·임베딩 교체가 준비돼 소비를 켤 때 이 계약이 깨지지 않도록,
+    플래그를 켠 상태로 고정해 회귀를 잡아둔다.
+
+    rules.py 계약: spread/concentrated → swap_embedding_model 만, none → 청킹 처방만,
+    신호 미측정/unmeasured → 셋 다(순차 fallback).
+    """
+
+    LABEL = "retrieval_semantic_mismatch"
+
+    def setUp(self):
+        self._saved = planner._CONSUME_TOPIC_CLUSTER_SIGNAL
+        planner._CONSUME_TOPIC_CLUSTER_SIGNAL = True
+
+    def tearDown(self):
+        planner._CONSUME_TOPIC_CLUSTER_SIGNAL = self._saved
 
     def _rule(self):
         from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
@@ -563,12 +636,6 @@ class TopicClusterAppliesWhenTest(unittest.TestCase):
         rule = self._rule()
         all_ids = [p["id"] for p in rule["prescriptions"]]
         self.assertEqual(self._ids(None), all_ids)
-
-    def test_no_findings_arg_is_legacy_blacklist_only(self):
-        # findings 를 안 주는 레거시 호출은 applies_when 을 보지 않는다(블랙리스트만).
-        rule = self._rule()
-        ids = [p["id"] for p in planner._available_prescriptions(rule, self.LABEL, set())]
-        self.assertEqual(ids, [p["id"] for p in rule["prescriptions"]])
 
     def test_prescription_without_applies_when_always_passes(self):
         # applies_when 이 없는 라벨(예: retrieval_lexical_mismatch)은 신호와 무관하게 통과.

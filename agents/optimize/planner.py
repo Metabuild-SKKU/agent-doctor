@@ -81,6 +81,21 @@ _MAX_STEP_PER_PROBE = 2.0
 # 무릎에서 위로 이만큼만 시도한다. (OPTIMIZER_IMPLEMENTATION_PLAN.md §2.3)
 _MAX_SWEEP_CANDIDATES = 3
 
+# topic_cluster 신호 소비 스위치 — 현재 OFF(관측용 신호로만 유지).
+# 신호 생산(Eval)·대조 로직(_prescription_applies)·테스트는 모두 배선돼 있으나,
+# 소비(applies_when 으로 후보를 실제로 거르는 일)는 의도적으로 꺼 둔다. 이유:
+#   1) 신호가 고르는 유일한 처방 swap_embedding_model 은 optimizer 의
+#      DEFAULT_CAPABILITIES["embedding_model"]=False 로 항상 거절돼(unsupported_capability),
+#      spread/concentrated 를 활성화해도 결국 청킹으로 완화된다 — 분기가 config 적용까지
+#      이어지지 않는다.
+#   2) 임계값(rules.py TOPIC_CLUSTER_*_RATIO)이 아직 캘리브레이션 전 임의값이고,
+#      실측상 추정량 분산(stdev~0.5)이 none 대 폭(~0.2)보다 커, 신호 없는 회차도
+#      spread/concentrated 로 튄다. 소비를 켜면 그 노이즈가 비싼 재색인을 잘못 발동시킨다.
+# 따라서 임베딩 교체 실행(capability 활성화 + 검증 모델 후보 + 차원/재색인 통합검증)과
+# 임계값 캘리브레이션(신뢰도 게이트)이 준비된 뒤 이 플래그를 True 로 켠다. False 인 동안
+# planner 는 신호를 무시하고 전 처방을 순서대로 시도한다(신호 배선 이전과 동일).
+_CONSUME_TOPIC_CLUSTER_SIGNAL = False
+
 # 방향 키워드를 계산할 때 baseline_config 에 해당 키가 없을 경우의 기본 현재값.
 _DEFAULT_CURRENT: dict[str, int] = {
     "top_k": 5,
@@ -341,17 +356,22 @@ def _available_prescriptions(
     findings 를 주면 applies_when(topic_cluster 등) 신호로 후보를 거른다. 안 주면(레거시
     호출) 블랙리스트만 본다 — 신호 대조는 findings 가 있어야 성립하기 때문.
 
-    신호로 걸러 후보가 0개가 되면 신호 조건을 완화해 블랙리스트만 적용한 목록을 돌려준다.
-    신호는 처방 순서를 '선호'하게 만들 뿐 라벨을 통째로 막아선 안 되기 때문이다 — 예를 들어
-    topic_cluster=spread 인데 swap_embedding_model 이 블랙리스트에 오르면, 완화가 없으면
-    이 라벨의 후보가 전부 사라져 _pick_top 이 라벨 자체를 건너뛴다(신호 배선 이전에는 청킹
-    처방으로 넘어가던 경로라 회귀). 임계값이 아직 캘리브레이션 안 된 임의값이라 더욱,
-    신호 때문에 고칠 기회를 잃는 쪽보다 덜 맞는 처방이라도 시도하는 쪽이 안전하다.
+    ⚠️ 현재 신호 소비는 _CONSUME_TOPIC_CLUSTER_SIGNAL=False 로 꺼져 있어, findings 를 줘도
+    applies_when 대조를 건너뛰고 블랙리스트만 본다(관측용 신호로만 유지 — 상수 정의부 주석
+    참고). 아래 완화 로직은 소비를 켰을 때를 위한 것으로, 소비가 켜지면 다시 활성화된다.
+
+    (소비 ON 일 때의 계약) 신호로 걸러 후보가 0개가 되면 신호 조건을 완화해 블랙리스트만
+    적용한 목록을 돌려준다. 신호는 처방 순서를 '선호'하게 만들 뿐 라벨을 통째로 막아선 안
+    되기 때문이다 — 예를 들어 topic_cluster=spread 인데 swap_embedding_model 이 블랙리스트에
+    오르면, 완화가 없으면 이 라벨의 후보가 전부 사라져 _pick_top 이 라벨 자체를 건너뛴다
+    (신호 배선 이전에는 청킹 처방으로 넘어가던 경로라 회귀). 임계값이 아직 캘리브레이션 안
+    된 임의값이라 더욱, 신호 때문에 고칠 기회를 잃는 쪽보다 덜 맞는 처방이라도 시도하는
+    쪽이 안전하다.
     """
     unblacklisted = [
         p for p in rule.get("prescriptions", []) if (label, p["id"]) not in blacklist
     ]
-    if findings is None:
+    if findings is None or not _CONSUME_TOPIC_CLUSTER_SIGNAL:
         return unblacklisted
     preferred = [p for p in unblacklisted if _prescription_applies(p, findings)]
     return preferred or unblacklisted
@@ -363,9 +383,10 @@ def _pick_top(
 ) -> tuple[str, list[Finding], dict, float] | None:
     """정렬된 목록에서 '아직 시도할 처방이 남은' 최상위 라벨 묶음을 고른다.
 
-    라벨이 스킵되는 조건은 블랙리스트로 처방이 전부 소진됐을 때뿐이다 — applies_when 신호는
-    _available_prescriptions 안에서 후보가 0개가 되면 완화되므로, 신호만으로는 라벨이
-    통째로 건너뛰어지지 않는다.
+    라벨이 스킵되는 조건은 블랙리스트로 처방이 전부 소진됐을 때뿐이다. 신호 소비가 켜져
+    있어도(_CONSUME_TOPIC_CLUSTER_SIGNAL) applies_when 은 _available_prescriptions 안에서
+    후보가 0개가 되면 완화되므로, 신호만으로는 라벨이 통째로 건너뛰어지지 않는다. 소비가
+    꺼진 현재는 신호 자체를 보지 않아 늘 블랙리스트만 기준이 된다.
     """
     for label, findings, rule, score in ranked:
         if _available_prescriptions(rule, label, blacklist, findings):

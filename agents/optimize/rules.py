@@ -101,16 +101,22 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "target_metrics": ["context_recall"],  # dense·BM25 둘 다 놓친 gold를 검색되게
 
         #   토픽클러스터 분석은 Eval 소관 → finding.metadata["topic_cluster"]로 넘어옴.
-        #   rules는 후보만 나열 + applies_when 태그, 실제 선택은 planner가 수행.
+        #   rules는 후보만 나열 + applies_when 태그. (아래 매핑은 소비가 켜졌을 때의 계약)
         #     "spread"       → Case3(임베딩 모델 자체 약함) → 임베딩 교체
         #     "concentrated" → Case2(특정 도메인 약함)      → 임베딩 교체(도메인특화/파인튜닝)
         #     "none"         → Case1(청크 희석)             → 청킹 조정
 
-        #   신호가 없으면(미측정/"unmeasured") planner가 리스트 순서대로 순차 시도(fallback).
-        #   신호가 고른 처방이 블랙리스트로 소진되면 planner가 조건을 완화해 나머지를
-        #   시도한다 — 신호는 선호일 뿐 라벨을 통째로 막지 않는다.
+        #   ⚠️ 현재 이 applies_when 태그의 소비는 꺼져 있다
+        #   (planner._CONSUME_TOPIC_CLUSTER_SIGNAL=False) — 관측용 신호로만 유지한다.
+        #   신호는 finding.metadata 에 계속 기록되지만 planner 는 아직 그 값으로 처방을
+        #   가르지 않고, 이 라벨의 세 처방을 순서대로 순차 시도한다(신호 배선 이전과 동일).
+        #   소비를 유예한 이유(요약): 위 매핑의 1순위 swap_embedding_model 이 optimizer
+        #   capability(embedding_model=False)로 항상 거절돼 분기가 config 적용까지 이어지지
+        #   않고, 임계값(TOPIC_CLUSTER_*_RATIO)도 캘리브레이션 전 임의값이라 추정량 노이즈가
+        #   비싼 재색인을 잘못 발동시킬 수 있기 때문. 임베딩 교체 실행 + 임계값 캘리브레이션이
+        #   준비되면 그 플래그를 켠다. 자세한 배경은 planner 정의부 주석 참고.
         #   신호 생산: agents/eval/topic_cluster.py + agent.py::_annotate_topic_cluster
-        #   신호 소비: planner::_prescription_applies (finding.metadata["topic_cluster"] 대조)
+        #   신호 소비(유예): planner::_prescription_applies (플래그 ON 시 metadata 대조)
 
         "prescriptions": [
             {
