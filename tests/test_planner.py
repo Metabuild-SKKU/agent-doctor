@@ -351,6 +351,49 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertEqual(request.max_trials, 1)
         self.assertIn("chunk_precheck_context", request.metadata)
 
+    def test_single_explicit_chunk_candidate_without_measurements_uses_rules(self):
+        finding = make_finding(
+            "p1", "too_long_context",
+            candidates={"chunker.chunk_size": [400]},
+        )
+        state = AgentDoctorState(
+            report=_report(finding),
+            documents=[Document("d1", "memory", "txt", "가" * 1000)],
+            index_config={"top_k": 5, "chunk_size": 512, "chunk_overlap": 50},
+        )
+
+        request, _decision = planner.plan(
+            state,
+            blacklist=self._chunk_blacklist(),
+        )
+
+        self.assertEqual(request.search_space, {"chunker.chunk_size": [400]})
+        self.assertEqual(request.optimizer, "rules")
+        self.assertEqual(request.max_trials, 1)
+        self.assertNotIn("chunk_precheck_context", request.metadata)
+
+    def test_multiple_chunk_candidates_without_measurements_use_rules(self):
+        finding = make_finding(
+            "p1", "too_long_context",
+            candidates={"chunker.chunk_size": [400, 600]},
+        )
+        state = AgentDoctorState(
+            report=_report(finding),
+            index_config={"top_k": 5, "chunk_size": 512, "chunk_overlap": 50},
+        )
+
+        request, _decision = planner.plan(
+            state,
+            blacklist=self._chunk_blacklist(),
+        )
+
+        self.assertEqual(
+            request.search_space,
+            {"chunker.chunk_size": [400, 600]},
+        )
+        self.assertEqual(request.optimizer, "rules")
+        self.assertNotIn("chunk_precheck_context", request.metadata)
+
     @staticmethod
     def _chunk_blacklist():
         """too_long_context의 앞선 두 처방을 건너뛰고 chunk 처방을 선택한다."""
@@ -641,9 +684,7 @@ class PlannerCandidateListTest(unittest.TestCase):
 
     def test_out_of_range_current_clamps_to_nearest_absolute_bound(self):
         cases = [
-            (160, "increase", 160, 200, "min_chunk_size"),
             (128, "increase", 160, 200, "min_chunk_size"),
-            (2000, "decrease", 100, 1500, "max_chunk_size"),
             (2048, "decrease", 100, 1500, "max_chunk_size"),
         ]
 
@@ -670,6 +711,33 @@ class PlannerCandidateListTest(unittest.TestCase):
                 self.assertEqual(metadata["safety_bound_clamp"], bound_name)
                 self.assertFalse(metadata["max_step_ratio_applied"])
                 self.assertEqual(metadata["generated_candidates"], [expected])
+
+    def test_near_out_of_range_current_keeps_normal_candidate_path(self):
+        cases = [
+            (160, "increase", 160, [200]),
+            (1550, "decrease", 100, [1450, 1300, 1200]),
+            (1600, "decrease", 100, [1450, 1350, 1200]),
+            (1750, "decrease", 100, [1500, 1350]),
+            (2000, "decrease", 100, [1500]),
+        ]
+
+        for current, direction, length, expected in cases:
+            with self.subTest(current=current, direction=direction):
+                state = AgentDoctorState(index_config={
+                    "chunk_size": current,
+                    "chunk_candidate_policy": self._chunk_policy(),
+                })
+
+                values, metadata = planner._ground_chunk_size_candidates(
+                    [],
+                    state,
+                    direction,
+                    self._evidence_analysis(length=length),
+                )
+
+                self.assertEqual(values, expected)
+                self.assertTrue(metadata["max_step_ratio_applied"])
+                self.assertNotIn("safety_bound_clamp", metadata)
 
     def test_out_of_range_clamp_does_not_override_evidence_direction_conflict(self):
         cases = [

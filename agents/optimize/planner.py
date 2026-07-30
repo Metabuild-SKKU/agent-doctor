@@ -41,7 +41,7 @@ import uuid
 from typing import Any
 
 from core.state import AgentDoctorState
-from core.schema import Finding
+from core.schema import Document, Finding
 from agents.optimize import rules
 from agents.optimize import gate
 from agents.optimize.config_mapper import canonicalize_path, get_current_value
@@ -795,34 +795,20 @@ def _ground_chunk_size_candidates(
         metadata["status"] = "direction_conflict"
         return None, metadata
 
-    # baseline이 절대 안전 범위 밖이면 max_step_ratio를 지키면서 범위 안으로
-    # 들어올 수 없는 불연속 구간이 생긴다. evidence 방향과 일치할 때만 가장
-    # 가까운 절대 경계로 복구하고, 실제 적용 여부는 prescreener가 판단한다.
-    boundary_target: int | None = None
-    boundary_name: str | None = None
-    if direction == "decrease" and current_int > max_chunk_size:
-        boundary_target = max_chunk_size
-        boundary_name = "max_chunk_size"
-    elif direction == "increase" and current_int < min_chunk_size:
-        boundary_target = min_chunk_size
-        boundary_name = "min_chunk_size"
-    if boundary_target is not None:
-        metadata.update({
-            "target_chunk_size": boundary_target,
-            "candidate_lower_limit": boundary_target,
-            "candidate_upper_limit": boundary_target,
-            "safety_bound_clamp": boundary_name,
-            "max_step_ratio_applied": False,
-            "generated_candidates": [boundary_target],
-        })
-        return [boundary_target], metadata
-
     limits = _chunk_candidate_limits(
         current_int,
         step,
         policy,
     )
     if limits is None:
+        boundary = _chunk_safety_boundary(
+            current_int,
+            direction,
+            min_chunk_size,
+            max_chunk_size,
+        )
+        if boundary is not None:
+            return _clamped_chunk_candidate(metadata, *boundary)
         return None, {
             **limit_metadata,
             "status": "no_safe_candidate_within_bounds",
@@ -834,6 +820,14 @@ def _ground_chunk_size_candidates(
     else:
         lower_limit = max(lower_limit, ((current_int // step) + 1) * step)
     if lower_limit > upper_limit:
+        boundary = _chunk_safety_boundary(
+            current_int,
+            direction,
+            min_chunk_size,
+            max_chunk_size,
+        )
+        if boundary is not None:
+            return _clamped_chunk_candidate(metadata, *boundary)
         return None, {
             **limit_metadata,
             "status": "no_safe_candidate_within_bounds",
@@ -869,6 +863,39 @@ def _ground_chunk_size_candidates(
         return None, metadata
     metadata["generated_candidates"] = list(candidates)
     return candidates, metadata
+
+
+def _chunk_safety_boundary(
+    current: int,
+    direction: str,
+    min_chunk_size: int,
+    max_chunk_size: int,
+) -> tuple[int, str] | None:
+    """범위 밖 baseline을 처방 방향과 일치하는 가장 가까운 경계로 복구한다."""
+
+    if direction == "decrease" and current > max_chunk_size:
+        return max_chunk_size, "max_chunk_size"
+    if direction == "increase" and current < min_chunk_size:
+        return min_chunk_size, "min_chunk_size"
+    return None
+
+
+def _clamped_chunk_candidate(
+    metadata: dict[str, Any],
+    target: int,
+    boundary_name: str,
+) -> tuple[list[int], dict[str, Any]]:
+    """비율·절대 범위의 교집합이 없을 때만 안전 경계 후보를 만든다."""
+
+    metadata.update({
+        "target_chunk_size": target,
+        "candidate_lower_limit": target,
+        "candidate_upper_limit": target,
+        "safety_bound_clamp": boundary_name,
+        "max_step_ratio_applied": False,
+        "generated_candidates": [target],
+    })
+    return [target], metadata
 
 
 def _chunk_candidate_limits(
@@ -1367,12 +1394,27 @@ def _build_request(
         if isinstance(candidate_grounding, dict)
         else None
     )
+    chunk_precheck_context = (
+        _chunk_precheck_context(
+            state,
+            findings,
+            path=selected_path,
+            evidence_analysis=evidence_analysis,
+        )
+        if selected_path in _CHUNK_PRECHECK_PATHS
+        else None
+    )
     use_chunk_precheck = (
         candidate_count > 0
         and selected_path in _CHUNK_PRECHECK_PATHS
         and grounding_status in _CHUNK_PRECHECK_GROUNDING_STATUSES
+        and _has_chunk_precheck_inputs(chunk_precheck_context)
     )
-    use_internal = candidate_count > 1 or use_chunk_precheck
+    use_internal = (
+        use_chunk_precheck
+        if selected_path in _CHUNK_PRECHECK_PATHS
+        else candidate_count > 1
+    )
     metadata: dict[str, Any] = {
         # 후보별 trade-off의 최종 심판은 Eval의 정규화 composite_score(0~1)다.
         # 신뢰도 축이 연속값이 된 뒤 composite 이 매끄러워져, 표시·게이트와 같은 지표로
@@ -1392,13 +1434,8 @@ def _build_request(
     }
     if isinstance(candidate_grounding, dict):
         metadata["candidate_grounding"] = dict(candidate_grounding)
-    if use_internal and selected_path in _CHUNK_PRECHECK_PATHS:
-        metadata["chunk_precheck_context"] = _chunk_precheck_context(
-            state,
-            findings,
-            path=selected_path,
-            evidence_analysis=evidence_analysis,
-        )
+    if use_internal and chunk_precheck_context is not None:
+        metadata["chunk_precheck_context"] = chunk_precheck_context
     return OptimizationRequest(
         request_id=str(uuid.uuid4()),
         iteration=state.iteration,
@@ -1490,3 +1527,43 @@ def _chunk_precheck_context(
             state.index_config.get("chunk_stage", "markdown_recursive"),
         ),
     }
+
+
+def _has_chunk_precheck_inputs(context: dict[str, Any] | None) -> bool:
+    """사전검사가 실제 측정 가능한 원문과 evidence 좌표를 가졌는지 확인한다."""
+
+    if not isinstance(context, dict):
+        return False
+    documents = context.get("documents")
+    spans = context.get("evidence_spans")
+    if not isinstance(documents, (list, tuple)) or not isinstance(
+        spans,
+        (list, tuple),
+    ):
+        return False
+
+    document_lengths = {
+        document.doc_id: len(document.content)
+        for document in documents
+        if (
+            isinstance(document, Document)
+            and isinstance(document.doc_id, str)
+            and isinstance(document.content, str)
+        )
+    }
+    if not document_lengths:
+        return False
+
+    return any(
+        isinstance(span, dict)
+        and isinstance(span.get("doc_id"), str)
+        and isinstance(span.get("start"), int)
+        and not isinstance(span.get("start"), bool)
+        and isinstance(span.get("end"), int)
+        and not isinstance(span.get("end"), bool)
+        and 0 <= span["start"] < span["end"] <= document_lengths.get(
+            span["doc_id"],
+            -1,
+        )
+        for span in spans
+    )
