@@ -164,7 +164,7 @@ class RetrieverTests(unittest.TestCase):
         self.assertEqual(response["reranker_status"], "applied")
         self.assertEqual(len(response["results"]), 5)
 
-    def test_math_document_metadata_expands_candidates_even_when_chunk_is_sparse(self):
+    def test_math_document_metadata_keeps_configured_candidate_pool(self):
         retriever = build_retriever(
             [
                 Chunk(
@@ -195,7 +195,7 @@ class RetrieverTests(unittest.TestCase):
             with patch("agents.rag.retriever.rerank_with_status", side_effect=lambda q, r, model_name, top_k: (r[:top_k], "applied")):
                 response = retriever.search_with_details("t=pi/4 기울기", top_k=5)
 
-        self.assertEqual(seen["top_k"], 60)
+        self.assertEqual(seen["top_k"], 20)
         self.assertEqual(response["reranker_status"], "applied")
 
     def test_general_query_does_not_expand_reranker_candidate_pool_in_math_corpus(self):

@@ -322,12 +322,6 @@ class Retriever:
             if self.settings.use_reranker
             else requested_top_k
         )
-        if (
-            self.settings.use_reranker
-            and self._corpus_has_math
-            and _looks_like_math_query(query)
-        ):
-            candidate_k = max(candidate_k, requested_top_k * 12, 60)
         vector_candidate_k = self._vector_candidate_k(candidate_k)
         results: list[dict] = []
         mode = "keyword"
