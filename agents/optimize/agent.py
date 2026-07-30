@@ -1211,7 +1211,11 @@ def _relax_reranker_precision_floor(
 
 def _label_count(report: DiagnosticReport, label: str) -> int:
     """리포트에서 특정 라벨의 확정 finding 개수를 센다."""
-    return sum(1 for finding in report.findings if finding.label == label)
+    return sum(
+        1
+        for finding in report.findings
+        if finding.confirmed and finding.label == label
+    )
 
 
 def _reranker_execution_incomplete(
