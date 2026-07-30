@@ -25,6 +25,12 @@ class GeneratedAnswer:
     generation_mode: str
     retrieval: dict
 
+
+@dataclass(frozen=True)
+class PromptContext:
+    citation_index: int
+    text: str
+
 # 1) LLM 답변 2) 관련 있는 context 그대로 반환
 # context 없으면 빈 문자열 반환
 def generate_answer(
@@ -150,6 +156,7 @@ def _extractive_answer(contexts: list[str]) -> str:
 
 
 _TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+|\n+")
 _STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "what", "when", "where", "how",
@@ -163,16 +170,20 @@ def _compress_contexts_for_question(
     contexts: list[str],
     *,
     config: dict | None = None,
-) -> list[str]:
+) -> list[PromptContext]:
     """Keep question-relevant sentences before generation when explicitly enabled."""
+    original = [
+        PromptContext(citation_index=index, text=context)
+        for index, context in enumerate(contexts, 1)
+    ]
 
     if not _context_compression_enabled(config):
-        return contexts
+        return original
 
     query_tokens = _keywords(question)
-    query_numbers = set(re.findall(r"\d+(?:[.,]\d+)*", question))
+    query_numbers = set(_NUMBER_RE.findall(question))
     if not query_tokens and not query_numbers:
-        return contexts
+        return original
 
     max_sentences = _positive_int(
         _config_value(config, "context_compression_max_sentences", "context_filter_max_sentences"),
@@ -190,7 +201,8 @@ def _compress_contexts_for_question(
         ),
     )
 
-    compressed: list[tuple[int, str]] = []
+    compressed: list[tuple[float, PromptContext]] = []
+    matched_any = False
     for context_index, context in enumerate(contexts):
         sentences = _split_sentences(context)
         scored: list[tuple[float, int, str]] = []
@@ -200,19 +212,36 @@ def _compress_contexts_for_question(
                 scored.append((score, sentence_index, sentence))
 
         if scored:
+            matched_any = True
+            best_score = max(item[0] for item in scored)
             picked = sorted(
                 sorted(scored, key=lambda item: item[0], reverse=True)[:max_sentences],
                 key=lambda item: item[1],
             )
-            compressed.append((context_index, " ".join(item[2] for item in picked)))
-        elif context_index < min_contexts:
-            compressed.append((context_index, " ".join(sentences[:max_sentences])))
+            compressed.append(
+                (
+                    best_score,
+                    PromptContext(
+                        citation_index=context_index + 1,
+                        text=" ".join(item[2] for item in picked),
+                    ),
+                )
+            )
+        else:
+            compressed.append(
+                (0.0, PromptContext(citation_index=context_index + 1, text=context))
+            )
 
-    if not compressed:
-        return contexts
+    if not matched_any:
+        return original
 
-    compressed = compressed[:max_contexts]
-    return [context for _, context in compressed if context.strip()] or contexts
+    if max_contexts < len(compressed):
+        compressed = sorted(
+            compressed,
+            key=lambda item: (-item[0], item[1].citation_index),
+        )[:max_contexts]
+    compressed = sorted(compressed, key=lambda item: item[1].citation_index)
+    return [context for _score, context in compressed if context.text.strip()] or original
 
 
 def _context_compression_enabled(config: dict | None = None) -> bool:
@@ -239,14 +268,52 @@ def _sentence_relevance_score(
 ) -> float:
     sentence_tokens = _keywords(sentence)
     overlap = len(query_tokens & sentence_tokens)
-    sentence_numbers = set(re.findall(r"\d+(?:[.,]\d+)*", sentence))
+    sentence_numbers = set(_NUMBER_RE.findall(sentence))
     number_overlap = len(query_numbers & sentence_numbers)
     return float(overlap) + (2.0 * number_overlap)
 
 
 def _keywords(text: str) -> set[str]:
-    tokens = {token.lower() for token in _TOKEN_RE.findall(text or "")}
-    return {token for token in tokens if len(token) > 1 and token not in _STOPWORDS}
+    tokens: set[str] = set()
+    for raw in _TOKEN_RE.findall(text or ""):
+        for token in _expand_keyword(raw.lower()):
+            if len(token) > 1 and token not in _STOPWORDS:
+                tokens.add(token)
+    return tokens
+
+
+def _expand_keyword(token: str) -> set[str]:
+    variants = {token}
+    stripped = _strip_korean_suffix(token)
+    variants.add(stripped)
+    if re.search(r"[가-힣]", stripped):
+        variants.update(_hangul_ngrams(stripped))
+    return {variant for variant in variants if variant}
+
+
+def _strip_korean_suffix(token: str) -> str:
+    suffixes = (
+        "으로부터", "로부터", "까지", "부터", "에서는", "에서", "에게", "께서",
+        "으로", "라고", "이라", "이며", "이고", "입니다", "입니까", "합니다",
+        "하세요", "되는", "된다", "되며", "된다면", "은", "는", "이", "가",
+        "을", "를", "의", "에", "도", "만", "와", "과", "로",
+    )
+    for suffix in suffixes:
+        if token.endswith(suffix) and len(token) > len(suffix) + 1:
+            return token[: -len(suffix)]
+    return token
+
+
+def _hangul_ngrams(token: str) -> set[str]:
+    compact = re.sub(r"[^0-9A-Za-z가-힣]", "", token)
+    if len(compact) < 3:
+        return set()
+    ngrams: set[str] = set()
+    for size in (2, 3, 4):
+        if len(compact) < size:
+            continue
+        ngrams.update(compact[index:index + size] for index in range(len(compact) - size + 1))
+    return ngrams
 
 
 def _as_bool(value: Any) -> bool:
@@ -358,7 +425,7 @@ def _warn_unknown_provider_once(selected: str) -> None:
 # 모두 실패하면 None을 반환해 extractive fallback으로 넘어가기
 def _llm_generate(
     question: str,
-    contexts: list[str],
+    contexts: list[str] | list[PromptContext],
     *,
     provider: str | None = None,
     model: str | None = None,
@@ -417,14 +484,20 @@ def _llm_generate(
 # LLM에 전달할 system/user prompt
 def _build_prompt(
     question: str,
-    contexts: list[str],
+    contexts: list[str] | list[PromptContext],
     *,
     max_context_chars: int,
 ) -> tuple[str, str]:
     context_block = ""
     for index, context in enumerate(contexts, 1):
+        if isinstance(context, PromptContext):
+            citation_index = context.citation_index
+            context_text = context.text
+        else:
+            citation_index = index
+            context_text = context
         # context에 번호를 붙여 답변에서 근거 번호를 표시할 수 있게 한다.
-        next_block = f"[{index}]\n{context.strip()}\n\n"
+        next_block = f"[{citation_index}]\n{context_text.strip()}\n\n"
         if len(context_block) + len(next_block) > max_context_chars:
             break
         context_block += next_block

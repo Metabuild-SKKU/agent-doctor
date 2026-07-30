@@ -146,12 +146,18 @@ class RagGeneratorTests(unittest.TestCase):
             answer = generate_answer(
                 "How many remote work days are allowed?",
                 contexts,
-                config={"context_compression": True},
+                config={
+                    "context_compression": True,
+                    "context_compression_max_contexts": 1,
+                },
             )
 
         self.assertEqual(answer, "ok")
         prompt_contexts = generate.call_args.args[1]
-        self.assertEqual(prompt_contexts, ["Remote work is allowed two days per week."])
+        self.assertEqual(
+            [context.text for context in prompt_contexts],
+            ["Remote work is allowed two days per week."],
+        )
 
     def test_context_compression_disabled_preserves_contexts(self):
         contexts = [
@@ -162,7 +168,64 @@ class RagGeneratorTests(unittest.TestCase):
         with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
             generate_answer("How many remote work days are allowed?", contexts)
 
-        self.assertEqual(generate.call_args.args[1], contexts)
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual([context.text for context in prompt_contexts], contexts)
+
+    def test_context_compression_handles_korean_particles(self):
+        contexts = [
+            "식당 메뉴는 매일 바뀝니다.",
+            "재택근무는 주 2일까지 가능합니다. 사무실 좌석 예약은 별도입니다.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer(
+                "재택근무 가능 일수는?",
+                contexts,
+                config={"context_compression": True},
+            )
+
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual(len(prompt_contexts), 2)
+        self.assertEqual(prompt_contexts[1].citation_index, 2)
+        self.assertEqual(prompt_contexts[1].text, "재택근무는 주 2일까지 가능합니다.")
+
+    def test_context_compression_preserves_original_when_all_scores_are_zero(self):
+        contexts = [
+            "복리후생 제도는 별도 공지합니다.",
+            "사내 교육 일정은 다음 주에 공개됩니다.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer(
+                "원격 근무 신청 기준은?",
+                contexts,
+                config={"context_compression": True},
+            )
+
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual([context.text for context in prompt_contexts], contexts)
+
+    def test_context_compression_preserves_citation_rank_after_filtering(self):
+        contexts = [
+            "식당 메뉴는 매일 바뀝니다.",
+            "주차 등록은 시설팀에서 처리합니다.",
+            "재택근무는 주 2일까지 가능합니다. 사무실 좌석 예약은 별도입니다.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer(
+                "재택근무 가능 일수는?",
+                contexts,
+                config={
+                    "context_compression": True,
+                    "context_compression_max_contexts": 1,
+                },
+            )
+
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual(len(prompt_contexts), 1)
+        self.assertEqual(prompt_contexts[0].citation_index, 3)
+        self.assertEqual(prompt_contexts[0].text, "재택근무는 주 2일까지 가능합니다.")
 
     def test_answer_question_returns_citations(self):
         retriever = build_retriever(

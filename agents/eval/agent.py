@@ -458,7 +458,12 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             parallel_note = (f" 병렬 (동시성 {concurrency})"
                              if concurrency > 1 and len(gen_tasks) > 1 else " 순차")
             print(f"  probe {len(probes)}개 · 답변 {len(gen_tasks)}건{parallel_note}")
-            answers = parallel_map(lambda t: generate_answer(t[0].probe.question, t[2]),
+            answers = parallel_map(
+                lambda t: generate_answer(
+                    t[0].probe.question,
+                    t[2],
+                    config=state.index_config,
+                ),
                                    gen_tasks, concurrency)
             for (rec, track, _ctx), answer in zip(gen_tasks, answers):
                 if track == "real":

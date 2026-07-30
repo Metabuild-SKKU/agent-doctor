@@ -83,6 +83,17 @@ def _public_index_settings(retriever: Retriever | None) -> dict:
     }
 
 
+def _answer_generation_config(retriever: Retriever) -> dict:
+    settings = retriever.settings
+    return {
+        "top_k": settings.top_k,
+        "use_hybrid": settings.use_hybrid,
+        "use_reranker": settings.use_reranker,
+        "context_compression": os.getenv("RAG_CONTEXT_COMPRESSION"),
+        "context.compression.enabled": os.getenv("RAG_CONTEXT_COMPRESSION"),
+    }
+
+
 @app.get("/health")
 def health():
     return {
@@ -126,7 +137,12 @@ def answer(query: str, top_k: int | None = None):
         raise HTTPException(status_code=400, detail="query must not be blank")
     if top_k is not None and top_k <= 0:
         raise HTTPException(status_code=400, detail="top_k must be positive")
-    return answer_question(query, retriever, top_k=top_k)
+    return answer_question(
+        query,
+        retriever,
+        top_k=top_k,
+        config=_answer_generation_config(retriever),
+    )
 
 
 @app.get("/documents")
