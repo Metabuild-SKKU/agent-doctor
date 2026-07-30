@@ -98,10 +98,53 @@ class BadGoldRegenerationTest(unittest.TestCase):
         with patch.object(pg, "_llm_generate_single_hop", return_value=("재택 며칠?", "주 2일")), \
              patch.object(pg, "probe_quality_issue", return_value=None), \
              patch.object(eval_agent, "save_probes") as save:
-            eval_agent._maybe_regenerate_bad_gold(st, [rec], [probe], "v1")
+            did = eval_agent._maybe_regenerate_bad_gold(st, [rec], [probe], "v1")
+        self.assertTrue(did)                 # 재생성·저장 성공 → True(STEP5 가 snapshot 생략)
         save.assert_called_once()
         saved_probes = save.call_args[0][0]
         self.assertEqual(saved_probes[0].ground_truth, "주 2일")  # 교체본 저장
+
+    def _bad_gold_record(self, probe):
+        rec = EvalRecord(probe=probe)
+        rec.findings = [Finding(finding_id=probe.probe_id, type="gap", severity="warning",
+                                description="bad", label="bad_gold_answer", confirmed=True,
+                                affected_probes=[probe.probe_id])]
+        return rec
+
+    def test_regeneration_skips_snapshot_so_next_eval_cache_misses(self):
+        # blocker(루프 미완결): 재생성이 일어난 실행은 stale snapshot 을 남기면 안 된다.
+        # 재생성 후 (STEP5 가 저장을 생략하므로) 그 cache key 로 조회하면 None → 다음 Eval 이
+        # cache hit 없이 새 probe 를 재평가한다. 여기서는 재생성이 True 를 돌려주고 기존
+        # 스냅샷을 무효화해, 이후 조회가 miss 임을 확인한다.
+        from agents.eval import agent as eval_agent
+        st = self._state()
+        probe = Probe(probe_id="probe_gen_000", question="구질문?", source="llm_generated",
+                      ground_truth="틀린", gold_chunk_ids=["c1"], metadata={})
+        key = "eval-key-1"
+        st.eval_cache = [EvalSnapshot(cache_key=key, index_key="i", probes=[probe],
+                                      report=None, diagnosis_cache={}, diagnosis_cache_version="v")]
+        with patch.object(pg, "_llm_generate_single_hop", return_value=("재택 며칠?", "주 2일")), \
+             patch.object(pg, "probe_quality_issue", return_value=None), \
+             patch.object(eval_agent, "save_probes"):
+            did = eval_agent._maybe_regenerate_bad_gold(st, [self._bad_gold_record(probe)], [probe], "v1")
+        self.assertTrue(did)
+        # 기존 스냅샷은 무효화됐고, STEP5 는 재생성 실행에서 새 snapshot 을 저장하지 않으므로
+        # 다음 Eval 의 조회는 miss 다(옛 성적표 복원 안 됨).
+        self.assertIsNone(eval_agent._find_eval_snapshot(st, key))
+
+    def test_regeneration_save_failure_keeps_caches_and_returns_false(self):
+        # 저장 실패 시엔 재생성이 반영 안 됐으므로 무효화·snapshot skip 을 하면 안 된다.
+        from agents.eval import agent as eval_agent
+        st = self._state()
+        probe = Probe(probe_id="probe_gen_000", question="구질문?", source="llm_generated",
+                      ground_truth="틀린", gold_chunk_ids=["c1"], metadata={})
+        st.diagnosis_cache = {"probe_gen_000": {"sig": 1}}
+        with patch.object(pg, "_llm_generate_single_hop", return_value=("재택 며칠?", "주 2일")), \
+             patch.object(pg, "probe_quality_issue", return_value=None), \
+             patch.object(eval_agent, "save_probes", side_effect=OSError("disk full")):
+            did = eval_agent._maybe_regenerate_bad_gold(st, [self._bad_gold_record(probe)], [probe], "v1")
+        self.assertFalse(did)                                 # 저장 실패 → False(STEP5 는 정상 저장)
+        self.assertIn("probe_gen_000", st.diagnosis_cache)    # 무효화 안 함
 
     def test_regeneration_invalidates_stale_caches(self):
         # blocker#3 회귀: 재생성 probe 는 같은 probe_id·probe_version 을 유지하므로,

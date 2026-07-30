@@ -322,21 +322,33 @@ def _maybe_regenerate_bad_gold(
     records: list[EvalRecord],
     probes: list[Probe],
     probe_version: str,
-) -> None:
+) -> bool:
     """bad_gold_answer 로 확정된 우리 probe 를 재생성해 probe 파일에 반영한다(Option A).
-    이번 방문의 report/records/snapshot 은 바꾸지 않는다 — 다음 실행이 재평가한다."""
+
+    반환: 실제로 재생성·저장이 일어났으면 True. 그 경우 호출부(STEP5)는 이번 실행의 eval
+    snapshot 을 저장하지 않아야 한다 — 재생성 probe 는 같은 probe_version(=cache key)을
+    유지하므로, 옛 probe/report 로 만든 snapshot 을 저장하면 다음 Eval 이 새 probe 파일을
+    읽기 전에 그 snapshot 을 cache hit 해 옛 성적표를 복원한다(리뷰 blocker: 루프 미완결).
+    저장 실패 시엔 재생성이 반영되지 않은 것이므로 무효화·성공 로그·skip 을 하지 않는다."""
     bad_probes = [r.probe for r in records if is_bad_gold_probe(r)]
     if not bad_probes:
-        return
+        return False
     replaced = regenerate_probes(bad_probes, state)
     if not replaced:
         # 재생성 불가(전부 user_log·멀티홉·LLM 실패 등) → 리포트의 검수 요청으로만 남는다.
-        return
+        return False
     updated = [replaced.get(p.probe_id, p) for p in probes]
-    save_probes(updated, probe_version)
+    try:
+        save_probes(updated, probe_version)
+    except OSError as exc:
+        # 저장이 실패하면 파일엔 옛 probe 가 남는다 → 캐시를 건드리거나 snapshot 을 건너뛰면
+        # 오히려 재평가 기회를 잃는다. 이번 실행은 기존 probe/캐시를 그대로 유지한다.
+        print(f"[Eval] bad_gold probe 재생성 저장 실패: {exc} — 기존 probe 유지")
+        return False
     _invalidate_regenerated_caches(state, set(replaced))
     print(f"[Eval] bad_gold probe {len(replaced)}개 재생성 → 다음 실행에서 재평가 "
           f"(재생성 불가 {len(bad_probes) - len(replaced)}개는 사용자 검수 요청)")
+    return True
 
 
 def _invalidate_regenerated_caches(state: AgentDoctorState, regenerated_ids: set[str]) -> None:
@@ -559,7 +571,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # probe 파일에 반영한다. 이번 방문의 report/records/snapshot 은 건드리지 않아(현
         # 진단·점수 일관) 다음 파이프라인 실행이 재생성된 probe 를 로드해 재평가한다.
         # (user_log·멀티홉은 regenerate_probes 가 제외 → 리포트의 사용자 검수 요청으로 남는다.)
-        _maybe_regenerate_bad_gold(state, records, probes, probe_version)
+        regenerated = _maybe_regenerate_bad_gold(state, records, probes, probe_version)
 
         # ── STEP5: 리포트 ─────────────────────────────────────
         with step("Eval", 5, "리포트"):
@@ -572,7 +584,14 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 version,
                 probe_version,
             )
-            _store_eval_snapshot(state, eval_cache_key)
+            # 재생성이 일어났으면 이번 report/probes 는 곧 옛 시험지 기준이라, 같은 cache key
+            # 로 snapshot 을 저장하면 다음 Eval 이 새 probe 대신 이 옛 성적표를 cache hit 한다.
+            # 저장을 건너뛰어 다음 Eval 이 cache miss → 새 probe 로 재평가하게 한다.
+            if regenerated:
+                print("[Eval] bad_gold 재생성 실행 → 이번 평가 snapshot 저장 생략"
+                      "(다음 실행이 새 probe 로 재평가)")
+            else:
+                _store_eval_snapshot(state, eval_cache_key)
 
     except Exception as e:  # 계약: 예외를 밖으로 던지지 않는다
         state.status = "error"
