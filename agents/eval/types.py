@@ -88,11 +88,12 @@ KG_TOP_K_NEIGHBORS = 2
 # "실패 gold 응집도 / 코퍼스 전체 평균 응집도" 비율로 상대 판정한다(KG_TOP_K 와 같은 철학).
 #   ratio >= CONCENTRATED → "concentrated" (특정 도메인만 약함 → 도메인특화 임베딩)
 #   ratio <= SPREAD       → "spread"       (전 주제 흩어져 실패 → 임베딩 모델 자체 약함)
-#   그 사이               → "none"         (신호 약함 → planner 순차 fallback)
+#   그 사이               → "none"         (재봤으나 주제 응집 안 보임 → 청킹 조정)
+# "못 잰" 경우는 이 임계값과 무관하게 "unmeasured" 로 따로 나간다(topic_cluster.py 참고).
 # 임의값 — 실측 캘리브레이션 필요(rules.py 의 diagnosis_confidence: None 과 같은 미완성 상태).
 TOPIC_CLUSTER_CONCENTRATED_RATIO = 1.3
 TOPIC_CLUSTER_SPREAD_RATIO = 1.1
-# baseline 평균 응집도를 잴 때 뽑는 청크 표본 수 상한(전량 O(n^2) 회피, 결정적 seed).
+# 평균 응집도를 잴 때 뽑는 청크 표본 수 상한(전량 O(n^2) 회피). baseline·실패 gold 공용.
 TOPIC_CLUSTER_BASELINE_SAMPLE = 100
 
 # STEP1 시나리오 샘플링 후보 (RAGAS Scenario 파라미터)

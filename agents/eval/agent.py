@@ -544,9 +544,12 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
     (Case1) → 청킹 조정" 신호로 쓴다(shrink_chunk_size / switch_chunking 의
     applies_when={"topic_cluster":["none"]}). 여기서 none 을 안 달면 planner 가 '미측정
     =순차 fallback'으로 보아 임베딩 교체 처방까지 통과시켜, none 이 청킹만 선택하려던
-    rules.py 계약이 깨진다. 임베딩이 아예 없어(fallback/미부착) 응집도를 못 잰 경우와
-    '주제 응집이 안 보임'은 rules.py 관점에선 둘 다 "임베딩 교체로 풀 문제가 아님"이라
-    같은 none 으로 수렴한다.
+    rules.py 계약이 깨진다.
+
+    반대로 '아예 못 잰' 경우(임베딩 미부착/fallback, 실패 gold 2개 미만, baseline 측정
+    불가)는 none 이 아니라 'unmeasured' 로 나간다 — 근거 없이 청킹 처방을 확정 선택하면
+    안 되기 때문이다. unmeasured 는 어느 applies_when 허용 리스트에도 없어 planner 가
+    순차 fallback 으로 되돌린다(agents/eval/topic_cluster.py 의 값 도메인 주석 참고).
     """
     sem_findings = [
         f

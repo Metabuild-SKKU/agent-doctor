@@ -7,7 +7,14 @@ STEP4 후처리: retrieval_semantic_mismatch 실패의 토픽 분포 신호(topi
 (rules.py 의 retrieval_semantic_mismatch.applies_when.topic_cluster):
     "concentrated" → 특정 도메인만 약함     → 도메인특화 임베딩 교체
     "spread"       → 전 주제에 흩어져 실패   → 임베딩 모델 자체 교체
-    "none"         → 신호 약함/판정 불가     → planner 순차 fallback
+    "none"         → 재봤으나 응집 안 보임   → 청킹 조정(임베딩 문제 아님)
+    "unmeasured"   → 아예 재지 못함          → planner 순차 fallback
+
+"none" 과 "unmeasured" 는 다르다 — 전자는 "쟀고, 임베딩 문제가 아니라는 결론"이라 rules.py
+에서 청킹 처방을 고르는 근거가 되고, 후자는 "근거 자체가 없음"이라 신호를 무시하고 기존
+순차 fallback 으로 돌아가야 한다. 둘을 같은 값으로 뭉개면 못 잰 회차가 청킹 처방을 확정
+선택해버린다(rules.py 의 applies_when 은 "unmeasured" 를 어느 허용 리스트에도 담지 않고,
+planner 가 미측정 신호를 fallback 으로 처리한다).
 
 판정은 개별 probe 로는 불가능하다 — "실패가 뭉쳤나 흩어졌나"는 여러 실패 probe 의 gold 를
 함께 봐야 나온다. 그래서 diagnose() 밖(agent.py STEP4 직후, 전 record 가 준비된 뒤)에서
@@ -38,6 +45,8 @@ Vector = Sequence[float]
 CONCENTRATED = "concentrated"
 SPREAD = "spread"
 NONE = "none"
+# 어느 applies_when 허용 리스트에도 없는 값 — planner 가 '신호 없음'으로 보아 fallback 한다.
+UNMEASURED = "unmeasured"
 
 
 def _valid(vec: Optional[Vector]) -> bool:
@@ -63,15 +72,28 @@ def _mean_pairwise_cosine(vectors: list[Vector]) -> Optional[float]:
     return total / count if count else None
 
 
+def stride_sample(vectors: list[Vector], limit: int = TOPIC_CLUSTER_BASELINE_SAMPLE) -> list[Vector]:
+    """전체에 고르게 걸친 결정적 표본 — O(n^2) 폭발을 막되 순서 편향은 만들지 않는다.
+
+    앞에서 limit 개를 자르면 안 된다: chunk 순서는 곧 문서 순서라, head-100 은 보통 문서
+    1~2개 = 단일 주제다. 그 좁은 표본의 응집도가 baseline 이 되면 baseline 이 크게 부풀려져
+    (실측 시뮬: 전체 0.082 vs head-100 0.538, 약 7배) 모든 ratio 가 눌린다 — 실패가 실제로
+    뭉쳐 있어도 "코퍼스 대비 안 뭉침"으로 읽혀 concentrated 를 놓친다.
+
+    stride 로 뽑으면 코퍼스 전 구간을 훑으므로 그 편향이 사라지고, 무작위가 아니라 결정적
+    이라 회차 간 신호도 흔들리지 않는다(probe_gen 전반의 결정성 원칙과 동일).
+    """
+    if limit <= 0 or len(vectors) <= limit:
+        return list(vectors)
+    return vectors[:: len(vectors) // limit][:limit]
+
+
 def _baseline_cohesion(corpus_vectors: list[Vector]) -> Optional[float]:
-    """코퍼스 전체의 평균 쌍별 코사인. 표본을 잘라 O(n^2) 폭발을 막는다(결정적: 앞에서 자름)."""
+    """코퍼스 전체의 평균 쌍별 코사인. 표본을 잘라 O(n^2) 폭발을 막는다(결정적 stride)."""
     usable = [v for v in corpus_vectors if _valid(v)]
     if len(usable) < 2:
         return None
-    # 무작위 대신 앞에서 자른다 — 결정적이어야 회차 간 신호가 흔들리지 않는다
-    # (probe_gen 전반의 결정성 원칙과 동일). chunk 순서는 문서 순서라 편향이 크지 않다.
-    sample = usable[:TOPIC_CLUSTER_BASELINE_SAMPLE]
-    return _mean_pairwise_cosine(sample)
+    return _mean_pairwise_cosine(stride_sample(usable))
 
 
 def classify(
@@ -80,8 +102,8 @@ def classify(
 ) -> str:
     """실패 gold 응집도를 코퍼스 baseline 대비 비율로 판정한다.
 
-    반환: "concentrated" | "spread" | "none".
-    - 실패 gold 가 2개 미만이거나 baseline 을 못 재면 "none"(판정 불가).
+    반환: "concentrated" | "spread" | "none" | "unmeasured".
+    - 실패 gold 가 2개 미만이거나 baseline 을 못 재면 "unmeasured"(판정 불가 → fallback).
     - ratio = 실패 gold 응집도 / baseline.
         ratio >= CONCENTRATED_RATIO → "concentrated"
         ratio <= SPREAD_RATIO       → "spread"
@@ -89,10 +111,12 @@ def classify(
     """
     failed_cohesion = _mean_pairwise_cosine(failed_gold_vectors)
     if failed_cohesion is None:
-        return NONE
+        return UNMEASURED
     baseline = _baseline_cohesion(corpus_vectors)
-    if not baseline:            # None 또는 0 — 나눌 수 없음
-        return NONE
+    # 음수 baseline(코퍼스가 서로 등질) 도 막는다 — 나누면 ratio 부호가 뒤집혀
+    # 실패가 아무리 뭉쳐 있어도 무조건 spread 로 떨어진다.
+    if baseline is None or baseline <= 0:
+        return UNMEASURED
     ratio = failed_cohesion / baseline
     if ratio >= TOPIC_CLUSTER_CONCENTRATED_RATIO:
         return CONCENTRATED
