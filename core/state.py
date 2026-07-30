@@ -116,9 +116,11 @@ class AgentDoctorState:
         # 기본값은 현재 하드코딩 동작을 그대로 재현한다(Optimize가 손대기 전엔 불변).
         # 실제 프롬프트 문구는 generator가 이 플래그들로 조립한다
         # (rules는 스위치, 소비처가 문구 — use_hybrid와 같은 패턴).
-        # 약간의 온기를 둬서 lower_temperature 처방이 실제로 내릴 여지를 준다
-        # (0.0이면 더 못 내려 처방이 no-op). 여전히 낮아 답변은 대체로 결정적.
-        "temperature": 0.15,
+        # 평가 재현성을 위해 기본 0.0(결정적) — 리뷰 합의(#51). 답변 생성이 실행마다
+        # 흔들리면 같은 config 재평가가 ±수 점 튀어 유지/롤백이 노이즈에 좌우된다.
+        # 트레이드오프: 0.0이면 lower_temperature 처방이 더 내릴 여지가 없어 no-op 이 된다
+        # (온기가 필요한 코퍼스가 확인되면 baseline 을 올려 그 처방을 되살릴 수 있다).
+        "temperature": 0.0,
         "grounding_strict": True,    # 컨텍스트만 근거로, 없으면 모른다고 (현 프롬프트)
         "require_citation": True,    # 답변 끝 근거 번호 표시 (현 프롬프트)
         "restate_question": False,   # 답변 전 질문 재진술 강제
