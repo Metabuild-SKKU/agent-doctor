@@ -167,15 +167,24 @@ _NEAR_DUPLICATE_JACCARD = 0.8
 
 
 def _near_duplicate(left: dict, right: dict) -> bool:
-    """두 청크가 사실상 같은 내용인가 — 좌표 겹침 또는 문자 3-gram Jaccard.
+    """두 청크가 사실상 같은 내용인가 — 좌표 겹침 비율 또는 문자 3-gram Jaccard.
 
-    같은 문서에서 char_span 이 겹치면 겹침 청킹이 만든 중복이라 내용 비교가 필요 없다.
+    좌표 규칙은 '겹치나'가 아니라 '거의 같은 구간인가'로 본다. chunk_overlap 청킹에서
+    인접 청크는 **설계상 항상** 겹치기 때문이다(기본값 512/50 이면 짧은 쪽의 약 10%).
+    '1자라도 겹치면 중복'으로 잡으면 한 문서의 연속 청크가 통째로 잉여로 접혀
+    projected_rank 가 과대 회복되고, duplicate_crowding 이 오확정된다.
+    그러면 _upstream_rank_cause 때문에 실행 가능한 순위 라벨까지 전부 침묵한다.
+
+    임계는 Jaccard 와 같은 값을 쓴다 — 두 규칙이 같은 질문("거의 같은 내용인가")에
+    답하므로 문턱도 같아야 한다.
     """
     if (left.get("doc_id") and left.get("doc_id") == right.get("doc_id")
             and left.get("span") and right.get("span")):
         l_start, l_end = left["span"]
         r_start, r_end = right["span"]
-        if min(l_end, r_end) > max(l_start, r_start):
+        overlap = min(l_end, r_end) - max(l_start, r_start)
+        shorter = min(l_end - l_start, r_end - r_start)
+        if shorter > 0 and overlap / shorter >= _NEAR_DUPLICATE_JACCARD:
             return True
     l_grams, r_grams = left.get("grams"), right.get("grams")
     if not l_grams or not r_grams:
@@ -187,16 +196,20 @@ def _near_duplicate(left: dict, right: dict) -> bool:
 
 
 def _chunk_view(chunk_id: str) -> dict:
-    """중복 판정에 필요한 최소 정보만 뽑는다(_ctx.chunks 조회)."""
-    for chunk in _ctx.chunks:
-        if getattr(chunk, "chunk_id", None) == chunk_id:
-            return {
-                "chunk_id": chunk_id,
-                "doc_id": getattr(chunk, "doc_id", ""),
-                "span": getattr(chunk, "char_span", None),
-                "grams": _shingles(getattr(chunk, "text", "")),
-            }
-    return {"chunk_id": chunk_id, "doc_id": "", "span": None, "grams": frozenset()}
+    """중복 판정에 필요한 최소 정보만 뽑는다(_ctx.chunk_by_id 인덱스 조회).
+
+    인덱스를 쓰는 이유: 이 함수는 probe 마다 후보 수십 개에 대해 불린다. 선형 탐색이면
+    (후보 수 × 코퍼스 크기 × probe 수)가 되어 코퍼스가 커질수록 진단이 급격히 느려진다.
+    """
+    chunk = _ctx.chunk_by_id.get(chunk_id)
+    if chunk is None:
+        return {"chunk_id": chunk_id, "doc_id": "", "span": None, "grams": frozenset()}
+    return {
+        "chunk_id": chunk_id,
+        "doc_id": getattr(chunk, "doc_id", ""),
+        "span": getattr(chunk, "char_span", None),
+        "grams": _shingles(getattr(chunk, "text", "")),
+    }
 
 
 def _redundancy_above_gold(record: EvalRecord):
@@ -211,7 +224,7 @@ def _redundancy_above_gold(record: EvalRecord):
     cross-encoder 는 중복 청크를 상위에 그대로 둔다(각각이 실제로 질문과 관련 있으니까).
     처방이 갈리므로(MMR/중복 제거 vs 리랭커) 신호도 따로 잰다.
 
-    비용: 도달 가능 창(기본 20) 안쪽만 본다 — 그 밖은 순위 라벨의 관할이 아니다.
+    비용: 도달 가능 창(reachable_window, 기본 50) 안쪽만 본다 — 그 밖은 순위 라벨의 관할이 아니다.
     """
     hit_ids = _wide_hit_ids(record)
     if hit_ids is None:

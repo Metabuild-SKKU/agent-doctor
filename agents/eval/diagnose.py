@@ -216,14 +216,48 @@ def _ranked_beyond_top_k(record: EvalRecord) -> dict[str, int]:
 
 
 def _rankable(record: EvalRecord) -> dict[str, int]:
-    """순위 라벨이 다룰 gold — 도달 가능 창(reachable_window) 안쪽만.
+    """융합 순위로 다룰 gold — top_k 밖 + 도달 가능 창(reachable_window) 안쪽.
 
     창 밖은 리랭커를 켜도 후보를 넓혀도 닿지 않아 순위 문제가 아니다 → 표현 문제
     (semantic/lexical mismatch)로 인계한다. 이 경계가 없으면 wide_n(=100) 안의 모든
     검색 실패가 순위 라벨로 흡수된다.
+
+    ⚠ 리랭크 단계에서 잃은 gold 는 여기 안 잡힐 수 있다(_rerank_lost 참고) — 순위 라벨의
+    전체 관할은 이 둘의 합집합(_rank_scope)이다.
     """
     window = reachable_window()
     return {g: r for g, r in _ranked_beyond_top_k(record).items() if r <= window}
+
+
+def _rerank_lost(record: EvalRecord) -> dict[str, int]:
+    """리랭커 후보에는 있었는데 최종 결과엔 없는 놓친 gold {gold_id: pre_rerank 순위}.
+
+    융합 순위가 top_k **이내**여도 대상이다. 이게 _rankable 과 갈리는 지점이자, wide 재검색에서
+    리랭크를 끈 것의 직접적 귀결이다:
+
+      융합이 gold 를 3위에 뒀는데(top_k=5 안) 리랭커가 12위로 떨어뜨려 놓친 경우
+      → 교과서적인 리랭커 강등인데, 융합 순위 3 은 'top_k 밖'이 아니라 _rankable 에 안 잡힌다.
+
+    예전엔 재검색도 리랭크를 태워서 이 경우가 '재검색도 top_k 밖'으로 보였다. 이제 융합 순위는
+    리랭크 이전 값이라 그 은폐가 사라졌고, 대신 '후보엔 있었는데 결과엔 없다'가 리랭크 단계
+    손실의 직접 증거가 된다 — 순위 대조가 필요 없다.
+
+    이 집합을 안 보면 강등이 침묵할 뿐 아니라, lexical/semantic 의 양보 게이트도 안 걸려
+    "dense 가 gold 를 놓쳤다"는 거짓 전제로 임베딩·청킹 처방이 나간다(리랭커를 끄면 낫는데).
+    """
+    if not _rerank_stage_visible(record):
+        return {}
+    pre = _gold_pre_rerank_ranks(record) or {}
+    return {g: pre[g] for g in _missed_gold_ids(record) if pre.get(g) is not None}
+
+
+def _rank_scope(record: EvalRecord) -> dict[str, int]:
+    """순위 라벨 전체의 관할 — 융합 순위로 잡힌 몫 + 리랭크 단계에서 잃은 몫.
+
+    lexical/semantic mismatch 는 이 관할이 비어 있을 때만 발동한다(전제가 'dense 가 놓침'인데,
+    여기 잡혔다는 건 dense 가 gold 를 실제로 올려놨다는 뜻이라 전제가 깨진다).
+    """
+    return {**_rerank_lost(record), **_rankable(record)}
 
 
 def _rerank_stage_visible(record: EvalRecord) -> bool:
@@ -391,19 +425,22 @@ def retrieval_reranker_demotion(record: EvalRecord) -> Optional[Finding]:
     if not _rerank_stage_visible(record) or _upstream_rank_cause(record):
         return None
     pre = _gold_pre_rerank_ranks(record) or {}
-    rankable = _rankable(record)
-    if any(pre.get(g) is None for g in rankable):
+    if any(pre.get(g) is None for g in _rankable(record)):
         return None                      # 후보창 밖 gold 가 함께 있음 → candidate_miss 가 앞단
-    targets = {g: r for g, r in rankable.items() if pre.get(g) is not None}
+    targets = _rerank_lost(record)
     if not targets:
         return None
-    seen = ", ".join(f"{g}:{pre[g]}" for g in sorted(targets, key=lambda g: pre[g]))
+    seen = ", ".join(f"{g}:{r}" for g, r in sorted(targets.items(), key=lambda kv: kv[1]))
+    fused = _gold_ranks(record) or {}
+    fused_note = ", ".join(f"{g}:{fused.get(g)}" for g in sorted(targets))
     finding = _finding(
         record, "retrieval_reranker_demotion", "retrieval_failure", confirmed=True,
-        reason=f"{_rank_reason(record, targets)}, pre_rerank_ranks=[{seen}]"
-               f"(후보창 안), reranker_status={record.retrieval_details.get('reranker_status')}",
+        reason=f"pre_rerank_ranks=[{seen}](후보창 안) 인데 최종 top_k="
+               f"{len(record.retrieved_chunk_ids)} 밖, fused_ranks=[{fused_note}], "
+               f"reranker_status={record.retrieval_details.get('reranker_status')}, "
+               f"recall@k={_v(record.recall_at_k)}",
     )
-    finding.metadata["pre_rerank_ranks"] = {g: pre[g] for g in targets}
+    finding.metadata["pre_rerank_ranks"] = dict(targets)
     return finding
 
 
@@ -446,7 +483,7 @@ def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
     if _bm25_hits_gold(record) is not True:
         return None
-    if _rankable(record):
+    if _rank_scope(record):
         return None                      # 순위 라벨이 다룰 구간 → 그쪽에 양보
     return _finding(
         record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True,
@@ -469,7 +506,7 @@ def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
     if record.probe.qtype == "bridge":
         return None                      # bridge 의존과 구분 불가 → bridge 에 양보
-    if _rankable(record):
+    if _rank_scope(record):
         return None                      # 순위 라벨이 다룰 구간 → 그쪽에 양보
     if _bm25_hits_gold(record) is not False:
         return None

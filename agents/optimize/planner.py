@@ -887,14 +887,20 @@ def _ground_rerank_candidates(
     다른 건 상한이다: 후보 수는 매 검색마다 cross-encoder 추론 쌍 수라, 정책상 상한
     (rerank_candidate_policy.max_candidates)을 넘겨선 안 된다.
     현재값 이하 후보는 넓히는 처방이 아니므로 버린다.
+
+    상한 밖 순위는 필요값 집계에서 아예 제외한다 — 창을 그만큼 넓힐 수 없으니 '도달 불가'이고,
+    이건 wide_n 밖 gold(순위 None)를 top_k 근거에서 빼는 것과 같은 이유다. 안 빼면 창 밖
+    gold 하나가 무릎을 상한 위로 끌어올려, 실제로 도달 가능한 gold 들의 근거값까지 통째로
+    날아가고 방향 키워드 추측(×2)으로 내려간다.
     """
+    policy = state.index_config.get("rerank_candidate_policy") or {}
+    max_allowed = int(policy.get("max_candidates", _DEFAULT_MAX_RERANK_CANDIDATES))
     required = [
-        r for r in (_probe_required_top_k(f) for f in findings) if r is not None
+        r for r in (_probe_required_top_k(f) for f in findings)
+        if r is not None and r <= max_allowed
     ]
     if not required:
         return None, None
-    policy = state.index_config.get("rerank_candidate_policy") or {}
-    max_allowed = int(policy.get("max_candidates", _DEFAULT_MAX_RERANK_CANDIDATES))
     current = get_current_value(state.index_config, "reranker.candidate_count")
     current_int = (
         int(current) if isinstance(current, (int, float)) and not isinstance(current, bool)

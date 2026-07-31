@@ -251,7 +251,12 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | 리랭크 | `retrieval_reranker_demotion` | 리랭커 되돌리기 / 모델 교체 |
 | (잔여) | `retrieval_low_rank` | `use_reranker` 켜기 |
 
-**다른 A 라벨과의 배타** — 순위 라벨이 다룰 구간(`_rankable`)이면 `lexical_mismatch` ·
+순위 라벨의 관할(`_rank_scope`)은 두 갈래의 합집합이다. **융합 순위가 top_k 밖**인 몫(`_rankable`)과,
+**리랭커 후보엔 있었는데 결과엔 없는** 몫(`_rerank_lost`)이다. 후자가 따로 필요한 이유는 wide
+재검색이 리랭크를 끄기 때문이다 — 융합이 gold 를 3위에 뒀는데 리랭커가 12위로 떨어뜨렸다면
+융합 순위는 top_k 이내라 첫 갈래에 안 잡히지만, 그건 교과서적인 리랭커 강등이다.
+
+**다른 A 라벨과의 배타** — 순위 라벨이 다룰 구간(`_rank_scope`)이면 `lexical_mismatch` ·
 `semantic_mismatch` 는 스스로 침묵한다. 두 라벨의 전제가 "dense 가 gold 를 놓쳤다"인데,
 창 안에 있다는 건 놓친 게 아니라 순위를 낮게 준 것이라 전제가 사실과 어긋나기 때문이다.
 순위 라벨끼리는 파이프라인 앞단이 뿌리다: `융합 손실`·`중복 밀림` > `후보창 밖` > `강등` > 잔여.

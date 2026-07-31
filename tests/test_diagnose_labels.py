@@ -364,6 +364,37 @@ class RerankStageTest(_DiagnoseTestBase):
         rec = self._rec(["n1", "n2", "n3", "n4", "g_b"])
         self.assertIsNone(diagnose.retrieval_low_rank(rec))
 
+    def test_demotion_caught_when_fused_rank_is_inside_top_k(self):
+        """융합 3위(top_k 안)를 리랭커가 떨어뜨린 전형적 강등 — 융합 순위로는 안 잡힌다.
+
+        wide 재검색이 리랭크를 끄면서 융합 순위가 '리랭크 이전' 값이 됐다. 그래서 강등된 gold 의
+        융합 순위가 top_k 이내일 수 있고, 'top_k 밖'만 보면 이 케이스가 통째로 사라진다.
+        '후보엔 있었는데 결과엔 없다'가 리랭크 단계 손실의 직접 증거다.
+        """
+        self._with(retrieve=["n1", "n2", "g_b", "n4", "n5"])     # g_b 융합 3위
+        rec = _record(("g_a", "g_b"), ("g_a", "n1", "n2", "n4", "n5"), recall=0.5,
+                      retrieval_details={"search_mode": "dense", "reranked": True,
+                                         "reranker_status": "applied",
+                                         "pre_rerank_ids": ["n1", "n2", "g_b", "n4"]})
+        self.assertEqual(diagnose._rankable(rec), {})            # 융합 순위로는 안 잡힘
+        finding = diagnose.retrieval_reranker_demotion(rec)
+        self.assertTrue(finding.confirmed)
+        self.assertEqual(finding.metadata["pre_rerank_ranks"], {"g_b": 3})
+
+    def test_mismatch_labels_yield_to_rerank_stage_loss(self):
+        """같은 케이스에서 BM25 도 놓치면, 예전엔 semantic 이 확정으로 서서 임베딩 교체로 샜다.
+
+        'dense 가 gold 를 놓쳤다'는 전제가 거짓이다 — 융합은 3위에 뒀고 리랭커가 떨어뜨렸다.
+        """
+        self._with(retrieve=["n1", "n2", "g_b", "n4", "n5"], keyword=[])
+        rec = _record(("g_a", "g_b"), ("g_a", "n1", "n2", "n4", "n5"), recall=0.5,
+                      retrieval_details={"search_mode": "dense", "reranked": True,
+                                         "reranker_status": "applied",
+                                         "pre_rerank_ids": ["n1", "n2", "g_b", "n4"]})
+        self.assertIsNone(diagnose.retrieval_semantic_mismatch(rec))
+        self.assertIsNone(diagnose.retrieval_lexical_mismatch(rec))
+        self.assertTrue(diagnose.retrieval_reranker_demotion(rec).confirmed)
+
     def test_demotion_yields_when_candidate_miss_is_also_present(self):
         """gold 가 여럿이라 '후보창 밖'과 '강등'이 함께 있으면 앞단(후보 선정)이 뿌리다.
 
@@ -405,6 +436,41 @@ class DuplicateCrowdingTest(_DiagnoseTestBase):
                                         "g_a": "정답 근거가 담긴 다른 청크"}))
         # 중복 1개만 접혀 3위 → top_k(2) 안으로 못 들어옴
         self.assertIsNone(diagnose.retrieval_duplicate_crowding(self._rec()))
+
+    def test_overlap_chunking_neighbours_are_not_duplicates(self):
+        """chunk_overlap 청킹의 인접 청크는 설계상 항상 겹친다 — 중복으로 접으면 안 된다.
+
+        '1자라도 겹치면 중복'이면 한 문서의 연속 청크가 통째로 잉여로 접혀 crowding 이
+        오확정되고, _upstream_rank_cause 때문에 실행 가능한 순위 라벨까지 전부 침묵한다
+        (crowding 은 draft 라 처방도 없다 → 그 probe 는 아무 처방도 못 받는다).
+        """
+        # 기본 config(chunk_size=512, chunk_overlap=50)의 인접 청크 좌표
+        neighbours = [
+            Chunk("a1", "d1", "가" * 512, char_span=(0, 512)),
+            Chunk("a2", "d1", "나" * 512, char_span=(462, 974)),
+            Chunk("a3", "d1", "다" * 512, char_span=(924, 1436)),
+            Chunk("g_a", "d2", "정답 근거 본문", char_span=(0, 20)),
+        ]
+        self._with(retrieve=["a1", "a2", "a3", "g_a"], chunks=neighbours)
+        rec = self._rec()
+
+        self.assertIsNone(diagnose.retrieval_duplicate_crowding(rec))
+        self.assertEqual(
+            metrics_search._redundancy_above_gold(rec)["g_a"]["redundant"], 0
+        )
+
+    def test_same_span_chunks_are_still_duplicates(self):
+        """좌표가 사실상 같은 구간이면 중복이 맞다 — 임계를 넣어도 이건 잡혀야 한다."""
+        same_span = [
+            Chunk("a1", "d1", "가" * 512, char_span=(0, 512)),
+            Chunk("a2", "d1", "나" * 512, char_span=(0, 512)),
+            Chunk("a3", "d1", "다" * 512, char_span=(5, 512)),
+            Chunk("g_a", "d2", "정답 근거 본문", char_span=(0, 20)),
+        ]
+        self._with(retrieve=["a1", "a2", "a3", "g_a"], chunks=same_span)
+        finding = diagnose.retrieval_duplicate_crowding(self._rec())
+        self.assertTrue(finding.confirmed)
+        self.assertEqual(finding.metadata["crowding_analysis"]["g_a"]["redundant"], 2)
 
     def test_low_rank_yields_to_duplicate_crowding(self):
         same = "완전히 동일한 안내 문구가 반복되는 청크입니다"

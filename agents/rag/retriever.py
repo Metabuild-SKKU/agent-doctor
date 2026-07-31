@@ -13,7 +13,7 @@ import hashlib
 import os
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -251,6 +251,25 @@ class Retriever:
             if self.chunks
             else None
         )
+        self._dense_only: "Retriever | None" = None
+
+    def dense_only_view(self) -> "Retriever | None":
+        """같은 인덱스를 dense 단일 채널로만 보는 Retriever. 하이브리드가 아니면 None.
+
+        Eval 이 융합 손실(한 채널은 gold 를 상위에 뒀는데 융합이 밀어냄)을 판정하려면 융합 전
+        채널별 순위가 필요하다. 설정만 바꾼 뷰라 임베딩·컬렉션은 그대로 공유하고, probe 마다
+        새로 만들지 않도록 여기서 캐시한다(생성 비용은 청크 dict 복사뿐이지만 코퍼스가 크면
+        그것도 probe 수만큼 반복된다).
+        """
+        if not self.settings.use_hybrid:
+            return None                  # 융합이 없으면 대조할 채널도 없다
+        if self._dense_only is None:
+            self._dense_only = Retriever(
+                self.chunks,
+                replace(self.settings, use_hybrid=False),
+                client=self.client,
+            )
+        return self._dense_only
 
     def search(
         self,

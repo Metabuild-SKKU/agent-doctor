@@ -48,6 +48,7 @@ class _Ctx:
     client = None
     chunks: list = []
     corpus_ids: frozenset = frozenset()
+    chunk_by_id: dict = {}   # 청크 단건 조회용 인덱스(중복 밀림 분석이 후보마다 훑는다)
     retrieve_fn = None       # (client, chunks, question, top_n) -> list[{"chunk_id",...}]
                              #   ⚠ 리랭크 이전(융합) 순위를 돌려줘야 한다 — reachable_window 참고
     dense_fn = None          # (client, chunks, question, top_n) -> list[{"chunk_id",...}]  dense 단일 채널
@@ -70,6 +71,7 @@ def set_context(client=None, chunks=None, retrieve_fn=None, keyword_fn=None,
     _ctx.client = client
     _ctx.chunks = chunks or []
     _ctx.corpus_ids = frozenset(c.chunk_id for c in _ctx.chunks)
+    _ctx.chunk_by_id = {c.chunk_id: c for c in _ctx.chunks}
     _ctx.retrieve_fn = retrieve_fn
     _ctx.dense_fn = dense_fn
     _ctx.keyword_fn = keyword_fn

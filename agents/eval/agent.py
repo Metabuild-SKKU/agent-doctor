@@ -31,7 +31,6 @@ import json
 import os
 import sys
 from copy import deepcopy
-from dataclasses import replace
 from pathlib import Path
 
 from core.schema import Probe, EvalSnapshot
@@ -304,21 +303,6 @@ def _retrieve_with_rag(retriever: Retriever, chunks, question: str, top_k: int) 
     return retriever.search(question, top_k=top_k, apply_rerank=False)
 
 
-def _dense_only_view(retriever: Retriever) -> Retriever | None:
-    """같은 인덱스를 dense 단일 채널로만 보는 Retriever(probe 마다 재생성하지 않게 캐시)."""
-    if not getattr(retriever.settings, "use_hybrid", False):
-        return None                      # 융합이 없으면 대조할 채널도 없다
-    view = getattr(retriever, "_dense_only_cache", None)
-    if view is None:
-        view = Retriever(
-            retriever.chunks,
-            replace(retriever.settings, use_hybrid=False),
-            client=retriever.client,
-        )
-        retriever._dense_only_cache = view
-    return view
-
-
 def _dense_retrieve_with_rag(
     retriever: Retriever, chunks, question: str, top_k: int
 ) -> list[dict]:
@@ -326,7 +310,7 @@ def _dense_retrieve_with_rag(
 
     하이브리드가 꺼져 있으면 융합 자체가 없어 대조할 게 없으므로 빈 결과를 준다.
     """
-    view = _dense_only_view(retriever)
+    view = retriever.dense_only_view()
     if view is None:
         return []
     return view.search(question, top_k=top_k, apply_rerank=False)
