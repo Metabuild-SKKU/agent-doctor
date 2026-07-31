@@ -888,6 +888,38 @@ def bad_gold_answer_oracle(record: EvalRecord) -> Optional[Finding]:
     return None
 
 
+def bad_gold_chunk(record: EvalRecord) -> Optional[Finding]:
+    """골드 '청크' 라벨 오류 — 실제 답은 맞는데(f1 통과) 골드 청크로는 못 맞춘다(oracle 실패).
+
+    정답셋의 정답 '텍스트'는 맞지만, 근거로 지정된 '청크'(positive_chunk_ids→gold_spans)가
+    엉뚱한 곳을 가리킨 경우다. 표 문서에서 같은 값(예: 스파이크 높이 332cm)이 여러 행에 나와
+    정답 값 매칭이 다른 개체의 행에 꽂히는 식으로 생긴다. 파이프라인은 실제 근거를 찾아
+    정답을 냈고(real faithfulness 높음 = 검색된 청크에 근거함), 골드 청크만으로는 답이 안
+    나오므로(not _oracle_ok), 원인은 검색·생성이 아니라 골드 라벨이다.
+
+    bad_gold_answer(정답 '텍스트' 오류)와 구분된다 — 그쪽은 오라클 답이 gold 에 충실한데
+    ground_truth 와 어긋나는 경우고(정답이 틀림), 이쪽은 실제 답이 맞는데 gold 청크가 그 답을
+    못 담은 경우다(청크가 틀림). 판별 열쇠는 '실제 답이 맞았나(_f1_ok)'다.
+
+    이 신호가 뜨면 diagnose 가 경쟁 슬롯의 거짓 원인(retrieval_low_rank·generation_*)을 막고
+    이 하나만 남겨 검수로 보낸다. 점수에서는 거짓 실패로 제외한다(report.is_gold_labeling_error).
+    """
+    if record.oracle_answer is None:
+        return None                      # 골드 컨텍스트 없음(코퍼스 결손 등) → 청크 오라벨로 단정 불가
+    if _oracle_ok(record):
+        return None                      # 골드로 답이 나오면 골드 청크는 정상
+    if not _f1_ok(record):
+        return None                      # 실제 답도 틀리면 골드 문제로 단정 못 함(진짜 실패 영역)
+    faith = _faith(record)
+    if faith is None or faith < RAGAS_FAITHFULNESS_MIN:
+        return None                      # 답이 검색 근거에 안 붙으면(parametric 등) 골드 단정 불가
+    return _finding(
+        record, "bad_gold_chunk", "gap", confirmed=True,
+        reason=f"f1={_v(record.f1_score)}(실제 답 정답)·oracle_f1={_v(record.oracle_f1)}(골드론 실패)"
+               f", faithfulness={_v(faith)}(검색 근거 있음) → 골드 청크 오라벨(정답 텍스트는 정상)",
+    )
+
+
 def _corpus_membership_ratio(record: EvalRecord) -> str:
     """코퍼스에 있는 gold 비율을 'n/N' 로. 멤버십이 per-gold 라 'False'(=하나라도 없음)만
     적으면 부분 gap 을 '전부 없음'으로 오독하게 된다(A 라벨의 missed_gold_in_corpus 와 같은 형식)."""
@@ -1147,6 +1179,13 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
 
     # 오라클 트랙 RAGAS — 소비처가 B그룹 라벨·_oracle_ok 뿐이라 실패 probe 에서만 지불한다.
     _compute_ragas_oracle(record)
+
+    # 골드 청크 오라벨: 실제 답은 맞는데(f1 통과) 골드 청크로는 못 맞춘 경우 — 검색·생성이
+    # 아니라 골드 라벨이 틀린 것이다. 경쟁 슬롯의 거짓 원인(retrieval_low_rank·generation_*)을
+    # 막고 이 하나만 남겨 검수로 보낸다(점수에서는 report 가 거짓 실패로 제외).
+    chunk_mislabel = bad_gold_chunk(record)
+    if chunk_mislabel is not None:
+        return [chunk_mislabel]
 
     # 추가 진단
     findings = []
