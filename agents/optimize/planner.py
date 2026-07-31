@@ -1502,7 +1502,8 @@ def _build_request(
         # 근거: history.judge 주석 + scoring.reliability_score.
         "primary_metric": "composite_score",
         # sweep 이 "baseline 을 이겼다"고 판정하는 최소 상승폭. judge(유지/롤백)와 같은
-        # 값이어야 "sweep 이 고른 최선이 judge 에서 탈락"하는 예산 낭비가 생기지 않는다.
+        # 값이어야 같은 점수 변화가 경로에 따라 다르게 보고되지 않는다(sweep 승자는
+        # _finish_internal_study 가 그 자리에서 확정해 judge 를 거치지 않는다).
         # primary_metric 이 정규화 composite(0~1)이라 마진도 같은 스케일이다.
         "min_delta": history.MIN_IMPROVEMENT_MARGIN,
         "study_baseline_config": dict(state.index_config),

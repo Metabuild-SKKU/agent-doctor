@@ -62,13 +62,21 @@ _FLOORS: dict[str, float] = {
 # ── 개선 판정 최소 마진 ───────────────────────────────────────────
 # 개선으로 인정할 최소 상승폭(정규화 composite 0~1 기준).
 # 표시 점수 2점 = 0.02. Eval 노이즈(LLM judge 편차·표본 오차) 안에 묻히는 상승을
-# "개선"으로 확정하지 않기 위한 값이다. 실측 테스트로 정했다(변경하려면 근거 데이터 필요).
+# "개선"으로 확정하지 않기 위한 값이다.
+#
+# ⚠️ 이 값은 **잠정치다. 노이즈 분포를 측정해서 나온 값이 아니다.**
+#    유일한 관측 근거는 같은 config 재평가가 82↔78(표시 4점 폭)로 흔들린 사례
+#    하나뿐이고(PR #66 리뷰), 그게 사실이면 2점은 노이즈보다 작아 제 역할을 못 한다.
+#    같은 config 반복 Eval 로 σ 를 재고 마진을 k·σ 로 다시 정해야 한다.
+#    보정에 쓸 관측값은 finalize_item 이 이력에 남긴다
+#    (margin_rejected·score_delta·improvement_margin).
 #
 # ⚠️ 스케일 주의: judge 도 sweep objective 도 정규화 composite(0~1)를 쓴다.
 #    표시용 composite_total(0~100)과 혼동하면 마진이 100배 어긋난다.
 #
-# judge(유지/롤백)와 internal sweep(best 후보 선정)이 같은 값을 써야 한다 —
-# 다르면 "sweep 이 고른 최선이 judge 에서 탈락"해 예산 한 번을 통째로 날린다.
+# judge(유지/롤백)와 internal sweep(best 후보 선정)이 같은 값을 써야 한다. 두 경로는
+# 각각 독립적으로 "개선했는가"를 판정하고 둘 다 사용자 리포트로 나가므로, 임계가
+# 다르면 같은 점수 변화가 경로에 따라 다르게 보고된다.
 # internal_adapter 는 history 를 import 하지 않으므로 planner 가 이 값을
 # OptimizationRequest.metadata["min_delta"] 로 중계한다(planner._build_request).
 MIN_IMPROVEMENT_MARGIN: float = 0.02
@@ -80,9 +88,13 @@ def meets_improvement_margin(
 ) -> bool:
     """상승폭이 마진을 만족하는가. (경계값 포함)
 
-    internal_adapter._complete 의 min_delta 판정과 **동작이 같아야** 한다. 부동소수
-    오차로 경계값에서 두 모듈의 판정이 갈리면 sweep 이 고른 후보가 judge 에서 탈락한다.
-    그래서 비교식(`> margin` 또는 `math.isclose`)까지 그대로 맞춘다.
+    internal_adapter._meets_min_delta 와 **동작이 같아야** 한다. 두 모듈은 각각
+    독립적으로 "개선했는가"를 판정하며(judge 는 rules 처방을, sweep 은 후보 묶음을),
+    둘 다 사용자 리포트로 나간다. 임계가 다르면 같은 점수 변화가 어느 경로를 탔는지에
+    따라 다르게 보고된다. 그래서 비교식(`> margin` 또는 math.isclose)까지 맞춘다.
+
+    agent._relax_reranker_precision_floor 도 이 함수를 쓴다 — floor 위반 경로는
+    judge 가 먼저 반환해 마진을 안 거치므로, 그쪽 점수 관문을 여기에 맞춰야 한다.
     """
     return improvement > 0 and (
         improvement > margin
@@ -314,12 +326,12 @@ def finalize_item(
     # Optimize Agent가 이 값을 사용해 같은 실행 안에서 동일 no-progress 전이를
     # 다시 열지 않으며, 새 파이프라인 실행에서는 이력이 초기화되어 재시도할 수 있다.
     item.metadata["unjudgeable"] = bool(verdict.unjudgeable)
-    # 마진 사후 조정용 기록. 마진이 노이즈보다 과도하게 크면 진짜 작은 개선까지 버리므로,
-    # "마진 때문에 탈락한 시도"와 "그때 실제 점수 차이"를 남겨 값을 검증할 수 있게 한다.
+    # 마진 사후 조정용 기록. 마진이 노이즈보다 작으면 제 역할을 못 하고, 과도하게 크면
+    # 진짜 작은 개선까지 버린다. 어느 쪽인지 판단하려면 탈락한 시도뿐 아니라 **유지된
+    # 시도의 상승폭 분포**도 필요하므로 세 값을 모든 확정 항목에 남긴다.
     item.metadata["score_delta"] = verdict.after_score - verdict.before_score
     item.metadata["margin_rejected"] = bool(verdict.margin_rejected)
-    if verdict.margin_rejected:
-        item.metadata["improvement_margin"] = MIN_IMPROVEMENT_MARGIN
+    item.metadata["improvement_margin"] = MIN_IMPROVEMENT_MARGIN
     # 표시·게이트용 종합점수(0~100). verdict 가 실어줬으면 그걸, 아니면 리포트에서 직접.
     before_report = item.metadata.get("before_report")
     item.metadata["before_composite"] = (

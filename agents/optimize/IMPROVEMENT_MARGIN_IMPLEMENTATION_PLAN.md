@@ -38,7 +38,8 @@ after_score > before_score + MARGIN   → 유지
 그 외                                  → 롤백
 ```
 
-마진 값은 실측 테스트로 **composite 표시 점수 기준 2점**으로 정했다.
+마진 값은 **composite 표시 점수 기준 2점**으로 잡았다.
+⚠️ 이 값은 잠정치다 — 노이즈 분포를 측정해서 나온 값이 아니다(§8 첫 항목).
 
 ---
 
@@ -117,6 +118,11 @@ planner가 항상 `"composite_score"`(0~1)를 넣는다. 즉 **두 지점의 스
 
 ## 3. 변경 계획
 
+> ⚠️ 아래 §3.1·§3.3 예시의 주석에 나오는 *"sweep이 고른 최선이 judge에서 탈락해
+> 예산을 날린다"* 는 **현재 배선에서 성립하지 않는다.** sweep 승자는
+> `_finish_internal_study`가 그 자리에서 확정해 `history.judge`를 거치지 않는다.
+> 임계를 맞춰야 하는 진짜 이유는 §7-A ③ 참조. (계획 당시 서술을 이력으로 남긴다.)
+
 ### 3.1 상수 정의 — `agents/optimize/history.py`
 
 두 모듈이 공유해야 하므로 한 곳에만 정의한다. `internal_adapter`가 `history`를
@@ -127,7 +133,7 @@ import하지 않으므로, planner가 중계한다(planner는 이미 양쪽을 �
 
 # 개선으로 인정할 최소 상승폭(정규화 composite 0~1 기준).
 # 표시 점수 2점 = 0.02. Eval 노이즈(LLM judge 편차·표본 오차) 안에 묻히는
-# 상승을 "개선"으로 확정하지 않기 위한 값이다. 실측 테스트로 정했다.
+# 상승을 "개선"으로 확정하지 않기 위한 값이다. 잠정치이며 σ 측정으로 재보정해야 한다.
 # judge(유지/롤백)와 internal sweep(best 후보 선정)이 같은 값을 써야 한다 —
 # 다르면 "sweep이 고른 최선이 judge에서 탈락"해 예산 한 번을 통째로 날린다.
 MIN_IMPROVEMENT_MARGIN: float = 0.02
@@ -209,7 +215,8 @@ reason="처방 후보가 모두 블랙리스트에 걸림"   → use_current →
 ### 4.2 진짜 작은 개선을 놓친다
 
 RAG 파라미터 하나를 바꿔 얻는 효과는 원래 작다. 마진이 노이즈보다 과도하게 크면
-실제 개선까지 버린다. 2점은 실측으로 정한 값이나, 위 로그로 사후 조정한다.
+실제 개선까지 버린다. 반대로 노이즈보다 작으면 애초에 제 역할을 못 한다.
+2점은 잠정치이므로 위 로그로 사후 조정한다.
 
 ---
 
@@ -297,12 +304,65 @@ python3 -m compileall -q agents core tests
 
 ---
 
+## 7-A. PR #76 리뷰 반영 (구현 후)
+
+리뷰에서 지적된 6건을 모두 확인했고, 반려한 것은 없다.
+
+| 지적 | 확인 방법 | 조치 |
+|---|---|---|
+| `_relax_reranker_precision_floor`가 옛 기준 | 코드 | `meets_improvement_margin`으로 교체 |
+| `pass_threshold_reached`가 min_delta 우회 | 실행 재현 | baseline 있으면 마진 요구 |
+| "judge에서 탈락" 근거 불성립 | 코드 | 서술 정정 |
+| 주석 ↔ 본문 모순 | PR #66 원문 | 잠정치임을 명시 |
+| `unjudgeable` 전환이 더 엄격 | 코드 | 사유별 시도 예산 분리 |
+| `improvement_margin` 탈락 시에만 | 자명 | 전 항목 기록 |
+
+**① floor 완화 예외의 점수 관문** (`agent._relax_reranker_precision_floor`)
+
+하한선 위반이 있으면 judge가 floor 판정으로 먼저 반환하므로 마진이 개입하지 않는다.
+이 함수의 `after_score > before_score`가 그 경로의 유일한 방어선이었고, 통과하면
+`floor_violations=[]`로 판정을 완전히 뒤집는다. 즉 **+0.001 노이즈가 하한선 위반
+처방을 되살렸다.** judge와 같은 기준으로 교체했다.
+
+**② `pass_threshold_reached` 조기 반환** (`internal_adapter._complete`)
+
+게이트를 넘은 후보를 min_delta 비교 없이 채택했다. 재현: baseline 89.9 → 후보 90.1
+(+0.002, 마진의 1/10)에서 `best_is_baseline=False, improved=None`. `_finish_internal_study`도
+마진 없이 `keep=True`로 확정하므로 **노이즈로 게이트를 넘은 config가 그대로 굳었다.**
+
+scorable baseline이 있으면 통과 여부와 무관하게 마진을 요구하도록 고쳤다. baseline이
+없거나 후보에 점수가 없으면 비교 근거가 없으므로 현행(통과 채택)을 유지한다.
+비교식은 `_meets_min_delta`로 뽑아 두 경로가 같은 식을 쓰게 했다.
+
+**③ 일관성의 진짜 이유**
+
+`_finish_internal_study`가 `pending=False`로 끝내므로 **sweep 승자는 `history.judge`를
+거치지 않는다.** "sweep이 고른 최선이 judge에서 탈락해 예산을 날린다"는 서술은 현재
+배선에서 성립하지 않는다. 두 임계를 맞춰야 하는 실제 이유는 **두 경로가 각각 독립적으로
+"개선했는가"를 판정하고 둘 다 사용자 리포트로 나가기 때문**이다 — 임계가 다르면 같은
+점수 변화가 경로에 따라 다르게 보고된다.
+
+**④ 시도 예산** — `blacklist`와 `optimization_history`는 같은 `AgentDoctorState`
+필드라 수명이 같다. "새 실행에서 재시도"는 양쪽 모두에 해당하므로 `unjudgeable`
+전환의 실익은 수명이 아니라 **분류**(측정 불가를 품질 실패로 기록하지 않음)다.
+한편 `_MAX_UNJUDGEABLE_ATTEMPTS=1`이 기존 retryable 경로의 2회를 1회로 줄이고 있었다.
+의도한 변경이 아니라 사유별로 분리했다 — 리포트 부재 1회,
+`missing_scorable_baseline` 2회(`_MAX_MEASUREMENT_FAILURE_ATTEMPTS`).
+
 ## 8. 범위 밖
 
-- **동적 마진**: 고정값 2점은 노이즈 크기를 *가정*할 뿐 측정하지 않는다. Eval이
+- **마진 값 자체의 재보정 (최우선 후속)**: `0.02`는 **잠정치이며 노이즈 분포를
+  측정해서 나온 값이 아니다.** 유일한 관측 근거는 같은 config 재평가가 82↔78
+  (표시 **4점** 폭)로 흔들린 사례 하나뿐이다(PR #66 리뷰). 그게 사실이면 2점은
+  노이즈보다 작아 제 역할을 못 한다. **같은 config로 Eval을 N회 반복해 σ를 재고**
+  마진을 `k·σ`로 다시 정해야 한다. 보정 관측값은 `finalize_item`이 남기는
+  `margin_rejected`·`score_delta`·`improvement_margin`으로 모인다.
+  PR #70(grounded-credit)이 composite 분산을 바꿀 수 있으므로 재베이스라인 시점에
+  함께 캘리브레이션한다.
+- **동적 마진**: 고정값은 노이즈 크기를 *가정*할 뿐 측정하지 않는다. Eval이
   probe별 점수를 노출하면 표준오차(`std/√n`) 기반으로 대체할 수 있으나, Eval과의
   계약 변경이 필요하므로 별도 작업으로 둔다.
 - **action 중심 전환**: 이 작업은 그와 독립적이며 먼저 병합돼야 한다.
   (`ACTION_CENTERED_OPTIMIZER_IMPLEMENTATION_PLAN.md` §8.0-A 선행 PR ①)
 - **`max_iterations` 상향**: action 전환 후에야 의미가 있으므로 그쪽 PR에 둔다.
-- **마진 값 재조정**: 2점은 실측 테스트 결과다. 변경하려면 근거 데이터를 함께 낸다.
+- ~~**마진 값 재조정**: 2점은 실측 테스트 결과다.~~ → 사실이 아니다. 위 §8 첫 항목 참조.
