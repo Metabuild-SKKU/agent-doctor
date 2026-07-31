@@ -142,6 +142,29 @@ def _grounded_ok(record: EvalRecord) -> bool:
     return faith is None or faith >= RAGAS_FAITHFULNESS_MIN
 
 
+def _grounded_verified(record: EvalRecord) -> bool:
+    """실제 답이 검색 근거에 붙었다고 '실측으로 확인'됐나 — faithfulness 가 측정되고 문턱 이상.
+
+    _grounded_ok 와 반대로 미측정(None)은 False 로 본다: '근거 없음이 반증 안 됨'(_grounded_ok)이
+    아니라 '근거 있음이 확인됨'을 요구한다. 검색축에 크레딧을 줄지 판단하는 자리라, 검증 안 된
+    grounding 에 크레딧을 주면 parametric(근거 없이 맞힌 답)까지 검색 성공으로 오인한다."""
+    faith = _faith(record)
+    return faith is not None and faith >= RAGAS_FAITHFULNESS_MIN
+
+
+def _retrieval_verified_grounded(record: EvalRecord) -> bool:
+    """라벨 골드는 top-k 에 못 들었지만(recall<1) 검색이 '다른 유효 근거'로 정답을 뒷받침한 경우.
+
+    전제: 답이 정답(_f1_ok) ∧ 답이 검색 근거에 붙음(_grounded_verified) ∧ 골드도 유효(_oracle_ok).
+      · _oracle_ok 로 골드 유효성을 확인 → 골드가 틀린 경우(bad_gold_chunk)와 분리된다.
+      · _grounded_verified 로 parametric(근거 없이 맞힌 답)을 배제 → 진짜 검색 실패는 실패로 남는다.
+    이 경우 검색은 라벨 골드 청크 하나를 놓쳤을 뿐 정답 근거는 실제로 제공했으므로, recall 스윙만으로
+    실패/성공이 뒤집히지 않게 성공으로 처리한다(검색축 크레딧은 faithfulness).
+    호출 전 _compute_ragas_oracle 이 돌아 _oracle_ok 가 유효해야 한다(diagnose 순서 참조)."""
+    return (not _recall_ok(record) and _f1_ok(record)
+            and _oracle_ok(record) and _grounded_verified(record))
+
+
 def _parametric_overreliance(record: EvalRecord) -> bool:
     """정답인데 검색 context 에 근거가 없음 = 모델 파라미터 기억으로 답함.
 
@@ -1186,6 +1209,14 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
     chunk_mislabel = bad_gold_chunk(record)
     if chunk_mislabel is not None:
         return [chunk_mislabel]
+
+    # 검증된 label-recall miss: 라벨 골드는 못 집었지만 답이 정답·검색 근거에 붙고 골드도 유효하면,
+    # 검색은 다른 유효 근거로 정답을 뒷받침한 것이라 실패가 아니다. recall 스윙(재청킹)만으로
+    # pass/fail 이 뒤집히지 않게 성공 처리하고, 검색축 크레딧(faithfulness)을 record 에 남겨
+    # reliability 가 같은 판정을 쓰게 한다(parametric·골드오류는 위에서 이미 걸러짐).
+    if _retrieval_verified_grounded(record):
+        record.retrieval_axis = _faith(record)
+        return []
 
     # 추가 진단
     findings = []
