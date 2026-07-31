@@ -28,8 +28,11 @@ from core.state import AgentDoctorState
 
 
 class _FakeCrossEncoder:
-    def __init__(self, scores):
+    # 실제 CrossEncoder 처럼 max_length 등 키워드를 받는다 — 못 받으면 프로덕션이
+    # 상한 없이 로드하는 폴백 경로로 새서, 테스트가 실제 경로를 검증하지 못한다.
+    def __init__(self, scores, **kwargs):
         self.scores = scores
+        self.kwargs = kwargs
         self.calls = []
 
     def predict(self, pairs):
@@ -97,6 +100,61 @@ class RerankerExecutionTest(unittest.TestCase):
             ["c3", "c2"],
         )
 
+    def test_loader_caps_reranker_input_length(self):
+        """리랭크 1쌍의 비용은 청크 길이에 비례한다 — 상한이 없으면 chunk_size 처방 하나로
+        검색 시간이 몇 배가 된다(모델 tokenizer 기본 상한은 8192)."""
+        model_name = "test/max-length-reranker"
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = lambda _name, **kw: _FakeCrossEncoder([0.1], **kw)
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+            model, status = qdrant_store._load_reranker(model_name)
+
+        self.assertEqual(status, "ready")
+        self.assertEqual(model.kwargs["max_length"], qdrant_store._RERANKER_MAX_LENGTH)
+
+    def test_loader_falls_back_when_max_length_unsupported(self):
+        """상한 인자를 못 받는 구현이어도 리랭킹 자체는 죽지 않는다(상한만 빠진다)."""
+        model_name = "test/no-max-length-reranker"
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = lambda _name: _FakeCrossEncoder([0.1])
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+            model, status = qdrant_store._load_reranker(model_name)
+
+        self.assertEqual(status, "ready")
+        self.assertEqual(model.kwargs, {})
+
+    def test_search_reports_rerank_cost(self):
+        """리랭크 소요 시간·쌍 수를 검색 결과에 실어 리포트가 비용을 집계할 수 있게 한다."""
+        chunks = [
+            {"chunk_id": f"c{i}", "doc_id": "d1", "text": f"alpha 문서 {i}", "metadata": {}}
+            for i in range(4)
+        ]
+        model_name = "test/cost-reranker"
+        qdrant_store._rerankers[model_name] = _FakeCrossEncoder([0.1, 0.2, 0.3])
+        retriever = Retriever(
+            chunks,
+            RetrievalSettings(
+                use_reranker=True, reranker_model=model_name, rerank_candidates=3
+            ),
+            client=None,
+        )
+
+        result = retriever.search_with_details("alpha", top_k=2)
+
+        self.assertEqual(result["rerank_pairs"], 3)
+        self.assertGreaterEqual(result["rerank_seconds"], 0.0)
+
+    def test_search_reports_zero_rerank_cost_when_disabled(self):
+        chunks = [{"chunk_id": "c1", "doc_id": "d1", "text": "alpha", "metadata": {}}]
+        retriever = Retriever(chunks, RetrievalSettings(use_reranker=False), client=None)
+
+        result = retriever.search_with_details("alpha", top_k=1)
+
+        self.assertEqual(result["rerank_pairs"], 0)
+        self.assertEqual(result["rerank_seconds"], 0.0)
+
     def test_inference_failure_keeps_original_order_and_reports_not_reranked(self):
         chunks = [
             {
@@ -145,7 +203,7 @@ class RerankerExecutionTest(unittest.TestCase):
         count_lock = threading.Lock()
 
         class _ConcurrentCrossEncoder:
-            def __init__(self, _model_name):
+            def __init__(self, _model_name, **_kwargs):
                 nonlocal load_count
                 with count_lock:
                     load_count += 1
@@ -184,7 +242,7 @@ class RerankerCapabilityTest(unittest.TestCase):
     def test_smoke_inference_marks_model_verified(self):
         model_name = "test/verified-reranker"
         fake_module = types.ModuleType("sentence_transformers")
-        fake_module.CrossEncoder = lambda _name: _FakeCrossEncoder([0.7])
+        fake_module.CrossEncoder = lambda _name, **kw: _FakeCrossEncoder([0.7], **kw)
 
         with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
             capability = qdrant_store.probe_reranker_capability(model_name)
@@ -207,7 +265,7 @@ class RerankerCapabilityTest(unittest.TestCase):
         model_name = "test/load-failure"
 
         class _BrokenCrossEncoder:
-            def __init__(self, _name):
+            def __init__(self, _name, **_kwargs):
                 raise OSError("download failed")
 
         fake_module = types.ModuleType("sentence_transformers")
@@ -222,7 +280,7 @@ class RerankerCapabilityTest(unittest.TestCase):
     def test_smoke_failure_marks_model_unavailable(self):
         model_name = "test/smoke-failure"
         fake_module = types.ModuleType("sentence_transformers")
-        fake_module.CrossEncoder = lambda _name: _FakeCrossEncoder([])
+        fake_module.CrossEncoder = lambda _name, **kw: _FakeCrossEncoder([], **kw)
 
         with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
             capability = qdrant_store.probe_reranker_capability(model_name)
@@ -335,6 +393,9 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
                 "attempted": 2,
                 "applied": 1,
                 "failed": 1,
+                "seconds": 0.0,
+                "pairs": 0,
+                "ms_per_pair": None,
                 "status_counts": {
                     "load_failed": 1,
                     "applied": 1,

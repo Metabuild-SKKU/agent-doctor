@@ -243,6 +243,10 @@ def _reranker_runtime(records: list[EvalRecord]) -> dict:
         str(record.retrieval_details.get("reranker_status", "disabled"))
         for record in records
     )
+    # 비용도 함께 집계한다 — 검색 시간의 대부분이 리랭크(쌍 수 × 쌍당 텍스트 길이)에서 나오는데
+    # 실행 여부만 남기면 chunk_size 처방이 쌍당 비용을 몇 배로 올려도 아무 신호가 안 남는다.
+    seconds = sum(_num(r.retrieval_details.get("rerank_seconds")) for r in records)
+    pairs = int(sum(_num(r.retrieval_details.get("rerank_pairs")) for r in records))
     return {
         "enabled": enabled_probes > 0,
         "enabled_probes": enabled_probes,
@@ -250,7 +254,18 @@ def _reranker_runtime(records: list[EvalRecord]) -> dict:
         "applied": applied,
         "failed": max(0, attempted - applied),
         "status_counts": dict(status_counts),
+        "seconds": round(seconds, 2),
+        "pairs": pairs,
+        "ms_per_pair": round(seconds * 1000 / pairs, 1) if pairs else None,
     }
+
+
+def _num(value) -> float:
+    """retrieval_details 에서 읽은 수치를 float 로. 없거나 형식 불량이면 0.0
+    (옛 계약의 retriever·테스트 주입 결과에는 키가 아예 없다)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value)
 
 
 def _ragas_means(records: list[EvalRecord]) -> dict:
@@ -345,6 +360,10 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     if rs.get("answer_correctness_degraded"):
         print(f"  ⚠ 정답 판정 degrade {rs['answer_correctness_degraded']}건 — "
               f"판정기(TP/FP/FN 분류) 실패로 의미유사도 단독 계산. 근접 오답을 못 걸렀을 수 있음")
+    rerank = (report.runtime_summary or {}).get("reranker") or {}
+    if rerank.get("pairs"):   # 리랭크 비용 — chunk_size 처방이 검색 시간에 준 영향을 드러낸다
+        print(f"  리랭커 {rerank['seconds']}초 · {rerank['pairs']}쌍"
+              f"(쌍당 {rerank['ms_per_pair']}ms) · applied {rerank['applied']}/{len(records)}")
     if report.findings:
         # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
         # (타입=처방 그룹 4종, 라벨=세분화 진단명. 타입만 보면 gap 처럼 뭉뚱그려져 원인이 안 보인다.)

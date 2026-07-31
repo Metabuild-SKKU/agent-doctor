@@ -63,6 +63,14 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    """환경변수 int 파싱 — 비정수/오타면 기본값으로 폴백(_env_float 와 같은 규약)."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 _models: dict[str, Any] = {}
 # model_name → 마지막 로드 실패 시각(monotonic). 실패를 영구 캐시하면 일시적
 # 원인(네트워크 등) 후에도 프로세스 내내 fallback 임베딩만 조용히 쓰게 되므로,
@@ -74,12 +82,37 @@ _FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
 _rerankers: dict[str, Any] = {}
 _failed_rerankers: dict[str, float] = {}
 _FAILED_RERANKER_RETRY_SEC = _env_float("INDEX_RERANKER_RETRY_SEC", 300.0)
+# 리랭커(cross-encoder) 입력 토큰 상한. 0 이하면 모델 기본값을 쓴다.
+#
+# 상한이 없으면 리랭크 1쌍의 비용이 chunk_size 에 그대로 비례한다 — 이 모델의 tokenizer 는
+# model_max_length=8192 라 청크를 통째로 받는다(실측, 한국어: 512자=304토큰 / 1024자=604토큰).
+# Optimize 가 chunk_size 를 키우는 처방 하나를 내면 Eval·Serve 의 검색 시간이 함께 뛰는데
+# (실측 corpus_20260730: 청크 수는 절반인데 STEP2 검색 23초 → 915초), 그 비용은 어떤 지표에도
+# 안 잡혀 다음 처방 판정이 무시한다. 기본 512 는 512자 청크를 자르지 않으므로 기존 구성의
+# 순위는 그대로고, 그보다 큰 청크만 앞부분으로 잘려 비용 상한이 생긴다.
+_RERANKER_MAX_LENGTH = _env_int("INDEX_RERANKER_MAX_LENGTH", 512)
 _collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, dict[str, bool]] = (
     WeakKeyDictionary()
 )
 # Serve의 동시 검색이 같은 CrossEncoder를 중복 로드하지 않도록 모델 캐시와
 # 실패 쿨다운 갱신을 한 임계구역에서 처리한다. 추론 자체는 병렬 검색을 막지 않는다.
 _reranker_lock = threading.Lock()
+
+
+def _new_cross_encoder(cross_encoder_cls, model_name: str):
+    """입력 길이 상한(_RERANKER_MAX_LENGTH)을 걸어 CrossEncoder 를 만든다.
+
+    상한 인자를 못 받는 구현이면 상한 없이 만들되 조용히 넘어가지 않는다 — 상한이 빠지면
+    리랭크 비용이 다시 chunk_size 에 비례해 열리므로, 로그로 드러내야 원인을 찾을 수 있다.
+    """
+    if _RERANKER_MAX_LENGTH <= 0:
+        return cross_encoder_cls(model_name)
+    try:
+        return cross_encoder_cls(model_name, max_length=_RERANKER_MAX_LENGTH)
+    except TypeError:
+        print("[Index] reranker 구현이 max_length 를 받지 않는다 — 입력 길이 상한 없이 로드한다 "
+              "(청크가 크면 리랭크 비용이 그만큼 커진다)")
+        return cross_encoder_cls(model_name)
 
 
 def _load_reranker(model_name: str) -> tuple[Any | None, str]:
@@ -106,7 +139,7 @@ def _load_reranker(model_name: str) -> tuple[Any | None, str]:
         try:
             # 모델 생성까지 lock 안에서 수행해야 동시에 들어온 요청이 같은
             # 대형 모델을 각각 메모리에 올리는 것을 막을 수 있다.
-            model = CrossEncoder(model_name)
+            model = _new_cross_encoder(CrossEncoder, model_name)
         except Exception as exc:
             _failed_rerankers[model_name] = time.monotonic()
             print(

@@ -13,6 +13,7 @@ import hashlib
 import math
 import os
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -416,6 +417,8 @@ class Retriever:
                 # 정상 경로와 키 집합을 맞춘다 — 소비처(Eval 진단)가 키 유무로 분기한다.
                 "rerank_candidate_count": 0,
                 "pre_rerank_ids": [],
+                "rerank_seconds": 0.0,
+                "rerank_pairs": 0,
                 "results": [],
             }
 
@@ -493,13 +496,21 @@ class Retriever:
         )
         # MMR 이 최종 top_k 선택을 맡으면 리랭커는 후보풀을 유지한다(그래야 다양화 여지가 남음).
         rerank_top_k = candidate_k if self.settings.use_mmr else requested_top_k
+        # 리랭크 실측 시간·쌍 수를 결과에 싣는다 — 검색 시간의 대부분이 여기서 나오는데
+        # (쌍 수 × 쌍당 텍스트 길이), 지금까지 리포트에는 실행 여부만 있고 비용이 없었다.
+        # chunk_size 처방으로 쌍당 비용이 뛰어도 Optimize 가 그걸 못 보고 품질만 비교한다.
+        rerank_seconds = 0.0
+        rerank_pairs = 0
         if reranker_attempted:
+            rerank_pairs = len(results)
+            rerank_started = time.monotonic()
             results, reranker_status = rerank_with_status(
                 query,
                 results,
                 model_name=self.settings.reranker_model,
                 top_k=rerank_top_k,
             )
+            rerank_seconds = time.monotonic() - rerank_started
             reranked = reranker_status == "applied"
 
         mmr_applied = False
@@ -535,6 +546,8 @@ class Retriever:
             "fallback_used": fallback_used,
             "rerank_candidate_count": candidate_k,
             "pre_rerank_ids": pre_rerank_ids,
+            "rerank_seconds": round(rerank_seconds, 3),
+            "rerank_pairs": rerank_pairs,
             "results": results,
         }
 
