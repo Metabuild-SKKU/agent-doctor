@@ -39,7 +39,7 @@ from agents.eval.types import (
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN, RAGAS_CONTEXT_PRECISION_MIN,
 )
 from agents.eval.metrics_common import (
-    set_mode, set_context, active_mode, _missed_gold_ids,
+    set_mode, set_context, active_mode, missed_gold_ids,
     candidate_window, reachable_window,
 )
 from agents.eval.metrics_basic import (            # tier1
@@ -202,7 +202,7 @@ def _enumeration_recoverable_by_top_k(record: EvalRecord) -> bool:
     ranks = _gold_ranks(record)
     if ranks is None:
         return True
-    return any(ranks.get(g) is not None for g in _missed_gold_ids(record))
+    return any(ranks.get(g) is not None for g in missed_gold_ids(record))
 
 # ══════════════════════════════════════════════════════════════════
 #  A그룹: 검색 실패 (Oracle 통과) — retrieval_*
@@ -245,7 +245,7 @@ def _ranked_beyond_top_k(record: EvalRecord) -> dict[str, int]:
     top_k = len(record.retrieved_chunk_ids)
     if top_k <= 0:
         return {}                        # 검색 0건 → 순위 문제가 아니라 검색 장애
-    return {g: ranks[g] for g in _missed_gold_ids(record)
+    return {g: ranks[g] for g in missed_gold_ids(record)
             if ranks.get(g) is not None and ranks[g] > top_k}
 
 
@@ -264,7 +264,8 @@ def _rankable(record: EvalRecord) -> dict[str, int]:
 
 
 def _rerank_lost(record: EvalRecord) -> dict[str, int]:
-    """리랭커 후보에는 있었는데 최종 결과엔 없는 놓친 gold {gold_id: pre_rerank 순위}.
+    """리랭크 **전엔 top_k 안**이었는데 결과엔 없는 놓친 gold {gold_id: pre_rerank 순위}.
+    = 리랭커가 실제로 떨어뜨린 몫(강등).
 
     융합 순위가 top_k **이내**여도 대상이다. 이게 _rankable 과 갈리는 지점이자, wide 재검색에서
     리랭크를 끈 것의 직접적 귀결이다:
@@ -278,19 +279,42 @@ def _rerank_lost(record: EvalRecord) -> dict[str, int]:
 
     이 집합을 안 보면 강등이 침묵할 뿐 아니라, lexical/semantic 의 양보 게이트도 안 걸려
     "dense 가 gold 를 놓쳤다"는 거짓 전제로 임베딩·청킹 처방이 나간다(리랭커를 끄면 낫는데).
+
+    단 '후보 목록에 있었다'만으로는 강등이 아니다. 리랭크 **전에도 top_k 밖**이던 gold 는
+    리랭커가 떨어뜨린 게 아니라 끌어올리는 데 실패한 것이다(_rerank_not_lifted). 두 경우는
+    처방이 다르다 — 강등은 롤백(disable_reranker)이 유효하지만, 못 끌어올린 경우는 롤백해도
+    융합 순위가 그대로 top_k 밖이라 개선 가능성이 0이다.
     """
     if not _rerank_stage_visible(record):
         return {}
     pre = _gold_pre_rerank_ranks(record) or {}
-    return {g: pre[g] for g in _missed_gold_ids(record) if pre.get(g) is not None}
+    top_k = len(record.retrieved_chunk_ids)
+    return {g: pre[g] for g in missed_gold_ids(record)
+            if pre.get(g) is not None and pre[g] <= top_k}
+
+
+def _rerank_not_lifted(record: EvalRecord) -> dict[str, int]:
+    """리랭커 후보에 있었지만 **리랭크 전에도 top_k 밖**이던 놓친 gold {gold_id: pre 순위}.
+
+    리랭커가 떨어뜨린 게 아니라 올려야 할 것을 못 올린 경우다. 롤백은 여기서 확정 무효다 —
+    되돌리면 융합 순위가 그대로 쓰이는데 그 순위가 애초에 top_k 밖이라 gold 는 여전히 누락된다.
+    남는 레버는 리랭커 모델 교체이며, 그 처방이 열리기 전까지는 리포트 전용이다(rules.py draft).
+    """
+    if not _rerank_stage_visible(record):
+        return {}
+    pre = _gold_pre_rerank_ranks(record) or {}
+    top_k = len(record.retrieved_chunk_ids)
+    return {g: pre[g] for g in missed_gold_ids(record)
+            if pre.get(g) is not None and pre[g] > top_k}
 
 
 def _rank_scope(record: EvalRecord) -> set[str]:
     """순위 라벨 전체의 관할(gold id 집합) — 세 갈래의 합집합.
 
-      _rankable    : 융합 순위가 top_k 밖 + 도달 가능 창 안 (리랭크 계열 라벨의 관할)
-      _rerank_lost : 리랭커 후보엔 있었는데 결과엔 없음 (융합 순위 무관)
-      융합 손실     : 단일 채널이 top_k 안에 뒀는데 융합이 밀어냄 (창 무관 — 아래 참고)
+      _rankable         : 융합 순위가 top_k 밖 + 도달 가능 창 안 (리랭크 계열 라벨의 관할)
+      _rerank_lost      : 리랭크 전엔 top_k 안이었는데 결과엔 없음 = 강등 (융합 순위 무관)
+      _rerank_not_lifted: 후보엔 있었으나 리랭크 전에도 top_k 밖 = 못 끌어올림
+      융합 손실          : 단일 채널이 top_k 안에 뒀는데 융합이 밀어냄 (창 무관 — 아래 참고)
 
     lexical/semantic mismatch 는 이 관할이 비어 있을 때만 발동한다(전제가 'dense 가 놓침'인데,
     여기 잡혔다는 건 dense 가 gold 를 실제로 올려놨다는 뜻이라 전제가 깨진다).
@@ -298,7 +322,8 @@ def _rank_scope(record: EvalRecord) -> set[str]:
     순위 값이 아니라 id 집합을 돌려준다 — 세 갈래의 순위가 서로 다른 단계의 값(pre_rerank vs
     융합)이라 한 dict 에 섞으면 소비처가 같은 의미로 오해하기 쉽다. 여기 쓰임은 '비었나'뿐이다.
     """
-    scope = set(_rerank_lost(record)) | set(_rankable(record))
+    scope = (set(_rerank_lost(record)) | set(_rerank_not_lifted(record))
+             | set(_rankable(record)))
     advantage = _channel_advantage(record)
     if advantage is not None:
         scope.add(advantage[1])
@@ -468,10 +493,47 @@ def retrieval_rerank_candidate_miss(record: EvalRecord) -> Optional[Finding]:
     return finding
 
 
+def retrieval_reranker_ineffective(record: EvalRecord) -> Optional[Finding]:
+    """
+    리랭커가 gold 를 후보로 봤지만 top_k 안으로 끌어올리지 못함.
+    확정: 리랭크 적용됨 + gold 가 후보 목록 안 + **리랭크 전에도 top_k 밖**(비용 0 측정).
+
+    강등(retrieval_reranker_demotion)과 반드시 갈라야 한다 — 여기선 리랭커가 떨어뜨린 게
+    아니라 올리는 데 실패한 것이라, 강등의 정석 처방인 롤백(disable_reranker)이 **확정 무효**다.
+    되돌리면 융합 순위가 그대로 쓰이는데 그 순위가 애초에 top_k 밖이라 gold 는 여전히 누락된다.
+    개선 가능성이 0인 처방에 iteration 을 쓰지 않으려면 판정 단계에서 갈라야 한다.
+
+    남는 레버는 리랭커 모델 교체뿐인데 후보가 미정이라(rules.py BLOCKER) 지금은 리포트 전용이다.
+    리랭커를 한 번 켠 뒤의 주류 경로라 커버리지 영향이 있다 — 모델 교체가 열리면 ready 로 올린다.
+    """
+    if not _rerank_stage_visible(record) or _upstream_rank_cause(record):
+        return None
+    pre = _gold_pre_rerank_ranks(record) or {}
+    if any(pre.get(g) is None for g in _rankable(record)):
+        return None                      # 후보창 밖 gold 가 함께 있음 → candidate_miss 가 앞단
+    targets = _rerank_not_lifted(record)
+    if not targets:
+        return None
+    seen = ", ".join(f"{g}:{r}" for g, r in sorted(targets.items(), key=lambda kv: kv[1]))
+    finding = _finding(
+        record, "retrieval_reranker_ineffective", "retrieval_failure", confirmed=True,
+        reason=f"pre_rerank_ranks=[{seen}] — 리랭크 전에도 top_k="
+               f"{len(record.retrieved_chunk_ids)} 밖(강등 아님, 못 끌어올림), "
+               f"reranker_status={record.retrieval_details.get('reranker_status')}, "
+               f"recall@k={_v(record.recall_at_k)}",
+    )
+    finding.metadata["pre_rerank_ranks"] = dict(targets)
+    return finding
+
+
 def retrieval_reranker_demotion(record: EvalRecord) -> Optional[Finding]:
     """
     리랭커가 gold 를 후보로 보고도 top_k 밖으로 떨어뜨림.
-    확정: 리랭크 적용됨 + gold 가 pre_rerank 후보 목록 안에 있음 + 최종 top_k 밖(비용 0 측정).
+    확정: 리랭크 적용됨 + gold 가 pre_rerank 후보 목록 안 + **리랭크 전엔 top_k 안** + 최종 top_k 밖.
+
+    '리랭크 전엔 top_k 안'이 이 라벨의 핵심 전제다. 그게 없으면 리랭커가 올리는 데 실패했을
+    뿐인 케이스(retrieval_reranker_ineffective)까지 '떨어뜨렸다'로 확정하고, 롤백이라는
+    확정 무효 처방을 내게 된다.
 
     후보창을 넓히는 처방이 여기선 무효라서 candidate_miss 와 반드시 갈라야 한다 — gold 는 이미
     창 안에 있었고 리랭커가 매긴 점수가 낮았을 뿐이라, 창을 넓히면 gold 아래로 후보만 더 들어온다.
@@ -498,7 +560,7 @@ def retrieval_reranker_demotion(record: EvalRecord) -> Optional[Finding]:
     fused_note = ", ".join(f"{g}:{fused.get(g)}" for g in sorted(targets))
     finding = _finding(
         record, "retrieval_reranker_demotion", "retrieval_failure", confirmed=True,
-        reason=f"pre_rerank_ranks=[{seen}](후보창 안) 인데 최종 top_k="
+        reason=f"pre_rerank_ranks=[{seen}](리랭크 전 top_k 안) 인데 최종 top_k="
                f"{len(record.retrieved_chunk_ids)} 밖, fused_ranks=[{fused_note}], "
                f"reranker_status={record.retrieval_details.get('reranker_status')}, "
                f"recall@k={_v(record.recall_at_k)}",
@@ -583,7 +645,7 @@ def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
         return _finding(
             record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=True,
             reason=f"bm25_hits_gold=False, "
-                   f"missed_gold_in_corpus={len(in_corpus)}/{len(_missed_gold_ids(record))}, "
+                   f"missed_gold_in_corpus={len(in_corpus)}/{len(missed_gold_ids(record))}, "
                    f"recall@k={_v(record.recall_at_k)}",
         )
     return None                          # 놓친 gold 가 전부 코퍼스 밖 → corpus_gap 영역
@@ -599,7 +661,7 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
     """
     if record.probe.qtype == "bridge":
         return None                      # bridge 의존과 구분 불가 → bridge 에 양보
-    if not _missed_gold_ids(record):
+    if not missed_gold_ids(record):
         return None                      # 놓친 gold 청크가 없음 → 'top-k 에 없다'가 성립 안 함
     in_corpus = _missed_gold_in_corpus(record)
     if in_corpus is None:
@@ -610,7 +672,7 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
     if in_corpus:
         return _finding(
             record, "retrieval_missing_gold", "retrieval_failure", confirmed=True,
-            reason=f"missed_gold_in_corpus={len(in_corpus)}/{len(_missed_gold_ids(record))}, "
+            reason=f"missed_gold_in_corpus={len(in_corpus)}/{len(missed_gold_ids(record))}, "
                    f"recall@k={_v(record.recall_at_k)}",
         )
     return None                          # 놓친 gold 가 전부 코퍼스 밖 → corpus_gap 영역
@@ -668,7 +730,7 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     if _recall_ok(record) and not _context_failed(record):
         return None
     # 반대 게이트: span 개수 압박이면 슬롯 부족이 지배 → enumeration 에 양보.
-    if (_missed_gold_ids(record) and _enumeration_pressure(record) is True
+    if (missed_gold_ids(record) and _enumeration_pressure(record) is True
             and _enumeration_recoverable_by_top_k(record)):
         return None
     finding = _finding(
@@ -690,7 +752,7 @@ def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]
     """
     if record.probe.qtype != "bridge" or not (0 <= record.recall_at_k < 1):
         return None
-    if not _missed_gold_ids(record):
+    if not missed_gold_ids(record):
         return None                      # 놓친 hop 근거가 없음 → bridge 의존을 의심할 근거 없음
 
     return _finding(
@@ -706,7 +768,7 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
     개수를 gold_chunk_ids 로 세면 세밀 청킹이 부풀려 chunking 을 나열형으로 오진 → span 수로.
     압박 없으면 chunking 에 양보(반대 게이트). qtype None·legacy 는 예비.
     """
-    missed = _missed_gold_ids(record)
+    missed = missed_gold_ids(record)
     if not missed:
         return None                      # 놓친 gold 없음 → 개수 부족 누락 아님
     if not record.retrieved_chunk_ids:
@@ -1004,7 +1066,7 @@ def _gold_in_middle_band(record: EvalRecord) -> Optional[bool]:
     """검색 결과 안 gold 가 양끝이 아니라 중간 밴드에 있나. 위치 미측정이면 None.
 
     미측정을 False(=양끝)로 접으면 안 된다 — 위치는 chunk-id 대조인데 C 전제의 recall 은
-    span 기준이라, 재청킹으로 id 가 어긋난 recall=1 케이스(_missed_gold_ids 독스트링 참고)나
+    span 기준이라, 재청킹으로 id 가 어긋난 recall=1 케이스(missed_gold_ids 독스트링 참고)나
     검색 결과 3건 미만에서 위치가 안 잡힌다. 그때 too_long_context 가 전부 흡수하면
     처방이 갈린다(재배치 vs 길이 축소). 미측정이면 둘 다 침묵시킨다.
     """
@@ -1207,7 +1269,7 @@ def _corpus_gap_premise(record: EvalRecord) -> bool:
 def _gold_absent_ids(record: EvalRecord) -> list[str]:
     """코퍼스에 없는 gold id 목록. 미측정이면 빈 리스트.
 
-    `_missed_gold_ids`(검색이 못 가져온 몫)와 다르다 — 이건 코퍼스 자체에 없는 몫이다.
+    `missed_gold_ids`(검색이 못 가져온 몫)와 다르다 — 이건 코퍼스 자체에 없는 몫이다.
     """
     membership = _gold_corpus_membership(record) or {}
     return [g for g, present in membership.items() if not present]
@@ -1261,7 +1323,8 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
 _RETRIEVAL_CAUSE = (
     retrieval_incomplete_enumeration, retrieval_missing_bridge_dependency,
     retrieval_rank_fusion_loss, retrieval_duplicate_crowding,
-    retrieval_rerank_candidate_miss, retrieval_reranker_demotion, retrieval_low_rank,
+    retrieval_rerank_candidate_miss, retrieval_reranker_demotion,
+    retrieval_reranker_ineffective, retrieval_low_rank,
     retrieval_lexical_mismatch, retrieval_semantic_mismatch, retrieval_missing_gold,
     # chunking 은 확정이지만 맨 뒤 — 실측된 다른 검색 원인이 있으면 그쪽을 먼저 채택한다.
     chunking_overchunking, chunking_context_mismatch,

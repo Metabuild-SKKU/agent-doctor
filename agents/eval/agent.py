@@ -62,8 +62,10 @@ from agents.eval.metrics_ragas import (
 from agents.eval.metrics_common import (
     DEFAULT_MAX_RERANK_CANDIDATES,
     DEFAULT_RERANK_CANDIDATES,
+    missed_gold_ids,
     set_context as set_diag_context,
 )
+from agents.eval import topic_cluster
 from agents.eval.metrics_basic import _compute_metrics
 from agents.eval.diagnose import diagnose, _is_success
 from agents.eval.report import build_report, is_bad_gold_probe
@@ -601,6 +603,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 rec.findings = diagnose(rec, mode)
                 _log_probe(i, len(records), rec)
             _log_diagnosis_summary(records)
+            _annotate_topic_cluster(records, state.chunks)
 
         # ── STEP4.5: bad_gold probe 재생성 (Option A — 다음 실행에서 재평가) ──
         # 정답셋 오류로 확정된 '우리(llm_generated)' probe 를 같은 근거 청크에서 재합성해
@@ -637,6 +640,70 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         print_summary(tag="Eval", stage="전체", since=run_usage)
 
     return state
+
+
+def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
+    """STEP4 후처리 — retrieval_semantic_mismatch 실패의 토픽 분포 신호를 finding 에 기록.
+
+    개별 probe 로는 못 내는 cross-probe 신호라 diagnose() 밖(전 record 준비 후)에서 계산한다.
+    실패한 semantic_mismatch probe 들의 '놓친 gold' 임베딩이 서로 뭉쳤나 흩어졌나를
+    코퍼스 baseline 대비 비율로 판정해(agents/eval/topic_cluster.py), 그 값을 해당 라벨의
+    모든 finding metadata['topic_cluster'] 에 실어 Optimize(planner)가 처방을 가르게 한다.
+
+    'none' 도 명시적으로 단다 — rules.py 의 semantic_mismatch 처방은 none 을 "청크 희석
+    (Case1) → 청킹 조정" 신호로 쓴다(shrink_chunk_size / switch_chunking 의
+    applies_when={"topic_cluster":["none"]}). 여기서 none 을 안 달면 planner 가 '미측정
+    =순차 fallback'으로 보아 임베딩 교체 처방까지 통과시켜, none 이 청킹만 선택하려던
+    rules.py 계약이 깨진다.
+
+    반대로 '아예 못 잰' 경우(임베딩 미부착/fallback, 실패 gold 2개 미만, baseline 측정
+    불가)는 none 이 아니라 'unmeasured' 로 나간다 — 근거 없이 청킹 처방을 확정 선택하면
+    안 되기 때문이다. unmeasured 는 어느 applies_when 허용 리스트에도 없어 planner 가
+    순차 fallback 으로 되돌린다(agents/eval/topic_cluster.py 의 값 도메인 주석 참고).
+    """
+    sem_findings = [
+        f
+        for r in records
+        for f in r.findings
+        if f.label == "retrieval_semantic_mismatch"
+    ]
+    if not sem_findings:
+        return
+
+    embed_by_id = {c.chunk_id: c.embedding for c in chunks}
+
+    # 실패 gold = semantic_mismatch probe 들이 '놓친' gold 청크(검색된 건 실패 근거가 아님).
+    failed_ids: set[str] = set()
+    for r in records:
+        if any(f.label == "retrieval_semantic_mismatch" for f in r.findings):
+            failed_ids |= missed_gold_ids(r)
+
+    # sorted: set 순회 순서는 회차마다 달라질 수 있어, 표본을 자를 때 신호가 흔들린다.
+    failed_vecs = [embed_by_id[cid] for cid in sorted(failed_ids) if embed_by_id.get(cid)]
+    corpus_vecs = [c.embedding for c in chunks if c.embedding]
+
+    # 유효성 필터·표본 절단은 classify_detail 안에서 양쪽 입력에 같은 순서로 걸린다
+    # (_valid → stride). 여기서 미리 자르면 그 순서가 뒤집혀 영벡터가 표본 슬롯을 먼저
+    # 먹는 문제가 되살아나고, 호출부가 topic_cluster 의 private 유효성 규칙에 묶인다.
+    result = topic_cluster.classify_detail(failed_vecs, corpus_vecs)
+    # 버킷뿐 아니라 판정 근거 수치도 metadata 에 남긴다 — 소비 유예(관측용) 동안
+    # 임계값을 실측 분산에 맞춰 재보정할 근거가 finding 에 쌓이게 한다(캘리브레이션 과제).
+    for f in sem_findings:
+        f.metadata["topic_cluster"] = result.bucket
+        f.metadata["topic_cluster_detail"] = {
+            "ratio": result.ratio,
+            "failed_cohesion": result.failed_cohesion,
+            "baseline": result.baseline,
+            "failed_sample_size": result.failed_sample_size,
+            "corpus_sample_size": result.corpus_sample_size,
+            "concentrated_ratio": topic_cluster.TOPIC_CLUSTER_CONCENTRATED_RATIO,
+            "spread_ratio": topic_cluster.TOPIC_CLUSTER_SPREAD_RATIO,
+        }
+    ratio_str = f"{result.ratio:.3f}" if result.ratio is not None else "n/a"
+    print(
+        f"  topic_cluster={result.bucket} (ratio={ratio_str}, "
+        f"failed_gold={result.failed_sample_size}, semantic_mismatch {len(sem_findings)}건)"
+    )
 
 
 def _log_diagnosis_summary(records: list[EvalRecord]) -> None:

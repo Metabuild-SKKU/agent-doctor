@@ -321,7 +321,8 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | 융합 | `retrieval_rank_fusion_loss` | `hybrid_dense_weight` 를 우세 채널 쪽으로 |
 | 경쟁 구성 | `retrieval_duplicate_crowding` | MMR (리랭커로는 안 고쳐진다 — 레버 미구현이라 `draft`) |
 | 후보창 | `retrieval_rerank_candidate_miss` | `rerank_candidates` 확대 |
-| 리랭크 | `retrieval_reranker_demotion` | 리랭커 되돌리기 / 모델 교체 |
+| 리랭크(강등) | `retrieval_reranker_demotion` | 리랭커 되돌리기 / 모델 교체 |
+| 리랭크(못 올림) | `retrieval_reranker_ineffective` | 모델 교체 (미정 → `draft`) |
 | (잔여) | `retrieval_low_rank` | `use_reranker` 켜기 |
 
 순위 라벨의 관할(`_rank_scope`)은 세 갈래의 합집합이다.
@@ -329,7 +330,8 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | 갈래 | 뜻 | 창 적용 |
 |---|---|---|
 | `_rankable` | 융합 순위가 top_k 밖 | 적용 (리랭크 계열 처방의 도달 범위) |
-| `_rerank_lost` | 리랭커 후보엔 있었는데 결과엔 없음 | 무관 (융합 순위와 독립) |
+| `_rerank_lost` | 리랭크 **전엔 top_k 안**이었는데 결과엔 없음 (강등) | 무관 (융합 순위와 독립) |
+| `_rerank_not_lifted` | 후보엔 있었으나 리랭크 전에도 top_k 밖 (못 올림) | 무관 |
 | 융합 손실 | 단일 채널은 top_k 안인데 융합이 밀어냄 | **미적용** |
 
 `_rerank_lost` 가 따로 필요한 이유는 wide 재검색이 리랭크를 끄기 때문이다 — 융합이 gold 를 3위에

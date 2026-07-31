@@ -161,11 +161,11 @@ class _DiagnoseTestBase(unittest.TestCase):
 class MissedGoldGuardTest(_DiagnoseTestBase):
     def test_missed_is_empty_when_all_gold_retrieved(self):
         rec = _record(("g_a", "g_b"), ("g_a", "g_b", "x"), recall=0.5)
-        self.assertEqual(metrics_common._missed_gold_ids(rec), set())
+        self.assertEqual(metrics_common.missed_gold_ids(rec), set())
 
     def test_missed_lists_only_unretrieved_gold(self):
         rec = _record(("g_a", "g_b"), ("g_a", "x"), recall=0.5)
-        self.assertEqual(metrics_common._missed_gold_ids(rec), {"g_b"})
+        self.assertEqual(metrics_common.missed_gold_ids(rec), {"g_b"})
 
     def test_missing_gold_silent_when_nothing_missed(self):
         """수정 전에는 'gold 가 top-k 에 없다'를 confirmed·critical 로 주장했다."""
@@ -380,12 +380,30 @@ class RerankStageTest(_DiagnoseTestBase):
         self.assertTrue(finding.confirmed)
         self.assertIsNone(diagnose.retrieval_reranker_demotion(rec))   # 배타
 
-    def test_demotion_when_gold_was_inside_candidate_list(self):
-        rec = self._rec(["n1", "n2", "n3", "n4", "g_b"])       # 봤는데도 top_k 밖
-        finding = diagnose.retrieval_reranker_demotion(rec)
+    def test_ineffective_when_gold_was_already_outside_top_k(self):
+        """리랭크 전에도 top_k 밖이던 gold 는 '강등'이 아니라 '못 끌어올림'이다.
+
+        롤백(disable_reranker)이 확정 무효인 구간이라 강등과 갈라야 한다 — 되돌리면 융합
+        순위가 그대로 쓰이는데 그 순위(5위)가 top_k(2) 밖이라 gold 는 여전히 누락된다.
+        """
+        rec = self._rec(["n1", "n2", "n3", "n4", "g_b"])       # pre 5위, top_k=2
+        finding = diagnose.retrieval_reranker_ineffective(rec)
         self.assertTrue(finding.confirmed)
         self.assertEqual(finding.metadata["pre_rerank_ranks"], {"g_b": 5})
+        self.assertIsNone(diagnose.retrieval_reranker_demotion(rec))      # 배타
         self.assertIsNone(diagnose.retrieval_rerank_candidate_miss(rec))  # 배타
+
+    def test_demotion_when_gold_was_inside_top_k_before_rerank(self):
+        """리랭크 전 top_k 안이었는데 밖으로 나갔을 때만 진짜 강등 — 롤백이 유효하다."""
+        self._with(retrieve=["n1", "g_b", "n3", "n4", "n5"])   # 융합 2위
+        rec = _record(("g_a", "g_b"), ("n1", "n2", "n3"), recall=0.5,
+                      retrieval_details={"search_mode": "dense", "reranked": True,
+                                         "reranker_status": "applied",
+                                         "pre_rerank_ids": ["n1", "g_b", "n3", "n4"]})
+        finding = diagnose.retrieval_reranker_demotion(rec)    # pre 2위 <= top_k 3
+        self.assertTrue(finding.confirmed)
+        self.assertEqual(finding.metadata["pre_rerank_ranks"], {"g_b": 2})
+        self.assertIsNone(diagnose.retrieval_reranker_ineffective(rec))   # 배타
 
     def test_both_silent_when_reranker_did_not_run(self):
         rec = self._rec(["n1", "n2"], reranked=False)

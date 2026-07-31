@@ -115,7 +115,7 @@ def reachable_window() -> int:
 
 # ── 검색 원인 라벨 공통 기준 (tier 없음 · 자원 불필요) ──────────────
 
-def _missed_gold_ids(record: EvalRecord) -> set[str]:
+def missed_gold_ids(record: EvalRecord) -> set[str]:
     """top-k 가 놓친 gold 청크 id 집합 — 검색 원인(A) 라벨들의 공통 근거.
 
     recall_at_k 는 gold_spans(원문 좌표) 기준이라 '정답 구간이 청크 경계에 잘려 덜 덮였다'

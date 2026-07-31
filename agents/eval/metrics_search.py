@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from agents.eval.types import Mode, EvalRecord
 from agents.eval.metrics_common import (
-    _ctx, _cache, active_mode, _missed_gold_ids, reachable_window,
+    _ctx, _cache, active_mode, missed_gold_ids, reachable_window,
 )
 
 
@@ -144,7 +144,7 @@ def _bm25_hits_gold(record: EvalRecord):
     def compute():
         missed = _missed_gold_in_corpus(record)
         if missed is None:
-            missed = _missed_gold_ids(record)
+            missed = missed_gold_ids(record)
         if not missed:
             return None
         ranks = _gold_lexical_ranks(record) or {}
@@ -244,7 +244,7 @@ def _redundancy_above_gold(record: EvalRecord):
         # 자명하게 성립한다. 그러면 crowding 이 확정으로 서서 실행 가능한 reranker_demotion 을
         # 침묵시키고, 정작 자신은 처방이 없어 그 probe 가 아무 처방도 못 받는다.
         targets = {
-            g: r for g in _missed_gold_ids(record)
+            g: r for g in missed_gold_ids(record)
             if (r := ranks.get(g)) is not None and top_k < r <= window
         }
         if not targets:
@@ -322,4 +322,4 @@ def _missed_gold_in_corpus(record: EvalRecord):
     membership = _gold_corpus_membership(record)
     if membership is None:
         return None
-    return {g for g in _missed_gold_ids(record) if membership.get(g)}
+    return {g for g in missed_gold_ids(record) if membership.get(g)}

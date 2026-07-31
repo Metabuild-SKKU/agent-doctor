@@ -185,6 +185,33 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         #   이 라벨은 reranker_low_recall(draft)의 실측판이기도 하다.
     },
 
+    "retrieval_reranker_ineffective": {
+        "group": "A",
+        "assigned": "권성우",
+        # 실행 가능한 레버가 없다 — 롤백은 확정 무효고 모델 교체 후보는 미정.
+        # 라벨은 남겨서 "리랭커를 켰지만 이 probe 는 못 건졌다"를 리포트로 알린다.
+        "status": "draft",
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["context_recall"],  # 리랭커가 못 올린 gold를 top_k 안으로
+        "prescriptions": [
+            {
+                "id": "swap_reranker_model",
+                "patch": {"reranker_model": "upgrade"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+                # BLOCKER: 모델 교체 후보가 미정(reranker_low_precision·demotion 과 동일).
+            },
+        ],
+        # NOTE: disable_reranker 를 여기 두면 안 된다 — gold 는 리랭크 **전에도** top_k 밖이라,
+        #   되돌리면 융합 순위가 그대로 쓰이고 그 순위가 여전히 top_k 밖이다(개선 가능성 0).
+        #   강등(retrieval_reranker_demotion)에서만 롤백이 유효하다.
+        # NOTE: increase_top_k 도 아직 두지 않는다 — 리랭크 **이후** 순위를 기록하지 않아
+        #   "top_k 를 얼마로 키우면 닿는지"를 실측할 수 없다. 근거 없는 top_k 증가는
+        #   노이즈만 키운다(planner 의 low_rank 제외 사유와 같다).
+        #   리랭크 후 전체 순위를 남기면(cross-encoder 는 이미 후보 전부를 채점하므로 추가
+        #   추론 비용 0) 근거값 계산이 가능해지고 이 라벨을 ready 로 올릴 수 있다.
+    },
+
     "retrieval_lexical_mismatch": {
         "group": "A",
         "status": "ready",
@@ -212,15 +239,23 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "target_metrics": ["context_recall"],  # dense·BM25 둘 다 놓친 gold를 검색되게
 
         #   토픽클러스터 분석은 Eval 소관 → finding.metadata["topic_cluster"]로 넘어옴.
-        #   rules는 후보만 나열 + applies_when 태그, 실제 선택은 planner가 수행.
+        #   rules는 후보만 나열 + applies_when 태그. (아래 매핑은 소비가 켜졌을 때의 계약)
         #     "spread"       → Case3(임베딩 모델 자체 약함) → 임베딩 교체
         #     "concentrated" → Case2(특정 도메인 약함)      → 임베딩 교체(도메인특화/파인튜닝)
         #     "none"         → Case1(청크 희석)             → 청킹 조정
-        
-        #   신호가 없으면(MVP) planner가 리스트 순서대로 순차 시도(fallback).
-        
-        # TODO(eval-합의): topic_cluster 신호 키/값을 Eval과 확정.
-        
+
+        #   ⚠️ 현재 이 applies_when 태그의 소비는 꺼져 있다
+        #   (planner._CONSUME_TOPIC_CLUSTER_SIGNAL=False) — 관측용 신호로만 유지한다.
+        #   신호는 finding.metadata 에 계속 기록되지만 planner 는 아직 그 값으로 처방을
+        #   가르지 않고, 이 라벨의 세 처방을 순서대로 순차 시도한다(신호 배선 이전과 동일).
+        #   소비를 유예한 이유(요약): 위 매핑의 1순위 swap_embedding_model 이 optimizer
+        #   capability(embedding_model=False)로 항상 거절돼 분기가 config 적용까지 이어지지
+        #   않고, 임계값(TOPIC_CLUSTER_*_RATIO)도 캘리브레이션 전 임의값이라 추정량 노이즈가
+        #   비싼 재색인을 잘못 발동시킬 수 있기 때문. 임베딩 교체 실행 + 임계값 캘리브레이션이
+        #   준비되면 그 플래그를 켠다. 자세한 배경은 planner 정의부 주석 참고.
+        #   신호 생산: agents/eval/topic_cluster.py + agent.py::_annotate_topic_cluster
+        #   신호 소비(유예): planner::_prescription_applies (플래그 ON 시 metadata 대조)
+
         "prescriptions": [
             {
                 # 임베딩 모델 바꾸기 case 3 2에 해당
