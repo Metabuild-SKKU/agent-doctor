@@ -103,6 +103,11 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     if rescued:
         scores["semantic_rescued"] = rescued
 
+    # fused RAGAS 가 개별 호출로 되돌아간 지표 수 — 0 이 정상(트랙당 chat 1회 전제).
+    repaired = _fused_repair_count(records)
+    if repaired:
+        scores["fused_repaired"] = repaired
+
     # 평가 신호(GT 규칙지표/RAGAS)가 전혀 없으면 진단 불가 →
     # eval 한계로 파이프라인을 막지 않도록 통과 처리(overall_score=None).
     # [설계 결정] 이건 "판정 보류"이지 "품질 확인"이 아니다 — ground_truth 없는 probe만 있거나
@@ -219,6 +224,18 @@ def _degraded_correctness_count(records: list[EvalRecord]) -> int:
         1 for r in records
         if r.ragas.get("answer_correctness_degraded")
         or r.oracle_ragas.get("answer_correctness_degraded")
+    )
+
+
+def _fused_repair_count(records: list[EvalRecord]) -> int:
+    """fused RAGAS 가 결손으로 개별 호출을 되살린 지표 수(두 트랙 합).
+
+    fused 는 '트랙당 chat 1회'가 전제인데, 응답 절단·파싱 실패로 보수가 돌면 그 전제가
+    조용히 깨진다. 로그로만 남으면 회귀를 못 보므로 리포트 지표로 올린다 — 값이 크면
+    EVAL_RAGAS_FUSED_MAX_TOKENS 를 올리거나 프롬프트 블록 수를 줄일 신호다."""
+    return sum(
+        int(r.ragas.get("fused_repaired") or 0) + int(r.oracle_ragas.get("fused_repaired") or 0)
+        for r in records
     )
 
 
@@ -358,6 +375,9 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     if rs.get("answer_correctness_degraded"):
         print(f"  ⚠ 정답 판정 degrade {rs['answer_correctness_degraded']}건 — "
               f"판정기(TP/FP/FN 분류) 실패로 의미유사도 단독 계산. 근접 오답을 못 걸렀을 수 있음")
+    if rs.get("fused_repaired"):
+        print(f"  ⚠ RAGAS fused 보수 {rs['fused_repaired']}건 — 통합 응답 결손으로 개별 호출 재실행. "
+              f"EVAL_RAGAS_FUSED_MAX_TOKENS 를 올릴 신호")
     if report.findings:
         # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
         # (타입=처방 그룹 4종, 라벨=세분화 진단명. 타입만 보면 gap 처럼 뭉뚱그려져 원인이 안 보인다.)

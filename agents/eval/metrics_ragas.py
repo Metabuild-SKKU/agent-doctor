@@ -782,6 +782,9 @@ def _fused_repair(judge, out: dict, question: str, answer: str, contexts: list[s
         missing.append(("answer_correctness", lambda: _answer_correctness(judge, question, answer, reference)))
     if not missing:
         return
+    # 보수 건수 = fused 가 아끼려던 개별 호출이 되살아난 수. 리포트가 집계해(scores.fused_repaired)
+    # '통합했는데 실제로는 개별 호출로 되돌아가고 있다'를 로그가 아니라 지표로 보게 한다.
+    out["fused_repaired"] = out.get("fused_repaired", 0) + len(missing)
     print(f"[Eval] RAGAS fused 결손 {[k for k, _ in missing]} → 개별 호출로 보수")
     try:
         values = parallel_map(lambda t: t[1](), missing, _inner_concurrency())
