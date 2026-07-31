@@ -308,6 +308,28 @@ ActionDefinition(
 )
 ```
 
+#### `base_cost` 산정 — **합의 완료: 현행 이분법을 그대로 옮긴다**
+
+`confidence`가 전부 `None`(=1.0)인 현재, `base_cost`는 점수 공식에 남은 **유일한
+차별 재료**다. 그만큼 임의로 정하면 선택이 조용히 왜곡된다.
+
+따라서 새 숫자를 만들지 않고 `planner._derive_cost`의 현행 규칙을 그대로 옮긴다.
+
+```python
+base_cost = 3.0 if reindex_required else 1.0     # 재색인 = 3, 런타임 = 1
+```
+
+- 근거는 `optimizer.REINDEX_PATHS` 하나로 통일한다(라벨의 첫 처방이 아니라 **action
+  자신의** 재색인 여부 — 초판 §2.2가 지적한 왜곡의 수정).
+- 세분화(실측 소요 시간·LLM 호출 수 기반)는 `confidence` 생산과 함께 **별도 작업**으로
+  둔다. 근거 없는 숫자를 지금 만들면 §1의 선투자 논리와 어긋난다.
+- `score_breakdown`에 `cost_source: "reindex_flag"`를 기록해, 나중에 실측 기반으로
+  바뀔 때 이력에서 구분할 수 있게 한다.
+
+**부작용을 인지할 것**: 이 이분법에서는 같은 축의 반대 방향(§4.4)과 재색인이 없는
+A·B 그룹 action(§4.3)이 **분모가 같아 약분된다.** 그래서 충돌 정책과 hard tier가
+필요하다 — cost로는 그 둘을 가를 수 없다.
+
 Action key 규칙:
 
 ```text
@@ -863,6 +885,55 @@ iteration = 실제 새 ActionStudy를 적용한 횟수
 - rollback 후 다른 action은 새 iteration
 - 같은 action도 새 baseline에서 새 study면 새 iteration
 - 절대 Optimize visit 상한은 유지
+
+#### ⚠️ `iteration`은 `graph.py`가 종료 조건으로 읽는다 (초판 누락)
+
+§6.16과 안전 원칙 5는 "`graph.py`를 수정하지 않는다"고만 적었으나, **`graph.py`는
+`iteration`을 파이프라인 종료 조건으로 읽는다.**
+
+```python
+# graph.py:65  route_after_eval
+if state.iteration >= state.max_iterations:
+    if history.find_pending(...):   # 마지막 판정 기회
+        return "optimize"
+    return "serve"                  # ← 파이프라인 종료
+```
+
+따라서 **`graph.py`를 한 줄도 고치지 않아도, `iteration` 의미를 바꾸면 그 동작이
+달라진다.** 특히 "no-op이면 예산 미소비"는 이 종료 조건의 발동을 직접 미룬다.
+
+##### 이 문제는 `graph.py` 수정으로 해결되지 않는다
+
+- `graph.py`는 `iteration`을 **읽기만** 한다. 증가는 `agent.py` 소관이다.
+- `iteration`이 오르지 않는 경로가 반복되면 위 가드는 **영원히 발동하지 않는다.**
+- 실제 최종 방어선은 `graph.py`가 모르는 값이다.
+
+```python
+# agent.py:462
+if state.optimize_visit_count >= state.max_optimize_visits:
+    return _stop_at_optimize_visit_limit(state)
+```
+
+즉 라우팅을 고쳐도 얻을 것이 없고, 5개 에이전트 공용 라우팅을 Optimize 하나 때문에
+바꾸는 비용만 남는다. **`graph.py` 무수정 원칙을 유지한다.**
+
+##### 대신 착수 전에 증명해야 할 것
+
+이 프로젝트는 이미 같은 계열의 사고를 겪었다(`fix: bound optimize visits and close
+completed sweeps`, `fix: finalize optimize visit limit safely`). 따라서 다음을
+표로 만들어 합의한 뒤 구현에 들어간다.
+
+| 확인 항목 | 내용 |
+| --- | --- |
+| 미소비 경로 목록 | `iteration`이 오르지 않는 모든 분기를 열거 |
+| 수렴 증명 | 각 미소비 경로가 유한 횟수 안에 소비 경로 또는 종료로 이어짐 |
+| visit 소비 여부 | 미소비 경로에서도 `optimize_visit_count`는 반드시 증가하는가 |
+| 최악 방문 수 | `max_iterations=3`, `max_optimize_visits=20` 기준 상한 |
+| 종료 경로 동등성 | 모든 종료 경로가 pending finalize와 baseline 복원을 보장하는가 |
+
+**핵심 불변조건**: `optimize_visit_count`는 **어떤 경로에서도 반드시 증가한다.**
+`iteration` 미소비는 허용하되, visit 미소비는 허용하지 않는다. 이것이 성립하면
+최악의 경우에도 `max_optimize_visits`에서 종료가 보장된다.
 
 ### 5.9 결과 귀속
 
@@ -1985,20 +2056,23 @@ python3 -m unittest discover -s tests
 - [x] **개선 판정 최소 마진** — composite 2점(내부 `0.02`), judge·sweep 양쪽 동일(§5.11)
 - [x] **confidence 생산** — 이번 범위 밖. `1.0` fallback 유지(§5.3), 근거는 §1
 - [x] **차단 기능 활성화** — 별도 PR. catalog에는 blocked reason으로만 등록(§6.1)
+- [x] **`base_cost` 산정** — 현행 이분법(재색인 3 / 런타임 1)을 그대로 이관. 세분화는 별도 작업(§3.1)
+- [x] **`graph.py` 무수정 유지** — 라우팅 수정으로는 예산 문제가 해결되지 않음(§5.8)
 
 **미합의 — 착수 전 결정 필요**
 
+- [ ] **iteration 미소비 경로의 수렴 증명** — §5.8의 5개 확인 항목 표를 채울 것 (최우선)
 - [ ] `chunker.strategy` 2후보 처리: §3.1의 (a)/(b)/(c) 중 택1 — **권장 (b)**
+- [ ] `rules.py` 재작성 시점 — 단계 1에서 전면 교체 vs 단계 4까지 alias로 버티기
+      (현재 flat 20 / canonical 20으로 혼재, 핵심 축 4개가 flat)
 - [ ] 고유 probe 기반 투표 (§4.2 공식 확정)
 - [ ] 후보값 union과 candidate budget
-- [ ] iteration을 ActionStudy 횟수로 변경 — `max_iterations=3` 예산과의 상호작용 시나리오
 - [ ] exact attempt blacklist 범위
 - [ ] inverse transition 차단 범위 — 정확 전이만 vs 축 전체 보류
 - [ ] 새 state field와 legacy 호환 기간
 - [ ] `selected_prescription_id` 제거 시점
 - [ ] resolved label 계산 방식
 - [ ] UI의 supporting/opposing label 표현
-- [ ] `base_cost` 실제 값 표 — 실행 가능 16개 전부
 - [ ] shadow mode 중단 기준 수치 확정 (§8 단계 3)
 
 권장 범위:
