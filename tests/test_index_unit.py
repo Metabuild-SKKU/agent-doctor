@@ -50,8 +50,25 @@ class ChunkingTests(unittest.TestCase):
     def test_all_chunk_strategies_are_registered(self):
         self.assertEqual(
             set(CHUNK_STRATEGIES),
-            {"fixed", "markdown", "recursive", "markdown_recursive"},
+            {"fixed", "markdown", "recursive", "markdown_recursive",
+             "recursive_sentence"},
         )
+
+    def test_recursive_sentence_breaks_on_sentence_boundaries(self):
+        # 문장 종결부 우선. 분할이 일어난 청크의 끝은 문장 종결부여야 한다
+        # (마지막 청크와 강제 분할 폴백은 예외).
+        source = ("첫째 문장입니다. 둘째 문장은 조금 더 깁니다. 셋째 문장도 있습니다. "
+                  "넷째 문장으로 마무리합니다. 다섯째 문장 추가. 여섯째 문장 추가입니다.")
+        document = _document("sent-doc", source)
+        drafts = _chunk_document(
+            document, chunk_size=40, chunk_overlap=0, strategy="recursive_sentence"
+        )
+        self.assertGreater(len(drafts), 1)
+        for draft in drafts[:-1]:
+            self.assertTrue(
+                draft.text.rstrip().endswith((".", "。", "?", "!", "…")),
+                f"문장 경계로 안 끊김: {draft.text!r}",
+            )
 
     def test_overlap_and_max_size_are_respected(self):
         source = "가나다라마바사 " * 30
@@ -120,6 +137,87 @@ class ChunkingTests(unittest.TestCase):
         self.assertTrue(all(chunk.section is not None for chunk in stage_3))
         self.assertTrue(all(len(chunk.text) <= 40 for chunk in stage_3))
 
+    def test_math_document_keeps_problem_boundaries(self):
+        document = _document(
+            "math",
+            "\n".join(
+                [
+                    "SET 17",
+                    "171번 x=2cos^3(t), y=3sin^3(t)의 접선 기울기를 구하라.",
+                    "해설: dy/dx를 계산한다.",
+                    "172번 적분법 문제의 정답은 58이다.",
+                    "해설: 표의 정답란을 확인한다.",
+                    "173번 수열 Sn의 첫째항과 공비를 이용해 급수의 합을 구하라.",
+                    "해설: 무한등비급수 공식을 사용한다.",
+                ]
+            ),
+        )
+        document.metadata["document_type"] = "math"
+
+        drafts = _chunk_document(
+            document,
+            chunk_size=120,
+            chunk_overlap=20,
+            strategy="markdown_recursive",
+        )
+
+        sections = [draft.section for draft in drafts]
+        self.assertIn("문제 171", sections)
+        self.assertIn("문제 172", sections)
+        self.assertIn("문제 173", sections)
+        for draft in drafts:
+            if draft.section == "문제 172":
+                self.assertIn("정답은 58", draft.text)
+                self.assertNotIn("173번", draft.text)
+            self.assertEqual(document.content[draft.start : draft.end], draft.text)
+
+    def test_math_problem_sections_preserve_preamble_before_first_problem(self):
+        document = _document(
+            "math",
+            "\n".join(
+                [
+                    "# 미적분 개요",
+                    "이 장에서 사용할 핵심 정의와 공식입니다.",
+                    "1. 첫 번째 문제와 풀이입니다.",
+                    "2. 두 번째 문제와 풀이입니다.",
+                ]
+            ),
+        )
+        document.metadata["document_type"] = "math"
+
+        drafts = _chunk_document(
+            document,
+            chunk_size=120,
+            chunk_overlap=20,
+            strategy="markdown_recursive",
+        )
+
+        self.assertEqual(drafts[0].section, "preamble")
+        self.assertIn("미적분 개요", drafts[0].text)
+        self.assertIn("핵심 정의와 공식", drafts[0].text)
+        problem_sections = [draft.section for draft in drafts[1:]]
+        self.assertTrue(any(str(section).endswith("1") for section in problem_sections))
+        self.assertTrue(any(str(section).endswith("2") for section in problem_sections))
+        covered = "".join(document.content[draft.start : draft.end] for draft in drafts)
+        compact_original = "".join(document.content.split())
+        compact_covered = "".join(covered.split())
+        self.assertEqual(compact_covered, compact_original)
+
+    def test_general_numbered_document_does_not_use_math_problem_sections(self):
+        document = _document(
+            "policy",
+            "1. API rate limit 정책을 설명한다.\n2. user_id별 요청 제한을 설명한다.",
+        )
+
+        drafts = _chunk_document(
+            document,
+            chunk_size=200,
+            chunk_overlap=20,
+            strategy="markdown_recursive",
+        )
+
+        self.assertEqual(len(drafts), 1)
+        self.assertIsNone(drafts[0].section)
     def test_default_chunk_strategy_is_fixed(self):
         document = _document(
             "guide",

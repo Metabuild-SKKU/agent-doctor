@@ -100,6 +100,9 @@ class DiagnosticReport:
     """
     report_id: str
     findings: list[Finding] = field(default_factory=list)
+    # 실패한 검증 질문의 원문 비교 데이터. EvalRecord는 실행 중에만 존재하므로
+    # 리포트 페이지가 질문·기대 정답·실제 답변을 보여주려면 여기 보존해야 한다.
+    failed_questions: list[dict] = field(default_factory=list)
     findings_summary: dict = field(default_factory=dict)  # 확정/예비·라벨 집계(진단 모드 포함). Optimize 소비용
     ragas_scores: dict = field(default_factory=dict)
     # Eval이 관측한 검색 runtime 실행 결과. 품질 지표와 섞지 않고 Optimize가
