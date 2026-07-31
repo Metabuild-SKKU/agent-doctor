@@ -131,6 +131,21 @@ _DEFAULT_CURRENT: dict[str, int] = {
     "reranker.candidate_count": 20,
 }
 
+# 리랭커 후보 수 상한의 폴백(index_config["rerank_candidate_policy"]["max_candidates"]).
+# 후보 하나가 곧 cross-encoder 추론 1쌍이라 검색 지연에 선형으로 실린다.
+_DEFAULT_MAX_RERANK_CANDIDATES = 50
+
+# 융합 가중치 조정 정책. 방향(어느 채널이 우세한가)은 Eval 실측이고, 폭은 여기 정책값이다 —
+# 채널별 점수 분포가 넘어오면 폭도 근거화할 수 있다(그때 이 상수는 사라진다).
+_WEIGHT_STEPS = (0.1, 0.2)
+_WEIGHT_MIN, _WEIGHT_MAX = 0.1, 0.9
+_DEFAULT_HYBRID_DENSE_WEIGHT = 0.7
+
+# rules.py 가 "이 값은 근거값 계산으로만 정해진다"고 표시하는 자리표시자.
+# 근거 계산이 실패하면 방향 키워드처럼 추측으로 때우지 않고 그 키를 통째로 뺀다
+# (문자열이 그대로 config 에 박히는 것을 막는다).
+_GROUNDED_ONLY = "shift_to_favored_channel"
+
 
 # ── 진입점 ────────────────────────────────────────────────────────
 
@@ -1177,6 +1192,107 @@ def _ground_chunk_overlap_candidates(
     return candidates, metadata
 
 
+def _probe_required_candidates(finding: Finding, max_allowed: int) -> int | None:
+    """probe 하나가 gold 를 리랭커 후보에 담으려면 필요한 최소 후보 수(상한 안쪽만).
+
+    _probe_required_top_k 와 달리 상한 밖 gold 순위를 **먼저** 버리고 최댓값을 뽑는다.
+    나중에 거르면 도달 불가 gold 하나가 그 probe 의 도달 가능한 근거까지 끌고 나간다.
+    """
+    ranks = finding.metadata.get("gold_ranks")
+    if isinstance(ranks, dict):
+        reachable = [
+            r for r in ranks.values()
+            if isinstance(r, int) and not isinstance(r, bool) and r <= max_allowed
+        ]
+        return max(reachable) if reachable else None
+    required = _probe_required_top_k(finding)     # 순위 미측정 → 개수 근사 폴백
+    return required if required is not None and required <= max_allowed else None
+
+
+def _ground_rerank_candidates(
+    findings: list[Finding],
+    state: AgentDoctorState,
+    _direction: Any,
+    _evidence_analysis: _EvidenceAnalysis | None = None,
+) -> tuple[list[int] | None, dict[str, Any] | None]:
+    """리랭커 후보창을 얼마나 넓혀야 gold 가 후보에 들어오나 — 실측 순위의 무릎.
+
+    top_k 근거값과 계산이 같다("가장 늦게 나오는 gold 의 순위 = 필요한 창 크기").
+    다른 건 상한이다: 후보 수는 매 검색마다 cross-encoder 추론 쌍 수라, 정책상 상한
+    (rerank_candidate_policy.max_candidates)을 넘겨선 안 된다.
+    현재값 이하 후보는 넓히는 처방이 아니므로 버린다.
+
+    상한 밖 순위는 필요값 집계에서 아예 제외한다 — 창을 그만큼 넓힐 수 없으니 '도달 불가'이고,
+    이건 wide_n 밖 gold(순위 None)를 top_k 근거에서 빼는 것과 같은 이유다. 안 빼면 창 밖
+    gold 하나가 무릎을 상한 위로 끌어올려, 실제로 도달 가능한 gold 들의 근거값까지 통째로
+    날아가고 방향 키워드 추측(×2)으로 내려간다.
+
+    ⚠ 제외는 **gold 순위 단위**로 해야 한다. probe 단위(= 그 probe 의 최대 순위)로 거르면
+    한 probe 안에 30위(도달 가능)와 90위(불가)가 섞였을 때 max=90 이라 그 probe 가 통째로
+    빠지고, 30위라는 멀쩡한 근거까지 같이 날아간다 — 막으려던 현상이 probe 안에서 재현된다.
+    """
+    policy = state.index_config.get("rerank_candidate_policy") or {}
+    max_allowed = int(policy.get("max_candidates", _DEFAULT_MAX_RERANK_CANDIDATES))
+    required = [
+        r for r in (_probe_required_candidates(f, max_allowed) for f in findings)
+        if r is not None
+    ]
+    if not required:
+        return None, None
+    current = get_current_value(state.index_config, "reranker.candidate_count")
+    current_int = (
+        int(current) if isinstance(current, (int, float)) and not isinstance(current, bool)
+        else _DEFAULT_CURRENT["rerank_candidates"]
+    )
+    candidates = [
+        value for value in _knee_candidates(required)
+        if current_int < value <= max_allowed
+    ]
+    if not candidates:
+        return None, {"status": "insufficient_candidates",
+                      "source": "gold_rank_knee", "max_allowed": max_allowed}
+    return candidates, {"status": "grounded", "source": "gold_rank_knee",
+                        "generated_candidates": list(candidates)}
+
+
+def _ground_hybrid_dense_weight(
+    findings: list[Finding],
+    state: AgentDoctorState,
+    _direction: Any,
+    _evidence_analysis: _EvidenceAnalysis | None = None,
+) -> tuple[list[float] | None, dict[str, Any] | None]:
+    """융합 가중치를 어느 쪽으로 옮길지 — 방향은 실측, 폭은 정책.
+
+    Eval 이 "어느 채널이 gold 를 상위에 뒀나"(favored_channel)를 실측해 넘긴다. 그 채널
+    쪽으로 _WEIGHT_STEPS 만큼 옮긴 값을 후보로 낸다(dense 우세면 올리고, lexical 우세면 내림).
+    폭까지 실측하려면 채널별 점수 분포가 필요한데 현재 순위만 넘어오므로, 폭은 정책값이다.
+    채널이 섞여 있으면(우세 채널이 여럿) 다수결로 정하고, 동수면 근거가 없어 폴백한다.
+    """
+    votes = {"dense": 0, "lexical": 0}
+    for finding in findings:
+        channel = finding.metadata.get("favored_channel")
+        if channel in votes:
+            votes[channel] += 1
+    if votes["dense"] == votes["lexical"]:
+        return None, None                # 방향 근거 없음 → 방향 키워드 폴백
+    favored = "dense" if votes["dense"] > votes["lexical"] else "lexical"
+
+    current = get_current_value(state.index_config, "retriever.hybrid_dense_weight")
+    if not isinstance(current, (int, float)) or isinstance(current, bool):
+        current = _DEFAULT_HYBRID_DENSE_WEIGHT
+    sign = 1 if favored == "dense" else -1
+    candidates: list[float] = []
+    for step in _WEIGHT_STEPS:
+        value = round(min(_WEIGHT_MAX, max(_WEIGHT_MIN, float(current) + sign * step)), 2)
+        if value != round(float(current), 2) and value not in candidates:
+            candidates.append(value)
+    if not candidates:
+        return None, None
+    return candidates, {"status": "grounded", "source": "channel_rank_advantage",
+                        "favored_channel": favored,
+                        "generated_candidates": list(candidates)}
+
+
 # 라벨 → 근거값 계산 함수. 여기 없는 라벨은 방향 키워드(추측)로 폴백한다.
 # 계산 공식(집계·이상치 처리)은 planner 소유다. Eval 은 원시 측정치만 준다.
 # top_k 를 키워야 gold 를 담는 두 라벨은 gold 순위(diagnose 가 metadata 로 실어줌)로
@@ -1185,6 +1301,13 @@ def _ground_chunk_overlap_candidates(
 #   리랭커(rules.py enable_reranker)다. top_k 증가는 노이즈(too_long/lost_in_middle)를
 #   키우는 열등한 차선책이라 rules.py 도 top_k 를 처방하지 않는다.
 _GROUNDED_VALUES: dict[str, dict[str, Any]] = {
+    # 순위 원인 4형제: 창 크기는 실측 순위의 무릎, 융합 가중치는 실측 우세 채널 방향.
+    "retrieval_rerank_candidate_miss": {
+        "reranker.candidate_count": _ground_rerank_candidates,
+    },
+    "retrieval_rank_fusion_loss": {
+        "retriever.hybrid_dense_weight": _ground_hybrid_dense_weight,
+    },
     # semantic mismatch 중 topic_cluster="none"은 rules.py에서 청크 희석으로
     # 분류해 chunk_size 축소를 처방한다. 이 경우에도 고정 비율 추측 대신 같은
     # 구조적 evidence window 분포에서 안전한 축소 후보를 계산한다.
@@ -1244,9 +1367,12 @@ def _concrete_values(
           정수 knob(top_k·chunk_size 등)은 정수로, 실수 knob(temperature 등)은
           실수(소수 3자리)로 유지한다 — float 을 int 로 캐스팅하면 0.15→0 처럼
           뭉개져 온도 미세조정이 불가능해진다.
+      - _GROUNDED_ONLY        : 추측 폴백 금지 → None (근거값이 없으면 키를 뺀다)
       - 그 외(True, 숫자, "recursive_sentence" 등) : 그대로 [값]
     현재값이 숫자가 아니거나 없어 계산이 불가하면 None(→ 해당 키 제외).
     """
+    if patch_value == _GROUNDED_ONLY:
+        return None
     if patch_value in ("increase", "decrease"):
         canonical_key = canonicalize_path(key)
         current = get_current_value(baseline_config, canonical_key)
@@ -1355,7 +1481,9 @@ def _finding_search_space(
         )
         if values:
             resolved[path] = list(values)
-        elif not evidence_values and allows_symbolic_fallback:
+        elif fallback_values and not evidence_values and allows_symbolic_fallback:
+            # 폴백까지 비면 그 키는 후보값을 못 만든 것이다. 빈 리스트를 남기면
+            # optimizer 가 '축은 있는데 값이 없는' search_space 를 받게 되므로 아예 뺀다.
             resolved[path] = list(fallback_values)
         if supplied_values and path in {
             "chunker.chunk_size",
@@ -1509,6 +1637,16 @@ def _build_request(
             name: dict(capability)
             for name, capability in state.runtime_capabilities.items()
             if isinstance(capability, dict)
+        },
+    }
+    # 후보창 상한은 config 정책값이라 optimizer 의 정적 DEFAULT_CONSTRAINTS 로는 표현할 수 없다.
+    # 여기서 실어 보내야 근거값·방향 폴백(현재값×2)·Eval 이 직접 넘긴 후보까지 한 지점에서
+    # 걸린다 — 근거값 계산에서만 상한을 보면 폴백 경로가 상한을 넘겨 config 에 박힌다
+    # (현재값 30 이면 ×2=60 > 50).
+    policy = state.index_config.get("rerank_candidate_policy") or {}
+    metadata["constraints"] = {
+        "reranker.candidate_count": {
+            "max": int(policy.get("max_candidates", _DEFAULT_MAX_RERANK_CANDIDATES)),
         },
     }
     if isinstance(candidate_grounding, dict):

@@ -38,7 +38,10 @@ from agents.eval.types import (
     CONTEXT_CHARS_MAX, CONTEXT_MIDDLE_BAND,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN, RAGAS_CONTEXT_PRECISION_MIN,
 )
-from agents.eval.metrics_common import set_mode, set_context, active_mode, missed_gold_ids
+from agents.eval.metrics_common import (
+    set_mode, set_context, active_mode, missed_gold_ids,
+    candidate_window, reachable_window,
+)
 from agents.eval.metrics_basic import (            # tier1
     is_abstention, _compute_metrics, _gold_span_boundary_analysis,
     _gold_chunk_evidence_density, _oversized_gold_spans,
@@ -47,6 +50,8 @@ from agents.eval.metrics_basic import (            # tier1
 from agents.eval.metrics_search import (           # tier2
     _gold_ranks, _bm25_hits_gold, _gold_in_corpus, _missed_gold_in_corpus,
     _gold_absent_from_corpus, _gold_corpus_membership,
+    _gold_dense_ranks, _gold_lexical_ranks, _gold_pre_rerank_ranks,
+    _redundancy_above_gold,
 )
 from agents.eval.metrics_ragas import (            # tier3
     _compute_ragas_real, _compute_ragas_oracle, _abstention_judged, _reasoning_mode_oracle,
@@ -218,44 +223,414 @@ def _retrieval_fixable(record: EvalRecord) -> bool:
     return _gold_absent_from_corpus(record) is not True
 
 
-def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
-    """
-    gold가 top-N 후보엔 있으나 순위가 낮아 top-k 밖.
-    확정: 놓친 gold 가 wide-N 재검색에서 top_k 보다 뒤 순위로 발견(tier2).
+# ── 순위 원인 공통 기반 ──────────────────────────────────────────
+#  최종 순위는 `채널 검색 → 융합 → 후보창 → 리랭크 → top_k 컷` 을 거쳐 만들어진다.
+#  '순위가 낮다'는 증상이라, 어느 단계에서 gold 를 잃었는지가 처방을 정한다.
+#  아래 헬퍼들이 그 단계 귀속을 위한 공통 전제를 만든다.
+
+def _reranked(record: EvalRecord) -> bool:
+    """이 검색에 리랭크가 실제로 적용됐나(설정만 켜진 게 아니라 성공적으로 돌았나)."""
+    return bool(record.retrieval_details.get("reranked"))
+
+
+def _ranked_beyond_top_k(record: EvalRecord) -> dict[str, int]:
+    """놓친 gold 중 융합 순위가 top_k 밖인 것 {gold_id: rank}. 순위 라벨 공통 전제.
 
     순위가 top_k 이내로 나오면 '순위가 낮아 밖'과 모순이라 제외한다 — 그건 검색 비결정성이나
     인덱스 변경이지 순위 문제가 아니다(결정적 리트리버면 발생하지 않는다).
     """
     ranks = _gold_ranks(record)
     if ranks is None:
-        return None
+        return {}
     top_k = len(record.retrieved_chunk_ids)
     if top_k <= 0:
-        return None                      # 검색 0건 → 순위 문제가 아니라 검색 장애
-    beyond = {g: ranks[g] for g in missed_gold_ids(record)
-              if ranks.get(g) is not None and ranks[g] > top_k}
-    if not beyond:
+        return {}                        # 검색 0건 → 순위 문제가 아니라 검색 장애
+    return {g: ranks[g] for g in missed_gold_ids(record)
+            if ranks.get(g) is not None and ranks[g] > top_k}
+
+
+def _rankable(record: EvalRecord) -> dict[str, int]:
+    """융합 순위로 다룰 gold — top_k 밖 + 도달 가능 창(reachable_window) 안쪽.
+
+    창 밖은 리랭커를 켜도 후보를 넓혀도 닿지 않아 순위 문제가 아니다 → 표현 문제
+    (semantic/lexical mismatch)로 인계한다. 이 경계가 없으면 wide_n(=100) 안의 모든
+    검색 실패가 순위 라벨로 흡수된다.
+
+    ⚠ 리랭크 단계에서 잃은 gold 는 여기 안 잡힐 수 있다(_rerank_lost 참고) — 순위 라벨의
+    전체 관할은 이 둘의 합집합(_rank_scope)이다.
+    """
+    window = reachable_window()
+    return {g: r for g, r in _ranked_beyond_top_k(record).items() if r <= window}
+
+
+def _rerank_lost(record: EvalRecord) -> dict[str, int]:
+    """리랭크 **전엔 top_k 안**이었는데 결과엔 없는 놓친 gold {gold_id: pre_rerank 순위}.
+    = 리랭커가 실제로 떨어뜨린 몫(강등).
+
+    융합 순위가 top_k **이내**여도 대상이다. 이게 _rankable 과 갈리는 지점이자, wide 재검색에서
+    리랭크를 끈 것의 직접적 귀결이다:
+
+      융합이 gold 를 3위에 뒀는데(top_k=5 안) 리랭커가 12위로 떨어뜨려 놓친 경우
+      → 교과서적인 리랭커 강등인데, 융합 순위 3 은 'top_k 밖'이 아니라 _rankable 에 안 잡힌다.
+
+    예전엔 재검색도 리랭크를 태워서 이 경우가 '재검색도 top_k 밖'으로 보였다. 이제 융합 순위는
+    리랭크 이전 값이라 그 은폐가 사라졌고, 대신 '후보엔 있었는데 결과엔 없다'가 리랭크 단계
+    손실의 직접 증거가 된다 — 순위 대조가 필요 없다.
+
+    이 집합을 안 보면 강등이 침묵할 뿐 아니라, lexical/semantic 의 양보 게이트도 안 걸려
+    "dense 가 gold 를 놓쳤다"는 거짓 전제로 임베딩·청킹 처방이 나간다(리랭커를 끄면 낫는데).
+
+    단 '후보 목록에 있었다'만으로는 강등이 아니다. 리랭크 **전에도 top_k 밖**이던 gold 는
+    리랭커가 떨어뜨린 게 아니라 끌어올리는 데 실패한 것이다(_rerank_not_lifted). 두 경우는
+    처방이 다르다 — 강등은 롤백(disable_reranker)이 유효하지만, 못 끌어올린 경우는 롤백해도
+    융합 순위가 그대로 top_k 밖이라 개선 가능성이 0이다.
+    """
+    if not _rerank_cut_attributable(record):
+        return {}
+    pre = _gold_pre_rerank_ranks(record) or {}
+    top_k = len(record.retrieved_chunk_ids)
+    return {g: pre[g] for g in missed_gold_ids(record)
+            if pre.get(g) is not None and pre[g] <= top_k}
+
+
+def _rerank_not_lifted(record: EvalRecord) -> dict[str, int]:
+    """리랭커 후보에 있었지만 **리랭크 전에도 top_k 밖**이던 놓친 gold {gold_id: pre 순위}.
+
+    리랭커가 떨어뜨린 게 아니라 올려야 할 것을 못 올린 경우다. 롤백은 여기서 확정 무효다 —
+    되돌리면 융합 순위가 그대로 쓰이는데 그 순위가 애초에 top_k 밖이라 gold 는 여전히 누락된다.
+    남는 레버는 리랭커 모델 교체이며, 그 처방이 열리기 전까지는 리포트 전용이다(rules.py draft).
+    """
+    if not _rerank_cut_attributable(record):
+        return {}
+    pre = _gold_pre_rerank_ranks(record) or {}
+    top_k = len(record.retrieved_chunk_ids)
+    return {g: pre[g] for g in missed_gold_ids(record)
+            if pre.get(g) is not None and pre[g] > top_k}
+
+
+def _rank_scope(record: EvalRecord) -> set[str]:
+    """순위 라벨 전체의 관할(gold id 집합) — 세 갈래의 합집합.
+
+      _rankable            : 융합 순위가 top_k 밖 + 도달 가능 창 안 (리랭크 계열 라벨의 관할)
+      _rerank_lost         : 리랭크 전엔 top_k 안이었는데 결과엔 없음 = 강등 (융합 순위 무관)
+      _rerank_not_lifted   : 후보엔 있었으나 리랭크 전에도 top_k 밖 = 못 끌어올림
+      _rerank_window_missed: 후보 목록에 아예 없었음 (_rankable 의 부분집합)
+      융합 손실             : 단일 채널이 top_k 안에 뒀는데 융합이 밀어냄 (창 무관 — 아래 참고)
+
+    lexical/semantic mismatch 는 이 관할이 비어 있을 때만 발동한다(전제가 'dense 가 놓침'인데,
+    여기 잡혔다는 건 dense 가 gold 를 실제로 올려놨다는 뜻이라 전제가 깨진다).
+
+    순위 값이 아니라 id 집합을 돌려준다 — 세 갈래의 순위가 서로 다른 단계의 값(pre_rerank vs
+    융합)이라 한 dict 에 섞으면 소비처가 같은 의미로 오해하기 쉽다. 여기 쓰임은 '비었나'뿐이다.
+    """
+    scope = (set(_rerank_lost(record)) | set(_rerank_not_lifted(record))
+             | set(_rankable(record)))
+    advantage = _channel_advantage(record)
+    if advantage is not None:
+        scope.add(advantage[1])
+    return scope
+
+
+def _rerank_stage_visible(record: EvalRecord) -> bool:
+    """리랭크 단계를 실측으로 들여다볼 수 있나 — 적용됐고 후보 목록이 기록됐나.
+
+    거짓이면 리랭크 단계는 미측정이고, 순위 원인은 잔여 라벨(low_rank)이 맡는다.
+
+    MMR 여부는 여기서 보지 않는다 — 이 신호가 뒷받침하는 사실은 '리랭커 입력 목록이 무엇이었나'
+    이고, MMR 은 리랭크 **이후** 단계라 그 사실을 바꿀 수 없기 때문이다. 최종 컷의 귀속이
+    필요한 라벨만 _rerank_cut_attributable 을 따로 본다.
+    """
+    return _reranked(record) and _gold_pre_rerank_ranks(record) is not None
+
+
+def _rerank_cut_attributable(record: EvalRecord) -> bool:
+    """최종 top_k 컷을 리랭커에게 귀속시킬 수 있나.
+
+    리랭커와 MMR 이 둘 다 켜지면 최종 선택을 MMR 이 맡는다(리랭커는 후보풀 순서만 바꾼다,
+    agents/rag/retriever.py). 그러면 후보에 있던 gold 가 결과에 없어도 떨어뜨린 주체가
+    리랭커라는 보장이 없어 '강등'·'못 끌어올림'을 단정할 수 없다.
+
+    반면 '후보 목록에 아예 없었다'(candidate_miss)는 리랭크 이전 사실이라 MMR 과 무관하다 —
+    그 라벨까지 이 게이트로 막으면, MMR 을 켜는 순간 후보창 문제가 처방을 못 받게 된다.
+    """
+    if record.retrieval_details.get("mmr_applied"):
+        return False
+    return _rerank_stage_visible(record)
+
+
+def _rerank_window_missed(record: EvalRecord) -> dict[str, int]:
+    """리랭커 후보 목록에 아예 없던 대상 gold {gold_id: 융합 순위}.
+
+    리랭크 이전 사실이라 MMR 적용 여부와 무관하다(_rerank_cut_attributable 참고).
+    """
+    if not _rerank_stage_visible(record):
+        return {}
+    pre = _gold_pre_rerank_ranks(record) or {}
+    return {g: r for g, r in _rankable(record).items() if pre.get(g) is None}
+
+
+def _channel_advantage(record: EvalRecord):
+    """융합 순위는 top_k 밖인데 단일 채널은 top_k 안에 뒀나(= 융합이 깎았다).
+
+    반환 (channel, gold_id, channel_rank, fused_rank) / 없거나 미측정이면 None.
+    하이브리드가 실제로 쓰인 검색에서만 본다 — dense 단일 모드에서 BM25 가 gold 를 잡는 건
+    융합 손실이 아니라 애초에 그 채널이 파이프라인에 없는 것이라 lexical_mismatch 몫이다.
+
+    ⚠ 여기만 도달 가능 창을 적용하지 않는다(_rankable 이 아니라 _ranked_beyond_top_k 를 쓴다).
+    창의 논거는 '리랭커 처방이 닿는 범위'인데, 이 라벨의 처방(hybrid_dense_weight)은 리랭커와
+    무관하게 어떤 융합 순위든 끌어올릴 수 있기 때문이다 — 처방마다 도달 범위가 다르니 게이트도
+    처방을 따라간다. 창을 걸면 dense 1위/융합 60위 같은 극단적 융합 손실에서 이 라벨이 침묵하고,
+    semantic_mismatch 가 'dense 가 놓쳤다'는 거짓 전제로 임베딩 교체를 처방하게 된다.
+    """
+    if record.retrieval_details.get("search_mode") != "hybrid":
         return None
-    ranked = ", ".join(f"{g}:{r}" for g, r in sorted(beyond.items(), key=lambda kv: kv[1]))
+    targets = _ranked_beyond_top_k(record)
+    if not targets:
+        return None
+    top_k = len(record.retrieved_chunk_ids)
+    dense = _gold_dense_ranks(record) or {}
+    lexical = _gold_lexical_ranks(record) or {}
+    best = None
+    for gold_id, fused in targets.items():
+        for channel, ranks in (("dense", dense), ("lexical", lexical)):
+            rank = ranks.get(gold_id)
+            if rank is not None and rank <= top_k and (best is None or rank < best[2]):
+                best = (channel, gold_id, rank, fused)
+    return best
+
+
+def _crowding_recovery(record: EvalRecord):
+    """중복 청크를 접으면 gold 가 top_k 안까지 올라오나.
+
+    반환 (gold_id, analysis) / 회복 안 되거나 미측정이면 None.
+    """
+    analyses = _redundancy_above_gold(record)
+    if not analyses:
+        return None
+    top_k = len(record.retrieved_chunk_ids)
+    for gold_id, analysis in sorted(analyses.items(), key=lambda kv: kv[1]["rank"]):
+        if analysis["redundant"] > 0 and analysis["projected_rank"] <= top_k:
+            return gold_id, analysis
+    return None
+
+
+def _upstream_rank_cause(record: EvalRecord) -> bool:
+    """순위를 잃은 더 앞단 원인이 실측됐나 — 밴드 라벨들의 공통 반대 게이트.
+
+    융합 손실·중복 밀림은 단계(후보창/리랭크)와 무관하게 성립할 수 있고, 성립하면 그쪽이
+    뿌리다. 예: 융합이 gold 를 40위로 밀어 후보창(20) 밖으로 내보냈다면 '후보창을 넓혀라'가
+    아니라 '융합 가중치를 고쳐라'가 맞다. 튜플 순서가 아니라 신호로 배타를 세운다
+    (신호는 memoize 되므로 이 게이트에 추가 검색 비용이 없다).
+    """
+    return _channel_advantage(record) is not None or _crowding_recovery(record) is not None
+
+
+def _rank_reason(record: EvalRecord, targets: dict[str, int]) -> str:
+    """순위 라벨 공통 reason 접두 — 대상 gold 의 순위와 top_k."""
+    ranked = ", ".join(f"{g}:{r}" for g, r in sorted(targets.items(), key=lambda kv: kv[1]))
+    return (f"missed_gold_ranks=[{ranked}] > top_k={len(record.retrieved_chunk_ids)}, "
+            f"recall@k={_v(record.recall_at_k)}")
+
+
+def retrieval_rank_fusion_loss(record: EvalRecord) -> Optional[Finding]:
+    """
+    하이브리드 융합이 단일 채널의 상위 순위를 깎아 gold 를 top_k 밖으로 밀어냄.
+    확정: 검색이 hybrid + 어느 한 채널(dense/BM25)은 gold 를 top_k 안에 뒀는데 융합 순위는 밖(tier2).
+
+    처방이 리랭커가 아니라 융합 가중치(hybrid_dense_weight)라서 따로 가른다 — 한 채널이 이미
+    정답을 상위에 두고 있으면, 비싼 cross-encoder 를 새로 태우기 전에 가중치를 그 채널 쪽으로
+    옮기는 게 싸고 정확하다. 어느 채널이 유리한지는 metadata['favored_channel'] 로 넘긴다
+    (planner 가 후보 가중치를 계산할 방향 근거).
+    """
+    advantage = _channel_advantage(record)
+    if advantage is None:
+        return None
+    channel, gold_id, channel_rank, fused_rank = advantage
+    finding = _finding(
+        record, "retrieval_rank_fusion_loss", "retrieval_failure", confirmed=True,
+        reason=f"{channel}_rank={channel_rank}<=top_k={len(record.retrieved_chunk_ids)} "
+               f"인데 fused_rank={fused_rank}({gold_id}), recall@k={_v(record.recall_at_k)}",
+    )
+    finding.metadata["favored_channel"] = channel
+    finding.metadata["channel_ranks"] = {
+        "dense": _gold_dense_ranks(record) or {},
+        "lexical": _gold_lexical_ranks(record) or {},
+        "fused": _gold_ranks(record) or {},
+    }
+    return finding
+
+
+def retrieval_duplicate_crowding(record: EvalRecord) -> Optional[Finding]:
+    """
+    상위 슬롯을 중복 청크가 차지해 gold 가 밀려남.
+    확정: gold 위 비-gold 중 near-duplicate 잉여분을 접으면 예상 순위가 top_k 이내(tier2 기하).
+
+    순위 원인 중 유일하게 리랭커로 안 고쳐져서 따로 가른다 — cross-encoder 는 중복 청크를
+    상위에 그대로 둔다(각각이 실제로 질문과 관련 있으니 점수가 높다). 처방은 중복 제거·MMR 이다.
+    회복 가능성을 순위표에서 직접 계산하므로(재검색 0회) 확정으로 낸다.
+
+    융합 손실이 실측되면 양보한다 — 둘 다 성립할 수 있는데(하이브리드 + 채널 우세 + 중복 회복)
+    융합이 파이프라인 앞단이라 뿌리다. 이 쌍만 튜플 순서로 갈리던 것을 신호로 세운 것이다.
+    """
+    if _channel_advantage(record) is not None:
+        return None                      # 융합 손실이 앞단 → 그쪽이 뿌리
+    recovery = _crowding_recovery(record)
+    if recovery is None:
+        return None
+    gold_id, analysis = recovery
+    finding = _finding(
+        record, "retrieval_duplicate_crowding", "retrieval_failure", confirmed=True,
+        reason=f"rank={analysis['rank']}({gold_id}), 중복 경쟁청크={analysis['redundant']} → "
+               f"중복 제거 시 순위={analysis['projected_rank']}<=top_k="
+               f"{len(record.retrieved_chunk_ids)}, recall@k={_v(record.recall_at_k)}",
+    )
+    finding.metadata["crowding_analysis"] = {
+        g: dict(a) for g, a in (_redundancy_above_gold(record) or {}).items()
+    }
+    return finding
+
+
+def retrieval_rerank_candidate_miss(record: EvalRecord) -> Optional[Finding]:
+    """
+    gold 가 리랭커 후보창 밖이라 리랭커가 보지도 못함.
+    확정: 리랭크 적용됨 + gold 가 pre_rerank 후보 목록에 없음(비용 0 측정).
+
+    순위 대조가 아니라 '리랭커가 실제로 받은 후보 목록에 없었다'로 직접 확인한다.
+    처방은 후보창 확대뿐이다 — 목록에 없던 것은 아무리 잘 정렬해도 올라오지 않는다.
+
+    앞단 원인(융합 손실·중복 밀림)이 실측되면 그쪽이 뿌리라 양보한다 — 융합이 밀어내 창 밖으로
+    나간 것을 '창을 넓혀라'로 처방하면 원인을 두고 증상을 키우는 셈이 된다.
+    """
+    if _upstream_rank_cause(record):
+        return None
+    targets = _rerank_window_missed(record)
+    if not targets:
+        return None
+    finding = _finding(
+        record, "retrieval_rerank_candidate_miss", "retrieval_failure", confirmed=True,
+        reason=f"{_rank_reason(record, targets)}, pre_rerank_ids에 없음"
+               f"(candidate_window={candidate_window()})",
+    )
+    finding.metadata["candidate_window"] = candidate_window()
+    return finding
+
+
+def retrieval_reranker_ineffective(record: EvalRecord) -> Optional[Finding]:
+    """
+    리랭커가 gold 를 후보로 봤지만 top_k 안으로 끌어올리지 못함.
+    확정: 리랭크 적용됨 + gold 가 후보 목록 안 + **리랭크 전에도 top_k 밖**(비용 0 측정).
+
+    강등(retrieval_reranker_demotion)과 반드시 갈라야 한다 — 여기선 리랭커가 떨어뜨린 게
+    아니라 올리는 데 실패한 것이라, 강등의 정석 처방인 롤백(disable_reranker)이 **확정 무효**다.
+    되돌리면 융합 순위가 그대로 쓰이는데 그 순위가 애초에 top_k 밖이라 gold 는 여전히 누락된다.
+    개선 가능성이 0인 처방에 iteration 을 쓰지 않으려면 판정 단계에서 갈라야 한다.
+
+    남는 레버는 리랭커 모델 교체뿐인데 후보가 미정이라(rules.py BLOCKER) 지금은 리포트 전용이다.
+    리랭커를 한 번 켠 뒤의 주류 경로라 커버리지 영향이 있다 — 모델 교체가 열리면 ready 로 올린다.
+    """
+    if not _rerank_cut_attributable(record) or _upstream_rank_cause(record):
+        return None
+    if _rerank_window_missed(record):
+        return None                      # 후보창 밖 gold 가 함께 있음 → candidate_miss 가 앞단
+    targets = _rerank_not_lifted(record)
+    if not targets:
+        return None
+    seen = ", ".join(f"{g}:{r}" for g, r in sorted(targets.items(), key=lambda kv: kv[1]))
+    finding = _finding(
+        record, "retrieval_reranker_ineffective", "retrieval_failure", confirmed=True,
+        reason=f"pre_rerank_ranks=[{seen}] — 리랭크 전에도 top_k="
+               f"{len(record.retrieved_chunk_ids)} 밖(강등 아님, 못 끌어올림), "
+               f"reranker_status={record.retrieval_details.get('reranker_status')}, "
+               f"recall@k={_v(record.recall_at_k)}",
+    )
+    finding.metadata["pre_rerank_ranks"] = dict(targets)
+    return finding
+
+
+def retrieval_reranker_demotion(record: EvalRecord) -> Optional[Finding]:
+    """
+    리랭커가 gold 를 후보로 보고도 top_k 밖으로 떨어뜨림.
+    확정: 리랭크 적용됨 + gold 가 pre_rerank 후보 목록 안 + **리랭크 전엔 top_k 안** + 최종 top_k 밖.
+
+    '리랭크 전엔 top_k 안'이 이 라벨의 핵심 전제다. 그게 없으면 리랭커가 올리는 데 실패했을
+    뿐인 케이스(retrieval_reranker_ineffective)까지 '떨어뜨렸다'로 확정하고, 롤백이라는
+    확정 무효 처방을 내게 된다.
+
+    후보창을 넓히는 처방이 여기선 무효라서 candidate_miss 와 반드시 갈라야 한다 — gold 는 이미
+    창 안에 있었고 리랭커가 매긴 점수가 낮았을 뿐이라, 창을 넓히면 gold 아래로 후보만 더 들어온다.
+    처방은 리랭커 되돌리기·모델 교체이며, 우리가 켠 리랭커가 역효과라는 뜻이므로
+    optimize 의 롤백 신호이기도 하다.
+
+    pre_rerank_ids 가 없으면(옛 계약 retriever) candidate_miss 와 구분이 불가해 침묵한다.
+
+    놓친 gold 가 여럿이라 '후보창 밖'과 '강등'이 한 probe 에 같이 있으면 candidate_miss 에
+    양보한다 — 후보 선정이 리랭크보다 앞단이고, 이 코드베이스는 앞단 원인을 뿌리로 본다
+    (융합 손실이 리랭크 단계 라벨보다 앞서는 것과 같은 기준). 양보하지 않으면 둘 다 확정으로
+    서서 튜플 순서로만 갈린다.
+    """
+    if not _rerank_cut_attributable(record) or _upstream_rank_cause(record):
+        return None
+    if _rerank_window_missed(record):
+        return None                      # 후보창 밖 gold 가 함께 있음 → candidate_miss 가 앞단
+    targets = _rerank_lost(record)
+    if not targets:
+        return None
+    seen = ", ".join(f"{g}:{r}" for g, r in sorted(targets.items(), key=lambda kv: kv[1]))
+    fused = _gold_ranks(record) or {}
+    fused_note = ", ".join(f"{g}:{fused.get(g)}" for g in sorted(targets))
+    finding = _finding(
+        record, "retrieval_reranker_demotion", "retrieval_failure", confirmed=True,
+        reason=f"pre_rerank_ranks=[{seen}](리랭크 전 top_k 안) 인데 최종 top_k="
+               f"{len(record.retrieved_chunk_ids)} 밖, fused_ranks=[{fused_note}], "
+               f"reranker_status={record.retrieval_details.get('reranker_status')}, "
+               f"recall@k={_v(record.recall_at_k)}",
+    )
+    finding.metadata["pre_rerank_ranks"] = dict(targets)
+    return finding
+
+
+def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
+    """
+    gold가 후보엔 있으나 순위가 낮아 top-k 밖 — 리랭크로 되돌릴 순수 정렬 오류.
+    확정: 놓친 gold 가 융합 재검색에서 top_k 뒤·도달 가능 창 안 순위로 발견 + 리랭크 미적용(tier2).
+
+    단계 귀속이 끝나고 남는 잔여 라벨이다. 리랭커가 아직 안 켜진 구간이라 처방은 '켜기' 하나이고,
+    여기가 원래 이 라벨이 뜻하던 케이스다. 아래가 실측되면 그쪽이 가져간다:
+      융합 손실 / 중복 밀림 (앞단 원인) · 후보창 밖 / 리랭커 강등 (리랭크 단계)
+    배타는 튜플 순서가 아니라 각자의 신호로 선다.
+
+    리랭크는 돌았는데 단계를 귀속할 수 없는 구성 — 후보 목록 미기록(옛 계약 retriever)이거나
+    MMR 이 최종 컷을 맡은 경우 — 에서는 어느 단계에서 잃었는지 알 수 없다 → 예비로 낸다.
+    이미 켜진 리랭커에 '켜라'를 처방하지 않기 위해서다(planner 는 예비를 자동 처방에서 뺀다).
+    """
+    targets = _rankable(record)
+    if (not targets or _upstream_rank_cause(record)
+            or _rerank_cut_attributable(record) or _rerank_window_missed(record)):
+        return None
+    confirmed = not _reranked(record)
     return _finding(
-        record, "retrieval_low_rank", "retrieval_failure", confirmed=True,
-        reason=f"missed_gold_ranks=[{ranked}] > top_k={top_k}, recall@k={_v(record.recall_at_k)}",
+        record, "retrieval_low_rank", "retrieval_failure", confirmed=confirmed,
+        reason=f"{_rank_reason(record, targets)}, reranked={bool(_reranked(record))}"
+               f"{'' if confirmed else ', pre_rerank_ids=-(단계 귀속 불가)'}",
     )
 
 
 def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
     """
     dense는 놓쳤으나 BM25로 잡히는 단어 불일치.
-    확정: BM25 가 gold 를 잡음 + dense wide-N 도 그 gold 를 못 잡음(tier2).
-    dense wide-N 에 있으면 low_rank 영역 — 튜플 순서 대신 함수 자체로 배타(ranks memoize 공유).
+    확정: BM25 가 gold 를 잡음 + 순위 라벨이 다룰 구간이 아님(tier2).
+
+    양보 기준이 '융합 wide-N 후보에 있나'가 아니라 '도달 가능 창 안에 있나'다 — 창 밖(예:
+    BM25 1위인데 융합 80위)은 리랭커로 못 고치므로 순위 문제가 아니라 어휘 불일치이고,
+    처방도 하이브리드 활성화가 맞다. 예전 기준으로는 이 케이스를 low_rank 가 가져가서
+    닿지도 않는 리랭커를 처방했다.
+    하이브리드가 이미 켜진 채로 창 안에서 밀린 경우는 retrieval_rank_fusion_loss 영역이다.
     놓친 gold 가 여럿이어도 그중 하나만 BM25 에 잡히면 probe 전체가 이 라벨이다(슬롯당 1원인).
-    남은 semantic 실패는 이번 처방 적용 후 다음 iteration 에서 다시 잡힌다.
     """
     if _bm25_hits_gold(record) is not True:
         return None
-    ranks = _gold_ranks(record) or {}
-    if any(ranks.get(g) is not None for g in missed_gold_ids(record)):
-        return None                      # dense wide-N 에 있음 → low_rank
+    if _rank_scope(record):
+        return None                      # 순위 라벨이 다룰 구간 → 그쪽에 양보
     return _finding(
         record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True,
         reason=f"bm25_hits_gold=True, dense_missed=True, recall@k={_v(record.recall_at_k)}",
@@ -270,9 +645,15 @@ def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     에서 라벨이 통째로 소실된다. 코퍼스에 없는 몫은 corpus_gap 이 additive 로 함께 붙는다.
     코퍼스 멤버십 미측정(None)은 corpus_gap 과 구분 불가라 예비(missing_gold 와 동일 기준).
     qtype=bridge 는 bridge 의존과 구분 불가라 양보(원 질문으론 hop2 를 원래 못 찾음).
+
+    도달 가능 창 안에 gold 가 있으면 양보한다(lexical_mismatch 와 같은 기준) — 그 경우
+    dense 는 gold 를 '놓친' 게 아니라 순위를 낮게 준 것이라 이 라벨의 전제가 사실과 어긋난다.
+    게이트가 없으면 순위 라벨과 이 라벨이 둘 다 확정으로 서서 튜플 순서로만 갈린다.
     """
     if record.probe.qtype == "bridge":
         return None                      # bridge 의존과 구분 불가 → bridge 에 양보
+    if _rank_scope(record):
+        return None                      # 순위 라벨이 다룰 구간 → 그쪽에 양보
     if _bm25_hits_gold(record) is not False:
         return None
     in_corpus = _missed_gold_in_corpus(record)
@@ -957,9 +1338,15 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
 #    generation_failure(예비 롤업)는 생성 슬롯 맨 뒤 후보.
 # ══════════════════════════════════════════════════════════════════
 
+# 순위 원인 4형제(fusion_loss / duplicate_crowding / candidate_miss / demotion)와 잔여 low_rank 는
+# 각자의 신호로 배타가 서 있어 여기 순서에 기대지 않는다(전수 확인: tests/test_diagnose_labels).
+# 앞에 두는 건 읽는 순서를 파이프라인 단계 순서와 맞추기 위해서다.
 _RETRIEVAL_CAUSE = (
     retrieval_incomplete_enumeration, retrieval_missing_bridge_dependency,
-    retrieval_low_rank, retrieval_lexical_mismatch, retrieval_semantic_mismatch, retrieval_missing_gold,
+    retrieval_rank_fusion_loss, retrieval_duplicate_crowding,
+    retrieval_rerank_candidate_miss, retrieval_reranker_demotion,
+    retrieval_reranker_ineffective, retrieval_low_rank,
+    retrieval_lexical_mismatch, retrieval_semantic_mismatch, retrieval_missing_gold,
     # chunking 은 확정이지만 맨 뒤 — 실측된 다른 검색 원인이 있으면 그쪽을 먼저 채택한다.
     chunking_overchunking, chunking_context_mismatch,
     retrieval_failure
@@ -1057,9 +1444,12 @@ def _severity_of(label: str) -> str:
 
 
 # gold 순위를 함께 저장해야하는 라벨들.
+# candidate_miss 는 planner 가 이 순위로 후보창 목표값(무릎)을 계산한다 — top_k 근거값을
+# 순위에서 뽑는 두 라벨과 같은 구조다.
 _RANK_LABELS = {
     "retrieval_incomplete_enumeration",
     "retrieval_missing_gold",
+    "retrieval_rerank_candidate_miss",
 }
 
 
