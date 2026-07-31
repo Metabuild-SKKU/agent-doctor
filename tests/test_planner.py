@@ -498,6 +498,66 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertEqual(request.optimizer, "rules")
         self.assertNotIn("chunk_precheck_context", request.metadata)
 
+    def test_chunk_strategy_candidates_make_one_internal_request(self):
+        # 전략 교체는 청크 사전검증(prescreener) 대상이 아니라 후보 수만 보고
+        # internal 로 간다 — 경계 생성 규칙 자체가 바뀌어 기존 경계 기하가 무의미하다.
+        finding = make_finding(
+            "p1", "chunking_context_mismatch",
+            candidates={
+                "chunker.strategy": ["recursive_sentence", "markdown_recursive"]
+            },
+        )
+        state = AgentDoctorState(
+            report=_report(finding),
+            index_config={
+                "top_k": 5,
+                "chunk_size": 512,
+                "chunk_overlap": 50,
+                "chunk_strategy": "fixed",
+            },
+        )
+
+        request, decision = planner.plan(
+            state,
+            blacklist=self._chunk_strategy_blacklist(),
+        )
+
+        self.assertEqual(decision.mode, "apply_optimize")
+        self.assertEqual(request.candidates[0].id, "switch_to_recursive_sentence")
+        self.assertEqual(
+            request.search_space,
+            {"chunker.strategy": ["recursive_sentence", "markdown_recursive"]},
+        )
+        self.assertEqual(request.optimizer, "internal")
+        self.assertEqual(request.max_trials, 2)
+        self.assertNotIn("chunk_precheck_context", request.metadata)
+
+    def test_single_chunk_strategy_candidate_uses_rules_backend(self):
+        # rules 처방 하나만 있으면 후보값도 하나라 sweep 할 게 없다(rules 1회 검증).
+        finding = make_finding("p1", "chunking_context_mismatch")
+        state = AgentDoctorState(
+            report=_report(finding),
+            index_config={
+                "top_k": 5,
+                "chunk_size": 512,
+                "chunk_overlap": 50,
+                "chunk_strategy": "fixed",
+            },
+        )
+
+        request, _decision = planner.plan(
+            state,
+            blacklist=self._chunk_strategy_blacklist(),
+        )
+
+        self.assertEqual(
+            request.search_space,
+            {"chunker.strategy": ["recursive_sentence"]},
+        )
+        self.assertEqual(request.optimizer, "rules")
+        self.assertEqual(request.max_trials, 1)
+        self.assertNotIn("chunk_precheck_context", request.metadata)
+
     @staticmethod
     def _chunk_blacklist():
         """too_long_context의 앞선 두 처방을 건너뛰고 chunk 처방을 선택한다."""
@@ -505,6 +565,15 @@ class PlannerCandidateListTest(unittest.TestCase):
         return {
             ("too_long_context", "decrease_top_k"),
             ("too_long_context", "context_compression"),
+        }
+
+    @staticmethod
+    def _chunk_strategy_blacklist():
+        """chunking_context_mismatch의 크기·중첩 처방을 건너뛰고 전략 교체를 고른다."""
+
+        return {
+            ("chunking_context_mismatch", "increase_chunk_overlap"),
+            ("chunking_context_mismatch", "increase_chunk_size"),
         }
 
     @staticmethod

@@ -111,6 +111,12 @@ _SYMBOLIC_FALLBACK_ALLOWED: dict[str, frozenset[str]] = {
         "invalid_policy",
     }),
 }
+# 사전검증(prescreener)으로 후보를 미리 거를 수 있는 축.
+# chunker.strategy 는 여기 넣지 않는다: prescreener 는 gold span 이 청크 경계에
+# 걸리는지를 기하로 판정하는데, 전략 교체는 경계 생성 규칙 자체를 바꾸므로 기존
+# 경계 좌표를 전제로 한 span-경계 계산이 성립하지 않는다. 전략은 사전검증 없이
+# internal sweep 의 실측(composite_score)으로 판정한다 — 그래서 use_internal 분기도
+# 후보 수(candidate_count > 1)만 보는 아래 경로를 탄다.
 _CHUNK_PRECHECK_PATHS = frozenset({
     "chunker.chunk_size",
     "chunker.chunk_overlap",
