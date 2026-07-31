@@ -933,6 +933,25 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         ],
         "manual_action": "RAG 파이프라인이 아니라 평가셋(정답) 문제로 보입니다. 해당 probe를 재생성(질문·정답 재작성)하거나 평가셋에서 제외해 주세요.",
     },
+    "bad_gold_chunk": {
+        "group": "D",
+        "status": "manual",
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        # 정답 텍스트는 맞고 근거로 지정된 '청크'가 틀린 경우 → 답이 아니라 근거 위치를 재지정한다.
+        "prescriptions": [
+            {
+                "id": "relabel_gold_chunk",
+                "manual": True,
+                "action": "이 라벨이 붙은 probe의 근거 청크(골드)를 재지정",
+                "detail": "정답 텍스트는 정상이나 근거로 지정된 positive_chunk_ids/gold_spans가 "
+                          "정답이 실제로 있는 위치를 가리키지 않는다(표 문서에서 같은 값이 여러 "
+                          "행에 나와 오매칭되는 등). 답은 그대로 두고, 정답이 실제로 등장하는 "
+                          "청크로 근거를 재지정하거나 해당 probe를 평가셋에서 제외한다.",
+                "show": ["probe_id", "question", "ground_truth"],
+            },
+        ],
+        "manual_action": "정답 텍스트는 맞지만 근거로 지정된 청크가 엉뚱한 위치를 가리킵니다. 정답이 실제로 있는 청크로 골드(positive_chunk_ids)를 재지정하거나 해당 probe를 평가셋에서 제외해 주세요.",
+    },
 }
 
 

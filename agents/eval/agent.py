@@ -760,6 +760,28 @@ def _short_cid(cid: str) -> str:
     return cid[i + 1:] if i != -1 else cid
 
 
+def _doc_tag(cid: str) -> str:
+    """청크 id 에서 문서 식별자를 짧게 뽑는다: 'doc_ace9d8c1ce5d_chunk_016' → 'ace9d8'.
+
+    _short_cid 가 문서 접두를 버리므로, 서로 다른 문서의 'chunk_005' 가 로그에서
+    똑같이 보인다 — 검색이 골드와 다른 문서의 동명 청크를 가져왔는데도 '골드를 가져온
+    것처럼' 보이는 착시(그래서 recall=0 이 모순처럼 읽힌다)를 만든다. 문서가 섞일 때
+    이 태그를 붙여 동명 청크를 구분한다."""
+    i = cid.rfind("_chunk_")
+    doc = cid[:i] if i != -1 else cid
+    if doc.startswith("doc_"):
+        doc = doc[4:]
+    return doc[:6] or doc
+
+
+def _fmt_cids(cids: list[str], multi_doc: bool) -> str:
+    """청크 id 리스트를 로그용으로 축약. 여러 문서가 섞였을 때만 문서 태그(@)를 붙여
+    동명 청크의 문서 간 충돌을 드러낸다(단일 문서면 기존 표시 그대로)."""
+    if multi_doc:
+        return ", ".join(f"{_short_cid(c)}@{_doc_tag(c)}" for c in cids)
+    return ", ".join(_short_cid(c) for c in cids)
+
+
 def _mark(ok: bool) -> str:
     """성공/실패 마크. 콘솔이 이모지를 못 그리면(Windows cp949 등) ASCII 로 폴백한다 —
     run_logger 의 Tee 가 '?' 로 치환하면 성공/실패 구분이 사라지기 때문.
@@ -783,8 +805,12 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
     recall = _fmt_metric(rec.recall_at_k)
     f1 = _fmt_metric(rec.f1_score, bool(p.ground_truth))
     oracle = _fmt_metric(rec.oracle_f1, rec.oracle_answer is not None)
-    retrieved = ", ".join(_short_cid(c) for c in rec.retrieved_chunk_ids)
-    gold = ", ".join(_short_cid(c) for c in p.gold_chunk_ids)
+    # 검색·골드가 여러 문서에 걸치면 문서 태그를 붙인다 — 서로 다른 문서의 동명 청크
+    # (예: 골드 doc_A_chunk_005 vs 검색 doc_B_chunk_005)가 축약 표시로 겹쳐 보여
+    # 'recall=0 인데 chunk_005 가 검색에 있다'는 착시를 만드는 걸 막는다.
+    multi_doc = len({_doc_tag(c) for c in [*rec.retrieved_chunk_ids, *p.gold_chunk_ids] if c}) > 1
+    retrieved = _fmt_cids(rec.retrieved_chunk_ids, multi_doc)
+    gold = _fmt_cids(p.gold_chunk_ids, multi_doc)
     # 판정은 finding 유무로 — diagnose 가 원인을 하나도 못 붙였으면 정상 처리된 probe 다.
     status = _mark(not rec.findings) + (f" {len(rec.findings)}건" if rec.findings else "")
 

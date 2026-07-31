@@ -70,7 +70,13 @@ def _probe_reliability(record: EvalRecord) -> float:
     두 축의 곱이라 검색·답변 어느 한쪽이 무너지면 신뢰도가 낮게 나온다(이진 게이트의 AND 대응)."""
     if record.probe.answer_exists is False:
         return 0.0 if record.findings else 1.0
-    retrieval = _clamp01(record.recall_at_k)
+    # 검색축: 기본은 recall(라벨 골드를 top-k 에 넣었나)이되, diagnose 가 '라벨 골드는 놓쳤지만
+    # 검색이 다른 유효 근거로 정답을 뒷받침했다'(검증된 label-recall miss)고 판정하면 그 크레딧
+    # (retrieval_axis=faithfulness)을 쓴다. pass/fail(findings=[])과 같은 판정이라, 재청킹 recall
+    # 스윙으로 둘이 따로 놀지 않는다. parametric·골드오류엔 axis 가 안 실려 recall 그대로다.
+    retrieval = _clamp01(record.retrieval_axis
+                         if record.retrieval_axis is not None
+                         else record.recall_at_k)
     return retrieval * _clamp01(record.answer_score)
 
 

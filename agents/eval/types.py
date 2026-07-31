@@ -290,6 +290,13 @@ class EvalRecord:
     # 없으므로 통과로 집계된다). scoring.reliability_score / report 가 이 규약으로 읽는다.
     findings: list[Finding] = field(default_factory=list)
 
+    # 검색축 신뢰도 override — diagnose 가 '라벨 골드는 못 집었지만 답이 정답이고 검색 근거에
+    # 붙었고(grounded) 골드도 유효(oracle 통과)'라고 판정하면(다른 유효 근거로 검색이 검증된
+    # label-recall miss), recall 대신 이 값(=faithfulness)을 검색축으로 쓴다. 미설정(None)이면
+    # scoring 이 recall_at_k 를 그대로 쓴다. pass/fail(findings)과 reliability 를 같은 판정으로
+    # 묶어 재청킹 recall 스윙에 둘이 따로 놀지 않게 한다.
+    retrieval_axis: Optional[float] = None
+
     # 진단 신호 memoize 뷰: agent 가 state.diagnosis_cache[probe_id] 를 주입 → 쓰기가 state 로 전파.
     # 비싼 판별 신호(_signal)가 여기 캐시돼 재진단 시 재사용된다.
     signals: dict = field(default_factory=dict)

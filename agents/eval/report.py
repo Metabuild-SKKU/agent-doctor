@@ -34,9 +34,24 @@ _RAGAS_KEYS = ("faithfulness", "context_precision", "context_recall", "response_
 
 
 def is_bad_gold_probe(record: EvalRecord) -> bool:
-    """이 probe 가 정답셋 오류(bad_gold_answer)로 확정 판정됐나 — 점수 제외 + 재생성 대상.
-    Eval agent(재생성)와 build_report(점수 제외)가 공유한다."""
+    """이 probe 가 정답셋 '정답 텍스트' 오류(bad_gold_answer)로 확정 판정됐나 — 점수 제외 +
+    재생성 대상. Eval agent(답 재생성)와 build_report(점수 제외)가 공유한다.
+
+    청크 라벨 오류(bad_gold_chunk)는 여기 넣지 않는다 — 그건 정답 텍스트가 맞으므로 답을
+    재생성하면 멀쩡한 정답을 망친다. 점수 제외는 is_gold_labeling_error 가 함께 처리한다."""
     return any(f.label == "bad_gold_answer" and f.confirmed for f in record.findings)
+
+
+# 점수 집계에서 제외할 '거짓 실패' 라벨 — 정답 텍스트 오류(bad_gold_answer)와 근거 청크
+# 포인터 오류(bad_gold_chunk) 둘 다. 어느 쪽이든 RAG 파이프라인이 아니라 평가셋(골드) 결함이라
+# 점수에 넣으면 고칠 수 없는 페널티가 되고 Optimize 가 헛처방을 쫓는다.
+_GOLD_ERROR_LABELS = ("bad_gold_answer", "bad_gold_chunk")
+
+
+def is_gold_labeling_error(record: EvalRecord) -> bool:
+    """골드 라벨 오류(정답 텍스트 또는 근거 청크)로 확정된 probe 인가 — 점수 제외용.
+    재생성 대상(is_bad_gold_probe)보다 넓다: 청크 오라벨은 점수만 빼고 답은 안 건드린다."""
+    return any(f.label in _GOLD_ERROR_LABELS and f.confirmed for f in record.findings)
 
 
 # 하위호환 별칭(내부 호출부).
@@ -56,12 +71,12 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     # Optimize 소비 편의: 확정 우선. 동률은 원래 순서 유지(stable sort — probe별 D→A→C→B).
     findings.sort(key=lambda f: not f.confirmed)
 
-    # bad_gold_answer(정답셋 오류)로 판정된 probe 는 '거짓 실패'다 — RAG 결함이 아니라
-    # 평가셋이 틀린 것이라, 점수에 넣으면 파이프라인이 고칠 수 없는 문제로 페널티를 받고
-    # Optimize 가 존재하지 않는 결함을 쫓게 된다. 따라서 점수 집계(품질/신뢰도/overall/
-    # composite)에서만 제외하고, 진단·리포트(findings/summary/outcome)에는 그대로 남긴다.
-    # (전부 bad_gold 면 scorable 이 비어 overall=None → 기존 '판정 보류' 통과 경로로 수렴.)
-    scorable = [r for r in records if not _is_bad_gold_probe(r)]
+    # 골드 라벨 오류(bad_gold_answer=정답 텍스트, bad_gold_chunk=근거 청크)로 판정된 probe 는
+    # '거짓 실패'다 — RAG 결함이 아니라 평가셋이 틀린 것이라, 점수에 넣으면 파이프라인이 고칠 수
+    # 없는 문제로 페널티를 받고 Optimize 가 존재하지 않는 결함을 쫓게 된다. 따라서 점수 집계
+    # (품질/신뢰도/overall/composite)에서만 제외하고, 진단·리포트(findings/summary/outcome)에는
+    # 그대로 남긴다. (전부 제외되면 scorable 이 비어 overall=None → 기존 '판정 보류' 통과 경로.)
+    scorable = [r for r in records if not is_gold_labeling_error(r)]
 
     ragas_means = _ragas_means(scorable)
     rule_means = _rule_means(scorable)
