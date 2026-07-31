@@ -645,16 +645,9 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
     failed_vecs = [embed_by_id[cid] for cid in sorted(failed_ids) if embed_by_id.get(cid)]
     corpus_vecs = [c.embedding for c in chunks if c.embedding]
 
-    # 유효성 필터(_valid) 를 표본 절단보다 먼저 건다 — baseline(_baseline_cohesion)이
-    # _valid → stride 순이라 순서를 맞춰야 한다. 반대로 하면 영벡터/미부착 벡터가 표본
-    # 슬롯을 먼저 잡아먹고 뒤에 걸러져, 실측 유효분이 반토막 나 실측 신호가 있는데도
-    # unmeasured 로 떨어질 수 있다(유효 3 + 영벡터 297 → 표본 유효 1개 → unmeasured).
-    # 실패 gold 도 baseline 과 같은 상한을 건다 — 보통 수십 개지만 수백 개가 되면
-    # 1024차원 코사인이 수만 쌍으로 늘어난다(O(m^2)).
-    failed_vecs = topic_cluster.stride_sample(
-        [v for v in failed_vecs if topic_cluster._valid(v)]
-    )
-
+    # 유효성 필터·표본 절단은 classify_detail 안에서 양쪽 입력에 같은 순서로 걸린다
+    # (_valid → stride). 여기서 미리 자르면 그 순서가 뒤집혀 영벡터가 표본 슬롯을 먼저
+    # 먹는 문제가 되살아나고, 호출부가 topic_cluster 의 private 유효성 규칙에 묶인다.
     result = topic_cluster.classify_detail(failed_vecs, corpus_vecs)
     # 버킷뿐 아니라 판정 근거 수치도 metadata 에 남긴다 — 소비 유예(관측용) 동안
     # 임계값을 실측 분산에 맞춰 재보정할 근거가 finding 에 쌓이게 한다(캘리브레이션 과제).

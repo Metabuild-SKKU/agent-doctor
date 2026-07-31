@@ -5,7 +5,8 @@ agent._annotate_topic_cluster 통합 테스트 — 실패 gold 임베딩 → fin
 리뷰 후속 2건 회귀 고정:
 - Low : 실패 gold 도 baseline 과 같은 순서(_valid 필터 → stride 절단)로 표본을 잘라야,
         영벡터가 표본 슬롯을 먼저 잡아먹고 뒤에 걸러져 실측 신호가 unmeasured 로
-        떨어지는 걸 막는다.
+        떨어지는 걸 막는다. 그 순서 보장은 classify_detail 안에 있으므로(호출부가
+        private 유효성 규칙을 몰라도 되게), 여기서는 배선이 그 계약을 타는지만 본다.
 - Medium: 버킷뿐 아니라 판정 근거 수치(ratio·baseline·표본 수)를 metadata 에 남겨야,
         소비 유예(관측용) 동안 임계값 캘리브레이션 근거가 finding 에 쌓인다.
 """

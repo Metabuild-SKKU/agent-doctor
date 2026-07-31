@@ -95,14 +95,6 @@ def stride_sample(vectors: list[Vector], limit: int = TOPIC_CLUSTER_BASELINE_SAM
     return [vectors[i * n // limit] for i in range(limit)]
 
 
-def _baseline_cohesion(corpus_vectors: list[Vector]) -> Optional[float]:
-    """코퍼스 전체의 평균 쌍별 코사인. 표본을 잘라 O(n^2) 폭발을 막는다(결정적 stride)."""
-    usable = [v for v in corpus_vectors if _valid(v)]
-    if len(usable) < 2:
-        return None
-    return _mean_pairwise_cosine(stride_sample(usable))
-
-
 class TopicClusterResult(NamedTuple):
     """classify 의 판정 + 그 근거 수치. 버킷만으로는 캘리브레이션을 못 하므로 함께 남긴다.
 
@@ -114,7 +106,7 @@ class TopicClusterResult(NamedTuple):
     ratio: Optional[float]
     failed_cohesion: Optional[float]
     baseline: Optional[float]
-    failed_sample_size: int   # baseline·failed 모두 _valid 통과 벡터만 센다(응집도 계산 실입력 수).
+    failed_sample_size: int   # baseline·failed 모두 _valid 통과 + 표본 절단 후 수(응집도 계산 실입력 수).
     corpus_sample_size: int
 
 
@@ -124,18 +116,25 @@ def classify_detail(
 ) -> TopicClusterResult:
     """classify 와 같은 판정을 하되, 근거 수치(ratio·baseline·표본 수)를 함께 돌려준다.
 
-    버킷 규칙은 classify 문서 참고. 표본 수는 _valid 를 통과한(=응집도 계산에 실제
-    들어간) 벡터 수라, unmeasured 원인이 "2개 미만"인지 "baseline 불가"인지 구분된다.
+    버킷 규칙은 classify 문서 참고. 표본 수는 _valid 를 통과하고 표본 절단까지 거친
+    (=응집도 계산에 실제 들어간) 벡터 수라, unmeasured 원인이 "2개 미만"인지
+    "baseline 불가"인지 구분된다. 전량 개수가 아니어야 하는 이유: 추정량 분산은 실입력
+    표본 수에 달려 있어, 캘리브레이션 근거로는 절단 후 수가 맞다.
+
+    양쪽 입력 모두 여기서 _valid 필터 → stride_sample 순으로 정규화한다. 순서가 뒤집히면
+    영벡터/미부착 벡터가 표본 슬롯을 먼저 잡아먹고 뒤에 걸러져, 실측 유효분이 반토막 나
+    실측 신호가 있는데도 unmeasured 로 떨어진다(유효 3 + 영벡터 297 → 표본 유효 1개).
+    호출부는 이 규칙(_valid 의 정의·절단 상한)을 몰라도 되게 raw 벡터를 그대로 넘긴다.
     """
-    failed_usable = [v for v in failed_gold_vectors if _valid(v)]
-    corpus_usable = [v for v in corpus_vectors if _valid(v)]
+    failed_usable = stride_sample([v for v in failed_gold_vectors if _valid(v)])
+    corpus_usable = stride_sample([v for v in corpus_vectors if _valid(v)])
     failed_n = len(failed_usable)
     corpus_n = len(corpus_usable)
 
-    failed_cohesion = _mean_pairwise_cosine(failed_gold_vectors)
+    failed_cohesion = _mean_pairwise_cosine(failed_usable)
     if failed_cohesion is None:
         return TopicClusterResult(UNMEASURED, None, None, None, failed_n, corpus_n)
-    baseline = _baseline_cohesion(corpus_vectors)
+    baseline = _mean_pairwise_cosine(corpus_usable)
     # 음수 baseline(코퍼스가 서로 등질) 도 막는다 — 나누면 ratio 부호가 뒤집혀
     # 실패가 아무리 뭉쳐 있어도 무조건 spread 로 떨어진다.
     if baseline is None or baseline <= 0:

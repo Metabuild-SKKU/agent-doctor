@@ -167,6 +167,37 @@ class TopicClusterClassifyDetailTest(unittest.TestCase):
         self.assertIsNone(r.ratio)
         self.assertEqual(r.failed_sample_size, 1)    # 유효 1개 → 쌍 없음 → unmeasured
 
+    def test_corpus_sample_size_is_post_stride_input_count(self):
+        """표본 수는 '유효 전량'이 아니라 응집도 계산 실입력 수여야 한다(리뷰 Low).
+
+        baseline 은 stride_sample 로 상한을 걸어 100개만 쓰는데 유효 전량(2000)을 보고하면,
+        추정량 분산이 표본 수에 달린 만큼 캘리브레이션 근거로 쓸 수 없다.
+        """
+        corpus = [[1.0, 0.0, 0.0]] * 1000 + [[0.0, 1.0, 0.0]] * 1000     # 유효 2000
+        failed = [[1, 0, 0], [0.98, 0.1, 0], [0.97, 0.15, 0.05]]
+        r = tc.classify_detail(failed, corpus)
+        self.assertEqual(r.corpus_sample_size, tc.TOPIC_CLUSTER_BASELINE_SAMPLE)
+        # 상한 아래면 유효 개수 그대로 — 무조건 상한을 보고하는 게 아니어야 한다.
+        small = tc.classify_detail(failed, [[1, 0, 0], [0, 1, 0], [0.0, 0.0, 0.0]])
+        self.assertEqual(small.corpus_sample_size, 2)
+
+    def test_failed_sample_is_filtered_before_capping(self):
+        """영벡터가 표본 슬롯을 먼저 먹지 않아야 한다 — _valid → stride 순서 회귀(리뷰 Low).
+
+        절단이 먼저면 유효 3 + 영벡터 297 에서 표본 100개 중 유효분이 1개로 굶어
+        실측 신호가 있는데도 unmeasured 로 떨어진다. 이 순서 보장은 호출부가 아니라
+        classify_detail 안에 있어야 한다(호출부가 private 유효성 규칙을 몰라도 되게).
+        """
+        failed = [[1, 0, 0], [0.98, 0.1, 0], [0.97, 0.15, 0.05]] + [[0.0, 0.0, 0.0]] * 297
+        corpus = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [0, 1, 1]]
+        r = tc.classify_detail(failed, corpus)
+        self.assertEqual(r.failed_sample_size, 3)
+        self.assertNotEqual(r.bucket, tc.UNMEASURED)
+        # 영벡터를 빼고 넘긴 것과 판정·수치가 동일해야 한다(영벡터가 신호를 안 건드림).
+        clean = tc.classify_detail(failed[:3], corpus)
+        self.assertEqual(r.bucket, clean.bucket)
+        self.assertAlmostEqual(r.ratio, clean.ratio)
+
 
 if __name__ == "__main__":
     unittest.main()
