@@ -285,7 +285,7 @@ def _rerank_lost(record: EvalRecord) -> dict[str, int]:
     처방이 다르다 — 강등은 롤백(disable_reranker)이 유효하지만, 못 끌어올린 경우는 롤백해도
     융합 순위가 그대로 top_k 밖이라 개선 가능성이 0이다.
     """
-    if not _rerank_stage_visible(record):
+    if not _rerank_cut_attributable(record):
         return {}
     pre = _gold_pre_rerank_ranks(record) or {}
     top_k = len(record.retrieved_chunk_ids)
@@ -300,7 +300,7 @@ def _rerank_not_lifted(record: EvalRecord) -> dict[str, int]:
     되돌리면 융합 순위가 그대로 쓰이는데 그 순위가 애초에 top_k 밖이라 gold 는 여전히 누락된다.
     남는 레버는 리랭커 모델 교체이며, 그 처방이 열리기 전까지는 리포트 전용이다(rules.py draft).
     """
-    if not _rerank_stage_visible(record):
+    if not _rerank_cut_attributable(record):
         return {}
     pre = _gold_pre_rerank_ranks(record) or {}
     top_k = len(record.retrieved_chunk_ids)
@@ -311,10 +311,11 @@ def _rerank_not_lifted(record: EvalRecord) -> dict[str, int]:
 def _rank_scope(record: EvalRecord) -> set[str]:
     """순위 라벨 전체의 관할(gold id 집합) — 세 갈래의 합집합.
 
-      _rankable         : 융합 순위가 top_k 밖 + 도달 가능 창 안 (리랭크 계열 라벨의 관할)
-      _rerank_lost      : 리랭크 전엔 top_k 안이었는데 결과엔 없음 = 강등 (융합 순위 무관)
-      _rerank_not_lifted: 후보엔 있었으나 리랭크 전에도 top_k 밖 = 못 끌어올림
-      융합 손실          : 단일 채널이 top_k 안에 뒀는데 융합이 밀어냄 (창 무관 — 아래 참고)
+      _rankable            : 융합 순위가 top_k 밖 + 도달 가능 창 안 (리랭크 계열 라벨의 관할)
+      _rerank_lost         : 리랭크 전엔 top_k 안이었는데 결과엔 없음 = 강등 (융합 순위 무관)
+      _rerank_not_lifted   : 후보엔 있었으나 리랭크 전에도 top_k 밖 = 못 끌어올림
+      _rerank_window_missed: 후보 목록에 아예 없었음 (_rankable 의 부분집합)
+      융합 손실             : 단일 채널이 top_k 안에 뒀는데 융합이 밀어냄 (창 무관 — 아래 참고)
 
     lexical/semantic mismatch 는 이 관할이 비어 있을 때만 발동한다(전제가 'dense 가 놓침'인데,
     여기 잡혔다는 건 dense 가 gold 를 실제로 올려놨다는 뜻이라 전제가 깨진다).
@@ -333,17 +334,39 @@ def _rank_scope(record: EvalRecord) -> set[str]:
 def _rerank_stage_visible(record: EvalRecord) -> bool:
     """리랭크 단계를 실측으로 들여다볼 수 있나 — 적용됐고 후보 목록이 기록됐나.
 
-    이게 참이어야 '후보창 밖이라 못 봤다'와 '보고도 떨어뜨렸다'를 가를 수 있다.
     거짓이면 리랭크 단계는 미측정이고, 순위 원인은 잔여 라벨(low_rank)이 맡는다.
 
-    MMR 이 실제로 적용된 검색은 제외한다 — 리랭커와 MMR 이 둘 다 켜지면 최종 top_k 선택을
-    MMR 이 맡고(리랭커는 후보풀 순서만 바꾼다, agents/rag/retriever.py), pre_rerank_ids 에
-    있던 gold 가 결과에 없어도 떨어뜨린 주체가 리랭커라는 보장이 없다. 단계를 못 가르므로
-    강등으로 단정하지 않는다.
+    MMR 여부는 여기서 보지 않는다 — 이 신호가 뒷받침하는 사실은 '리랭커 입력 목록이 무엇이었나'
+    이고, MMR 은 리랭크 **이후** 단계라 그 사실을 바꿀 수 없기 때문이다. 최종 컷의 귀속이
+    필요한 라벨만 _rerank_cut_attributable 을 따로 본다.
+    """
+    return _reranked(record) and _gold_pre_rerank_ranks(record) is not None
+
+
+def _rerank_cut_attributable(record: EvalRecord) -> bool:
+    """최종 top_k 컷을 리랭커에게 귀속시킬 수 있나.
+
+    리랭커와 MMR 이 둘 다 켜지면 최종 선택을 MMR 이 맡는다(리랭커는 후보풀 순서만 바꾼다,
+    agents/rag/retriever.py). 그러면 후보에 있던 gold 가 결과에 없어도 떨어뜨린 주체가
+    리랭커라는 보장이 없어 '강등'·'못 끌어올림'을 단정할 수 없다.
+
+    반면 '후보 목록에 아예 없었다'(candidate_miss)는 리랭크 이전 사실이라 MMR 과 무관하다 —
+    그 라벨까지 이 게이트로 막으면, MMR 을 켜는 순간 후보창 문제가 처방을 못 받게 된다.
     """
     if record.retrieval_details.get("mmr_applied"):
         return False
-    return _reranked(record) and _gold_pre_rerank_ranks(record) is not None
+    return _rerank_stage_visible(record)
+
+
+def _rerank_window_missed(record: EvalRecord) -> dict[str, int]:
+    """리랭커 후보 목록에 아예 없던 대상 gold {gold_id: 융합 순위}.
+
+    리랭크 이전 사실이라 MMR 적용 여부와 무관하다(_rerank_cut_attributable 참고).
+    """
+    if not _rerank_stage_visible(record):
+        return {}
+    pre = _gold_pre_rerank_ranks(record) or {}
+    return {g: r for g, r in _rankable(record).items() if pre.get(g) is None}
 
 
 def _channel_advantage(record: EvalRecord):
@@ -478,10 +501,9 @@ def retrieval_rerank_candidate_miss(record: EvalRecord) -> Optional[Finding]:
     앞단 원인(융합 손실·중복 밀림)이 실측되면 그쪽이 뿌리라 양보한다 — 융합이 밀어내 창 밖으로
     나간 것을 '창을 넓혀라'로 처방하면 원인을 두고 증상을 키우는 셈이 된다.
     """
-    if not _rerank_stage_visible(record) or _upstream_rank_cause(record):
+    if _upstream_rank_cause(record):
         return None
-    pre = _gold_pre_rerank_ranks(record) or {}
-    targets = {g: r for g, r in _rankable(record).items() if pre.get(g) is None}
+    targets = _rerank_window_missed(record)
     if not targets:
         return None
     finding = _finding(
@@ -506,10 +528,9 @@ def retrieval_reranker_ineffective(record: EvalRecord) -> Optional[Finding]:
     남는 레버는 리랭커 모델 교체뿐인데 후보가 미정이라(rules.py BLOCKER) 지금은 리포트 전용이다.
     리랭커를 한 번 켠 뒤의 주류 경로라 커버리지 영향이 있다 — 모델 교체가 열리면 ready 로 올린다.
     """
-    if not _rerank_stage_visible(record) or _upstream_rank_cause(record):
+    if not _rerank_cut_attributable(record) or _upstream_rank_cause(record):
         return None
-    pre = _gold_pre_rerank_ranks(record) or {}
-    if any(pre.get(g) is None for g in _rankable(record)):
+    if _rerank_window_missed(record):
         return None                      # 후보창 밖 gold 가 함께 있음 → candidate_miss 가 앞단
     targets = _rerank_not_lifted(record)
     if not targets:
@@ -547,10 +568,9 @@ def retrieval_reranker_demotion(record: EvalRecord) -> Optional[Finding]:
     (융합 손실이 리랭크 단계 라벨보다 앞서는 것과 같은 기준). 양보하지 않으면 둘 다 확정으로
     서서 튜플 순서로만 갈린다.
     """
-    if not _rerank_stage_visible(record) or _upstream_rank_cause(record):
+    if not _rerank_cut_attributable(record) or _upstream_rank_cause(record):
         return None
-    pre = _gold_pre_rerank_ranks(record) or {}
-    if any(pre.get(g) is None for g in _rankable(record)):
+    if _rerank_window_missed(record):
         return None                      # 후보창 밖 gold 가 함께 있음 → candidate_miss 가 앞단
     targets = _rerank_lost(record)
     if not targets:
@@ -579,12 +599,13 @@ def retrieval_low_rank(record: EvalRecord) -> Optional[Finding]:
       융합 손실 / 중복 밀림 (앞단 원인) · 후보창 밖 / 리랭커 강등 (리랭크 단계)
     배타는 튜플 순서가 아니라 각자의 신호로 선다.
 
-    리랭크는 돌았는데 후보 목록이 기록되지 않은 구성(옛 계약 retriever)에서는 어느 단계에서
-    잃었는지 알 수 없다 → 예비로 낸다. 이미 켜진 리랭커에 '켜라'를 처방하지 않기 위해서다
-    (planner 는 예비 finding 을 자동 처방 대상에서 뺀다).
+    리랭크는 돌았는데 단계를 귀속할 수 없는 구성 — 후보 목록 미기록(옛 계약 retriever)이거나
+    MMR 이 최종 컷을 맡은 경우 — 에서는 어느 단계에서 잃었는지 알 수 없다 → 예비로 낸다.
+    이미 켜진 리랭커에 '켜라'를 처방하지 않기 위해서다(planner 는 예비를 자동 처방에서 뺀다).
     """
     targets = _rankable(record)
-    if not targets or _upstream_rank_cause(record) or _rerank_stage_visible(record):
+    if (not targets or _upstream_rank_cause(record)
+            or _rerank_cut_attributable(record) or _rerank_window_missed(record)):
         return None
     confirmed = not _reranked(record)
     return _finding(

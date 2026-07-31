@@ -411,6 +411,27 @@ class RerankStageTest(_DiagnoseTestBase):
         self.assertIsNone(diagnose.retrieval_reranker_demotion(rec))
         self.assertTrue(diagnose.retrieval_low_rank(rec).confirmed)      # 잔여가 맡음
 
+    def test_candidate_miss_survives_mmr(self):
+        """MMR 은 리랭크 **이후** 단계라 '후보 목록에 없었다'는 사실을 바꿀 수 없다.
+
+        MMR 예외를 단계 가시성 전체에 걸면 MMR 을 켜는 순간 후보창 문제가 처방을 못 받는다
+        (enable_mmr 은 실제로 적용되는 처방이라 잠재 경로가 아니다).
+        """
+        rec = self._rec(["n1", "n2", "n3"])                  # g_b 가 후보 목록에 없음
+        rec.retrieval_details["mmr_applied"] = True
+
+        finding = diagnose.retrieval_rerank_candidate_miss(rec)
+        self.assertTrue(finding.confirmed)
+
+    def test_cut_dependent_labels_yield_to_mmr(self):
+        """반대로 '떨어뜨렸다/못 올렸다'는 최종 컷 귀속이 필요하다 — MMR 이 컷을 맡으면 침묵."""
+        rec = self._rec(["n1", "n2", "n3", "n4", "g_b"])     # 후보엔 있음
+        rec.retrieval_details["mmr_applied"] = True
+
+        self.assertIsNone(diagnose.retrieval_reranker_demotion(rec))
+        self.assertIsNone(diagnose.retrieval_reranker_ineffective(rec))
+        self.assertFalse(diagnose.retrieval_low_rank(rec).confirmed)   # 예비로 남음
+
     def test_low_rank_is_preliminary_when_stage_is_invisible(self):
         """리랭크는 돌았는데 후보 목록이 없으면 단계 귀속 불가 → 예비(자동 처방 제외)."""
         rec = self._rec(None, reranked=True)
