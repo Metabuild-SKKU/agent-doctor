@@ -1593,20 +1593,26 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
     # 오라클 트랙 RAGAS — 소비처가 B그룹 라벨·_oracle_ok 뿐이라 실패 probe 에서만 지불한다.
     _compute_ragas_oracle(record)
 
-    # 골드 청크 오라벨: 실제 답은 맞는데(f1 통과) 골드 청크로는 못 맞춘 경우 — 검색·생성이
-    # 아니라 골드 라벨이 틀린 것이다. 경쟁 슬롯의 거짓 원인(retrieval_low_rank·generation_*)을
-    # 막고 이 하나만 남겨 검수로 보낸다(점수에서는 report 가 거짓 실패로 제외).
-    chunk_mislabel = bad_gold_chunk(record)
-    if chunk_mislabel is not None:
-        return [chunk_mislabel]
+    # 아래 두 단락(골드 오라벨·검증된 label-recall miss)은 골드가 코퍼스에 있을 때만 탄다.
+    # gold 가 코퍼스에 없으면(_corpus_gap_premise) 없는 청크를 '재지정'할 수도(bad_gold_chunk),
+    # '다른 유효 근거로 검증됐다'고 볼 수도(label-recall miss) 없다 — 단락하면 additive 인
+    # corpus_gap/corpus_gap_partial_hop(자료 결손·누락 gold 표기)이 통째로 사라진다(리뷰 지적).
+    # 이 경우 정상 경로로 흘려 corpus_gap 이 그 사실을 보고하게 양보한다.
+    if not _corpus_gap_premise(record):
+        # 골드 청크 오라벨: 실제 답은 맞는데(f1 통과) 골드 청크로는 못 맞춘 경우 — 검색·생성이
+        # 아니라 골드 라벨이 틀린 것이다. 경쟁 슬롯의 거짓 원인(retrieval_low_rank·generation_*)을
+        # 막고 이 하나만 남겨 검수로 보낸다(점수에서는 report 가 거짓 실패로 제외).
+        chunk_mislabel = bad_gold_chunk(record)
+        if chunk_mislabel is not None:
+            return [chunk_mislabel]
 
-    # 검증된 label-recall miss: 라벨 골드는 못 집었지만 답이 정답·검색 근거에 붙고 골드도 유효하면,
-    # 검색은 다른 유효 근거로 정답을 뒷받침한 것이라 실패가 아니다. recall 스윙(재청킹)만으로
-    # pass/fail 이 뒤집히지 않게 성공 처리하고, 검색축 크레딧(faithfulness)을 record 에 남겨
-    # reliability 가 같은 판정을 쓰게 한다(parametric·골드오류는 위에서 이미 걸러짐).
-    if _retrieval_verified_grounded(record):
-        record.retrieval_axis = _faith(record)
-        return []
+        # 검증된 label-recall miss: 라벨 골드는 못 집었지만 답이 정답·검색 근거에 붙고 골드도
+        # 유효하면, 검색은 다른 유효 근거로 정답을 뒷받침한 것이라 실패가 아니다. recall 스윙
+        # (재청킹)만으로 pass/fail 이 뒤집히지 않게 성공 처리하고, 검색축 크레딧(faithfulness)을
+        # record 에 남겨 reliability 가 같은 판정을 쓰게 한다(parametric·골드오류는 위에서 걸러짐).
+        if _retrieval_verified_grounded(record):
+            record.retrieval_axis = _faith(record)
+            return []
 
     # 추가 진단
     findings = []
