@@ -50,6 +50,15 @@ def route_after_eval(state: AgentDoctorState) -> str:
       품질 미달(예산 남음)            → Optimize
     """
     if gate.passes_report(state.report):
+        # 마지막으로 적용한 처방이 아직 판정(마감) 안 된 채로 통과했으면 Optimize 를
+        # 한 번 더 태워 pending 을 확정(keep + after_composite 기록)한 뒤 Serve 로 보낸다.
+        # 확정 없이 Serve 로 빠지면 pending 이력에 after 점수가 안 남아 치료경과 그래프가
+        # 기준선으로 폴백하고(처방 효과 미표시) 유지 카운트도 '대기'로 어긋난다.
+        # 진행 중 sweep(active_study)은 기존대로 통과 시 그대로 Serve(중간 후보로 서빙).
+        pending = history.find_pending(state.optimization_history)
+        if pending is not None and not pending.metadata.get("active_study"):
+            print("[Orchestrator] 품질 통과 — 마지막 처방 판정(마감) 위해 → Optimize")
+            return "optimize"
         print(f"[Orchestrator] 품질 통과 ({state.report.overall_score}점) → Serve")
         return "serve"
 

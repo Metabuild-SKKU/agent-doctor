@@ -127,15 +127,15 @@ def build_graph(
     candidates: dict[str, list[tuple[str, float]]] = {cid: [] for cid in ids}
     for left_index, right_index in set(semantic_pairs) | keyword_pairs:
         left_id, right_id = ids[left_index], ids[right_index]
-        cosine = semantic_pairs.get((left_index, right_index))
-        if cosine is None:
-            cosine = _cosine(embeddings[left_index], embeddings[right_index])
+        similarity = semantic_pairs.get((left_index, right_index))
+        if similarity is None:
+            similarity = cosine(embeddings[left_index], embeddings[right_index])
         weight = _edge_weight(
             nodes[left_id],
             nodes[right_id],
             embeddings[left_index],
             embeddings[right_index],
-            cosine=cosine,
+            similarity=similarity,
         )
         if weight is None:
             continue
@@ -284,7 +284,7 @@ def _python_embedding_candidates(
     pairs: dict[tuple[int, int], float] = {}
     for left_row, left_vector in enumerate(vectors):
         candidates = (
-            (_cosine(left_vector, right_vector), right_row)
+            (cosine(left_vector, right_vector), right_row)
             for right_row, right_vector in enumerate(vectors)
             if right_row != left_row
         )
@@ -392,7 +392,7 @@ def _edge_weight(
     emb_a: list[float] | None,
     emb_b: list[float] | None,
     *,
-    cosine: float | None = None,
+    similarity: float | None = None,
 ) -> float | None:
     """
     a, b 를 연결할지와 그 가중치를 함께 결정한다.
@@ -402,10 +402,13 @@ def _edge_weight(
     경우—예: mock 데이터—에도 키워드만으로 동작하도록 키워드 쪽에 더 큰 비중).
     """
     jaccard = _keyword_jaccard(a.keywords, b.keywords)
-    cosine = _cosine(emb_a, emb_b) if cosine is None else cosine
-    if jaccard < KG_ENTITY_OVERLAP_MIN and cosine < KG_EMBEDDING_SIM_MIN:
+    # similarity 는 GPU 블록 행렬곱으로 미리 구한 코사인을 재사용하기 위한 통로다.
+    # 없으면(폴백·직접 호출) 여기서 계산한다.
+    if similarity is None:
+        similarity = cosine(emb_a, emb_b)
+    if jaccard < KG_ENTITY_OVERLAP_MIN and similarity < KG_EMBEDDING_SIM_MIN:
         return None
-    return 0.6 * jaccard + 0.4 * cosine
+    return 0.6 * jaccard + 0.4 * similarity
 
 
 def _keyword_jaccard(a: list[str], b: list[str]) -> float:
@@ -415,7 +418,15 @@ def _keyword_jaccard(a: list[str], b: list[str]) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
-def _cosine(a: list[float] | None, b: list[float] | None) -> float:
+def cosine(a: list[float] | None, b: list[float] | None) -> float:
+    """두 임베딩의 코사인 유사도. 한쪽이 비었거나 영벡터면 0.0.
+
+    모듈 밖에서도 쓰인다(topic_cluster) — 같은 임베딩 소스에 같은 셈을 적용해야
+    신호끼리 비교가 성립하기 때문에 공개 헬퍼로 둔다.
+
+    TODO(eval-정리) metrics_ragas._cosine / index.graph_index._cosine 에 같은 구현이
+    따로 있다. 셋을 core 쪽 한 곳으로 합치는 건 이 파일 밖의 별도 과제.
+    """
     if not a or not b:
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))

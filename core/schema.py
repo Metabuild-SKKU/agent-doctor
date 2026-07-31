@@ -81,8 +81,7 @@ class Finding:
     # "gap" | "retrieval_failure" | "generation_failure" (agents/eval/diagnose.py::_group_of 가
     # type 과 label 접두어로 A/B/C/D 그룹(처방 순서 정렬용)을 파생: type=="gap"→D,
     # label이 "retrieval_"로 시작→A, "generation_"으로 시작→B, 그 외(컨텍스트 구조 라벨)→C).
-    # "contradiction"/"duplicate"/"staleness"는 예약(미사용) — metrics_ragas.py 가 aspect.contradiction
-    # 을 계산은 해두지만 diagnose.py 는 아직 소비하지 않는다("나중에 개발" 주석 참고).
+    # "contradiction"/"duplicate"/"staleness"는 예약(미사용).
     type: str
     severity: str  # "critical" | "warning" | "info"
     description: str
@@ -101,6 +100,9 @@ class DiagnosticReport:
     """
     report_id: str
     findings: list[Finding] = field(default_factory=list)
+    # 실패한 검증 질문의 원문 비교 데이터. EvalRecord는 실행 중에만 존재하므로
+    # 리포트 페이지가 질문·기대 정답·실제 답변을 보여주려면 여기 보존해야 한다.
+    failed_questions: list[dict] = field(default_factory=list)
     findings_summary: dict = field(default_factory=dict)  # 확정/예비·라벨 집계(진단 모드 포함). Optimize 소비용
     ragas_scores: dict = field(default_factory=dict)
     # Eval이 관측한 검색 runtime 실행 결과. 품질 지표와 섞지 않고 Optimize가

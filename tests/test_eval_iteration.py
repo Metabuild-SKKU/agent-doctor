@@ -104,16 +104,20 @@ class EvalIterationContractTest(unittest.TestCase):
                 Chunk("new_0", "d1", content[:100], char_span=(0, 100)),
                 Chunk("new_1", "d1", content[100:], char_span=(100, len(content))),
             ],
+            index_config={"context_compression": True},
         )
         _get_retriever.return_value.search.return_value = []
 
         with (
-            patch("agents.eval.agent.generate_answer", return_value=""),
+            patch("agents.eval.agent.generate_answer", return_value="") as generate_answer,
             patch("agents.eval.agent.diagnose", return_value=[]),
         ):
             result = agent.run(state)
 
         generate_probes.assert_not_called()
+        self.assertTrue(generate_answer.call_args_list)
+        for call in generate_answer.call_args_list:
+            self.assertEqual(call.kwargs.get("config"), state.index_config)
         self.assertEqual(result.probes[0].gold_chunk_ids, ["new_1"])
 
 

@@ -77,7 +77,7 @@ except ImportError:  # pragma: no cover
 import graph
 from core.schema import DiagnosticReport, Finding
 from core.state import AgentDoctorState
-from agents.optimize import agent, history
+from agents.optimize import agent, history, rules
 from agents.optimize.schemas import (
     ConfigPatch,
     OptimizationHistoryItem,
@@ -99,6 +99,24 @@ def make_report(overall, pass_threshold=False, label="too_long_context"):
         ragas_scores={"context_recall": 0.7, "faithfulness": 0.7, "noise_sensitivity": 0.2},
         pass_threshold=pass_threshold,
     )
+
+
+class OptimizeManualLogTest(unittest.TestCase):
+    def test_manual_prescriptions_are_logged(self):
+        """D그룹(manual) 결정이면 라벨 헤드라인 + 매뉴얼 스텝이 출력로그에 남는다."""
+        from agents.optimize.schemas import OptimizeDecision
+        dec = OptimizeDecision(
+            mode="manual_required", status="manual_required",
+            requires_user_confirmation=True, next_route="serve",
+            reason="사람 개입 필요(D그룹)", manual_labels=["corpus_gap"],
+        )
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_manual_prescriptions(dec)
+        out = buf.getvalue()
+        self.assertIn("수동 조치 필요: corpus_gap", out)
+        self.assertIn("코퍼스에서 빠진 근거를 특정", out)  # 매뉴얼 스텝
+        self.assertIn("재색인", out)
 
 
 class OptimizeCandidateLogTest(unittest.TestCase):
@@ -272,6 +290,33 @@ def make_state(overall=60.0, chunk_size=512, iteration=0, max_iterations=3,
 
 
 class OptimizeAgentForwardTest(unittest.TestCase):
+    def test_unjudgeable_exclusions_only_returns_recorded_failures(self):
+        unjudgeable = OptimizationHistoryItem(
+            trial_id="u1",
+            request_id="r1",
+            iteration=1,
+            failure_labels=["retrieval_low_rank"],
+            optimizer="rules",
+            status="failed",
+            selected_prescription_id="enable_reranker",
+            metadata={"unjudgeable": True},
+        )
+        judged = OptimizationHistoryItem(
+            trial_id="u2",
+            request_id="r2",
+            iteration=1,
+            failure_labels=["retrieval_missing_gold"],
+            optimizer="rules",
+            status="failed",
+            selected_prescription_id="increase_top_k",
+            metadata={"unjudgeable": False},
+        )
+
+        self.assertEqual(
+            agent._unjudgeable_exclusions([unjudgeable, judged]),
+            {("retrieval_low_rank", "enable_reranker")},
+        )
+
     def test_absolute_visit_limit_stops_before_new_prescription(self):
         state = make_state()
         state.optimize_visit_count = 19
@@ -283,6 +328,8 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertEqual(state.status, "verified")
         self.assertEqual(state.index_config, before)
         self.assertEqual(state.optimization_history, [])
+        self.assertEqual(state.optimization_report.status, "skipped")
+        self.assertIn("절대 방문 상한", state.optimization_report.summary)
 
     def test_apply_creates_pending_and_increments_iteration(self):
         state = agent.run(make_state())
@@ -443,9 +490,8 @@ class OptimizeAgentForwardTest(unittest.TestCase):
             ["retrieval_low_rank"],
         )
 
-    def test_enabled_reranker_widens_candidate_count(self):
-        """reranker가 이미 켜져 있으면 다음 처방이 후보 수를 실제 config에 반영한다."""
-        state = make_state(overall=30.0, label="retrieval_low_rank")
+    def _reranker_on_state(self, label):
+        state = make_state(overall=30.0, label=label)
         state.index_config.update(
             {
                 "use_reranker": True,
@@ -461,6 +507,11 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                 "reason": None,
             }
         }
+        return state
+
+    def test_candidate_miss_widens_candidate_count(self):
+        """후보창 밖 gold(candidate_miss)는 후보 수를 실제 config에 반영한다."""
+        state = self._reranker_on_state("retrieval_rerank_candidate_miss")
 
         out = agent.run(state)
 
@@ -472,8 +523,126 @@ class OptimizeAgentForwardTest(unittest.TestCase):
             "widen_rerank_candidates",
         )
 
+    def _rank_cause_state(self, label, metadata=None, config=None):
+        finding = Finding(
+            finding_id=f"p1:{label}", type="retrieval_failure", severity="warning",
+            description=label, label=label, confirmed=True,
+            affected_probes=["p1"], metadata=dict(metadata or {}),
+        )
+        index_config = {
+            "top_k": 5, "chunk_size": 512, "chunk_overlap": 50,
+            "use_hybrid": True, "hybrid_dense_weight": 0.7,
+            "use_reranker": False, "rerank_candidates": 20,
+            "rerank_candidate_policy": {"max_candidates": 50},
+        }
+        index_config.update(config or {})
+        state = make_state(overall=30.0, label=label)
+        state.report.findings = [finding]
+        state.index_config = index_config
+        state.runtime_capabilities = {
+            "reranker": {
+                "status": "verified",
+                "model": "BAAI/bge-reranker-v2-m3",
+                "retryable": False,
+                "reason": None,
+            }
+        }
+        return state
+
+    def test_rank_cause_prescriptions_reach_index_config(self):
+        """순위 원인 4형제의 처방이 실제 config 변경까지 도달하는지 end-to-end 고정.
+
+        rules.py 에 처방을 적어도 optimizer 의 경로 레지스트리
+        (STATE_MAPPABLE_PATHS / BACKEND_SUPPORTED_PATHS / PATH_CAPABILITIES)에 빠져 있으면
+        unsupported_backend_path 로 조용히 건너뛰고 다음 후보가 대신 적용된다. 라벨별
+        '무엇이 바뀌어야 하는가'를 여기서 못박아 그 누락을 드러낸다.
+        """
+        cases = [
+            # (라벨, finding metadata, 시작 config, 기대 처방, 기대 config 변화)
+            ("retrieval_low_rank", {}, {},
+             "enable_reranker", ("use_reranker", True)),
+            ("retrieval_rank_fusion_loss", {"favored_channel": "lexical"}, {},
+             "rebalance_hybrid_weight", ("hybrid_dense_weight", 0.6)),
+            ("retrieval_rank_fusion_loss", {"favored_channel": "dense"}, {},
+             "rebalance_hybrid_weight", ("hybrid_dense_weight", 0.8)),
+            ("retrieval_rerank_candidate_miss", {"gold_ranks": {"g": 34}},
+             {"use_reranker": True},
+             "widen_rerank_candidates", ("rerank_candidates", 34)),
+            ("retrieval_reranker_demotion", {"pre_rerank_ranks": {"g": 12}},
+             {"use_reranker": True},
+             "disable_reranker", ("use_reranker", False)),
+        ]
+        for label, metadata, config, expected_id, (key, value) in cases:
+            with self.subTest(label=label, metadata=metadata):
+                out = agent.run(self._rank_cause_state(label, metadata, config))
+
+                self.assertEqual(out.status, "applied")
+                self.assertEqual(
+                    out.optimization_history[-1].selected_prescription_id,
+                    expected_id,
+                )
+                self.assertEqual(out.index_config[key], value)
+
+    def test_candidate_widening_never_exceeds_policy_ceiling(self):
+        """정책 상한은 근거값 계산뿐 아니라 방향 폴백(현재값×2)에도 걸려야 한다.
+
+        근거값이 없으면 폴백이 30×2=60 을 내는데, 이를 거르는 게 optimizer 의 정적 제약
+        (max=100)뿐이면 정책 상한 50 을 넘는 값이 실제 config 에 박힌다.
+        """
+        state = self._rank_cause_state(
+            "retrieval_rerank_candidate_miss",
+            {},                                   # gold_ranks 없음 → 방향 폴백 경로
+            {"use_reranker": True, "rerank_candidates": 30,
+             "rerank_candidate_policy": {"max_candidates": 50}},
+        )
+
+        out = agent.run(state)
+
+        self.assertLessEqual(out.index_config["rerank_candidates"], 50)
+
+    def test_duplicate_crowding_is_reported_without_prescription(self):
+        """중복 밀림은 지금 config 에 레버가 없다 — 리랭커를 억지로 처방하지 않고 미룬다.
+
+        deduplicate 는 기본값이 이미 True 인 본문 해시 완전일치 제거라 near-duplicate 를
+        못 걸러낸다(= patch 를 내도 config 가 안 바뀐다). mmr 필드는 아직 없다.
+        """
+        state = self._rank_cause_state(
+            "retrieval_duplicate_crowding",
+            {"crowding_analysis": {"g": {"rank": 4, "redundant": 2,
+                                         "projected_rank": 2}}},
+        )
+        before = dict(state.index_config)
+
+        out = agent.run(state)
+
+        self.assertEqual(out.status, "skipped")
+        self.assertEqual(out.index_config, before)
+        self.assertFalse(rules.is_actionable("retrieval_duplicate_crowding"))
+
+    def test_low_rank_does_not_widen_candidate_count(self):
+        """low_rank 는 'gold 가 후보창 안'이라는 신호라 창 확대가 처방이 아니다.
+
+        예전에는 같은 라벨에 enable_reranker → widen_rerank_candidates 가 순차로 달려 있어,
+        리랭커가 이미 켜진 상태에서 신호 없이 창을 넓혔다. 창을 넓혀야 하는 케이스는
+        retrieval_rerank_candidate_miss 로 분리됐다.
+        """
+        state = self._reranker_on_state("retrieval_low_rank")
+
+        out = agent.run(state)
+
+        self.assertEqual(out.index_config["rerank_candidates"], 20)   # 그대로
+        self.assertNotEqual(
+            getattr(out.optimization_history[-1], "selected_prescription_id", None)
+            if out.optimization_history else None,
+            "widen_rerank_candidates",
+        )
+
     def test_inapplicable_prescription_falls_through_to_next(self):
-        """issue #26: 미지원 처방이 최우선이어도 다음 actionable finding을 적용한다."""
+        """issue #26: 적용 불가 처방이 최우선이어도 다음 actionable finding을 적용한다.
+
+        lexical_mismatch(12건)가 최우선이지만 baseline이 이미 hybrid라 enable_hybrid는
+        유효 후보가 없어(no-op) 적용 불가 → blacklist 되고 missing_gold(increase_top_k)로
+        폴스루한다. (enable_hybrid 자체는 dense baseline에선 정상 적용된다 — hybrid 언블록.)"""
         def _finding(pid, label, **metadata):
             return Finding(
                 finding_id=f"{pid}:{label}",
@@ -512,6 +681,7 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                 "chunk_size": 512,
                 "chunk_overlap": 50,
                 "embedding_model": "BAAI/bge-m3",
+                "use_hybrid": True,   # 이미 hybrid → enable_hybrid는 no-op(적용 불가)
             },
             iteration=0,
             max_iterations=3,
@@ -535,6 +705,36 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertIsInstance(result, AgentDoctorState)
 
 
+class OptimizeCGroupUnblockTest(unittest.TestCase):
+    """C그룹 언블록: lost_in_the_middle / context_noise_interference 가 실행 가능한
+    처방(top_k 축소 / MMR)을 맨 앞 후보로 내는지 고정. 나머지(정렬·필터 프롬프트)는
+    소비 경로가 없어 뒤쪽 fallback 으로만 남고 optimizer 가 걸러낸다."""
+
+    def _first_candidate_space(self, label):
+        from agents.optimize.planner import plan
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="r",
+                findings=[Finding(
+                    finding_id="f1", type="context_failure", severity="critical",
+                    description="c", label=label, affected_probes=["p1"],
+                )],
+                composite_score={"total": 40.0},
+            ),
+        )
+        request, decision = plan(state)
+        self.assertEqual(decision.mode, "apply_optimize")
+        return request.candidates[0].search_space
+
+    def test_lost_in_the_middle_leads_with_top_k(self):
+        space = self._first_candidate_space("lost_in_the_middle")
+        self.assertIn("retriever.top_k", space)
+
+    def test_context_noise_interference_leads_with_context_compression(self):
+        space = self._first_candidate_space("context_noise_interference")
+        self.assertEqual(space, {"context.compression.enabled": [True]})
+
+
 class OptimizeAgentRollbackTest(unittest.TestCase):
     def test_improved_keeps_config(self):
         state = agent.run(make_state(overall=60.0))         # 방문1: 적용
@@ -552,7 +752,11 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         state = agent.run(state)                            # 방문2: 판정 → 롤백
         self.assertEqual(state.status, "applied")           # 같은 라벨의 다음 처방은 계속 진행
         self.assertEqual(state.index_config["top_k"], 4)    # 첫 후보는 baseline으로 복원
-        self.assertEqual(state.index_config["chunk_size"], 256)
+        self.assertTrue(state.index_config["context_compression"])
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "context_compression",
+        )
         self.assertEqual(len(state.blacklist), 1)
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
@@ -659,7 +863,11 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         state.report = make_report(50.0)                    # 악화
         state = agent.run(state)                            # 방문2: 같은 라벨의 다음 처방
         self.assertEqual(state.iteration, 3)                # 후보/처방 전환은 증가 없음
-        self.assertEqual(state.index_config["chunk_size"], 256)
+        self.assertTrue(state.index_config["context_compression"])
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "context_compression",
+        )
         self.assertEqual(state.status, "applied")
 
     def test_baseline_dead_end_preserves_same_visit_rollback(self):
@@ -824,6 +1032,19 @@ class OptimizeTopKSweepTest(unittest.TestCase):
         self.assertTrue(
             state.optimization_history[0].metadata["visit_limit_reached"]
         )
+        self.assertEqual(state.optimization_report.status, "failed")
+        self.assertIn("절대 방문 상한", state.optimization_report.summary)
+
+        rollback_report = state.optimization_report
+        state.report = self._report(60.0)
+        state = agent.run(state)
+
+        self.assertEqual(state.optimize_visit_count, 20)
+        self.assertEqual(state.status, "verified")
+        self.assertIsNot(state.optimization_report, rollback_report)
+        self.assertEqual(state.optimization_report.status, "skipped")
+        self.assertIn("절대 방문 상한", state.optimization_report.summary)
+        self.assertEqual(graph.route_after_optimize(state), "serve")
 
     def test_baseline_is_restored_only_after_all_candidates(self):
         state = self._state()
@@ -998,6 +1219,23 @@ class GraphRoutingTest(unittest.TestCase):
     def test_route_after_eval_pass_goes_serve(self):
         state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
                                  iteration=1, max_iterations=3)
+        self.assertEqual(self._route(graph.route_after_eval, state), "serve")
+
+    def test_route_after_eval_pass_with_pending_goes_optimize_to_finalize(self):
+        # 방금 적용한 처방으로 품질이 통과했는데 아직 판정(마감) 안 됐으면,
+        # Optimize 를 한 번 더 태워 pending 을 확정한 뒤 Serve 로 보낸다.
+        state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
+                                 iteration=1, max_iterations=3,
+                                 optimization_history=[self._pending()])
+        self.assertEqual(self._route(graph.route_after_eval, state), "optimize")
+
+    def test_route_after_eval_pass_with_active_study_pending_goes_serve(self):
+        # 진행 중 sweep(active_study)은 통과 시 기존대로 그대로 Serve.
+        item = self._pending()
+        item.metadata["active_study"] = True
+        state = AgentDoctorState(report=make_report(90.0, pass_threshold=True),
+                                 iteration=1, max_iterations=3,
+                                 optimization_history=[item])
         self.assertEqual(self._route(graph.route_after_eval, state), "serve")
 
     def test_route_after_eval_budget_left_goes_optimize(self):

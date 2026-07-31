@@ -18,6 +18,9 @@ from pathlib import Path
 import requests
 
 from agents.serve.fingerprint import corpus_fingerprint
+from agents.serve.serve_config import (
+    extract_serve_config, write_serve_config, serving_fingerprint,
+)
 from core.state import AgentDoctorState
 
 MCP_SERVER  = Path(__file__).parent / "mcp_server.py"
@@ -54,9 +57,52 @@ def _serialize_chunks(state: AgentDoctorState) -> str:
     data = []
     for chunk in state.chunks:
         d = dataclasses.asdict(chunk)
+        _apply_generation_metadata(d, state.index_config)
         d.pop("sparse_vector", None)   # embedding은 벡터 검색에 필요하므로 유지
         data.append(d)
     return json.dumps(data, ensure_ascii=False, default=str, indent=2)
+
+
+def _apply_generation_metadata(chunk: dict, config: dict) -> None:
+    """Persist runtime generation settings so Serve reload sees Optimize changes."""
+    metadata = chunk.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+        chunk["metadata"] = metadata
+
+    enabled = config.get("context_compression")
+    if enabled is None:
+        enabled = config.get("context.compression.enabled")
+    if enabled is not None:
+        enabled_value = _as_bool(enabled)
+        metadata["context_compression"] = enabled_value
+        metadata["context.compression.enabled"] = enabled_value
+
+    aliases = (
+        ("context_compression_max_contexts", "context_filter_max_contexts"),
+        ("context_compression_min_contexts", "context_filter_min_contexts"),
+        ("context_compression_max_sentences", "context_filter_max_sentences"),
+    )
+    for canonical, legacy in aliases:
+        value = config.get(canonical)
+        if value is None:
+            value = config.get(legacy)
+        if value is None:
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed <= 0:
+            continue
+        metadata[canonical] = parsed
+        metadata[legacy] = parsed
+
+
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _start_api_server(expected_fingerprint: str | None = None) -> bool:
@@ -161,9 +207,13 @@ def _reload_api_server(expected_fingerprint: str) -> bool:
 
 
 def _corpus_fingerprint(state: AgentDoctorState) -> str:
-    """state.chunks 의 코퍼스 지문. API 서버와 같은 알고리즘을 쓰도록 공용 모듈
-    (agents/serve/fingerprint.py)의 함수를 재사용한다 — 양쪽 지문이 드리프트하지 않게."""
-    return corpus_fingerprint([dataclasses.asdict(c) for c in state.chunks])
+    """state.chunks + 서빙 설정의 결합 지문. API 서버와 같은 알고리즘(serve_config)을 써
+    양쪽 지문이 드리프트하지 않게 한다. 설정(generation·MMR 등)만 바뀌어도 지문이 달라져
+    이미 실행 중인 API 가 /reload 로 새 설정을 다시 읽는다."""
+    return serving_fingerprint(
+        [dataclasses.asdict(c) for c in state.chunks],
+        extract_serve_config(state.index_config),
+    )
 
 
 def _register_to_claude_desktop() -> None:
@@ -212,9 +262,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         return state
 
     try:
-        # 1. 청크 저장
+        # 1. 청크 저장 + 서빙 설정 사이드카(파이프라인이 고른 검색·생성 설정을 API 로 전달).
+        #    API 는 별도 프로세스라 전역값이 아니라 이 파일로만 최적화 설정을 받는다.
         CHUNKS_FILE.write_text(_serialize_chunks(state), encoding="utf-8")
+        served = write_serve_config(CHUNKS_FILE, state.index_config)
         print(f"[Serve] 청크 저장 → {CHUNKS_FILE}")
+        print(f"[Serve] 서빙 설정 저장 → {len(served)}개 키 "
+              f"(reranker={served.get('use_reranker')}, mmr={served.get('use_mmr')})")
 
         # 2. FastAPI 서버 백그라운드 시작 — 실패 시 죽은 엔드포인트 등록을 막는다.
         #    지문을 넘겨, 이미 실행 중인 서버가 낡은 코퍼스면 /reload 로 갱신한다.

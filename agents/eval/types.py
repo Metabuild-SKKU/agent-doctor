@@ -23,7 +23,9 @@ from core.schema import Finding, Probe
 # ── 상수 ──────────────────────────────────────────────────────────
 
 # STEP3-1 규칙 지표 임계값
-F1_PASS_THRESHOLD = 0.5        # token F1 통과 기준 (설계상 "F1 통과" 수치화)
+# lexical 단독 게이트 문턱 — RAGAS 가 없는 모드(DEEP 미만)나 판정기 실패 때만 쓰인다.
+# RAGAS 가 측정된 실행에서는 lexical 을 단독 게이트로 쓰지 않는다(아래 혼합 점수 참고).
+F1_PASS_THRESHOLD = 0.5
 DEFAULT_TOP_K = 5              # index_config.top_k 미지정 시 검색 개수
 
 # STEP3-2 RAGAS 지표 임계값 (설계 STEP4 표 기준, 낮으면 Finding 생성)
@@ -35,10 +37,35 @@ EVIDENCE_DENSITY_MIN = 0.2
 RAGAS_CONTEXT_RECALL_MIN = 0.7
 RAGAS_RESPONSE_RELEVANCY_MIN = 0.7
 
-# 정답 강등 임계값 — RAGAS answer_correctness(답변↔gold 비교, tier3).
-# lexical answer_match(F1_PASS_THRESHOLD)는 통과했지만 이 값 미만이면 '표면형만 비슷한
-# 근접 오답(부정문·3월↔3일 등)'으로 보고 성공 판정을 강등한다. DEEP+ 에서만 적용.
+# ── 정답 판정 혼합 점수 (lexical × RAGAS 의미, tier3) ──────────────
+# lexical(char-F1)은 표면형만 보고 의미(RAGAS)는 판정기 편차가 있어, 어느 하나를 단독
+# 임계값으로 쓰면 '맞은 답이 문턱 하나에 걸려 실패'가 계속 생긴다(실측: f1=0.49 로 실패한
+# 정답 → C그룹 오진). 그래서 두 축을 가중합한 점수 하나로 판정한다.
+#   answer_score = (1-ANSWER_SEMANTIC_WEIGHT)·lexical + ANSWER_SEMANTIC_WEIGHT·semantic
+#   semantic     = max(answer_correctness, gold 커버리지(근거 있을 때만))
+# 의미축에 커버리지를 함께 넣는 이유: answer_correctness(=TP/(TP+0.5(FP+FN)))는 군더더기(FP)를
+# 분모에 넣어 '근거를 덧붙여 길어진 정답'을 깎는데, 커버리지(TP/(TP+FN))는 FP 를 빼고
+# '정답 요소를 다 담았나'만 묻기 때문이다(누락·모순은 FN 이라 근접 오답은 여전히 떨어진다).
+ANSWER_SEMANTIC_WEIGHT = 0.6
+ANSWER_PASS_THRESHOLD = 0.5
+# 커버리지를 의미축으로 인정하는 최소치 — '정답 요소를 (거의) 다 담았다'는 구제 경로이지
+# 부분 점수 채널이 아니다. 이 문턱이 없으면 gold 절반만 담은 답변이 커버리지 0.5 를 의미축으로
+# 들고 통과해, generation_partial_answer(부분 답변) 진단이 조용히 사라진다.
+# 미달이면 의미축은 answer_correctness 가 맡는다(그쪽은 FN 을 분모에 넣어 누락을 감점한다).
+GOLD_COVERAGE_MIN = 0.8
+# 의미축 바닥선 — 이 아래면 lexical 이 높아도 실패. 표면형만 비슷한 근접 오답(부정문·3월↔3일)을
+# 거르던 기존 강등(ANSWER_CORRECTNESS_MIN)의 역할을 혼합 점수 체계에서 이어받는다.
+ANSWER_SEMANTIC_FLOOR = 0.3
+# (레거시) 단독 강등 임계값 — 혼합 점수 도입 후 게이트에서는 쓰지 않는다. 리포트·문서가
+# '근접 오답 경계'를 말할 때 참조하는 값으로만 남긴다.
 ANSWER_CORRECTNESS_MIN = 0.5
+
+# ── context 구조 라벨(too_long_context / lost_in_the_middle)의 저비용 발동 문턱 ──
+# context 총 길이(문자)가 이보다 길면 길이·배치를 의심한다. 임의값 — 실측 후 튜닝 필요.
+CONTEXT_CHARS_MAX = 6000
+# 검색 결과에서 gold 청크의 상대 위치가 이 구간(경계 포함)이면 '중간에 묻혔다'로 본다.
+# 경계 포함이라 top_k=5 의 2번째 순위(위치 0.25)도 중간으로 잡힌다 — 튜닝 대상.
+CONTEXT_MIDDLE_BAND = (0.25, 0.75)
 
 # STEP5 최종 판정
 # graph.route_after_eval() 이 이 값 기반 pass_threshold 로 Serve/Optimize 를 분기한다.
@@ -75,6 +102,33 @@ KG_EMBEDDING_SIM_MIN = 0.5      # chunk.embedding 코사인 유사도(무관 쌍
 # 멀티홉이 대폭 줄었다. 예산(멀티홉 30%)을 채우기 충분한 최소값으로 2 를 기본값으로 둔다.
 KG_TOP_K_NEIGHBORS = 2
 
+# STEP4 토픽클러스터 신호 임계값 (retrieval_semantic_mismatch 처방 라우팅용)
+# 실패한 gold 청크들이 임베딩 공간에서 얼마나 뭉쳤는지를 코퍼스 baseline 대비 비율로 본다.
+# 절대 코사인은 코퍼스마다 깔린 수준이 달라(위 KG 주석: 무관 쌍도 cos 0.46) 쓸 수 없어,
+# "실패 gold 응집도 / 코퍼스 전체 평균 응집도" 비율로 상대 판정한다(KG_TOP_K 와 같은 철학).
+#   ratio >= CONCENTRATED → "concentrated" (특정 도메인만 약함 → 도메인특화 임베딩)
+#   ratio <= SPREAD       → "spread"       (전 주제 흩어져 실패 → 임베딩 모델 자체 약함)
+#   그 사이               → "none"         (재봤으나 주제 응집 안 보임 → 청킹 조정)
+# "못 잰" 경우는 이 임계값과 무관하게 "unmeasured" 로 따로 나간다(topic_cluster.py 참고).
+#
+# 임의값 — 실측 캘리브레이션 필요(rules.py 의 diagnosis_confidence: None 과 같은 미완성 상태).
+# TODO(eval-캘리브레이션) 현재 두 값은 ratio 추정량의 분산에 비해 너무 촘촘하다.
+#   시뮬(문서 10×50청크, 실패를 무작위로 뽑아 '주제 신호 없음'을 만든 60회) 실측:
+#     실패 gold  10개 → ratio 중앙값 1.04, stdev 0.93
+#     실패 gold  20개 → ratio 중앙값 1.00, stdev 0.50
+#     실패 gold 100개 → ratio 중앙값 1.06, stdev 0.21
+#   중앙값은 1.0 에 제대로 붙지만(= baseline 추정은 편향 없음), 실패가 보통 수십 개인
+#   구간에서 stdev(~0.5)가 none 대의 폭(1.1~1.3 = 0.2)보다 훨씬 크다. 그래서 신호가
+#   없는 회차도 우연히 spread/concentrated 로 튄다(60회 중 none 은 7회뿐).
+#   캘리브레이션 때는 임계값만 옮길 게 아니라 (a) none 대 폭을 분산에 맞춰 넓히거나
+#   (b) 실패 gold 수에 따라 폭을 조절하는 쪽을 함께 봐야 한다.
+#   지금 이 좁은 폭이 안전한 이유는 spread/concentrated 가 같은 처방(임베딩 교체)으로
+#   수렴해서 오분류의 라우팅 영향이 없기 때문이다 — 둘이 갈리는 순간 이 TODO 가 급해진다.
+TOPIC_CLUSTER_CONCENTRATED_RATIO = 1.3
+TOPIC_CLUSTER_SPREAD_RATIO = 1.1
+# 평균 응집도를 잴 때 뽑는 청크 표본 수 상한(전량 O(n^2) 회피). baseline·실패 gold 공용.
+TOPIC_CLUSTER_BASELINE_SAMPLE = 100
+
 # STEP1 시나리오 샘플링 후보 (RAGAS Scenario 파라미터)
 PERSONAS = ["신입사원", "실무 담당자"]
 QUERY_STYLES = ["web_search", "conversational", "imperative"]
@@ -95,23 +149,26 @@ MULTIHOP_SUBTYPES = ["bridge", "comparison", "aggregation"]
 # ── 진단 모드 (비용 tier) ─────────────────────────────────────────
 # 사용자가 고르는 '진단 깊이'. 값 = 그 모드가 감당하는 최대 자원 tier.
 #   자원 사다리(=tier):  tier1 규칙·기존지표만  <  tier2 추가 검색 쿼리(top-N 재검색·BM25·코퍼스)
-#                        <  tier3 LLM·RAGAS  <  tier4 파이프라인 재실행(ablation)
+#                        <  tier3 LLM·RAGAS
 # 라벨은 '판별에 필요한 가장 비싼 자원'이 곧 그 라벨의 confirm tier 다(각 측정이 metrics_* 에서 self-gate).
 #   mode >= tier 이고 그 확정 측정이 실제 발동 → 확정(confirmed=True), 아니면 예비(confirmed=False).
 # 생성 원인(B)은 전부 RAGAS(=DEEP) 의존이라, DEEP 미만에선 하나의 예비 'generation_failure' 로 롤업.
 # STEP3-2 RAGAS 자체도 DEEP 이상에서만 실행한다(metrics_ragas._faith 등 RAGAS 측정의 DEEP 게이트).
+# tier4(파이프라인 재실행/ablation)는 없다 — Optimize 의 config 재실행과 중복이라 그쪽으로 넘겼고,
+# DEEP 이 가장 깊은 모드다. context 원인(C)은 실측 신호로 DEEP 에서 확정된다.
 class Mode:
     FAST = 1       # 규칙·기존지표만 (추가 쿼리·LLM 없음) — 나열형(enumeration)만 확정
     STANDARD = 2   # + 추가 검색 쿼리(top-N·BM25·코퍼스)   — 검색 원인 대부분 확정
-    DEEP = 3       # + LLM(RAGAS/AspectCritic)         — 생성 원인 진단
-    FULL = 4       # + 파이프라인 재실행(ablation)      — context 원인 확정
+    DEEP = 3       # + LLM(RAGAS/AspectCritic)         — 생성·context 원인 확정
 
 
 DEFAULT_MODE = Mode.FAST   # 미지정 시 가장 싼 모드
 
+# "full"/"4" 는 DEEP 으로 접는다 — 웹 UI 의 depth 선택지(agents/serve/web_api.py)와 기존
+# EVAL_MODE 설정이 쓰는 문자열이라, 지우면 조용히 DEFAULT_MODE(fast)로 강등된다.
 _MODE_ALIASES = {
-    "fast": Mode.FAST, "standard": Mode.STANDARD, "deep": Mode.DEEP, "full": Mode.FULL,
-    "1": Mode.FAST, "2": Mode.STANDARD, "3": Mode.DEEP, "4": Mode.FULL,
+    "fast": Mode.FAST, "standard": Mode.STANDARD, "deep": Mode.DEEP, "full": Mode.DEEP,
+    "1": Mode.FAST, "2": Mode.STANDARD, "3": Mode.DEEP, "4": Mode.DEEP,
 }
 
 
@@ -211,12 +268,19 @@ class EvalRecord:
     recall_at_k: float = 0.0
     f1_score: float = 0.0
     oracle_f1: float = 0.0
+    raw_f1_score: float = 0.0
+    raw_oracle_f1: float = 0.0
+    best_gold_answer_f1: float = 0.0
+    best_oracle_gold_answer_f1: float = 0.0
+    best_gold_answer: Optional[str] = None
+    best_oracle_gold_answer: Optional[str] = None
+    gold_answer_variant_count: int = 0
     exact_match: bool = False        # KorQuAD 공식 EM — 리포트 관측용(게이트·overall_score 미반영)
 
     # STEP3-2: LLM(RAGAS) 지표 — diagnose 가 lazy 로 채움
     ragas: dict = field(default_factory=dict)          # 실제 트랙
     oracle_ragas: dict = field(default_factory=dict)   # 오라클 트랙
-    aspect: dict = field(default_factory=dict)         # AspectCritic 결과 — generation_contradiction(주석처리) 용 예약, 현 라이브 미사용
+    aspect: dict = field(default_factory=dict)         # 실행 단위 LLM 판정(abstention / reasoning_mode) memoize
     # RAGAS lazy 계산 여부(트랙별). 빈 결과({})여도 '시도함'으로 남겨 같은 트랙 재-LLM호출을 막는다.
     ragas_done: bool = False
     oracle_ragas_done: bool = False
@@ -244,3 +308,89 @@ class EvalRecord:
         """answer_correctness(답변↔gold 비교) — 오라클 트랙. 미측정·DEEP 미만이면 None."""
         v = self.oracle_ragas.get("answer_correctness")
         return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    @property
+    def gold_coverage(self) -> Optional[float]:
+        """gold 요소 커버리지 TP/(TP+FN) — 실제 트랙. 카운트 미측정(degraded·DEEP 미만)이면 None.
+
+        answer_correctness(TP/(TP+0.5(FP+FN)))와 달리 군더더기(FP)를 분모에서 뺀 recall 축이다.
+        '정답 요소를 다 담았나'만 묻기 때문에, 근거를 덧붙여 길어진 정답 답변이 lexical F1·
+        answer_correctness 양쪽에서 깎이는 구조적 저평가를 가려낼 수 있다."""
+        return _gold_coverage(self.ragas)
+
+    @property
+    def oracle_gold_coverage(self) -> Optional[float]:
+        """gold 요소 커버리지 TP/(TP+FN) — 오라클 트랙. 미측정이면 None."""
+        return _gold_coverage(self.oracle_ragas)
+
+    @property
+    def answer_semantic(self) -> Optional[float]:
+        """정답 판정 혼합 점수의 '의미축' — 실제 트랙. RAGAS 미측정이면 None(=lexical 단독 판정)."""
+        return _semantic_answer(self.ragas)
+
+    @property
+    def oracle_answer_semantic(self) -> Optional[float]:
+        """정답 판정 혼합 점수의 '의미축' — 오라클 트랙. 미측정이면 None."""
+        return _semantic_answer(self.oracle_ragas)
+
+    @property
+    def answer_score(self) -> float:
+        """정답 판정 점수 — 실제 트랙. lexical(f1_score)과 의미축의 가중합(의미 미측정이면 lexical)."""
+        return blend_answer_score(self.f1_score, self.answer_semantic)
+
+    @property
+    def oracle_answer_score(self) -> float:
+        """정답 판정 점수 — 오라클 트랙."""
+        return blend_answer_score(self.oracle_f1, self.oracle_answer_semantic)
+
+
+def _gold_coverage(ragas: dict) -> Optional[float]:
+    """RAGAS 트랙 dict 의 TP/FN 카운트에서 gold 커버리지를 계산. 카운트 없으면 None."""
+    if "answer_correctness_fn" not in ragas:
+        return None
+    tp, fn = ragas["answer_correctness_tp"], ragas["answer_correctness_fn"]
+    denom = tp + fn
+    return tp / denom if denom > 0 else None
+
+
+def _float_or_none(value) -> Optional[float]:
+    """dict 에서 읽은 값이 실수 지표인지 확인(bool·None·문자열 배제)."""
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _semantic_answer(ragas: dict) -> Optional[float]:
+    """의미축 = max(answer_correctness, gold 커버리지) — 쓸 수 있는 게 없으면 None(→ lexical 단독).
+
+    두 성분 모두 '쓸 수 있을 때만' 넣는다. 게이트가 이 값으로 승격까지 하므로, 신뢰할 수
+    없는 성분을 넣으면 오답이 통과한다:
+      · answer_correctness: factual 분류(TP/FP/FN)가 실패해 임베딩 유사도 단독으로 계산된
+        경우(answer_correctness_degraded)는 제외한다. 한국어에서 같은 주제 문장끼리는 사실이
+        틀려도 코사인이 0.8 대로 나와, 유사도만으로 승격시키면 오답이 그대로 통과한다.
+        (강등만 하던 시절엔 이 폴백이 안전했다 — metrics_ragas._answer_correctness 주석 참고.)
+      · 커버리지: GOLD_COVERAGE_MIN 이상 + 답이 검색 context 에 근거(faithfulness)할 때만.
+        문턱은 부분 답변이 커버리지를 부분 점수로 들고 통과하는 걸 막고, 근거 조건은 파라미터
+        기억으로 맞힌 답(generation_parametric_overreliance 영역)을 의미축으로 올리지 않는다.
+    """
+    values: list[float] = []
+    ac = _float_or_none(ragas.get("answer_correctness"))
+    if ac is not None and not ragas.get("answer_correctness_degraded"):
+        values.append(ac)
+    coverage = _gold_coverage(ragas)
+    faith = _float_or_none(ragas.get("faithfulness"))
+    if (coverage is not None and coverage >= GOLD_COVERAGE_MIN
+            and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN):
+        values.append(coverage)
+    return max(values) if values else None
+
+
+def blend_answer_score(lexical: float, semantic: Optional[float]) -> float:
+    """lexical(char-F1 계열)과 의미축을 ANSWER_SEMANTIC_WEIGHT 로 가중합. 의미 미측정이면 lexical.
+
+    한 축이라도 단독 문턱으로 쓰면 '맞은 답이 문턱 하나에 걸려 실패'가 반복된다 —
+    lexical 은 표현 차이·길이에, 의미축은 판정기 편차에 흔들리기 때문. 두 축을 섞으면
+    한쪽의 흔들림이 다른 쪽에 흡수된다(판정: diagnose._answer_ok)."""
+    lexical = max(0.0, min(1.0, lexical))
+    if semantic is None:
+        return lexical
+    semantic = max(0.0, min(1.0, semantic))
+    return (1 - ANSWER_SEMANTIC_WEIGHT) * lexical + ANSWER_SEMANTIC_WEIGHT * semantic

@@ -6,6 +6,7 @@ LLM 설정 X, LLM 호출 실패 시 -> 추출식 fallback 사용
 from __future__ import annotations
 
 import os
+import re
 import threading
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -24,6 +25,12 @@ class GeneratedAnswer:
     generation_mode: str
     retrieval: dict
 
+
+@dataclass(frozen=True)
+class PromptContext:
+    citation_index: int
+    text: str
+
 # 1) LLM 답변 2) 관련 있는 context 그대로 반환
 # context 없으면 빈 문자열 반환
 def generate_answer(
@@ -41,10 +48,12 @@ def generate_answer(
     if not cleaned_contexts:
         return ""
 
+    prompt_contexts = _compress_contexts_for_question(question, cleaned_contexts, config=config)
+
     # LLM 답변 생성 -> 실패 시 none 반환, extractive fallback으로 넘어가기
     answer = _llm_generate(
         question,
-        cleaned_contexts,
+        prompt_contexts,
         provider=provider,
         model=model,
         config=config,
@@ -52,7 +61,7 @@ def generate_answer(
     )
     if answer:
         return answer
-    return _extractive_answer(cleaned_contexts)
+    return _extractive_answer([context.text for context in prompt_contexts])
 
 # retriever 검색 ~ 답변 생성 (전체 RAG 흐름)
 def answer_question(
@@ -78,7 +87,15 @@ def answer_question(
     generation_mode = "llm" if _has_provider(provider, config=config) else "extractive"
 
     # top context 그대로 반환 -> fallback
-    if answer == _extractive_answer(contexts):
+    cleaned_contexts = [
+        context.strip() for context in contexts if context and context.strip()
+    ]
+    prompt_contexts = _compress_contexts_for_question(
+        question,
+        cleaned_contexts,
+        config=config,
+    )
+    if answer == _extractive_answer([context.text for context in prompt_contexts]):
         generation_mode = "extractive"
 
     result = GeneratedAnswer(
@@ -144,6 +161,205 @@ def _extractive_answer(contexts: list[str]) -> str:
         if context and context.strip():
             return context.strip()
     return ""
+
+
+_TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+|\n+")
+_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "what", "when", "where", "how",
+    "에", "의", "을", "를", "이", "가", "은", "는", "와", "과", "로", "으로",
+    "및", "또는", "그리고", "대해", "설명", "하십시오", "주세요",
+}
+
+
+def _compress_contexts_for_question(
+    question: str,
+    contexts: list[str],
+    *,
+    config: dict | None = None,
+) -> list[PromptContext]:
+    """Keep question-relevant sentences before generation when explicitly enabled."""
+    original = [
+        PromptContext(citation_index=index, text=context)
+        for index, context in enumerate(contexts, 1)
+    ]
+
+    if not _context_compression_enabled(config):
+        return original
+
+    query_tokens = _keywords(question)
+    query_numbers = set(_NUMBER_RE.findall(question))
+    if not query_tokens and not query_numbers:
+        return original
+
+    max_sentences = _positive_int(
+        _config_value(config, "context_compression_max_sentences", "context_filter_max_sentences"),
+        4,
+    )
+    raw_max_contexts = _config_value(
+        config,
+        "context_compression_max_contexts",
+        "context_filter_max_contexts",
+    )
+    max_contexts = (
+        _positive_int(raw_max_contexts, len(contexts))
+        if raw_max_contexts is not None
+        else None
+    )
+    min_contexts = min(
+        len(contexts),
+        _positive_int(
+            _config_value(config, "context_compression_min_contexts", "context_filter_min_contexts"),
+            1,
+        ),
+    )
+
+    compressed: list[tuple[float, bool, PromptContext]] = []
+    matched_any = False
+    matched_count = 0
+    for context_index, context in enumerate(contexts):
+        sentences = _split_sentences(context)
+        scored: list[tuple[float, int, str]] = []
+        for sentence_index, sentence in enumerate(sentences):
+            score = _sentence_relevance_score(sentence, query_tokens, query_numbers)
+            if score > 0:
+                scored.append((score, sentence_index, sentence))
+
+        if scored:
+            matched_any = True
+            matched_count += 1
+            best_score = max(item[0] for item in scored)
+            picked = sorted(
+                sorted(scored, key=lambda item: item[0], reverse=True)[:max_sentences],
+                key=lambda item: item[1],
+            )
+            compressed.append(
+                (
+                    best_score,
+                    True,
+                    PromptContext(
+                        citation_index=context_index + 1,
+                        text=" ".join(item[2] for item in picked),
+                    ),
+                )
+            )
+        else:
+            fallback_text = " ".join(sentences[:max_sentences])
+            compressed.append(
+                (
+                    0.0,
+                    False,
+                    PromptContext(citation_index=context_index + 1, text=fallback_text),
+                )
+            )
+
+    if not matched_any:
+        return original
+
+    target_contexts = max_contexts if max_contexts is not None else matched_count
+    if compressed and not compressed[0][1] and matched_count > 0 and len(compressed) > 1:
+        target_contexts = max(target_contexts, 2)
+    target_contexts = min(len(compressed), max(min_contexts, target_contexts))
+    compressed = sorted(
+        compressed,
+        key=lambda item: (
+            item[2].citation_index != 1,
+            -item[0],
+            not item[1],
+            item[2].citation_index,
+        ),
+    )[:target_contexts]
+    compressed = sorted(compressed, key=lambda item: item[2].citation_index)
+    return [context for _score, _matched, context in compressed if context.text.strip()] or original
+
+
+def _context_compression_enabled(config: dict | None = None) -> bool:
+    value = _config_value(
+        config,
+        "context_compression",
+        "context_filtering",
+        "context.compression.enabled",
+    )
+    if value is None:
+        value = os.getenv("RAG_CONTEXT_COMPRESSION")
+    return _as_bool(value)
+
+
+def _split_sentences(text: str) -> list[str]:
+    sentences = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text) if part.strip()]
+    return sentences or [text.strip()]
+
+
+def _sentence_relevance_score(
+    sentence: str,
+    query_tokens: set[str],
+    query_numbers: set[str],
+) -> float:
+    sentence_tokens = _keywords(sentence)
+    overlap = len(query_tokens & sentence_tokens)
+    sentence_numbers = set(_NUMBER_RE.findall(sentence))
+    number_overlap = len(query_numbers & sentence_numbers)
+    return float(overlap) + (2.0 * number_overlap)
+
+
+def _keywords(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for raw in _TOKEN_RE.findall(text or ""):
+        for token in _expand_keyword(raw.lower()):
+            if len(token) > 1 and token not in _STOPWORDS:
+                tokens.add(token)
+    return tokens
+
+
+def _expand_keyword(token: str) -> set[str]:
+    variants = {token}
+    stripped = _strip_korean_suffix(token)
+    variants.add(stripped)
+    if re.search(r"[가-힣]", stripped):
+        variants.update(_hangul_ngrams(stripped))
+    return {variant for variant in variants if variant}
+
+
+def _strip_korean_suffix(token: str) -> str:
+    suffixes = (
+        "으로부터", "로부터", "까지", "부터", "에서는", "에서", "에게", "께서",
+        "으로", "라고", "이라", "이며", "이고", "입니다", "입니까", "합니다",
+        "하세요", "되는", "된다", "되며", "된다면", "은", "는", "이", "가",
+        "을", "를", "의", "에", "도", "만", "와", "과", "로",
+    )
+    for suffix in suffixes:
+        if token.endswith(suffix) and len(token) > len(suffix) + 1:
+            return token[: -len(suffix)]
+    return token
+
+
+def _hangul_ngrams(token: str) -> set[str]:
+    compact = re.sub(r"[^0-9A-Za-z가-힣]", "", token)
+    if len(compact) < 3:
+        return set()
+    ngrams: set[str] = set()
+    for size in (2, 3, 4):
+        if len(compact) < size:
+            continue
+        ngrams.update(compact[index:index + size] for index in range(len(compact) - size + 1))
+    return ngrams
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 # config 안에서 여러 후보 key 중 첫 번째 유효 값 반환 (이름 달라도 설정 동일하게)
@@ -239,7 +455,7 @@ def _warn_unknown_provider_once(selected: str) -> None:
 # 모두 실패하면 None을 반환해 extractive fallback으로 넘어가기
 def _llm_generate(
     question: str,
-    contexts: list[str],
+    contexts: list[str] | list[PromptContext],
     *,
     provider: str | None = None,
     model: str | None = None,
@@ -255,7 +471,9 @@ def _llm_generate(
         _warn_unknown_provider_once(selected)
         return None
     providers = ["openai", "gemini", "github"] if selected == "auto" else [selected]
-    system, user = _build_prompt(question, contexts, max_context_chars=max_context_chars)
+    system, user = _build_prompt(
+        question, contexts, max_context_chars=max_context_chars, config=config
+    )
 
     for name in providers:
         # config/env에서 다시 결정
@@ -296,26 +514,63 @@ def _llm_generate(
 
 
 # LLM에 전달할 system/user prompt
+def _gen_flag(config: dict | None, name: str, default: bool) -> bool:
+    """generation_config 의 bool 플래그를 읽는다(문자열 'true' 등도 정규화). 없으면 default."""
+    if not config or name not in config:
+        return default
+    value = config.get(name)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 def _build_prompt(
     question: str,
-    contexts: list[str],
+    contexts: list[str] | list[PromptContext],
     *,
     max_context_chars: int,
+    config: dict | None = None,
 ) -> tuple[str, str]:
     context_block = ""
     for index, context in enumerate(contexts, 1):
+        if isinstance(context, PromptContext):
+            citation_index = context.citation_index
+            context_text = context.text
+        else:
+            citation_index = index
+            context_text = context
         # context에 번호를 붙여 답변에서 근거 번호를 표시할 수 있게 한다.
-        next_block = f"[{index}]\n{context.strip()}\n\n"
+        next_block = f"[{citation_index}]\n{context_text.strip()}\n\n"
         if len(context_block) + len(next_block) > max_context_chars:
             break
         context_block += next_block
 
-    # context 밖의 내용을 지어내지 않도록 답변 규칙을 고정한다.
-    system = (
-        "너는 사내 문서 QA 어시스턴트다. 반드시 제공된 컨텍스트만 근거로 한국어로 답하라. "
-        "컨텍스트에 근거가 없으면 '제공된 정보로는 알 수 없습니다'라고 답하라. "
-        "답변 끝에는 근거 번호를 대괄호로 표시하라."
-    )
+    # generation_config 플래그로 시스템 프롬프트를 조립한다. rules.py 처방은 플래그만
+    # 넘기고 실제 문구는 여기서 소유한다(use_hybrid/use_reranker와 같은 패턴).
+    # 기본값(grounding_strict·require_citation=True, 나머지 False)은 과거 하드코딩
+    # 프롬프트를 그대로 재현하므로, Optimize가 손대기 전엔 동작이 바뀌지 않는다.
+    clauses = ["너는 사내 문서 QA 어시스턴트다."]
+    if _gen_flag(config, "grounding_strict", True):
+        clauses.append(
+            "반드시 제공된 컨텍스트만 근거로 한국어로 답하라. "
+            "컨텍스트에 근거가 없으면 '제공된 정보로는 알 수 없습니다'라고 답하라."
+        )
+    else:
+        clauses.append("한국어로 답하라.")
+    if _gen_flag(config, "abstention_strict", False):
+        clauses.append(
+            "조금이라도 확신이 없으면 지어내지 말고 반드시 "
+            "'제공된 정보로는 알 수 없습니다'라고 답하라."
+        )
+    if _gen_flag(config, "completeness_mode", False):
+        clauses.append("질문에 여러 항목이나 하위 질문이 있으면 빠짐없이 모두 답하라.")
+    if _gen_flag(config, "restate_question", False):
+        clauses.append("답변을 시작하기 전에 질문을 한 문장으로 재진술하라.")
+    if _gen_flag(config, "require_citation", True):
+        clauses.append("답변 끝에는 근거 번호를 대괄호로 표시하라.")
+    system = " ".join(clauses)
     user = f"[컨텍스트]\n{context_block.strip()}\n\n[질문]\n{question.strip()}"
     return system, user
 
@@ -324,17 +579,31 @@ def _build_prompt(
 # 여기 래퍼는 RAG 규약(키 없으면 None, 빈 응답 None, RAG_* 모델 env)만 담당.
 
 # OpenAI (openai SDK)
+def _generation_temperature(config: dict | None) -> float:
+    """generation_config 의 temperature(기본 0.0). 파싱 실패 시 0.0."""
+    raw = _config_value(config, "temperature")
+    if raw is None:
+        return 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _openai_generate(
     system: str,
     user: str,
     *,
     model: str | None = None,
-    config: dict | None = None,   # 미사용(호출부 시그니처 호환용)
+    config: dict | None = None,
 ) -> str | None:
     if not os.getenv("OPENAI_API_KEY"):
         return None
     selected_model = model or os.getenv("RAG_OPENAI_MODEL", "gpt-4o")
-    return openai_chat(system, user, selected_model, tag="RAG").strip() or None
+    return openai_chat(
+        system, user, selected_model,
+        temperature=_generation_temperature(config), tag="RAG",
+    ).strip() or None
 
 
 # GitHub Models (OpenAI 호환 API, GitHub PAT 인증)
@@ -353,7 +622,8 @@ def _github_generate(
     selected_model = model or os.getenv("RAG_GITHUB_MODEL", "openai/gpt-4o")
     return openai_chat(
         system, user, selected_model,
-        api_key=api_key, base_url=GITHUB_MODELS_BASE_URL, tag="RAG",
+        api_key=api_key, base_url=GITHUB_MODELS_BASE_URL,
+        temperature=_generation_temperature(config), tag="RAG",
     ).strip() or None
 
 
@@ -363,9 +633,12 @@ def _gemini_generate(
     user: str,
     *,
     model: str | None = None,
-    config: dict | None = None,   # base_url 등은 SDK가 처리하므로 현재 미사용(시그니처 호환용)
+    config: dict | None = None,
 ) -> str | None:
     if not os.getenv("GEMINI_API_KEY"):
         return None
     selected_model = model or os.getenv("RAG_GEMINI_MODEL", "gemini-flash-latest")
-    return gemini_chat(system, user, selected_model, tag="RAG").strip() or None
+    return gemini_chat(
+        system, user, selected_model,
+        temperature=_generation_temperature(config), tag="RAG",
+    ).strip() or None

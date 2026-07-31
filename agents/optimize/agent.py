@@ -39,7 +39,7 @@ from typing import Any
 from core.state import AgentDoctorState
 from core.timing import StageTimer
 from core.schema import DiagnosticReport
-from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate
+from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate, rules
 from agents.optimize.schemas import (
     ConfigDiff,
     OptimizationHistoryItem,
@@ -51,6 +51,89 @@ from agents.optimize.schemas import (
 
 
 _MAX_UNJUDGEABLE_ATTEMPTS = 1
+_OPTIMIZE_VISIT_LIMIT_REASON = "Optimize 절대 방문 상한 도달"
+
+
+def _restore_history_item_baseline(
+    state: AgentDoctorState,
+    item: OptimizationHistoryItem,
+    reason: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], DiagnosticReport | None, bool]:
+    """처방 이력을 종료하고 적용 전 baseline 설정으로 안전하게 복원한다."""
+    before_config = dict(state.index_config)
+    before_report = item.metadata.get("before_report")
+    state.index_config = dict(item.before_config)
+    item.after_config = dict(state.index_config)
+    item.status = "failed"
+    item.rollback_reason = reason
+    item.metadata.update(
+        {
+            "pending": False,
+            "active_study": False,
+            **(metadata or {}),
+        }
+    )
+    item.metadata.pop("before_report", None)
+    state.reindex_required = bool(item.metadata.get("reindex_required", True))
+    return before_config, before_report, before_config != state.index_config
+
+
+def _stop_at_optimize_visit_limit(
+    state: AgentDoctorState,
+) -> AgentDoctorState:
+    """Optimize 절대 방문 상한에 도달하면 진행 중 설정을 복원하고 종료한다."""
+    pending = history.find_active_study(state.optimization_history)
+    if pending is None:
+        pending = history.find_pending(state.optimization_history)
+
+    changed = False
+    if pending is not None:
+        _before_config, before_report, changed = _restore_history_item_baseline(
+            state,
+            pending,
+            _OPTIMIZE_VISIT_LIMIT_REASON,
+            metadata={"visit_limit_reached": True},
+        )
+        before_score = _report_score(before_report)
+        verdict = Verdict(
+            keep=False,
+            before_score=before_score,
+            after_score=before_score,
+            reason=_OPTIMIZE_VISIT_LIMIT_REASON,
+        )
+        pending.metadata.update(
+            {
+                "before_score": verdict.before_score,
+                "after_score": verdict.after_score,
+                "before_composite": history._read_composite(before_report),
+                "after_composite": history._read_composite(before_report),
+            }
+        )
+        state.optimization_report = reporter.build_trial_report(pending, verdict)
+    else:
+        decision = OptimizeDecision(
+            mode="use_current",
+            status="skipped",
+            requires_user_confirmation=False,
+            next_route="serve",
+            reason=_OPTIMIZE_VISIT_LIMIT_REASON,
+        )
+        state.optimization_report = reporter.build_report(decision)
+
+    state.status = "rolled_back" if changed else "verified"
+    state.error = None
+    print(
+        "[Optimize] 절대 방문 상한 도달: "
+        f"{state.optimize_visit_count}/{state.max_optimize_visits}"
+    )
+    print(
+        "[Optimize] 진행 중 설정을 baseline으로 복원"
+        if changed
+        else "[Optimize] 추가 처방 없이 종료"
+    )
+    return state
 
 
 def _stop_at_optimize_visit_limit(
@@ -367,6 +450,21 @@ def _log_optimize_verdict(
     )
 
 
+def _log_manual_prescriptions(decision: OptimizeDecision) -> None:
+    """D그룹(manual) 라벨의 사람 조치를 로그에 남긴다. config 처방과 달리 자동 적용되지
+    않으므로, 어떤 라벨에 무슨 매뉴얼 스텝이 필요한지 출력로그에도 드러낸다."""
+    labels = getattr(decision, "manual_labels", None) or []
+    for label in labels:
+        rule = rules.get_rule(label) or {}
+        headline = (rule.get("manual_action", "") or "").strip()
+        print(f"[Optimize] 수동 조치 필요: {label}" + (f" — {headline}" if headline else ""))
+        for i, presc in enumerate(rule.get("prescriptions", []), start=1):
+            if not presc.get("manual"):
+                continue
+            action = presc.get("action", "") or presc.get("id", "")
+            print(f"[Optimize]   {i}. {action}")
+
+
 def _log_optimize_decision(
     state: AgentDoctorState,
     decision: OptimizeDecision,
@@ -374,6 +472,7 @@ def _log_optimize_decision(
     next_step = "Serve 이동" if decision.next_route == "serve" else decision.next_route
     action = "SKIP" if decision.status == "skipped" else decision.status.upper()
     print(f"[Optimize] 행동 결정: {action}, reason={decision.reason or '-'}")
+    _log_manual_prescriptions(decision)
 
     _log_optimize_transition(
         label=None,
@@ -413,6 +512,8 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
     state.current_agent = "optimize"
     try:
         _log_optimize_input(state)
+        if state.optimize_visit_count >= state.max_optimize_visits:
+            return _stop_at_optimize_visit_limit(state)
         state.optimize_visit_count += 1
         if state.optimize_visit_count >= state.max_optimize_visits:
             return _stop_at_optimize_visit_limit(state)
@@ -450,6 +551,26 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                         "retryable": True,
                     }
                 )
+
+        # route_after_eval 이 '품질 통과 + 판정 대기' 상태에서 이리로 보낸 경우:
+        # 방금 판정한 처방을 유지(keep)했다면 이미 목표 품질에 도달했으므로 새 처방을
+        # 더 붙이지 않고 그대로 Serve 로 확정한다(치료경과·유지 카운트 마감용 1회 방문).
+        # 롤백됐다면 복원된 config 로 재색인·재평가가 필요하니 이 단축을 타지 않는다.
+        if (
+            judged_item is not None
+            and not rolled_back
+            and gate.passes_report(state.report)
+        ):
+            state.status = "verified"
+            _log_optimize_verdict(
+                state,
+                judged_item,
+                verdict,
+                next_step="Serve 이동 (verified, 품질 통과)",
+            )
+            state.optimization_report = reporter.build_trial_report(judged_item, verdict)
+            _attach_runtime_deferred(state.optimization_report, deferred_runtime)
+            return state
 
         # (2) 새 처방 선택. 저비용 사전검증에서 baseline이 이기면 현재 처방을
         # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
@@ -569,7 +690,7 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
                             )
                         ),
                         "retryable": (
-                            True
+                            False
                             if error_code == "reranker_disabled"
                             else bool(capability.get("retryable", True))
                         ),
@@ -945,17 +1066,15 @@ def _fail_active_study(
     retryable: bool = False,
 ) -> AgentDoctorState:
     """study 오류 시 baseline으로 복원하고 재시도 가능 여부를 구분한다."""
-    before_config_for_log = dict(state.index_config)
-    changed = state.index_config != item.before_config
-    state.index_config = dict(item.before_config)
-    item.status = "failed"
-    item.rollback_reason = reason
-    item.after_config = dict(state.index_config)
-    item.metadata["pending"] = False
-    item.metadata["active_study"] = False
-    item.metadata["study_error"] = reason
-    item.metadata["study_retryable"] = retryable
-    item.metadata.pop("before_report", None)
+    before_config_for_log, _before_report, changed = _restore_history_item_baseline(
+        state,
+        item,
+        reason,
+        metadata={
+            "study_error": reason,
+            "study_retryable": retryable,
+        },
+    )
     label = item.failure_labels[0] if item.failure_labels else ""
     prescription_id = item.selected_prescription_id
     previous_same_errors = sum(
@@ -975,7 +1094,6 @@ def _fail_active_study(
     ):
         state.blacklist.add((label, prescription_id))
     state.status = "rolled_back" if changed else "error"
-    state.reindex_required = bool(item.metadata.get("reindex_required", True))
     state.error = None if changed else reason
     diff = config_mapper.build_config_diff(before_config_for_log, state.index_config)
     next_step = (
@@ -1095,6 +1213,12 @@ def _judge_pending_trial(
         )
     else:
         verdict = history.judge(before_report, after_report)
+        verdict = _relax_reranker_precision_floor(
+            pending,
+            before_report,
+            after_report,
+            verdict,
+        )
 
     # 롤백 전의 '실제 적용되어 측정된' config 를 이력에 남긴다.
     after_config = dict(state.index_config)
@@ -1118,6 +1242,60 @@ def _judge_pending_trial(
     history.finalize_item(pending, verdict, after_config, after_report)
     rollback_baseline_report = before_report if not verdict.keep else None
     return pending, verdict, rollback_baseline_report
+
+
+def _relax_reranker_precision_floor(
+    pending: OptimizationHistoryItem,
+    before_report: DiagnosticReport,
+    after_report: DiagnosticReport,
+    verdict: Verdict,
+) -> Verdict:
+    """Reranker 처방은 검색 순위 개선 신호가 있으면 precision 단독 위반을 완화한다.
+
+    Reranker는 관련 청크를 더 위로 올리는 과정에서 context_precision이 일시적으로
+    흔들릴 수 있다. 그런데 종합점수와 low-rank 라벨이 함께 개선됐는데도
+    context_precision 하나만으로 롤백하면 실제 검색 개선 처방을 학습하지 못한다.
+    """
+    if verdict.keep:
+        return verdict
+    if pending.selected_prescription_id not in {
+        "enable_reranker",
+        "widen_rerank_candidates",
+    }:
+        return verdict
+    if verdict.floor_violations != ["context_precision"]:
+        return verdict
+    if verdict.after_score <= verdict.before_score:
+        return verdict
+
+    before_low_rank = _label_count(before_report, "retrieval_low_rank")
+    after_low_rank = _label_count(after_report, "retrieval_low_rank")
+    if before_low_rank <= 0 or after_low_rank >= before_low_rank:
+        return verdict
+
+    return Verdict(
+        keep=True,
+        before_score=verdict.before_score,
+        after_score=verdict.after_score,
+        before_composite=verdict.before_composite,
+        after_composite=verdict.after_composite,
+        floor_violations=[],
+        reason=(
+            "reranker 적용 후 context_precision 단독 하한선 위반이 있었지만 "
+            f"종합점수 상승 {verdict.before_score:.3f}→{verdict.after_score:.3f}, "
+            f"retrieval_low_rank 감소 {before_low_rank}→{after_low_rank}로 유지"
+        ),
+        unjudgeable=verdict.unjudgeable,
+    )
+
+
+def _label_count(report: DiagnosticReport, label: str) -> int:
+    """리포트에서 특정 라벨의 확정 finding 개수를 센다."""
+    return sum(
+        1
+        for finding in report.findings
+        if finding.confirmed and finding.label == label
+    )
 
 
 def _reranker_execution_incomplete(
