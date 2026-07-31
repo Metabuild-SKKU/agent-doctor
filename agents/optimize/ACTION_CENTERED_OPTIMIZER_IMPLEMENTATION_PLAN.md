@@ -392,18 +392,71 @@ chunker.strategy:set:markdown_recursive   ← chunking_context_mismatch, retriev
 정확히 구분된다.
 
 **다만 §2.5의 제약과 충돌한다.** `chunker.strategy`는 후보가 2개인데 internal sweep
-대상이 아니다(`BACKEND_SUPPORTED_PATHS["internal"]`에 없음). 따라서 다음 중 하나를
-합의해야 한다.
+대상이 아니다(`BACKEND_SUPPORTED_PATHS["internal"]`에 없음).
 
-| 선택지 | 내용 | 비용 |
+#### ✅ 합의: `internal` sweep에 `chunker.strategy`를 추가한다 — **선행 PR로 분리**
+
+| 선택지 | 내용 | 판단 |
 | --- | --- | --- |
-| (a) `internal`에 `chunker.strategy` 추가 | 2후보를 정식 sweep | adapter 변경 필요 |
-| (b) rules backend가 후보 하나만 적용 | 나머지 후보는 다음 방문에 | sweep 이점 상실 |
-| (c) 이번 범위에서 제외 | 단일 후보로 고정 | 기존 2-후보 설계 후퇴 |
+| **(a) `internal`에 `chunker.strategy` 추가** | 2후보를 한 study에서 정식 sweep | **채택 (선행 PR)** |
+| (b) rules backend가 후보 하나만 적용 | 나머지는 다음 방문에 | 폴백안 |
+| (c) 이번 범위에서 제외 | 단일 후보로 고정 | 2-후보 설계 후퇴 |
 
-권장은 **(b)** 다. §12 권장 범위("차단 기능 활성화는 별도 PR")와 일관되고,
-`ActionStudyKey`로 "이 baseline에서 어떤 후보를 이미 썼는지" 추적하면 다음 방문에
-자연스럽게 나머지 후보로 넘어간다.
+(a)를 택하는 이유는 `origin/main`의 원래 의도("2-후보 스윕")를 그대로 실현하면서
+예산을 1회만 쓰기 때문이다.
+
+**단, 이번 PR에 포함하지 않고 선행 PR로 분리한다**(§8.0). action 전환과 독립적으로
+가치가 있고 독립적으로 검증되기 때문이다. 선행 PR이 늦어지면 이번 작업은 (b)로
+폴백할 수 있어야 하며, catalog의 action 정의는 두 경우 모두 동일하다(`replace` +
+후보값 2개). 즉 **선행 PR 여부가 catalog 설계를 바꾸지 않는다.**
+
+##### 사전 조사 결과 — 변경 범위가 작다
+
+`internal_adapter`는 **후보값 타입에 무관하다.** 현재 지원 축 3개가 모두 숫자인 것은
+우연이며, 엔진이 숫자를 요구하지 않는다.
+
+```python
+# internal_adapter.py:252  후보 정규화 — 동등 비교와 dedupe만 한다
+for value in values:
+    if value == current or value in deduped:
+        continue
+    deduped.append(deepcopy(value))
+```
+
+산술 연산은 전부 **점수(score)** 처리 쪽이고 후보값 쪽이 아니다. 제약도 이미
+범주형을 지원한다.
+
+```python
+DEFAULT_CONSTRAINTS["chunker.strategy"] = {"allowed": [...]}   # min/max가 아닌 allowed
+```
+
+따라서 필요한 변경은 다음으로 한정된다.
+
+```python
+BACKEND_SUPPORTED_PATHS["internal"] = {
+    "retriever.top_k",
+    "chunker.chunk_size",
+    "chunker.chunk_overlap",
+    "chunker.strategy",          # ← 추가
+}
+```
+
+##### 착수 전 확인할 것
+
+한 줄 추가로 끝난다고 단정하지 말고, 아래를 테스트로 먼저 고정한다.
+
+| 확인 항목 | 이유 |
+| --- | --- |
+| 범주형 후보 sweep 왕복 | `_fingerprint`가 문자열 값을 안정적으로 직렬화하는가 |
+| 재색인 경로 | `chunker.strategy ∈ REINDEX_PATHS` — chunk_size와 같은 경로를 타는가 |
+| `chunk_precheck_context` | planner가 chunk_size/overlap에만 붙인다. strategy에도 필요한가, 아니면 제외가 맞는가 |
+| baseline trial | `_baseline_axis_config`가 범주형 축에서 올바른 baseline을 만드는가 |
+| constraint 필터 | `allowed` 목록 밖 값이 실제로 걸러지는가 |
+
+이 중 `chunk_precheck_context`는 **제외가 맞을 가능성이 높다.** prescreener는 gold
+span이 청크 경계에 걸리는지를 기하로 검증하는데, strategy 교체는 경계 생성 규칙
+자체를 바꾸므로 기존 span-경계 계산 전제가 성립하지 않는다. 판단 근거를 테스트로
+남긴다.
 
 ### 3.2 LabelActionRule
 
@@ -886,6 +939,22 @@ iteration = 실제 새 ActionStudy를 적용한 횟수
 - 같은 action도 새 baseline에서 새 study면 새 iteration
 - 절대 Optimize visit 상한은 유지
 
+#### ✅ 합의: `max_iterations` 3 → 5
+
+action 전환은 선택 단위를 잘게 쪼갠다. 지금은 "라벨 하나"를 고르면 그 안에서 처방을
+순서대로 시도하지만, 전환 후에는 **action 하나 = 예산 하나**다. 실행 가능 action이
+16개인데 예산이 3이면 탐색이 지나치게 얕다.
+
+```text
+max_iterations: 3 → 5      # 서로 다른 ActionStudy를 5회까지 시도
+max_optimize_visits: 20    # 유지 (최종 안전선)
+```
+
+**이것은 위험 대응이 아니라 탐색 깊이 확보다.** 아래에서 보듯 막아야 할 무한 루프는
+존재하지 않으므로, 상향의 근거는 "안전"이 아니라 "16개 action을 3회로는 탐색할 수
+없다"는 것이다. 비용이 최대 1.67배 늘어나는 것을 감수하는 결정이며, §5.11의 개선
+마진이 무의미한 시도를 조기에 걸러 실제 증가폭을 낮춘다.
+
 #### ⚠️ `iteration`은 `graph.py`가 종료 조건으로 읽는다 (초판 누락)
 
 §6.16과 안전 원칙 5는 "`graph.py`를 수정하지 않는다"고만 적었으나, **`graph.py`는
@@ -916,6 +985,36 @@ if state.optimize_visit_count >= state.max_optimize_visits:
 
 즉 라우팅을 고쳐도 얻을 것이 없고, 5개 에이전트 공용 라우팅을 Optimize 하나 때문에
 바꾸는 비용만 남는다. **`graph.py` 무수정 원칙을 유지한다.**
+
+##### no-op은 루프를 돌지 않는다 — 미소비 규칙의 실효 범위는 좁다
+
+"예산 미소비"가 위험해 보이지만, 실제로는 **아무것도 바뀌지 않으면 파이프라인이
+그 자리에서 끝난다.**
+
+```python
+# graph.py:83  route_after_optimize
+if state.status in ("applied", "rolled_back"):
+    return "index"      # config가 바뀐 경우만 루프를 한 바퀴 더
+return "serve"          # skipped / verified / manual_required → 종료
+```
+
+```python
+# agent.py:525  처방할 것이 없을 때
+state.status = "rolled_back" if rolled_back else decision.status   # skipped 등
+```
+
+즉 루프가 이어지는 경우는 `applied`(적용)와 `rolled_back`(롤백) 둘뿐이고, 둘 다
+config가 실제로 바뀐 경우다. "변경이 없는 방문이 무한히 반복된다"는 시나리오는
+구조적으로 성립하지 않는다.
+
+최악은 적용·롤백의 반복이며, 적용마다 예산이 소비되므로 다음으로 묶인다.
+
+```text
+적용(+1) → 롤백(+0) → 적용(+1) → 롤백(+0) → ...
+= max_iterations 소진 시점에 종료, sweep 후보를 더해도 10회 내외
+```
+
+`max_optimize_visits`(20)는 실제로 도달하는 값이 아니라 최종 안전선이다.
 
 ##### 대신 착수 전에 증명해야 할 것
 
@@ -1774,6 +1873,43 @@ Iteration 주석을 label 처리 단계에서 ActionStudy 적용 횟수로 변�
 
 ## 8. 구현 단계와 권장 커밋 단위
 
+### 단계 0-A. 선행 PR (이번 작업 범위 밖, 먼저 병합)
+
+action 전환과 **독립적으로 가치가 있고 독립적으로 검증되는** 변경은 별도 PR로 낸다.
+이번 PR의 blast radius를 줄이고, 각 변경의 효과를 따로 관측하기 위해서다
+(이슈 #67 리스크 7 대응).
+
+#### 선행 PR ①: 개선 판정 최소 마진
+
+- `history.judge`와 `internal_adapter._best_completed_trial`에 마진 적용
+- 상수 한 곳 정의(`MIN_IMPROVEMENT_MARGIN = 0.02`), 두 모듈이 공유
+- 상세는 §5.11
+
+**독립적 가치**: 현재 구조에서도 노이즈로 인한 가짜 개선을 즉시 걸러낸다.
+action 전환 여부와 무관하다.
+
+**검증**: 마진 미만 상승이 rollback되는지, sweep이 baseline을 이기지 못할 때
+best로 채택하지 않는지.
+
+#### 선행 PR ②: `internal` sweep에 `chunker.strategy` 축 추가
+
+- `BACKEND_SUPPORTED_PATHS["internal"]`에 `chunker.strategy` 추가
+- 범주형 후보 sweep 검증 테스트 (§3.1의 확인 항목 5개)
+
+**독립적 가치**: `origin/main`이 이미 2-후보로 등록해둔 청킹 전략 교체가 실제로
+sweep된다. 현재는 rules backend로 1회만 적용된다.
+
+**검증**: 문자열 후보의 fingerprint 안정성, 재색인 경로, baseline trial 생성,
+`allowed` 제약 필터, `chunk_precheck_context` 제외 판단.
+
+#### 이번 PR에 포함하는 것 — `max_iterations` 3 → 5
+
+①②와 달리 **action 전환 후에야 의미가 있다.** 지금 올리면 현재 구조에서 예산만
+늘어난다(라벨 단위 탐색이 깊어질 뿐). action 단위로 선택이 잘게 쪼개진 뒤에야
+"16개 action을 탐색하기에 3회는 얕다"는 근거가 성립하므로 이번 PR에 둔다.
+
+---
+
 ### 단계 0. Baseline 고정
 
 - 최신 main Optimize 테스트 실행
@@ -2058,13 +2194,16 @@ python3 -m unittest discover -s tests
 - [x] **차단 기능 활성화** — 별도 PR. catalog에는 blocked reason으로만 등록(§6.1)
 - [x] **`base_cost` 산정** — 현행 이분법(재색인 3 / 런타임 1)을 그대로 이관. 세분화는 별도 작업(§3.1)
 - [x] **`graph.py` 무수정 유지** — 라우팅 수정으로는 예산 문제가 해결되지 않음(§5.8)
+- [x] **`chunker.strategy` 2후보 처리** — (a) `internal` sweep에 축 추가, **선행 PR로 분리**(§3.1·§8.0-A)
+- [x] **`max_iterations` 3 → 5** — 탐색 깊이 목적. 이번 PR에 포함(§5.8)
+- [x] **선행 PR 분리** — 판정 마진·sweep 축 추가를 별도 PR로(§8.0-A)
 
 **미합의 — 착수 전 결정 필요**
 
-- [ ] **iteration 미소비 경로의 수렴 증명** — §5.8의 5개 확인 항목 표를 채울 것 (최우선)
-- [ ] `chunker.strategy` 2후보 처리: §3.1의 (a)/(b)/(c) 중 택1 — **권장 (b)**
 - [ ] `rules.py` 재작성 시점 — 단계 1에서 전면 교체 vs 단계 4까지 alias로 버티기
-      (현재 flat 20 / canonical 20으로 혼재, 핵심 축 4개가 flat)
+      (현재 flat 20 / canonical 20으로 혼재, 핵심 축 4개가 flat) **(최우선)**
+- [ ] iteration 미소비 경로의 수렴 증명 — §5.8의 확인 항목 표
+      (no-op은 serve로 종료되므로 위험도는 낮으나 표는 채울 것)
 - [ ] 고유 probe 기반 투표 (§4.2 공식 확정)
 - [ ] 후보값 union과 candidate budget
 - [ ] exact attempt blacklist 범위
