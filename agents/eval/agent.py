@@ -572,14 +572,35 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
     failed_vecs = [embed_by_id[cid] for cid in sorted(failed_ids) if embed_by_id.get(cid)]
     corpus_vecs = [c.embedding for c in chunks if c.embedding]
 
+    # 유효성 필터(_valid) 를 표본 절단보다 먼저 건다 — baseline(_baseline_cohesion)이
+    # _valid → stride 순이라 순서를 맞춰야 한다. 반대로 하면 영벡터/미부착 벡터가 표본
+    # 슬롯을 먼저 잡아먹고 뒤에 걸러져, 실측 유효분이 반토막 나 실측 신호가 있는데도
+    # unmeasured 로 떨어질 수 있다(유효 3 + 영벡터 297 → 표본 유효 1개 → unmeasured).
     # 실패 gold 도 baseline 과 같은 상한을 건다 — 보통 수십 개지만 수백 개가 되면
     # 1024차원 코사인이 수만 쌍으로 늘어난다(O(m^2)).
-    failed_vecs = topic_cluster.stride_sample(failed_vecs)
+    failed_vecs = topic_cluster.stride_sample(
+        [v for v in failed_vecs if topic_cluster._valid(v)]
+    )
 
-    signal = topic_cluster.classify(failed_vecs, corpus_vecs)
+    result = topic_cluster.classify_detail(failed_vecs, corpus_vecs)
+    # 버킷뿐 아니라 판정 근거 수치도 metadata 에 남긴다 — 소비 유예(관측용) 동안
+    # 임계값을 실측 분산에 맞춰 재보정할 근거가 finding 에 쌓이게 한다(캘리브레이션 과제).
     for f in sem_findings:
-        f.metadata["topic_cluster"] = signal
-    print(f"  topic_cluster={signal} (semantic_mismatch {len(sem_findings)}건)")
+        f.metadata["topic_cluster"] = result.bucket
+        f.metadata["topic_cluster_detail"] = {
+            "ratio": result.ratio,
+            "failed_cohesion": result.failed_cohesion,
+            "baseline": result.baseline,
+            "failed_sample_size": result.failed_sample_size,
+            "corpus_sample_size": result.corpus_sample_size,
+            "concentrated_ratio": topic_cluster.TOPIC_CLUSTER_CONCENTRATED_RATIO,
+            "spread_ratio": topic_cluster.TOPIC_CLUSTER_SPREAD_RATIO,
+        }
+    ratio_str = f"{result.ratio:.3f}" if result.ratio is not None else "n/a"
+    print(
+        f"  topic_cluster={result.bucket} (ratio={ratio_str}, "
+        f"failed_gold={result.failed_sample_size}, semantic_mismatch {len(sem_findings)}건)"
+    )
 
 
 def _log_diagnosis_summary(records: list[EvalRecord]) -> None:

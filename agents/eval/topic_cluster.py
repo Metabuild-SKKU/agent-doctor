@@ -30,7 +30,7 @@ knowledge_graph 와 같은 소스·같은 cosine 을 쓴다.
 """
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import NamedTuple, Optional, Sequence
 
 from agents.eval.knowledge_graph import cosine
 from agents.eval.types import (
@@ -103,6 +103,53 @@ def _baseline_cohesion(corpus_vectors: list[Vector]) -> Optional[float]:
     return _mean_pairwise_cosine(stride_sample(usable))
 
 
+class TopicClusterResult(NamedTuple):
+    """classify 의 판정 + 그 근거 수치. 버킷만으로는 캘리브레이션을 못 하므로 함께 남긴다.
+
+    소비 유예(관측용) 동안에도 이 수치가 finding.metadata 에 쌓여야, 임계값
+    (CONCENTRATED/SPREAD_RATIO)을 실측 분산에 맞춰 재보정할 근거가 된다.
+    unmeasured 면 ratio·baseline·failed_cohesion 은 None 이고, 표본 수만 남는다.
+    """
+    bucket: str
+    ratio: Optional[float]
+    failed_cohesion: Optional[float]
+    baseline: Optional[float]
+    failed_sample_size: int   # baseline·failed 모두 _valid 통과 벡터만 센다(응집도 계산 실입력 수).
+    corpus_sample_size: int
+
+
+def classify_detail(
+    failed_gold_vectors: list[Vector],
+    corpus_vectors: list[Vector],
+) -> TopicClusterResult:
+    """classify 와 같은 판정을 하되, 근거 수치(ratio·baseline·표본 수)를 함께 돌려준다.
+
+    버킷 규칙은 classify 문서 참고. 표본 수는 _valid 를 통과한(=응집도 계산에 실제
+    들어간) 벡터 수라, unmeasured 원인이 "2개 미만"인지 "baseline 불가"인지 구분된다.
+    """
+    failed_usable = [v for v in failed_gold_vectors if _valid(v)]
+    corpus_usable = [v for v in corpus_vectors if _valid(v)]
+    failed_n = len(failed_usable)
+    corpus_n = len(corpus_usable)
+
+    failed_cohesion = _mean_pairwise_cosine(failed_gold_vectors)
+    if failed_cohesion is None:
+        return TopicClusterResult(UNMEASURED, None, None, None, failed_n, corpus_n)
+    baseline = _baseline_cohesion(corpus_vectors)
+    # 음수 baseline(코퍼스가 서로 등질) 도 막는다 — 나누면 ratio 부호가 뒤집혀
+    # 실패가 아무리 뭉쳐 있어도 무조건 spread 로 떨어진다.
+    if baseline is None or baseline <= 0:
+        return TopicClusterResult(UNMEASURED, None, failed_cohesion, baseline, failed_n, corpus_n)
+    ratio = failed_cohesion / baseline
+    if ratio >= TOPIC_CLUSTER_CONCENTRATED_RATIO:
+        bucket = CONCENTRATED
+    elif ratio <= TOPIC_CLUSTER_SPREAD_RATIO:
+        bucket = SPREAD
+    else:
+        bucket = NONE
+    return TopicClusterResult(bucket, ratio, failed_cohesion, baseline, failed_n, corpus_n)
+
+
 def classify(
     failed_gold_vectors: list[Vector],
     corpus_vectors: list[Vector],
@@ -115,18 +162,8 @@ def classify(
         ratio >= CONCENTRATED_RATIO → "concentrated"
         ratio <= SPREAD_RATIO       → "spread"
         그 사이                     → "none"
+
+    근거 수치(ratio·표본 수 등)가 필요하면 classify_detail 을 쓴다 — 이 함수는 그
+    버킷 문자열만 노출하는 얇은 래퍼다(기존 호출부·계약 유지).
     """
-    failed_cohesion = _mean_pairwise_cosine(failed_gold_vectors)
-    if failed_cohesion is None:
-        return UNMEASURED
-    baseline = _baseline_cohesion(corpus_vectors)
-    # 음수 baseline(코퍼스가 서로 등질) 도 막는다 — 나누면 ratio 부호가 뒤집혀
-    # 실패가 아무리 뭉쳐 있어도 무조건 spread 로 떨어진다.
-    if baseline is None or baseline <= 0:
-        return UNMEASURED
-    ratio = failed_cohesion / baseline
-    if ratio >= TOPIC_CLUSTER_CONCENTRATED_RATIO:
-        return CONCENTRATED
-    if ratio <= TOPIC_CLUSTER_SPREAD_RATIO:
-        return SPREAD
-    return NONE
+    return classify_detail(failed_gold_vectors, corpus_vectors).bucket

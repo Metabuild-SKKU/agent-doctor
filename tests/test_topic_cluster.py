@@ -118,5 +118,55 @@ class TopicClusterClassifyTest(unittest.TestCase):
         self.assertNotEqual(tc.classify(failed, corpus), tc.CONCENTRATED)
 
 
+class TopicClusterClassifyDetailTest(unittest.TestCase):
+    """classify_detail — 버킷뿐 아니라 캘리브레이션 근거 수치를 함께 돌려주는지.
+
+    소비 유예(관측용) 동안 임계값 재보정 근거를 finding.metadata 에 쌓으려면, 판정에
+    쓴 ratio·baseline·응집도·표본 수가 휘발되지 않고 반환돼야 한다(리뷰 Medium).
+    """
+
+    def test_classify_matches_detail_bucket(self):
+        # classify 는 classify_detail 의 얇은 래퍼여야 한다 — 두 버킷이 항상 같다.
+        cases = [
+            ([[1, 0, 0], [0.98, 0.1, 0], [0.97, 0.15, 0.05]],
+             [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [0, 1, 1]]),
+            ([[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+             [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [0, 1, 1]]),
+            ([[1, 0, 0]], [[1, 0, 0], [0, 1, 0]]),           # unmeasured
+        ]
+        for failed, corpus in cases:
+            self.assertEqual(tc.classify(failed, corpus),
+                             tc.classify_detail(failed, corpus).bucket)
+
+    def test_detail_carries_ratio_and_sample_sizes(self):
+        # 판정된 회차는 ratio·baseline·응집도와 유효 표본 수를 다 실어야 한다.
+        failed = [[1, 0, 0], [0.98, 0.1, 0], [0.97, 0.15, 0.05]]
+        corpus = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [0, 1, 1]]
+        r = tc.classify_detail(failed, corpus)
+        self.assertEqual(r.bucket, tc.CONCENTRATED)
+        self.assertIsNotNone(r.ratio)
+        self.assertIsNotNone(r.baseline)
+        self.assertIsNotNone(r.failed_cohesion)
+        # ratio 가 임계값과 정합해야 한다(판정 근거 재현성).
+        self.assertGreaterEqual(r.ratio, tc.TOPIC_CLUSTER_CONCENTRATED_RATIO)
+        self.assertAlmostEqual(r.ratio, r.failed_cohesion / r.baseline)
+        self.assertEqual(r.failed_sample_size, 3)
+        self.assertEqual(r.corpus_sample_size, 5)
+
+    def test_detail_counts_only_valid_samples(self):
+        # 표본 수는 _valid 통과분(응집도 계산 실입력)만 센다 — 영벡터/None 은 빠진다.
+        failed = [[1, 0, 0], [0.98, 0.1, 0], [], None, [0.0, 0.0, 0.0]]
+        corpus = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        r = tc.classify_detail(failed, corpus)
+        self.assertEqual(r.failed_sample_size, 2)   # 영벡터·빈·None 3개 제외
+
+    def test_unmeasured_detail_keeps_sample_size(self):
+        # 못 잰 회차도 표본 수는 남아, unmeasured 원인(2개 미만 vs baseline 불가)이 구분된다.
+        r = tc.classify_detail([[1, 0, 0]], [[1, 0, 0], [0, 1, 0]])
+        self.assertEqual(r.bucket, tc.UNMEASURED)
+        self.assertIsNone(r.ratio)
+        self.assertEqual(r.failed_sample_size, 1)    # 유효 1개 → 쌍 없음 → unmeasured
+
+
 if __name__ == "__main__":
     unittest.main()
