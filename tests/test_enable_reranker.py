@@ -559,6 +559,174 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
             state.blacklist,
         )
 
+    def test_reranker_precision_floor_is_relaxed_when_low_rank_improves(self):
+        before_findings = [
+            self._finding(),
+            Finding(
+                finding_id="p2:retrieval_low_rank",
+                type="retrieval_failure",
+                severity="warning",
+                description="정답 청크의 순위가 낮음",
+                label="retrieval_low_rank",
+                confirmed=True,
+                affected_probes=["p2"],
+            ),
+        ]
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="before",
+                findings=before_findings,
+                overall_score=0.41,
+                ragas_scores={"context_precision": 0.50},
+                pass_threshold=False,
+            ),
+            runtime_capabilities={
+                "reranker": {
+                    "status": "verified",
+                    "model": qdrant_store.DEFAULT_RERANKER_MODEL,
+                    "retryable": False,
+                    "reason": None,
+                }
+            },
+        )
+
+        state = run_optimize(state)
+        self.assertTrue(state.index_config["use_reranker"])
+
+        state.report = DiagnosticReport(
+            report_id="after",
+            findings=[self._finding()],
+            overall_score=0.46,
+            ragas_scores={"context_precision": 0.20},
+            runtime_summary={
+                "reranker": {
+                    "enabled": True,
+                    "attempted": 2,
+                    "applied": 2,
+                }
+            },
+            pass_threshold=False,
+        )
+        state = run_optimize(state)
+
+        self.assertTrue(state.index_config["use_reranker"])
+        self.assertEqual(state.optimization_history[0].status, "applied")
+        self.assertEqual(state.optimization_history[0].metadata["floor_violations"], [])
+        self.assertNotIn(
+            ("retrieval_low_rank", "enable_reranker"),
+            state.blacklist,
+        )
+
+    def test_reranker_precision_floor_still_rolls_back_without_low_rank_improvement(self):
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="before",
+                findings=[self._finding()],
+                overall_score=0.41,
+                ragas_scores={"context_precision": 0.50},
+                pass_threshold=False,
+            ),
+            runtime_capabilities={
+                "reranker": {
+                    "status": "verified",
+                    "model": qdrant_store.DEFAULT_RERANKER_MODEL,
+                    "retryable": False,
+                    "reason": None,
+                }
+            },
+        )
+
+        state = run_optimize(state)
+        self.assertTrue(state.index_config["use_reranker"])
+
+        state.report = DiagnosticReport(
+            report_id="after",
+            findings=[self._finding()],
+            overall_score=0.46,
+            ragas_scores={"context_precision": 0.20},
+            runtime_summary={
+                "reranker": {
+                    "enabled": True,
+                    "attempted": 2,
+                    "applied": 2,
+                }
+            },
+            pass_threshold=False,
+        )
+        state = run_optimize(state)
+
+        self.assertFalse(state.index_config["use_reranker"])
+        self.assertEqual(state.optimization_history[0].status, "failed")
+        self.assertEqual(
+            state.optimization_history[0].metadata["floor_violations"],
+            ["context_precision"],
+        )
+        self.assertIn(
+            ("retrieval_low_rank", "enable_reranker"),
+            state.blacklist,
+        )
+
+    def test_reranker_precision_floor_still_rolls_back_with_multiple_floor_violations(self):
+        before_findings = [
+            self._finding(),
+            Finding(
+                finding_id="p2:retrieval_low_rank",
+                type="retrieval_failure",
+                severity="warning",
+                description="gold chunk is ranked too low",
+                label="retrieval_low_rank",
+                confirmed=True,
+                affected_probes=["p2"],
+            ),
+        ]
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="before",
+                findings=before_findings,
+                overall_score=0.41,
+                ragas_scores={"context_precision": 0.50, "faithfulness": 0.80},
+                pass_threshold=False,
+            ),
+            runtime_capabilities={
+                "reranker": {
+                    "status": "verified",
+                    "model": qdrant_store.DEFAULT_RERANKER_MODEL,
+                    "retryable": False,
+                    "reason": None,
+                }
+            },
+        )
+
+        state = run_optimize(state)
+        self.assertTrue(state.index_config["use_reranker"])
+
+        state.report = DiagnosticReport(
+            report_id="after",
+            findings=[self._finding()],
+            overall_score=0.46,
+            ragas_scores={"context_precision": 0.20, "faithfulness": 0.40},
+            runtime_summary={
+                "reranker": {
+                    "enabled": True,
+                    "attempted": 2,
+                    "applied": 2,
+                }
+            },
+            pass_threshold=False,
+        )
+        state = run_optimize(state)
+
+        self.assertFalse(state.index_config["use_reranker"])
+        self.assertEqual(state.optimization_history[0].status, "failed")
+        self.assertEqual(
+            state.optimization_history[0].metadata["floor_violations"],
+            ["context_precision", "faithfulness"],
+        )
+        self.assertIn(
+            ("retrieval_low_rank", "enable_reranker"),
+            state.blacklist,
+        )
+
 
 class RerankerMetadataValidationTest(unittest.TestCase):
     def test_invalid_runtime_values_fall_back_to_safe_defaults(self):

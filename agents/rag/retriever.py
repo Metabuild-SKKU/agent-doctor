@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 import threading
 from collections import OrderedDict
@@ -53,6 +54,11 @@ class RetrievalSettings:
     use_reranker: bool = False
     reranker_model: str = DEFAULT_RERANKER_MODEL
     rerank_candidates: int = 20
+    # MMR(Maximal Marginal Relevance) 다양성 재정렬. 후보풀에서 관련성과 상호
+    # 다양성을 mmr_lambda 로 균형해 top_k 를 고른다(나열형 질문의 중복 잠식 완화).
+    use_mmr: bool = False
+    mmr_lambda: float = 0.5
+    mmr_candidates: int = 20
     qdrant_url: str = ":memory:"
     qdrant_api_key: str | None = None
     collection_name: str = COLLECTION
@@ -120,6 +126,7 @@ def resolve_retrieval_settings(
     rerank_candidates = (
         _as_int(pick("rerank_candidates", 20), 20) or 20
     )
+    mmr_candidates = _as_int(pick("mmr_candidates", 20), 20) or 20
 
     return RetrievalSettings(
         embedding_model=str(pick("embedding_model", DEFAULT_EMBEDDING_MODEL)),
@@ -133,6 +140,9 @@ def resolve_retrieval_settings(
             or DEFAULT_RERANKER_MODEL
         ),
         rerank_candidates=max(1, rerank_candidates),
+        use_mmr=_as_bool(pick("use_mmr", False)),
+        mmr_lambda=float(pick("mmr_lambda", 0.5)),
+        mmr_candidates=max(1, mmr_candidates),
         qdrant_url=str(config.get("qdrant_url") or os.getenv("QDRANT_URL", ":memory:")),
         qdrant_api_key=config.get("qdrant_api_key") or os.getenv("QDRANT_API_KEY"),
         collection_name=str(pick("qdrant_collection_name", COLLECTION)),
@@ -224,6 +234,58 @@ def _chunk_from_dict(data: dict) -> Chunk:
     )
 
 
+def _cosine(a: list[float], b: list[float]) -> float:
+    """두 임베딩의 코사인 유사도. 크기 0 이거나 차원 불일치면 0."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _mmr_select(
+    results: list[dict], top_k: int, lambda_: float, embeddings: list[list[float] | None]
+) -> list[dict] | None:
+    """MMR(Maximal Marginal Relevance)로 후보풀에서 top_k 를 고른다.
+
+    각 단계에서 `lambda*관련성 - (1-lambda)*이미뽑힌것과의최대유사도` 가 가장 큰 후보를
+    고른다. 관련성은 이미 계산된 검색 점수(score, [0,1] 로 정규화)를, 다양성은 청크
+    임베딩의 코사인을 쓴다 — 질의 벡터에 의존하지 않아 dense/hybrid/keyword/rerank 결과
+    모두에 동일하게 적용된다.
+
+    embeddings 는 results 와 같은 순서의 청크 임베딩 리스트다(호출부가 chunk_id 로
+    _chunks_by_id 에서 조회해 넘긴다 — 검색 결과 dict 에 embedding 을 싣지 않아도 되게).
+    하나라도 없으면 다양성을 잴 수 없어 None 을 돌려주고, 호출부는 기존 점수 순서를
+    그대로 쓴다(안전 폴백)."""
+    if len(embeddings) != len(results) or any(not emb for emb in embeddings):
+        return None
+    scores = [float(r.get("score") or 0.0) for r in results]
+    hi = max(scores) if scores else 0.0
+    lo = min(scores) if scores else 0.0
+    span = hi - lo
+    rel = [(s - lo) / span if span > 0 else 1.0 for s in scores]
+
+    remaining = list(range(len(results)))
+    selected: list[int] = []
+    while remaining and len(selected) < top_k:
+        best_idx = None
+        best_score = None
+        for i in remaining:
+            diversity = max(
+                (_cosine(embeddings[i], embeddings[j]) for j in selected),
+                default=0.0,
+            )
+            mmr = lambda_ * rel[i] - (1.0 - lambda_) * diversity
+            if best_score is None or mmr > best_score:
+                best_score, best_idx = mmr, i
+        selected.append(best_idx)
+        remaining.remove(best_idx)
+    return [results[i] for i in selected]
+
+
 class Retriever:
     """A small, reusable retrieval facade with dense/hybrid/rerank/fallback."""
 
@@ -306,17 +368,21 @@ class Retriever:
                     else "disabled"
                 ),
                 "reranker_fallback_used": False,
+                "mmr_enabled": self.settings.use_mmr,
+                "mmr_applied": False,
                 "search_fallback_used": False,
                 "fallback_used": False,
                 "results": [],
             }
 
         requested_top_k = max(1, int(top_k or self.settings.top_k))
-        candidate_k = (
-            max(requested_top_k, self.settings.rerank_candidates)
-            if self.settings.use_reranker
-            else requested_top_k
-        )
+        # 리랭커·MMR 은 top_k 보다 넓은 후보풀이 있어야 재정렬·다양화를 할 수 있다.
+        pool_sizes = [requested_top_k]
+        if self.settings.use_reranker:
+            pool_sizes.append(self.settings.rerank_candidates)
+        if self.settings.use_mmr:
+            pool_sizes.append(self.settings.mmr_candidates)
+        candidate_k = max(pool_sizes)
         vector_candidate_k = self._vector_candidate_k(candidate_k)
         results: list[dict] = []
         mode = "keyword"
@@ -370,16 +436,33 @@ class Retriever:
             if self.settings.use_reranker
             else "disabled"
         )
+        # MMR 이 최종 top_k 선택을 맡으면 리랭커는 후보풀을 유지한다(그래야 다양화 여지가 남음).
+        rerank_top_k = candidate_k if self.settings.use_mmr else requested_top_k
         if reranker_attempted:
             results, reranker_status = rerank_with_status(
                 query,
                 results,
                 model_name=self.settings.reranker_model,
-                top_k=requested_top_k,
+                top_k=rerank_top_k,
             )
             reranked = reranker_status == "applied"
-        else:
-            results = results[:requested_top_k]
+
+        mmr_applied = False
+        if self.settings.use_mmr and len(results) > requested_top_k:
+            # 임베딩은 검색 결과 dict 가 아니라 원본 청크(_chunks_by_id)에서 chunk_id 로
+            # 조회한다 — keyword/dense/hybrid/rerank 어느 경로든 결과에 embedding 을 싣지
+            # 않으므로(과거 MMR 이 항상 no-op 이던 원인) 여기서 확실히 붙여 넘긴다.
+            embeddings = [
+                (self._chunks_by_id.get(r.get("chunk_id")) or {}).get("embedding")
+                for r in results
+            ]
+            selected = _mmr_select(
+                results, requested_top_k, self.settings.mmr_lambda, embeddings
+            )
+            if selected is not None:
+                results = selected
+                mmr_applied = True
+        results = results[:requested_top_k]
 
         return {
             "query": query,
@@ -391,6 +474,8 @@ class Retriever:
             "reranker_fallback_used": (
                 reranker_attempted and reranker_status != "applied"
             ),
+            "mmr_enabled": self.settings.use_mmr,
+            "mmr_applied": mmr_applied,
             "search_fallback_used": fallback_used,
             "fallback_used": fallback_used,
             "results": results,

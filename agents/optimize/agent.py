@@ -38,7 +38,7 @@ from typing import Any
 
 from core.state import AgentDoctorState
 from core.schema import DiagnosticReport
-from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate
+from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate, rules
 from agents.optimize.schemas import (
     ConfigDiff,
     OptimizationHistoryItem,
@@ -406,6 +406,21 @@ def _log_optimize_verdict(
     )
 
 
+def _log_manual_prescriptions(decision: OptimizeDecision) -> None:
+    """D그룹(manual) 라벨의 사람 조치를 로그에 남긴다. config 처방과 달리 자동 적용되지
+    않으므로, 어떤 라벨에 무슨 매뉴얼 스텝이 필요한지 출력로그에도 드러낸다."""
+    labels = getattr(decision, "manual_labels", None) or []
+    for label in labels:
+        rule = rules.get_rule(label) or {}
+        headline = (rule.get("manual_action", "") or "").strip()
+        print(f"[Optimize] 수동 조치 필요: {label}" + (f" — {headline}" if headline else ""))
+        for i, presc in enumerate(rule.get("prescriptions", []), start=1):
+            if not presc.get("manual"):
+                continue
+            action = presc.get("action", "") or presc.get("id", "")
+            print(f"[Optimize]   {i}. {action}")
+
+
 def _log_optimize_decision(
     state: AgentDoctorState,
     decision: OptimizeDecision,
@@ -413,6 +428,7 @@ def _log_optimize_decision(
     next_step = "Serve 이동" if decision.next_route == "serve" else decision.next_route
     action = "SKIP" if decision.status == "skipped" else decision.status.upper()
     print(f"[Optimize] 행동 결정: {action}, reason={decision.reason or '-'}")
+    _log_manual_prescriptions(decision)
 
     _log_optimize_transition(
         label=None,
@@ -1133,6 +1149,12 @@ def _judge_pending_trial(
         )
     else:
         verdict = history.judge(before_report, after_report)
+        verdict = _relax_reranker_precision_floor(
+            pending,
+            before_report,
+            after_report,
+            verdict,
+        )
 
     # 롤백 전의 '실제 적용되어 측정된' config 를 이력에 남긴다.
     after_config = dict(state.index_config)
@@ -1156,6 +1178,60 @@ def _judge_pending_trial(
     history.finalize_item(pending, verdict, after_config, after_report)
     rollback_baseline_report = before_report if not verdict.keep else None
     return pending, verdict, rollback_baseline_report
+
+
+def _relax_reranker_precision_floor(
+    pending: OptimizationHistoryItem,
+    before_report: DiagnosticReport,
+    after_report: DiagnosticReport,
+    verdict: Verdict,
+) -> Verdict:
+    """Reranker 처방은 검색 순위 개선 신호가 있으면 precision 단독 위반을 완화한다.
+
+    Reranker는 관련 청크를 더 위로 올리는 과정에서 context_precision이 일시적으로
+    흔들릴 수 있다. 그런데 종합점수와 low-rank 라벨이 함께 개선됐는데도
+    context_precision 하나만으로 롤백하면 실제 검색 개선 처방을 학습하지 못한다.
+    """
+    if verdict.keep:
+        return verdict
+    if pending.selected_prescription_id not in {
+        "enable_reranker",
+        "widen_rerank_candidates",
+    }:
+        return verdict
+    if verdict.floor_violations != ["context_precision"]:
+        return verdict
+    if verdict.after_score <= verdict.before_score:
+        return verdict
+
+    before_low_rank = _label_count(before_report, "retrieval_low_rank")
+    after_low_rank = _label_count(after_report, "retrieval_low_rank")
+    if before_low_rank <= 0 or after_low_rank >= before_low_rank:
+        return verdict
+
+    return Verdict(
+        keep=True,
+        before_score=verdict.before_score,
+        after_score=verdict.after_score,
+        before_composite=verdict.before_composite,
+        after_composite=verdict.after_composite,
+        floor_violations=[],
+        reason=(
+            "reranker 적용 후 context_precision 단독 하한선 위반이 있었지만 "
+            f"종합점수 상승 {verdict.before_score:.3f}→{verdict.after_score:.3f}, "
+            f"retrieval_low_rank 감소 {before_low_rank}→{after_low_rank}로 유지"
+        ),
+        unjudgeable=verdict.unjudgeable,
+    )
+
+
+def _label_count(report: DiagnosticReport, label: str) -> int:
+    """리포트에서 특정 라벨의 확정 finding 개수를 센다."""
+    return sum(
+        1
+        for finding in report.findings
+        if finding.confirmed and finding.label == label
+    )
 
 
 def _reranker_execution_incomplete(

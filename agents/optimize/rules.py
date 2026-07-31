@@ -27,13 +27,17 @@ from __future__ import annotations
 # manual      : config로 못 고침, 사람 개입 필요 (D그룹)
 
 # ── config 키 주의 ────────────────────────────────────────────────
-# 현재 state.index_config 에는 chunk/embedding/search 설정과 reranker 기본값이 있다.
+# 현재 state.index_config 에는 chunk/embedding/search 설정과 reranker 기본값,
+# 그리고 생성(B그룹) 설정(temperature·grounding_strict 등)이 함께 담긴다.
 # Optimize 내부 patch는 flat key 대신 canonical path를 사용하고 config_mapper를 거친다.
 #
-# ⚠️ 더 큰 블로커: generation_config 필드 자체가 core/state.py의
-#   AgentDoctorState 에 아예 없음 (index_config만 존재). B그룹 처방은
-#   전부 이 필드가 생겨야 실행 가능 → schema/state 합의가 선행돼야 함.
-#   # TODO(state-스키마-확장): generation_config: dict 필드 추가 필요
+# ⚠️ 단일 축 규칙: optimizer는 한 처방이 config 키 하나만 바꾸게 강제한다(효과 귀속).
+#   patch에 키가 2개 이상이면 거부(multi_axis_search_space)되므로, 한 처방 = 한 키.
+#
+# 생성(B그룹 Tier1): generation.* 처방은 index_config의 생성 키로 매핑되고 generator가
+#   프롬프트/온도로 소비한다(Eval이 index_config를 generate_answer로 전달). 실제 프롬프트
+#   문구는 generator(_build_prompt)가 플래그로 조립한다 — rules는 스위치만 든다.
+#   Tier2(verifier/checklist/calculation 노드)·Tier3(모델 교체)는 소비처 부재로 draft.
 
 # swap_embedding_model이 바꿔 끼울 실제 임베딩 모델명.
 # TODO(embedding-후보-합의): 품질 기준으로 검증된 실제 업그레이드 후보가 아직 정해지지
@@ -53,7 +57,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     "retrieval_low_rank": {
         "group": "A",
 
-        "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,  # 숫자 튜닝 필요
         "target_metrics": ["context_precision"],  # gold는 검색됨, 순위 품질이 문제
@@ -78,24 +81,26 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "retrieval_lexical_mismatch": {
         "group": "A",
-        "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # dense가 놓친 gold를 검색결과에 포함시킴
         "prescriptions": [
             {
                 "id": "enable_hybrid",
-                "patch": {"use_hybrid": True},
-                "reindex": False,       
+                # canonical 경로로 하이브리드 검색을 켠다. flat "use_hybrid": True 를 쓰면
+                # config_mapper 가 retriever.search_type 으로 정규화하면서 값을 문자열 "hybrid"
+                # 와 비교(str(True).lower() != "hybrid")해 오히려 use_hybrid=False 로 꺼버렸다.
+                # 값은 반드시 "hybrid"/"dense" 문자열이어야 매핑이 올바로 켠다.
+                "patch": {"retriever.search_type": "hybrid"},
+                "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # NOTE: baseline이 이미 hybrid면 발생 가능성 낮음. naive(dense-only) MVP 전용.
+        # NOTE: baseline이 이미 hybrid면 후보가 no-op으로 필터돼 발동하지 않는다(dense-only 전용).
     },
 
     "retrieval_semantic_mismatch": {
         "group": "A",
-        "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # dense·BM25 둘 다 놓친 gold를 검색되게
@@ -135,22 +140,33 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "cost": None,           # 숫자 튜닝 필요
                 "applies_when": {"topic_cluster": ["none"]},
             },
+            # 청킹 전략 교체 case 1 — 상급 전략 2개를 순서 후보로 두고 Eval이 실측 채택한다.
+            # 어느 상급 전략이 나은지는 코퍼스 타입(평문 vs 마크다운 구조) 의존이라 하나로
+            # 못 박지 않는다. 진단(경계에서 의미 희석)에 직결된 recursive_sentence를 먼저,
+            # 구조형 코퍼스용 markdown_recursive를 다음 후보로 둔다. baseline과 같은 값은
+            # no-op 필터가 자동 제외한다(예: 이미 markdown_recursive면 그 후보만 스킵).
             {
-                # 청킹 전략 교체 case 1에 해당 (초안 누락분 보강)
-                "id": "switch_chunking_strategy",
-                "patch": {"chunking_strategy": "recursive_sentence"},
+                "id": "switch_to_recursive_sentence",
+                "patch": {"chunker.strategy": "recursive_sentence"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
                 "applies_when": {"topic_cluster": ["none"]},
-                # NOTE: chunking_context_mismatch와 동일 처방(Case1: 청크 경계 의미 희석).
-                # TODO(index-합의)  chunking_strategy 필드는 index_config 합의 대기.  
+                # Index가 recursive_sentence 전략을 CHUNK_STRATEGIES에 등록해 실행 가능하다
+                # (chunker.strategy → chunk_strategy 매핑, chunking_strategy capability=True).
+            },
+            {
+                "id": "switch_to_markdown_recursive",
+                "patch": {"chunker.strategy": "markdown_recursive"},
+                "reindex": True,
+                "cost": None,           # 숫자 튜닝 필요
+                "applies_when": {"topic_cluster": ["none"]},
+                # 구조형(마크다운) 코퍼스면 섹션·문단 보존이 검색에 더 유리할 수 있다.
             },
         ],
     },
 
     "retrieval_missing_gold": {
         "group": "A",
-        "assigned": "이승준",
         "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 후보에 아예 없는 gold를 가져오게
@@ -188,7 +204,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "retrieval_incomplete_enumeration": {
         "group": "A",
-        "assigned": "이승준",
         # dynamic_top_k 하나가 실행 가능해져 ready 로 승격(나머지 2개는 여전히 스키마 미정).
         # top_k 는 STATE_MAPPABLE_PATHS 에 있고 Eval 이 index_config["top_k"] 를 실제로
         # 읽어 검색에 쓴다. mmr/adaptive_retrieval 은 매핑 불가라 optimizer 가 후보
@@ -206,10 +221,11 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
             {
                 # 관련성만이 아니라 다양성까지 고려해 top-k 안 쏠림을 줄임
                 "id": "enable_mmr",
-                "patch": {"mmr": True},
+                "patch": {"retriever.mmr": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                # BLOCKER: mmr 필드가 index_config에 없음.  # TODO(index-합의)
+                # 공통 Retriever가 use_mmr로 후보풀을 MMR 재정렬해 실행 가능하다
+                # (retriever.mmr → use_mmr 매핑, mmr capability=True).
             },
             {
                 # top-k 고정 대신, 검색 도중 "더 필요한지" 판단해 반복 검색
@@ -227,7 +243,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "retrieval_missing_bridge_dependency": {
         "group": "A",
-        "assigned": "권성우",
         "status": "draft",              # multi-hop query rewrite / max_hops 스키마 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 미검색된 hop2 gold를 가져오게
@@ -260,7 +275,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "chunking_context_mismatch": {
         "group": "A",
-        "assigned": "권성우",
         # gold span/청크 절대좌표로 경계 분할을 확정하고 overlap 후보를
         # 사전검증할 수 있으므로 실행 가능한 라벨로 승격한다.
         "status": "ready",
@@ -281,20 +295,28 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "reindex": True,
                 "cost": None,
             },
+            # 청킹 전략 교체 — 상급 전략 2개를 순서 후보로 두고 Eval이 실측 채택.
+            # recursive_sentence(문장 보존, 경계 잘림 직결 처방) 먼저, markdown_recursive
+            # (구조형 코퍼스용) 다음. baseline과 같은 값은 no-op 필터가 자동 제외한다.
             {
-                "id": "switch_chunking_strategy",
-                "patch": {"chunking_strategy": "recursive_sentence"},
+                "id": "switch_to_recursive_sentence",
+                "patch": {"chunker.strategy": "recursive_sentence"},
+                "reindex": True,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "switch_to_markdown_recursive",
+                "patch": {"chunker.strategy": "markdown_recursive"},
                 "reindex": True,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # NOTE: 앞의 두 처방은 현재 index_config로 실행 가능하다.
-        # chunking_strategy는 지원 경로 합의 전까지 mapper에서 제외된다.
+        # NOTE: 모든 처방이 현재 index_config로 실행 가능하다.
+        # (두 전략 모두 Index CHUNK_STRATEGIES에 등록됨 — chunker.strategy 매핑.)
     },
 
     "chunking_overchunking": {
         "group": "A",
-        "assigned": "권성우",
         # Eval 이 기하(span 길이 > 최장 청크)로 확정하고 planner 가 span 길이로 chunk_size 를
         # 근거화하므로 실행 가능한 라벨로 승격한다(chunking_context_mismatch 와 같은 기준).
         "status": "ready",
@@ -312,8 +334,12 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "chunking_underchunking": {
         "group": "A",
-        "assigned": "권성우",
-        "status": "draft",
+        # Eval이 확정 신호(gold 청크 내부 근거 밀도↓ + context_precision↓)로 발행하고
+        # (diagnose.chunking_underchunking, PR #55에서 confirmed=True로 승격), 유일 처방
+        # decrease_chunk_size가 chunk_size 경로로 실행 가능하므로 ready로 승격한다.
+        # NOTE: PR #55 병합 전(Eval이 아직 예비 발행)에는 planner가 f.confirmed=False로
+        #   안전하게 스킵하므로 forward-compatible하다(예비면 ready여도 발동하지 않음).
+        "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_precision"],  # 큰 청크에 섞인 무관 내용 → 유용성 개선
         "prescriptions": [
@@ -326,32 +352,41 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         ],
     },
 
-    "reranker_low_recall": {
-        "group": "A",
-        "assigned": "권성우",
-        "status": "draft",              # 이 튜닝 라벨과 threshold 소비 경로는 아직 없음
-        "diagnosis_confidence": None,   # 숫자 튜닝 필요
-        "target_metrics": ["context_recall"],  # 재랭커가 걸러낸 gold를 다시 살림
-        "prescriptions": [
-            {
-                "id": "widen_rerank_candidates",
-                "patch": {"rerank_candidates": "increase"},
-                "reindex": False,
-                "cost": None,           # 숫자 튜닝 필요
-            },
-            {
-                "id": "relax_reranker_threshold",
-                "patch": {"reranker_threshold": "decrease"},
-                "reindex": False,
-                "cost": None,           # 숫자 튜닝 필요
-            },
-        ],
-        # BLOCKER: Eval 라벨 생성과 reranker_threshold 소비 경로가 아직 없음.
-    },
+    # ── 폐기(보류) 라벨: reranker_low_recall ────────────────────────
+    # 2026-07-27 Eval팀 라벨 합의에서 도입하지 않기로 결정. 완전 삭제하지 않고
+    # 주석으로 남겨 근거를 보존한다(필요 시 아래 정의를 되살릴 수 있음).
+    # [이유] recall 은 retriever 단계 속성이고 리랭커는 후보 "재정렬"만 한다 →
+    #   후보 집합에 없는 gold 는 리랭커가 못 살린다. "리랭커가 gold 를 컷오프
+    #   아래로 밀어냈다(리랭킹 전>후 recall)"로 좁게 정의하고 pre/post delta 를
+    #   신호로 잡을 때만 성립하며, 그 외엔 retrieval_low_rank /
+    #   retrieval_incomplete_enumeration 과 처방이 겹쳐 이중 라벨링이 된다.
+    #   → 처방이 기존 라벨과 겹치면 새 라벨이 아니다(라벨 도입 원칙).
+    #
+    # "reranker_low_recall": {
+    #     "group": "A",
+    #     "assigned": "권성우",
+    #     "status": "draft",              # 이 튜닝 라벨과 threshold 소비 경로는 아직 없음
+    #     "diagnosis_confidence": None,   # 숫자 튜닝 필요
+    #     "target_metrics": ["context_recall"],  # 재랭커가 걸러낸 gold를 다시 살림
+    #     "prescriptions": [
+    #         {
+    #             "id": "widen_rerank_candidates",
+    #             "patch": {"rerank_candidates": "increase"},
+    #             "reindex": False,
+    #             "cost": None,           # 숫자 튜닝 필요
+    #         },
+    #         {
+    #             "id": "relax_reranker_threshold",
+    #             "patch": {"reranker_threshold": "decrease"},
+    #             "reindex": False,
+    #             "cost": None,           # 숫자 튜닝 필요
+    #         },
+    #     ],
+    #     # BLOCKER: Eval 라벨 생성과 reranker_threshold 소비 경로가 아직 없음.
+    # },
 
     "reranker_low_precision": {
         "group": "A",
-        "assigned": "권성우",
         "status": "draft",              # 모델 교체 후보와 threshold 소비 경로는 아직 없음
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_precision"],  # 재랭커가 상위로 올린 무관 청크 억제
@@ -380,49 +415,52 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_hallucination": {
         "group": "B",
-        "assigned": "이승준",
-        "status": "draft",              # 로직은 확정, generation_config 필드 부재로 블로킹
+        "status": "ready",              # 프롬프트/온도 플래그가 generator에 소비됨(Tier1)
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # context에 없는 내용 지어냄 → 근거성
         "prescriptions": [
             {
-                # MVP: temperature만 낮추는 게 제일 가벼움 (프롬프트 수정과 독립적인 레버)
+                # 온도만 낮추는 게 제일 가벼운 독립 레버. baseline이 0이면 no-op으로 필터.
                 "id": "lower_temperature",
-                "patch": {"temperature": "decrease"},
+                "patch": {"generation.temperature": "decrease"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
-                # MVP는 프롬프트 텍스트를 직접 패치값으로 사용.
-                # TODO(업그레이드): grounding_strict:true 같은 신호 방식으로 전환.
-                #   rules.py엔 "엄격 모드 on/off" 스위치만 남기고, 실제 프롬프트 문구는
-                #   Eval 구현이 결정하도록 분리 (use_hybrid/use_reranker와 같은 패턴).
-                "id": "strict_grounding_prompt",
-                "patch": {"system_prompt": "context에 없으면 모른다고 답하라",
-                          "require_citation": True},
+                # 근거가 없으면 지어내지 말고 강하게 기권하도록. (문구는 generator 소유,
+                # 여기선 스위치만 — grounding_strict는 기본 True라 abstention_strict가 실질 레버.)
+                "id": "strengthen_abstention",
+                "patch": {"generation.abstention_strict": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                # 근거 번호 인용 강제(기본 True라 대개 no-op이나, 꺼진 경우 복구용).
+                "id": "require_citation",
+                "patch": {"generation.require_citation": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
                 "id": "upgrade_generation_model",
-                "patch": {"generation_model": "upgrade"},  # 프롬프트로 안 되면 최후 수단
+                "patch": {"generation.model": "upgrade"},  # 프롬프트로 안 되면 최후 수단
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
+                # BLOCKER(Tier3): 검증된 교체 후보 없음 → capability generation_model=False.
             },
         ],
-        # BLOCKER: core/state.py 에 generation_config 필드 없음. 추가 전까지 draft.
     },
 
     "generation_partial_answer": {
         "group": "B",
-        "assigned": "이승준",
-        "status": "draft",
+        "status": "ready",              # completeness_mode 플래그가 generator에 소비됨(Tier1)
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["answer_relevancy"],  # 질문 요구 일부만 충족 → 완결성
         "prescriptions": [
             {
+                # 여러 항목·하위 질문에 빠짐없이 답하도록 유도(문구는 generator 소유).
                 "id": "completeness_prompt",
-                "patch": {"system_prompt": "모든 하위 질문에 빠짐없이 답하라"},
+                "patch": {"generation.completeness_mode": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
@@ -431,14 +469,13 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"answer_checklist_review": True},  # 답변 누락 점검 단계 추가
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
+                # BLOCKER(Tier2): 답변 점검 노드가 아직 없음(소비처 부재).
             },
         ],
-        # BLOCKER: generation_config 필드 없음.
     },
 
     "generation_contradiction": {
         "group": "B",
-        "assigned": "이승준",
         "status": "draft",              # 재실행형(LLM 재검증 패스), 실행 방식도 별도 확정 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # 청크 간 모순을 못 풀고 답변 → 근거성
@@ -456,70 +493,70 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_misinterpretation": {
         "group": "B",
-        "assigned": "이승준",
-        "status": "draft",
+        "status": "ready",              # restate_question 플래그가 generator에 소비됨(Tier1)
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["answer_relevancy"],  # 질문 조건 오독 → 질문 의도 반영도
         "prescriptions": [
             {
                 "id": "restate_question",
-                "patch": {"restate_question": True},  # 답변 전 질문 재진술 강제
+                "patch": {"generation.restate_question": True},  # 답변 전 질문 재진술 강제
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: generation_config 없음.
     },
 
     "generation_abstention_failure": {
         "group": "B",
-        "assigned": "권성우",
-        "status": "draft",              # generation_config 필드 합의 필요
+        "status": "ready",              # abstention_strict 플래그가 generator에 소비됨(Tier1)
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # 모른다고 해야 하는데 지어냄 → 근거성
         "prescriptions": [
             {
-                "id": "strengthen_abstention_prompt",
-                "patch": {"abstention_prompt": "strengthen", "grounding_strict": True},
+                "id": "strengthen_abstention",
+                "patch": {"generation.abstention_strict": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
                 "id": "require_citation",
-                "patch": {"require_citation": True},
+                "patch": {"generation.require_citation": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: generation_config 필드 없음.
     },
 
     "generation_parametric_overreliance": {
         "group": "B",
-        "assigned": "권성우",
-        "status": "draft",              # generation_config 필드 합의 필요
+        "status": "ready",              # abstention_strict 플래그가 generator에 소비됨(Tier1)
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # 맞았지만 context 근거 없음(파라미터 의존) → 근거성
         "prescriptions": [
             {
-                "id": "strict_grounding_prompt",
-                "patch": {"grounding_strict": True, "require_citation": True},
+                # 정답이라도 context 근거가 없으면 기권하도록 강화(파라미터 기억 의존 억제).
+                "id": "strengthen_abstention",
+                "patch": {"generation.abstention_strict": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
+                "id": "require_citation",
+                "patch": {"generation.require_citation": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
                 "id": "lower_temperature",
-                "patch": {"temperature": "decrease"},
+                "patch": {"generation.temperature": "decrease"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: generation_config 필드 없음.
     },
 
     "generation_numerical_error": {
         "group": "B",
-        "assigned": "권성우",
         "status": "draft",              # generation_config 필드 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["faithfulness"],  # 숫자 계산/집계 오류 → 원문 근거성
@@ -542,7 +579,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "generation_hop_binding_error": {
         "group": "B",
-        "assigned": "권성우",
         "status": "draft",              # multi-hop answer planning 스키마 합의 필요
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         # 각 fact는 근거 있어 faithfulness는 안 낮음 → 대신 결합 오류를 잡는
@@ -571,7 +607,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "too_long_context": {
         "group": "C",
-        "assigned": "이승준",
         "status": "ready",              # top_k 축소는 기존 키로 바로 실행 가능
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["noise_sensitivity"],  # 과다 context의 잡음에 답변이 흔들림
@@ -600,34 +635,52 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "lost_in_the_middle": {
         "group": "C",
-        "assigned": "권성우",
-        "status": "draft",              # context ordering 필드 합의 필요
+        # decrease_top_k 하나가 실행 가능해져 ready 로 승격(retrieval_incomplete_enumeration
+        # 과 동일 선례). context 재정렬(reorder_context_edges)은 정렬 서브시스템이 없어
+        # optimizer 가 후보 단계에서 자동으로 걸러내므로, 그 하나 때문에 라벨 전체를 막지 않는다.
+        "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_utilization"],  # 검색은 됐으나 중간 청크를 답변에 못 씀
         "prescriptions": [
             {
-                "id": "reorder_context_edges",
-                "patch": {"context_ordering": "most_relevant_edges"},
-                "reindex": False,
-                "cost": None,           # 숫자 튜닝 필요
-            },
-            {
+                # 검색 결과를 짧게 줄이면 "중간"에서 잃을 구간 자체가 줄어드는 정당한 완화책.
+                # top_k 는 STATE_MAPPABLE 이고 Eval 이 index_config["top_k"] 를 실제로 소비한다.
                 "id": "decrease_top_k",
                 "patch": {"top_k": "decrease"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
+            {
+                # 가장 관련도 높은 청크를 컨텍스트 양끝에 배치해 lost-in-the-middle 을 직접
+                # 완화하는 본래 처방. 컨텍스트 정렬 서브시스템 부재로 아직 막힘(후보로만 남김).
+                "id": "reorder_context_edges",
+                "patch": {"context_ordering": "most_relevant_edges"},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
         ],
-        # BLOCKER: context_ordering/top_k 필드가 현재 index_config에 없음.
+        # NOTE: reorder_context_edges 는 context_ordering 소비 경로가 없어 자동 필터된다.
     },
 
     "context_noise_interference": {
         "group": "C",
         "assigned": "권성우",
         "status": "ready",              # context_compression은 현재 index_config에 매핑됨
+        # enable_mmr 이 실행 가능해져 ready 로 승격. 다양성 재정렬은 중복·잡음 근접청크를
+        # 줄여 노이즈 오염을 완화하는 정당한 처방이다. noise_filter/conflict_prompt 는
+        # 소비 노드가 없어 optimizer 가 후보 단계에서 자동으로 걸러낸다.
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["noise_sensitivity"],  # 비-gold 상충 청크가 답변을 오염
         "prescriptions": [
+            {
+                # 관련성+다양성 균형으로 후보풀을 재정렬해 중복·잡음 청크 쏠림을 억제.
+                # 값 키는 A그룹과 통일한다 — flat "mmr":True 대신 canonical retriever.mmr.
+                # 공통 Retriever 가 use_mmr 로 소비해 실행 가능(retriever.mmr → use_mmr 매핑).
+                "id": "enable_mmr",
+                "patch": {"retriever.mmr": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
             {
                 "id": "context_compression",
                 "patch": {"context.compression.enabled": True},
@@ -641,54 +694,104 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
-                "id": "enable_mmr",
-                "patch": {"mmr": True},
-                "reindex": False,
-                "cost": None,           # 숫자 튜닝 필요
-            },
-            {
                 "id": "strict_conflict_prompt",
                 "patch": {"conflict_resolution_prompt": "prefer_high_confidence_evidence"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: noise_filter/mmr/generation_config 필드는 아직 없음.
+        # NOTE: noise_filter/conflict_resolution_prompt 는 소비 경로가 없어 자동 필터된다.
     },
 
     # ═══════════════════════════════════════════════════════════════
     #  D그룹 — 데이터 문제 (config로 처방 불가, 사람 개입)
     # ═══════════════════════════════════════════════════════════════
+    #
+    # [매뉴얼 처방 규약]
+    #   A/B/C 처방은 config patch(자동 적용)지만, D그룹 처방은 사람이 수행할
+    #   "매뉴얼 스텝"이다. 각 항목은 patch 대신 다음 필드를 든다:
+    #     - manual: True   → planner/optimizer가 절대 자동 적용하지 않는다는 표식.
+    #                        (status="manual" 이라 is_actionable 도 계속 False)
+    #     - action        : 사용자가 할 한 줄 조치(명령형).
+    #     - detail        : 어떻게 하는지 구체 설명.
+    #     - show          : "어디가 문제인지"를 사용자에게 보여줄 때 쓸 finding/probe
+    #                       필드 목록(reporter가 렌더). 실제 배선은 Eval의 finding.metadata
+    #                       계약 확정(PR #55, missing_gold_ids 등) 후 붙인다 — 그전엔
+    #                       reporter가 manual_action 헤드라인만 읽는다(동작 불변).
+    #   manual_action 은 라벨 전체를 한 줄로 요약한 헤드라인으로 계속 유지한다
+    #   (스텝들은 그 아래에 번호로 렌더될 예정).
 
     "corpus_gap": {
         "group": "D",
-        "assigned": "이승준",
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
-        "prescriptions": [],            # config 처방 없음. 튜닝 루프에서 제외, 리포트만.
-        # reporter가 사용자에게 보여줄 조치 문구. (config로 못 고치는 D그룹 전용)
+        # config로 못 고침 → 사람이 수행할 매뉴얼 스텝. planner는 이 라벨을 manual로
+        # 분리해 reporter로만 넘긴다(자동처방 루프에서 제외).
+        "prescriptions": [
+            {
+                "id": "locate_missing_evidence",
+                "manual": True,
+                "action": "코퍼스에서 빠진 근거를 특정",
+                "detail": "해당 질문의 정답 근거가 담긴 원본 문서 중 코퍼스에 없는 것을 확인한다. "
+                          "누락 gold의 원본 문서(gold_doc_id)와 질문을 함께 제시한다.",
+                # reporter가 "어디가 문제인지" 보여줄 때 쓸 위치정보(배선은 Eval 계약 확정 후):
+                "show": ["question", "missing_gold_ids", "gold_doc_id", "corpus_membership_ratio"],
+            },
+            {
+                "id": "collect_and_reindex",
+                "manual": True,
+                "action": "그 문서를 수집·추가한 뒤 재색인",
+                "detail": "특정된 주제/문서를 소스에서 추가 수집해 코퍼스에 넣고 재색인한 뒤 "
+                          "다시 진단을 실행한다.",
+            },
+        ],
+        # reporter가 사용자에게 보여줄 헤드라인. (config로 못 고치는 D그룹 전용)
         "manual_action": "질문에 답할 근거 문서가 코퍼스에 없습니다. 해당 주제를 다루는 문서를 추가로 수집·인덱싱해 주세요.",
-        # 처방: 사용자에게 관련 문서 추가 수집 요청. Optimize 우회.
     },
 
     "corpus_gap_partial_hop": {
         "group": "D",
-        "assigned": "이승준",
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
-        "prescriptions": [],
+        "prescriptions": [
+            {
+                "id": "locate_missing_hop",
+                "manual": True,
+                "action": "끊긴 hop의 근거를 특정",
+                "detail": "다단계 질문에서 어느 hop의 근거가 코퍼스에 없는지 특정한다. "
+                          "누락 hop의 원본 문서(gold_spans[i].doc_id)와 질문을 함께 제시한다.",
+                # 멀티홉은 hop별 위치(gold_spans)로 어느 단계가 빠졌는지까지 보여준다:
+                "show": ["question", "missing_gold_ids", "gold_spans", "corpus_membership_ratio"],
+            },
+            {
+                "id": "collect_bridge_docs",
+                "manual": True,
+                "action": "빠진 hop 문서를 수집·추가한 뒤 재색인",
+                "detail": "특정된 hop을 뒷받침하는 문서를 추가 수집해 코퍼스에 넣고 재색인한 뒤 "
+                          "다시 진단을 실행한다.",
+            },
+        ],
         "manual_action": "다단계(multi-hop) 질문의 중간 단계를 뒷받침하는 문서가 일부 누락됐습니다. 빠진 hop과 관련된 문서를 추가로 수집해 주세요.",
-        # corpus_gap과 동일 처리 + 어느 hop이 빠졌는지 리포트에 구체적으로 명시.
     },
 
     "bad_gold_answer": {
         "group": "D",
-        "assigned": "권성우",
         "status": "manual",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
-        "prescriptions": [],
-        "manual_action": "RAG 파이프라인이 아니라 평가셋(정답) 문제로 보입니다. 해당 질문의 ground_truth를 검수·수정하거나 평가셋에서 제외해 주세요.",
-        # RAG pipeline 결함이 아니라 평가셋 문제. Probe ground_truth 수정/제거 또는 사람 검수 큐로 전달.
+        # RAG 결함이 아니라 평가셋(정답) 문제 → 해당 probe 자체를 재생성하도록 요청한다.
+        "prescriptions": [
+            {
+                "id": "regenerate_probe",
+                "manual": True,
+                "action": "이 라벨이 붙은 probe를 재생성",
+                "detail": "affected_probes에 해당하는 각 probe의 질문·정답(ground_truth)을 "
+                          "다시 생성하거나 검수해 교체한다. 재생성으로도 타당한 정답을 얻지 "
+                          "못하면 해당 probe를 평가셋에서 제외한다.",
+                # 어느 probe를 재생성할지 사용자에게 명시:
+                "show": ["probe_id", "question", "ground_truth"],
+            },
+        ],
+        "manual_action": "RAG 파이프라인이 아니라 평가셋(정답) 문제로 보입니다. 해당 probe를 재생성(질문·정답 재작성)하거나 평가셋에서 제외해 주세요.",
     },
 }
 
@@ -714,8 +817,3 @@ def is_manual(label: str) -> bool:
     """D그룹처럼 config 처방 불가 → 사람 개입 라벨인지."""
     rule = LABEL_TO_PRESCRIPTIONS.get(label)
     return bool(rule) and rule.get("status") == "manual"
-
-
-def my_labels(name: str = "이승준") -> list[str]:
-    """특정 담당자가 맡은 라벨 목록. 진행상황 체크용."""
-    return [k for k, v in LABEL_TO_PRESCRIPTIONS.items() if v.get("assigned") == name]
