@@ -13,6 +13,7 @@ from typing import Any
 
 from core.llm_clients import openai_chat
 from core.schema import Chunk
+from core.state import DEFAULT_GRAPH_LLM_MODEL
 
 _STOPWORDS = {
     "그리고", "그러나", "대한", "위한", "있는", "한다", "에서", "으로",
@@ -81,11 +82,11 @@ def _extract(chunk: Chunk, config: dict) -> tuple[list[str], list[dict], str]:
     mode = config.get("graph_extraction", "auto")
     if mode in {"auto", "llm"} and os.getenv("OPENAI_API_KEY"):
         if mode == "auto":
-            _notify_llm_extraction_once(config.get("graph_llm_model", "gpt-4.1-mini"))
+            _notify_llm_extraction_once(config.get("graph_llm_model", DEFAULT_GRAPH_LLM_MODEL))
         try:
             entities, relations = _llm_entities(
                 chunk.text,
-                config.get("graph_llm_model", "gpt-4.1-mini"),
+                config.get("graph_llm_model", DEFAULT_GRAPH_LLM_MODEL),
             )
             return entities, relations, "llm"
         except Exception as exc:
@@ -103,7 +104,7 @@ def _extraction_ctx(config: dict) -> str:
     # entity 추출 결과에 영향을 주는 조건: 요청 모드, LLM 모델, 키 존재 여부.
     mode = config.get("graph_extraction", "auto")
     llm_on = 1 if (mode in {"auto", "llm"} and os.getenv("OPENAI_API_KEY")) else 0
-    return f"{mode}:{config.get('graph_llm_model', 'gpt-4.1-mini')}:{llm_on}"
+    return f"{mode}:{config.get('graph_llm_model', DEFAULT_GRAPH_LLM_MODEL)}:{llm_on}"
 
 
 def _graph_signature(chunks: list[Chunk], config: dict) -> str:

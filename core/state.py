@@ -17,6 +17,11 @@ from core.schema import (
 )
 
 
+# 그래프 entity 추출 기본 모델. graph_index 가 config 미지정 시 폴백으로 같이 쓴다
+# (안내 로그가 실제 모델과 어긋나지 않도록 기본값 출처를 하나로 둔다).
+DEFAULT_GRAPH_LLM_MODEL = "gpt-4.1-mini"
+
+
 @dataclass
 class AgentDoctorState:
     """
@@ -111,7 +116,7 @@ class AgentDoctorState:
         },
         "graph_enabled": True,
         "graph_extraction": "auto",
-        "graph_llm_model": "gpt-4.1-mini",
+        "graph_llm_model": DEFAULT_GRAPH_LLM_MODEL,
         "graph_similarity_threshold": 0.9,
         "graph_output_dir": "output/index_graph",
         "corpus_visualization_enabled": True,

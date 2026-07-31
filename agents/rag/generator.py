@@ -237,17 +237,20 @@ def _warn_unknown_provider_once(selected: str) -> None:
 # auto 는 OpenAI 를 먼저 시도한다 — 다른 용도로 OPENAI_API_KEY 를 넣으면 Gemini 로 돌던
 # 답변 생성이 말없이 OpenAI 로 옮겨간다. 그 전환만 프로세스당 한 번 알린다
 # (질문마다 찍으면 Eval/Optimize 병렬 실행에서 수백 줄이 된다).
+# 시도 시점이 아니라 첫 성공 직후에 찍는다 — 만료된 키면 실제로는 Gemini 로
+# 폴백하는데 "OpenAI 로 답했다"는 줄만 남는다.
 _notified_auto_openai = False
+_auto_openai_notice_lock = threading.Lock()
 
 
-def _notify_auto_openai_once(model: str | None) -> None:
+def _notify_auto_openai_once() -> None:
     global _notified_auto_openai
-    with _warned_providers_lock:
+    with _auto_openai_notice_lock:
         if _notified_auto_openai:
             return
         _notified_auto_openai = True
-    print(f"[RAG] auto → OpenAI 선택({model or os.getenv('RAG_OPENAI_MODEL', 'gpt-4o')}) "
-          f"— OPENAI_API_KEY 감지. 고정하려면 RAG_LLM_PROVIDER=gemini|openai|github")
+    print("[RAG] auto → OpenAI 로 답변 생성 중(OPENAI_API_KEY 감지). "
+          "고정하려면 RAG_LLM_PROVIDER=gemini|openai|github")
 
 
 # LLM provider를 선택 -> 실제 provider별 생성 함수를 호출
@@ -288,12 +291,12 @@ def _llm_generate(
             # 조용히 추출식 답변으로 대체돼 평가 결과가 왜곡된다. 그 외 예외는 즉시
             # 다음 provider 폴백(기존 동작).
             if name == "openai" and os.getenv("OPENAI_API_KEY"):
-                if selected == "auto":
-                    _notify_auto_openai_once(selected_model)
                 result = run_with_retry(
                     lambda: _openai_generate(system, user, model=selected_model, config=config),
                     "생성", tag="RAG")
                 if result:
+                    if selected == "auto":
+                        _notify_auto_openai_once()
                     return result
             if name == "gemini" and os.getenv("GEMINI_API_KEY"):
                 result = run_with_retry(

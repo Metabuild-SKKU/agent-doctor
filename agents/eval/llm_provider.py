@@ -26,6 +26,8 @@ from core.llm_retry import run_with_retry
 
 
 _KNOWN_PROVIDERS = {"openai", "gemini", "github"}
+# RAG 쪽(_llm_generate)이 받아주는 철자 — 같은 값을 여기 옮겨 적어도 동작하게 맞춘다.
+_PROVIDER_ALIASES = {"github_models": "github"}
 # 이미 경고한 미지원 provider 값(Eval 은 스레드로 병렬 호출하므로 lock 으로 보호).
 _warned_providers: set[str] = set()
 _warned_providers_lock = threading.Lock()
@@ -47,6 +49,7 @@ def _provider() -> str:
     raw = os.getenv("EVAL_LLM_PROVIDER", "openai").strip().lower()
     if not raw:  # 빈 값은 "기본값" 의사표시로 보고 경고하지 않는다.
         return "openai"
+    raw = _PROVIDER_ALIASES.get(raw, raw)
     if raw not in _KNOWN_PROVIDERS:
         _warn_unknown_provider_once(raw)
         return "openai"
