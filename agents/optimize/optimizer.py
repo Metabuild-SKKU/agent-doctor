@@ -44,6 +44,8 @@ BackendRunner = Callable[[OptimizationRequest], Any]
 # optimizer가 후보값을 실험하기 전에 적용하는 안전 범위다.
 DEFAULT_CONSTRAINTS: dict[str, dict[str, Any]] = {
     "retriever.top_k": {"min": 1, "max": 20},
+    # 한쪽 채널을 0 으로 죽이면 하이브리드가 아니게 된다 — 양끝을 남긴다.
+    "retriever.hybrid_dense_weight": {"min": 0.1, "max": 0.9},
     "reranker.candidate_count": {"min": 4, "max": 100},
     "chunker.chunk_size": {"min": 200, "max": 1500},
     "chunker.chunk_overlap": {"min": 0, "max": 300},
@@ -59,6 +61,10 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
     # (Index도 청크 metadata에 기록한다 — 소비처가 확인돼 허용으로 전환.)
     "retriever.top_k": True,
     "hybrid_search": False,
+    # 공통 Retriever가 hybrid_dense_weight를 hybrid_search의 융합 가중치로 그대로 쓴다
+    # (agents/rag/retriever.py). hybrid_search 자체를 켜고 끄는 것과 달리 소비처가 확인돼
+    # 허용으로 둔다 — use_hybrid가 꺼져 있으면 값이 안 읽힐 뿐 파이프라인이 깨지지 않는다.
+    "hybrid_fusion_weight": True,
     "chunking": True,
     "embedding_model": False,
     # 공통 Retriever가 Eval과 Serve에서 같은 설정으로 CrossEncoder를 실행한다.
@@ -72,6 +78,7 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
 PATH_CAPABILITIES: dict[str, str] = {
     "retriever.top_k": "retriever.top_k",
     "retriever.search_type": "hybrid_search",
+    "retriever.hybrid_dense_weight": "hybrid_fusion_weight",
     "reranker.enabled": "reranker",
     "reranker.candidate_count": "reranker",
     "context.compression.enabled": "context_compression",
@@ -87,6 +94,7 @@ PATH_CAPABILITIES: dict[str, str] = {
 STATE_MAPPABLE_PATHS: set[str] = {
     "retriever.top_k",
     "retriever.search_type",
+    "retriever.hybrid_dense_weight",
     "reranker.enabled",
     "reranker.candidate_count",
     "chunker.chunk_size",
@@ -101,6 +109,8 @@ BACKEND_SUPPORTED_PATHS: dict[str, set[str]] = {
     "rules": set(STATE_MAPPABLE_PATHS),
     "internal": {
         "retriever.top_k",
+        # 융합 가중치도 후보 여러 개를 훑는 수치 축이라 internal sweep 대상이다.
+        "retriever.hybrid_dense_weight",
         "chunker.chunk_size",
         "chunker.chunk_overlap",
     },

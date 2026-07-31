@@ -23,7 +23,6 @@ CANONICAL_INDEX_CONFIG_KEYS: dict[str, str] = {
     # 융합 가중치. 필드는 이미 state.index_config 에 있고 retriever 가 소비하지만
     # 표준 경로가 없어 Optimize 가 건드리지 못했다(retrieval_rank_fusion_loss 처방).
     "retriever.hybrid_dense_weight": "hybrid_dense_weight",
-    "retriever.deduplicate": "deduplicate",
     "reranker.enabled": "use_reranker",
     "reranker.candidate_count": "rerank_candidates",
     "chunker.chunk_size": "chunk_size",
@@ -42,7 +41,6 @@ CONFIG_READ_PATHS: dict[str, tuple[str, ...]] = {
         "retriever.hybrid_dense_weight",
         "hybrid_dense_weight",
     ),
-    "retriever.deduplicate": ("retriever.deduplicate", "deduplicate"),
     "retriever.search_type": ("retriever.search_type", "search_type", "use_hybrid"),
     "reranker.enabled": ("reranker.enabled", "use_reranker"),
     "reranker.candidate_count": (

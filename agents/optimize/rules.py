@@ -108,16 +108,12 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     "retrieval_duplicate_crowding": {
         "group": "A",
         "assigned": "이승준",
-        "status": "ready",              # deduplicate 는 index_config 에 이미 있음
+        # 진단은 확정으로 나오지만 지금 config 에 이 원인을 고칠 레버가 없다 → draft.
+        # (라벨은 리포트에 남아 "리랭커를 켜도 안 낫는다"는 사실을 알려준다.)
+        "status": "draft",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 중복이 먹던 슬롯을 gold에 돌려줌
         "prescriptions": [
-            {
-                "id": "enable_deduplicate",
-                "patch": {"deduplicate": True},
-                "reindex": True,        # 청크 집합 자체가 바뀜
-                "cost": None,           # 숫자 튜닝 필요
-            },
             {
                 # 관련성만이 아니라 다양성까지 고려해 상위 슬롯 쏠림을 줄인다.
                 "id": "enable_mmr",
@@ -131,6 +127,10 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         # NOTE: 리랭커는 이 라벨의 처방이 아니다 — cross-encoder 는 중복 청크를 상위에 그대로
         #   둔다(각각이 질문과 실제로 관련 있어 점수가 높다). 리랭커를 처방하면 실패 후
         #   blacklist 만 쌓인다.
+        # NOTE: index_config["deduplicate"] 도 처방이 아니다 — 기본값이 이미 True 인 데다
+        #   본문 해시 완전일치 제거(agents/index/agent.py)라, 이 라벨이 잡는 near-duplicate
+        #   (문자 3-gram Jaccard 0.8 이상)는 애초에 그 그물에 안 걸린다.
+        #   즉 patch 를 내도 config 는 그대로고 iteration 만 소모한다.
     },
 
     "retrieval_rerank_candidate_miss": {

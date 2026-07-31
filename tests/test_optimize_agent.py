@@ -77,7 +77,7 @@ except ImportError:  # pragma: no cover
 import graph
 from core.schema import DiagnosticReport, Finding
 from core.state import AgentDoctorState
-from agents.optimize import agent, history
+from agents.optimize import agent, history, rules
 from agents.optimize.schemas import (
     ConfigPatch,
     OptimizationHistoryItem,
@@ -504,6 +504,85 @@ class OptimizeAgentForwardTest(unittest.TestCase):
             out.optimization_history[-1].selected_prescription_id,
             "widen_rerank_candidates",
         )
+
+    def _rank_cause_state(self, label, metadata=None, config=None):
+        finding = Finding(
+            finding_id=f"p1:{label}", type="retrieval_failure", severity="warning",
+            description=label, label=label, confirmed=True,
+            affected_probes=["p1"], metadata=dict(metadata or {}),
+        )
+        index_config = {
+            "top_k": 5, "chunk_size": 512, "chunk_overlap": 50,
+            "use_hybrid": True, "hybrid_dense_weight": 0.7,
+            "use_reranker": False, "rerank_candidates": 20,
+            "rerank_candidate_policy": {"max_candidates": 50},
+        }
+        index_config.update(config or {})
+        state = make_state(overall=30.0, label=label)
+        state.report.findings = [finding]
+        state.index_config = index_config
+        state.runtime_capabilities = {
+            "reranker": {
+                "status": "verified",
+                "model": "BAAI/bge-reranker-v2-m3",
+                "retryable": False,
+                "reason": None,
+            }
+        }
+        return state
+
+    def test_rank_cause_prescriptions_reach_index_config(self):
+        """순위 원인 4형제의 처방이 실제 config 변경까지 도달하는지 end-to-end 고정.
+
+        rules.py 에 처방을 적어도 optimizer 의 경로 레지스트리
+        (STATE_MAPPABLE_PATHS / BACKEND_SUPPORTED_PATHS / PATH_CAPABILITIES)에 빠져 있으면
+        unsupported_backend_path 로 조용히 건너뛰고 다음 후보가 대신 적용된다. 라벨별
+        '무엇이 바뀌어야 하는가'를 여기서 못박아 그 누락을 드러낸다.
+        """
+        cases = [
+            # (라벨, finding metadata, 시작 config, 기대 처방, 기대 config 변화)
+            ("retrieval_low_rank", {}, {},
+             "enable_reranker", ("use_reranker", True)),
+            ("retrieval_rank_fusion_loss", {"favored_channel": "lexical"}, {},
+             "rebalance_hybrid_weight", ("hybrid_dense_weight", 0.6)),
+            ("retrieval_rank_fusion_loss", {"favored_channel": "dense"}, {},
+             "rebalance_hybrid_weight", ("hybrid_dense_weight", 0.8)),
+            ("retrieval_rerank_candidate_miss", {"gold_ranks": {"g": 34}},
+             {"use_reranker": True},
+             "widen_rerank_candidates", ("rerank_candidates", 34)),
+            ("retrieval_reranker_demotion", {"pre_rerank_ranks": {"g": 12}},
+             {"use_reranker": True},
+             "disable_reranker", ("use_reranker", False)),
+        ]
+        for label, metadata, config, expected_id, (key, value) in cases:
+            with self.subTest(label=label, metadata=metadata):
+                out = agent.run(self._rank_cause_state(label, metadata, config))
+
+                self.assertEqual(out.status, "applied")
+                self.assertEqual(
+                    out.optimization_history[-1].selected_prescription_id,
+                    expected_id,
+                )
+                self.assertEqual(out.index_config[key], value)
+
+    def test_duplicate_crowding_is_reported_without_prescription(self):
+        """중복 밀림은 지금 config 에 레버가 없다 — 리랭커를 억지로 처방하지 않고 미룬다.
+
+        deduplicate 는 기본값이 이미 True 인 본문 해시 완전일치 제거라 near-duplicate 를
+        못 걸러낸다(= patch 를 내도 config 가 안 바뀐다). mmr 필드는 아직 없다.
+        """
+        state = self._rank_cause_state(
+            "retrieval_duplicate_crowding",
+            {"crowding_analysis": {"g": {"rank": 4, "redundant": 2,
+                                         "projected_rank": 2}}},
+        )
+        before = dict(state.index_config)
+
+        out = agent.run(state)
+
+        self.assertEqual(out.status, "skipped")
+        self.assertEqual(out.index_config, before)
+        self.assertFalse(rules.is_actionable("retrieval_duplicate_crowding"))
 
     def test_low_rank_does_not_widen_candidate_count(self):
         """low_rank 는 'gold 가 후보창 안'이라는 신호라 창 확대가 처방이 아니다.

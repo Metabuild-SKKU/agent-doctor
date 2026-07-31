@@ -246,7 +246,7 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | 잃은 단계 | 라벨 | 처방 |
 |---|---|---|
 | 융합 | `retrieval_rank_fusion_loss` | `hybrid_dense_weight` 를 우세 채널 쪽으로 |
-| 경쟁 구성 | `retrieval_duplicate_crowding` | 중복 제거 / MMR (리랭커로는 안 고쳐진다) |
+| 경쟁 구성 | `retrieval_duplicate_crowding` | MMR (리랭커로는 안 고쳐진다 — 레버 미구현이라 `draft`) |
 | 후보창 | `retrieval_rerank_candidate_miss` | `rerank_candidates` 확대 |
 | 리랭크 | `retrieval_reranker_demotion` | 리랭커 되돌리기 / 모델 교체 |
 | (잔여) | `retrieval_low_rank` | `use_reranker` 켜기 |

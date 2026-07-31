@@ -82,7 +82,7 @@ Planner는 최상위 failure label을 기준으로 조정 가능한 config 후�
 | --- | --- | --- |
 | `retrieval_low_rank` | reranker 도입 | `use_reranker` |
 | `retrieval_rank_fusion_loss` | 융합 가중치 재조정 | `hybrid_dense_weight` (우세 채널은 Eval 실측) |
-| `retrieval_duplicate_crowding` | 중복 억제 | `deduplicate`, `mmr`(미구현) |
+| `retrieval_duplicate_crowding` | 중복 억제 | `mmr`(미구현 → draft, 리포트만) |
 | `retrieval_rerank_candidate_miss` | 후보창 확대 | `rerank_candidates` (목표값은 gold 순위 무릎) |
 | `retrieval_reranker_demotion` | reranker 되돌리기/교체 | `use_reranker=False`, `reranker_model` |
 | `retrieval_lexical_mismatch` | hybrid search 적용 | `use_hybrid`, `retriever_type`, `bm25_top_k`, `rrf_weight` |
