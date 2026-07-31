@@ -277,7 +277,9 @@ def _rule_means(records: list[EvalRecord]) -> dict:
     # 판정에 쓰이는 값은 f1 단독이 아니라 혼합 점수(answer_score)다 — 의미축이 측정된 실행에서는
     # 그 평균도 함께 남긴다. f1 만 보면 '판정 기준'과 '표시 숫자'가 어긋난다.
     answer_scores = [r.answer_score for r in gt if r.answer_semantic is not None]
-    oracles = [r.oracle_f1 for r in gt]
+    # 오라클은 실패 probe 에만 생성되므로(agent.py STEP3) 실측된 record 만 평균 낸다 —
+    # 미측정분을 0 으로 섞으면 성공이 많을수록 평균이 내려가는 거꾸로 된 지표가 된다.
+    oracles = [r.oracle_f1 for r in gt if r.oracle_answer is not None]
     ems = [1.0 if r.exact_match else 0.0 for r in gt]
     out = {}
     if recalls:
@@ -290,6 +292,7 @@ def _rule_means(records: list[EvalRecord]) -> dict:
         out["mean_answer_score"] = sum(answer_scores) / len(answer_scores)
     if oracles:
         out["mean_oracle_f1"] = sum(oracles) / len(oracles)
+        out["oracle_measured"] = len(oracles)   # mean_oracle_f1·oracle_accuracy 의 실측 표본 수
     return out
 
 
@@ -316,11 +319,21 @@ def _oracle_accuracy(records: list[EvalRecord]) -> float | None:
 
     판정은 diagnose._oracle_ok 을 그대로 쓴다 — lexical(oracle_f1)뿐 아니라 DEEP 에서
     측정된 RAGAS answer_correctness 강등까지 반영해야, '진단은 oracle 실패인데 리포트엔
-    성공으로 집계'되는 어긋남이 생기지 않는다."""
+    성공으로 집계'되는 어긋남이 생기지 않는다.
+
+    오라클 답변은 실패 probe 에만 생성하므로(agent.py STEP3), 미측정 성공 probe 는 통과로
+    추론한다 — 성공의 전제가 recall=1 이라 gold 는 이미 실제 context 안에 있었고 그 답이
+    근거까지 맞았다. 분모는 그대로 gt 전체라 이전 실행과 비교 가능하고, 실측 표본 수는
+    scores 의 oracle_measured 로 남는다.
+
+    성공 판정을 _is_success 로 다시 묻지 않고 findings 로 읽는 이유: _is_success 는
+    _faith/_abstention_judged 를 타서 LLM 을 부를 수 있는데, 리포트는 LLM 을 안 부른다.
+    'findings 가 비었으면 성공' 은 diagnose 의 성공 게이트가 세우는 보장이다."""
     gt = [r for r in records if r.probe.ground_truth]
     if not gt:
         return None
-    passed = sum(1 for r in gt if _oracle_ok(r))
+    passed = sum(1 for r in gt
+                 if _oracle_ok(r) or (r.oracle_answer is None and not r.findings))
     return passed / len(gt)
 
 
