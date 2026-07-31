@@ -319,6 +319,37 @@ class RankFusionLossTest(_DiagnoseTestBase):
         self._with(retrieve=["n1", "n2", "n3", "x", "g_b"], dense=["g_b"])
         self.assertIsNone(diagnose.retrieval_low_rank(self._rec()))
 
+    def test_fires_beyond_reachable_window(self):
+        """융합 가중치 처방은 리랭커와 무관하므로 도달 가능 창을 적용하지 않는다.
+
+        창의 논거는 '리랭커가 닿는 범위'다. dense 1위 / 융합 60위 같은 극단적 융합 손실에
+        창을 걸면 이 라벨이 침묵하고, semantic_mismatch 가 'dense 가 놓쳤다'는 거짓 전제로
+        임베딩 교체를 처방하게 된다(BM25 가 잡으면 이미 켜진 하이브리드를 또 처방).
+        """
+        deep = [f"n{i}" for i in range(59)] + ["g_b"]     # 융합 60위 (창=50 밖)
+        self._with(retrieve=deep, dense=["g_b"], keyword=[])
+        rec = self._rec()
+
+        self.assertTrue(diagnose.retrieval_rank_fusion_loss(rec).confirmed)
+        self.assertIsNone(diagnose.retrieval_semantic_mismatch(rec))
+        self.assertIsNone(diagnose.retrieval_lexical_mismatch(rec))
+
+    def test_duplicate_crowding_yields_to_fusion_loss(self):
+        """둘 다 성립할 수 있는 유일한 쌍 — 융합이 앞단이라 뿌리다(순서가 아니라 신호로)."""
+        same = "완전히 동일한 안내 문구가 반복되는 청크입니다"
+        chunks = [
+            Chunk("n1", "docA", same, char_span=(0, 40)),
+            Chunk("n2", "docB", same, char_span=(0, 40)),
+            Chunk("n3", "docC", same, char_span=(0, 40)),
+            Chunk("g_b", "docG", "정답 근거가 담긴 고유 청크", char_span=(0, 20)),
+        ]
+        self._with(retrieve=["n1", "n2", "n3", "g_b"], dense=["g_b"], chunks=chunks)
+        rec = _record(("g_a", "g_b"), ("n1", "n2"), recall=0.0,
+                      retrieval_details=self.HYBRID)
+
+        self.assertTrue(diagnose.retrieval_rank_fusion_loss(rec).confirmed)
+        self.assertIsNone(diagnose.retrieval_duplicate_crowding(rec))
+
 
 class RerankStageTest(_DiagnoseTestBase):
     """리랭크 단계에서 잃었나 — '후보로도 못 봤다'와 '보고도 떨어뜨렸다'는 처방이 반대다."""
@@ -380,6 +411,27 @@ class RerankStageTest(_DiagnoseTestBase):
         finding = diagnose.retrieval_reranker_demotion(rec)
         self.assertTrue(finding.confirmed)
         self.assertEqual(finding.metadata["pre_rerank_ranks"], {"g_b": 3})
+
+    def test_demotion_survives_duplicates_sitting_above_gold(self):
+        """강등된 gold 위에 중복이 깔려 있어도 crowding 이 가로채면 안 된다.
+
+        강등 케이스는 융합 순위가 top_k 이내다. crowding 의 회복 판정(중복 접으면 top_k 안)이
+        그때는 자명하게 성립해버려, 실행 가능한 demotion 을 침묵시키고 자신은 draft 라
+        그 probe 가 아무 처방도 못 받게 된다. crowding 의 대상에 하한(top_k)이 필요한 이유다.
+        """
+        same = "완전히 동일한 안내 문구가 반복되는 청크입니다"
+        chunks = [
+            Chunk("dup1", "docA", same, char_span=(0, 40)),
+            Chunk("dup2", "docB", same, char_span=(0, 40)),
+            Chunk("g_b", "docG", "정답 근거가 담긴 고유 청크", char_span=(0, 20)),
+        ]
+        self._with(retrieve=["dup1", "dup2", "g_b"], chunks=chunks)
+        rec = _record(("g_a", "g_b"), ("g_a", "n1", "n2", "n4", "n5"), recall=0.5,
+                      retrieval_details={"search_mode": "dense", "reranked": True,
+                                         "reranker_status": "applied",
+                                         "pre_rerank_ids": ["dup1", "dup2", "g_b"]})
+        self.assertIsNone(diagnose.retrieval_duplicate_crowding(rec))
+        self.assertTrue(diagnose.retrieval_reranker_demotion(rec).confirmed)
 
     def test_mismatch_labels_yield_to_rerank_stage_loss(self):
         """같은 케이스에서 BM25 도 놓치면, 예전엔 semantic 이 확정으로 서서 임베딩 교체로 샜다.

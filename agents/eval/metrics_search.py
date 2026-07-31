@@ -233,10 +233,19 @@ def _redundancy_above_gold(record: EvalRecord):
     def compute():
         ranks = _gold_ranks(record) or {}
         window = reachable_window()
+        top_k = len(record.retrieved_chunk_ids)
+        if top_k <= 0:
+            return {}
         golds = set(record.probe.gold_chunk_ids)
+        # 하한(top_k)이 상한만큼 중요하다. 이 신호의 주장은 "중복이 gold 를 top_k 밖으로
+        # 밀어냈다"인데, 융합 순위가 이미 top_k 이내인 gold 는 융합 단계에서 밀린 적이 없다.
+        # 하한을 빼면 리랭커가 강등시킨 gold(융합 순위가 top_k 이내로 잡힌다 — wide 재검색이
+        # 리랭크를 끄므로)까지 대상이 되어, 위에 중복 한 쌍만 있으면 projected_rank <= top_k 가
+        # 자명하게 성립한다. 그러면 crowding 이 확정으로 서서 실행 가능한 reranker_demotion 을
+        # 침묵시키고, 정작 자신은 처방이 없어 그 probe 가 아무 처방도 못 받는다.
         targets = {
             g: r for g in _missed_gold_ids(record)
-            if (r := ranks.get(g)) is not None and r <= window
+            if (r := ranks.get(g)) is not None and top_k < r <= window
         }
         if not targets:
             return {}

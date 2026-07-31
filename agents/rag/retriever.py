@@ -260,6 +260,10 @@ class Retriever:
         채널별 순위가 필요하다. 설정만 바꾼 뷰라 임베딩·컬렉션은 그대로 공유하고, probe 마다
         새로 만들지 않도록 여기서 캐시한다(생성 비용은 청크 dict 복사뿐이지만 코퍼스가 크면
         그것도 probe 수만큼 반복된다).
+
+        캐시에 락을 걸지 않는다 — 동시 호출이면 뷰가 중복 생성될 수 있지만 생성이 순수하고
+        (모델 로드 없이 dict 복사뿐) 결과가 동등해서 무해하다. Eval 은 검색을 순차 구간에서만
+        돌리므로(LLM 호출만 병렬) 실제로는 경합이 생기지 않는다.
         """
         if not self.settings.use_hybrid:
             return None                  # 융합이 없으면 대조할 채널도 없다
@@ -345,6 +349,8 @@ class Retriever:
                 "reranker_fallback_used": False,
                 "search_fallback_used": False,
                 "fallback_used": False,
+                # 정상 경로와 키 집합을 맞춘다 — 소비처(Eval 진단)가 키 유무로 분기한다.
+                "rerank_candidate_count": 0,
                 "pre_rerank_ids": [],
                 "results": [],
             }

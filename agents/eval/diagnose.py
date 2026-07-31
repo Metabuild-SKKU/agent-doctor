@@ -251,13 +251,24 @@ def _rerank_lost(record: EvalRecord) -> dict[str, int]:
     return {g: pre[g] for g in _missed_gold_ids(record) if pre.get(g) is not None}
 
 
-def _rank_scope(record: EvalRecord) -> dict[str, int]:
-    """순위 라벨 전체의 관할 — 융합 순위로 잡힌 몫 + 리랭크 단계에서 잃은 몫.
+def _rank_scope(record: EvalRecord) -> set[str]:
+    """순위 라벨 전체의 관할(gold id 집합) — 세 갈래의 합집합.
+
+      _rankable    : 융합 순위가 top_k 밖 + 도달 가능 창 안 (리랭크 계열 라벨의 관할)
+      _rerank_lost : 리랭커 후보엔 있었는데 결과엔 없음 (융합 순위 무관)
+      융합 손실     : 단일 채널이 top_k 안에 뒀는데 융합이 밀어냄 (창 무관 — 아래 참고)
 
     lexical/semantic mismatch 는 이 관할이 비어 있을 때만 발동한다(전제가 'dense 가 놓침'인데,
     여기 잡혔다는 건 dense 가 gold 를 실제로 올려놨다는 뜻이라 전제가 깨진다).
+
+    순위 값이 아니라 id 집합을 돌려준다 — 세 갈래의 순위가 서로 다른 단계의 값(pre_rerank vs
+    융합)이라 한 dict 에 섞으면 소비처가 같은 의미로 오해하기 쉽다. 여기 쓰임은 '비었나'뿐이다.
     """
-    return {**_rerank_lost(record), **_rankable(record)}
+    scope = set(_rerank_lost(record)) | set(_rankable(record))
+    advantage = _channel_advantage(record)
+    if advantage is not None:
+        scope.add(advantage[1])
+    return scope
 
 
 def _rerank_stage_visible(record: EvalRecord) -> bool:
@@ -275,10 +286,16 @@ def _channel_advantage(record: EvalRecord):
     반환 (channel, gold_id, channel_rank, fused_rank) / 없거나 미측정이면 None.
     하이브리드가 실제로 쓰인 검색에서만 본다 — dense 단일 모드에서 BM25 가 gold 를 잡는 건
     융합 손실이 아니라 애초에 그 채널이 파이프라인에 없는 것이라 lexical_mismatch 몫이다.
+
+    ⚠ 여기만 도달 가능 창을 적용하지 않는다(_rankable 이 아니라 _ranked_beyond_top_k 를 쓴다).
+    창의 논거는 '리랭커 처방이 닿는 범위'인데, 이 라벨의 처방(hybrid_dense_weight)은 리랭커와
+    무관하게 어떤 융합 순위든 끌어올릴 수 있기 때문이다 — 처방마다 도달 범위가 다르니 게이트도
+    처방을 따라간다. 창을 걸면 dense 1위/융합 60위 같은 극단적 융합 손실에서 이 라벨이 침묵하고,
+    semantic_mismatch 가 'dense 가 놓쳤다'는 거짓 전제로 임베딩 교체를 처방하게 된다.
     """
     if record.retrieval_details.get("search_mode") != "hybrid":
         return None
-    targets = _rankable(record)
+    targets = _ranked_beyond_top_k(record)
     if not targets:
         return None
     top_k = len(record.retrieved_chunk_ids)
@@ -362,7 +379,12 @@ def retrieval_duplicate_crowding(record: EvalRecord) -> Optional[Finding]:
     순위 원인 중 유일하게 리랭커로 안 고쳐져서 따로 가른다 — cross-encoder 는 중복 청크를
     상위에 그대로 둔다(각각이 실제로 질문과 관련 있으니 점수가 높다). 처방은 중복 제거·MMR 이다.
     회복 가능성을 순위표에서 직접 계산하므로(재검색 0회) 확정으로 낸다.
+
+    융합 손실이 실측되면 양보한다 — 둘 다 성립할 수 있는데(하이브리드 + 채널 우세 + 중복 회복)
+    융합이 파이프라인 앞단이라 뿌리다. 이 쌍만 튜플 순서로 갈리던 것을 신호로 세운 것이다.
     """
+    if _channel_advantage(record) is not None:
+        return None                      # 융합 손실이 앞단 → 그쪽이 뿌리
     recovery = _crowding_recovery(record)
     if recovery is None:
         return None
@@ -1193,8 +1215,8 @@ def corpus_gap_partial_hop(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 # 순위 원인 4형제(fusion_loss / duplicate_crowding / candidate_miss / demotion)와 잔여 low_rank 는
-# 각자의 신호로 배타가 서 있어 여기 순서에 기대지 않는다. 앞단 원인(융합·중복)을 앞에 두는 건
-# 읽는 순서를 파이프라인 단계 순서와 맞추기 위해서다.
+# 각자의 신호로 배타가 서 있어 여기 순서에 기대지 않는다(전수 확인: tests/test_diagnose_labels).
+# 앞에 두는 건 읽는 순서를 파이프라인 단계 순서와 맞추기 위해서다.
 _RETRIEVAL_CAUSE = (
     retrieval_incomplete_enumeration, retrieval_missing_bridge_dependency,
     retrieval_rank_fusion_loss, retrieval_duplicate_crowding,
