@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from core.llm_clients import openai_chat
+from core.parallel import parallel_map
 from core.schema import Chunk
 from core.state import DEFAULT_GRAPH_LLM_MODEL
 
@@ -147,6 +148,17 @@ def _load_manifest_artifacts(path: Path, signature: str) -> dict | None:
     return artifacts
 
 
+def _cache_key(chunk: Chunk, ctx: str) -> str:
+    return f"{chunk.hash}:{ctx}"
+
+
+def _cache_get(entity_cache: dict, key: str) -> dict | None:
+    entry = entity_cache.get(key)
+    if isinstance(entry, dict) and "entities" in entry and "relations" in entry:
+        return entry
+    return None
+
+
 def _cached_extract(
     chunk: Chunk, config: dict, entity_cache: dict, ctx: str
 ) -> tuple[list[str], list[dict], str, bool]:
@@ -154,13 +166,46 @@ def _cached_extract(
 
     캐시에는 실제 사용된 모드(llm 실패 → keyword 폴백 포함)가 그대로 남는다 —
     시각화 전용 산출물이라 폴백 결과 재사용을 허용한다."""
-    key = f"{chunk.hash}:{ctx}"
-    entry = entity_cache.get(key)
-    if isinstance(entry, dict) and "entities" in entry and "relations" in entry:
+    key = _cache_key(chunk, ctx)
+    entry = _cache_get(entity_cache, key)
+    if entry is not None:
         return entry["entities"], entry["relations"], entry.get("mode", "keyword"), False
     entities, relations, used_mode = _extract(chunk, config)
     entity_cache[key] = {"entities": entities, "relations": relations, "mode": used_mode}
     return entities, relations, used_mode, True
+
+
+def _resolve_extract_concurrency() -> int:
+    """entity 추출 동시 실행 수. INDEX_LLM_CONCURRENCY(기본 4, 최소 1). 1이면 순차."""
+    try:
+        return max(1, int(os.getenv("INDEX_LLM_CONCURRENCY", "4")))
+    except (TypeError, ValueError):
+        return 4
+
+
+def _prefetch_extractions(
+    chunks: list[Chunk], config: dict, entity_cache: dict, ctx: str
+) -> bool:
+    """캐시 미스 청크의 entity 추출을 병렬로 미리 채운다. 반환: 캐시가 바뀌었나.
+
+    LLM 경로(graph_extraction=auto|llm + 키)는 청크당 chat 1회라, 순차로 돌면 코퍼스
+    크기에 비례해 인덱싱이 늘어진다. 여기서 미스만 모아 동시에 부르고, 그래프 조립
+    루프는 캐시 히트만 하며 청크 순서대로 진행한다(산출물 결정성 유지).
+    같은 hash 청크는 캐시 키가 같으므로 한 번만 부른다.
+    """
+    pending: dict[str, Chunk] = {}
+    for chunk in chunks:
+        key = _cache_key(chunk, ctx)
+        if _cache_get(entity_cache, key) is None:
+            pending.setdefault(key, chunk)
+    if not pending:
+        return False
+    keys = list(pending)
+    results = parallel_map(lambda k: _extract(pending[k], config),
+                           keys, _resolve_extract_concurrency())
+    for key, (entities, relations, used_mode) in zip(keys, results):
+        entity_cache[key] = {"entities": entities, "relations": relations, "mode": used_mode}
+    return True
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
@@ -252,6 +297,9 @@ def build_graph_artifacts(chunks: list[Chunk], config: dict) -> dict:
 
     graph = nx.MultiDiGraph()
     extraction_modes: set[str] = set()
+
+    # 미스분 entity 추출을 먼저 병렬로 채운다 — 아래 루프는 캐시 히트만 하고 순서대로 조립한다.
+    cache_dirty = _prefetch_extractions(chunks, config, entity_cache, extraction_ctx) or cache_dirty
 
     for chunk in chunks:
         document_node = f"doc:{chunk.doc_id}"
