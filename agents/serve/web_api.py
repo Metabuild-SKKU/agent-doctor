@@ -102,7 +102,7 @@ def _summarize_stage_event(stage: str, snapshot: AgentDoctorState) -> tuple[str,
 
 
 # index.html 이 노출하는 depth 선택지(fast/standard/full) → EVAL_MODE 매핑.
-# "full"은 UI 상 가장 깊은 진단이므로 EVAL_MODE=full 에서만 켜지는 tier 4 검증까지 실행한다.
+# "full"은 UI 상 가장 깊은 진단 — EVAL_MODE 쪽에서 DEEP(=LLM/RAGAS 전량)으로 접힌다.
 _DEPTH_TO_EVAL_MODE = {"fast": "fast", "standard": "standard", "full": "full"}
 
 # Eval 에이전트가 EVAL_MODE/EVAL_ENABLE_LLM 을 프로세스 전역 환경변수로 읽기 때문에(agents/eval/types.py),

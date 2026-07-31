@@ -19,7 +19,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from fastapi.testclient import TestClient
 
 from agents.serve import api
-from agents.serve.api import app, corpus_fingerprint
+from agents.serve.api import app
+from agents.serve.serve_config import serving_fingerprint
+
+
+def _fp(chunks: list[dict]) -> str:
+    """사이드카 없는(빈 설정) 코퍼스의 서빙 지문 — /health 가 노출하는 값과 같은 계약."""
+    return serving_fingerprint(chunks, {})
 
 
 def _write_chunks(path: Path, chunks: list[dict]) -> None:
@@ -49,7 +55,7 @@ class ApiReloadTest(unittest.TestCase):
         client = TestClient(app)
 
         health_a = client.get("/health").json()
-        self.assertEqual(health_a["fingerprint"], corpus_fingerprint(_CORPUS_A))
+        self.assertEqual(health_a["fingerprint"], _fp(_CORPUS_A))
         docs_a = client.get("/documents").json()
         self.assertEqual([d["doc_id"] for d in docs_a["documents"]], ["docA"])
 
@@ -58,23 +64,23 @@ class ApiReloadTest(unittest.TestCase):
 
         # 3) reload 전에는 여전히 A 를 서빙한다 (시작 시점에만 파일을 읽으므로)
         self.assertEqual(
-            client.get("/health").json()["fingerprint"], corpus_fingerprint(_CORPUS_A)
+            client.get("/health").json()["fingerprint"], _fp(_CORPUS_A)
         )
 
         # 4) /reload 후 지문·문서가 B 로 바뀐다
         reloaded = client.post("/reload").json()
-        self.assertEqual(reloaded["fingerprint"], corpus_fingerprint(_CORPUS_B))
+        self.assertEqual(reloaded["fingerprint"], _fp(_CORPUS_B))
         docs_b = client.get("/documents").json()
         self.assertEqual([d["doc_id"] for d in docs_b["documents"]], ["docB"])
 
     def test_fingerprint_changes_with_corpus(self):
         self.assertNotEqual(
-            corpus_fingerprint(_CORPUS_A), corpus_fingerprint(_CORPUS_B)
+            _fp(_CORPUS_A), _fp(_CORPUS_B)
         )
         # 순서가 달라도 같은 청크 집합이면 지문은 동일하다(정렬 후 해시).
         self.assertEqual(
-            corpus_fingerprint(_CORPUS_A + _CORPUS_B),
-            corpus_fingerprint(_CORPUS_B + _CORPUS_A),
+            _fp(_CORPUS_A + _CORPUS_B),
+            _fp(_CORPUS_B + _CORPUS_A),
         )
 
 

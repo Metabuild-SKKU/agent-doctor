@@ -549,6 +549,28 @@ def _gold_chunk_evidence_density(record: EvalRecord):
     return _cache(record, "gold_chunk_evidence_density", compute)
 
 
+def _context_char_total(record: EvalRecord) -> int:
+    """LLM 에 들어간 검색 context 총 길이(문자). too_long_context 판별용."""
+    return sum(len(text or "") for text in record.retrieved_context)
+
+
+def _gold_position_band(record: EvalRecord):
+    """검색 결과 안 gold 청크의 상대 위치(0=맨 앞, 1=맨 뒤) 중 가장 가장자리에 가까운 값.
+
+    lost_in_the_middle 판별용 — gold 가 하나라도 양끝에 있으면 '중간이라 못 봤다'가 성립하지
+    않으므로 가장 유리한 위치를 대표로 쓴다.
+    반환: 0~1 / 결과가 3건 미만이거나 gold 미검색이면 None(앞·중간·뒤가 안 갈림).
+    """
+    ids = record.retrieved_chunk_ids
+    if len(ids) < 3:
+        return None
+    golds = set(record.probe.gold_chunk_ids)
+    positions = [i / (len(ids) - 1) for i, cid in enumerate(ids) if cid in golds]
+    if not positions:
+        return None
+    return min(positions, key=lambda p: min(p, 1 - p))
+
+
 def _oversized_gold_spans(record: EvalRecord):
     """현재 청크로는 한 청크에 담길 수 없는 gold span 통계.
 

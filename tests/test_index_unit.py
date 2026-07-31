@@ -50,8 +50,25 @@ class ChunkingTests(unittest.TestCase):
     def test_all_chunk_strategies_are_registered(self):
         self.assertEqual(
             set(CHUNK_STRATEGIES),
-            {"fixed", "markdown", "recursive", "markdown_recursive"},
+            {"fixed", "markdown", "recursive", "markdown_recursive",
+             "recursive_sentence"},
         )
+
+    def test_recursive_sentence_breaks_on_sentence_boundaries(self):
+        # 문장 종결부 우선. 분할이 일어난 청크의 끝은 문장 종결부여야 한다
+        # (마지막 청크와 강제 분할 폴백은 예외).
+        source = ("첫째 문장입니다. 둘째 문장은 조금 더 깁니다. 셋째 문장도 있습니다. "
+                  "넷째 문장으로 마무리합니다. 다섯째 문장 추가. 여섯째 문장 추가입니다.")
+        document = _document("sent-doc", source)
+        drafts = _chunk_document(
+            document, chunk_size=40, chunk_overlap=0, strategy="recursive_sentence"
+        )
+        self.assertGreater(len(drafts), 1)
+        for draft in drafts[:-1]:
+            self.assertTrue(
+                draft.text.rstrip().endswith((".", "。", "?", "!", "…")),
+                f"문장 경계로 안 끊김: {draft.text!r}",
+            )
 
     def test_overlap_and_max_size_are_respected(self):
         source = "가나다라마바사 " * 30
@@ -68,7 +85,12 @@ class ChunkingTests(unittest.TestCase):
             "# 설치\n설치 방법입니다.\n\n## Windows\nPowerShell을 사용합니다.",
         )
 
-        drafts = _chunk_document(document, chunk_size=100, chunk_overlap=10)
+        drafts = _chunk_document(
+            document,
+            chunk_size=100,
+            chunk_overlap=10,
+            strategy="markdown_recursive",
+        )
 
         self.assertEqual(drafts[0].section, "설치")
         self.assertEqual(drafts[1].section, "설치 > Windows")
@@ -114,6 +136,18 @@ class ChunkingTests(unittest.TestCase):
         self.assertTrue(all(chunk.section is None for chunk in stage_2))
         self.assertTrue(all(chunk.section is not None for chunk in stage_3))
         self.assertTrue(all(len(chunk.text) <= 40 for chunk in stage_3))
+
+    def test_default_chunk_strategy_is_fixed(self):
+        document = _document(
+            "guide",
+            "# 설치\n" + ("설치 설명 문장입니다. " * 8),
+        )
+
+        drafts = _chunk_document(document, 40, 8)
+
+        self.assertTrue(drafts)
+        self.assertTrue(all(chunk.section is None for chunk in drafts))
+        self.assertTrue(all(len(chunk.text) <= 40 for chunk in drafts))
 
 
 class IndexRunTests(unittest.TestCase):
@@ -178,6 +212,7 @@ class IndexRunTests(unittest.TestCase):
         content = "# 규정\n재택근무는 주 2일까지 가능합니다."
         state.documents = [_document("doc-1", content), _document("doc-2", content)]
         state.index_config["use_hybrid"] = True
+        state.index_config["chunk_strategy"] = "markdown_recursive"
 
         result = run(state)
 

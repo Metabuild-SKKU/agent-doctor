@@ -33,6 +33,16 @@ from agents.eval.diagnose import _oracle_ok   # oracle 통과 판정은 진단�
 _RAGAS_KEYS = ("faithfulness", "context_precision", "context_recall", "response_relevancy")
 
 
+def is_bad_gold_probe(record: EvalRecord) -> bool:
+    """이 probe 가 정답셋 오류(bad_gold_answer)로 확정 판정됐나 — 점수 제외 + 재생성 대상.
+    Eval agent(재생성)와 build_report(점수 제외)가 공유한다."""
+    return any(f.label == "bad_gold_answer" and f.confirmed for f in record.findings)
+
+
+# 하위호환 별칭(내부 호출부).
+_is_bad_gold_probe = is_bad_gold_probe
+
+
 def build_report(records: list[EvalRecord], iteration: int, mode: int | None = None) -> DiagnosticReport:
     """records 를 집계해 DiagnosticReport 반환.
 
@@ -46,10 +56,17 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     # Optimize 소비 편의: 확정 우선. 동률은 원래 순서 유지(stable sort — probe별 D→A→C→B).
     findings.sort(key=lambda f: not f.confirmed)
 
-    ragas_means = _ragas_means(records)
-    rule_means = _rule_means(records)
+    # bad_gold_answer(정답셋 오류)로 판정된 probe 는 '거짓 실패'다 — RAG 결함이 아니라
+    # 평가셋이 틀린 것이라, 점수에 넣으면 파이프라인이 고칠 수 없는 문제로 페널티를 받고
+    # Optimize 가 존재하지 않는 결함을 쫓게 된다. 따라서 점수 집계(품질/신뢰도/overall/
+    # composite)에서만 제외하고, 진단·리포트(findings/summary/outcome)에는 그대로 남긴다.
+    # (전부 bad_gold 면 scorable 이 비어 overall=None → 기존 '판정 보류' 통과 경로로 수렴.)
+    scorable = [r for r in records if not _is_bad_gold_probe(r)]
+
+    ragas_means = _ragas_means(scorable)
+    rule_means = _rule_means(scorable)
     overall = _overall_score(ragas_means, rule_means)
-    oracle_acc = _oracle_accuracy(records)
+    oracle_acc = _oracle_accuracy(scorable)
 
     scores = {**rule_means}
     scores.update(ragas_means)                          # RAGAS 평균(있으면)
@@ -87,7 +104,7 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
         runtime_summary={"reranker": reranker_runtime},
         oracle_accuracy=oracle_acc,
         overall_score=overall_val,
-        composite_score=compute_composite(records).as_dict(),   # 종합점수(0~100) — scoring 모듈
+        composite_score=compute_composite(scorable).as_dict(),  # 종합점수(0~100) — bad_gold 제외
         pass_threshold=pass_thr,
         iteration=iteration,
     )

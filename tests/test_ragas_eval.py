@@ -118,7 +118,7 @@ recall = R._context_recall(judge, "Where is the Eiffel Tower?",
 show("context_recall", recall, "기대: 높음(1.0 근처)")
 assert recall is not None and recall > 0.5
 
-# ── 5) 트랙 함수 엔드투엔드 (실제+오라클+aspect) ──────────────
+# ── 5) 트랙 함수 엔드투엔드 (실제+오라클) ────────────────────
 print("\n[5] 트랙 함수 엔드투엔드")
 probe = Probe(probe_id="t0", question="Where is the Eiffel Tower located?",
               source="llm_generated", ground_truth="The Eiffel Tower is in Paris.",
@@ -130,10 +130,8 @@ rec.oracle_context = ["The Eiffel Tower is in Paris."]
 rec.oracle_answer = "The Eiffel Tower is in Paris."
 rec.ragas = R.evaluate_real_track(rec, judge)
 rec.oracle_ragas = R.evaluate_oracle_track(rec, judge) if rec.oracle_answer is not None else {}
-rec.aspect = R.evaluate_aspect_critics(rec, judge)
 print(f"  ragas        = { {k: round(v, 3) for k, v in rec.ragas.items()} }")
 print(f"  oracle_ragas = { {k: round(v, 3) for k, v in rec.oracle_ragas.items()} }")
-print(f"  aspect       = {rec.aspect}")
 assert rec.ragas, "트랙 함수가 ragas 를 채워야 함"
 
 print("\n실측 테스트 통과 [OK]")

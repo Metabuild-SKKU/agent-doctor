@@ -27,7 +27,7 @@ from core.schema import Chunk, Document, Probe
 
 DEFAULT_STORE_PATH = "eval_probes.json"
 # gold_spans 생성 계약이 바뀌면 이전 Probe 캐시를 재사용하지 않는다.
-PROBE_SCHEMA_VERSION = "gold-spans-v2"
+PROBE_SCHEMA_VERSION = "gold-spans-v3"
 
 
 def corpus_version(
@@ -73,14 +73,20 @@ def resolve_store_path(path: str | None = None) -> str:
     return os.getenv("EVAL_PROBE_STORE") or DEFAULT_STORE_PATH
 
 
-def save_probes(probes: list[Probe], version: str, path: str | None = None) -> None:
-    """probes 를 버전과 함께 JSON으로 저장. 쓰기 실패(권한 등)는 조용히 무시(캐시일 뿐 필수 아님)."""
+def save_probes(probes: list[Probe], version: str, path: str | None = None) -> bool:
+    """probes 를 버전과 함께 JSON으로 저장. 반환: 성공 True / 쓰기 실패(권한·용량 등) False.
+
+    쓰기 실패는 조용히 무시하되(캐시일 뿐 필수 아님) 성공 여부는 반환한다 — bad_gold
+    재생성처럼 '저장이 실제로 됐을 때만' 캐시 무효화·1회 가드를 진행해야 하는 호출부가
+    파일 반영 여부를 판단할 수 있어야 하기 때문이다(예외를 내부에서 삼키므로 반환값 필요)."""
     path = resolve_store_path(path)
     try:
         data = {"version": version, "probes": [asdict(p) for p in probes]}
         Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
     except OSError as e:
         print(f"  probe 저장 실패({e}) → 다음 실행에서 재생성됨")
+        return False
 
 
 def load_probes(

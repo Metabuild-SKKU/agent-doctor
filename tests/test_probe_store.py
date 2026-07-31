@@ -111,6 +111,18 @@ class SaveLoadTest(unittest.TestCase):
         # 코퍼스가 바뀌어 버전이 달라지면 재사용하지 않는다(→ 재생성).
         self.assertIsNone(load_probes("v-new", path=self.path))
 
+    def test_save_returns_true_on_success(self):
+        probes = [Probe(probe_id="p1", question="질문", source="taxonomy")]
+        self.assertTrue(save_probes(probes, "v1", path=self.path))
+
+    def test_save_returns_false_when_write_fails(self):
+        # save_probes 는 OSError 를 내부에서 삼키므로, 호출부가 성공 여부를 알려면
+        # 반환값이 유일한 신호다. 실제 write 실패를 재현해 False 계약을 고정한다.
+        from unittest.mock import patch
+        probes = [Probe(probe_id="p1", question="질문", source="taxonomy")]
+        with patch("agents.eval.probe_store.Path.write_text", side_effect=OSError("denied")):
+            self.assertFalse(save_probes(probes, "v1", path=self.path))
+
 
 if __name__ == "__main__":
     unittest.main()

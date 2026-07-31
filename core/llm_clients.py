@@ -31,10 +31,13 @@ def openai_chat(
     api_key: str | None = None,
     base_url: str | None = None,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    temperature: float = 0.0,
     tag: str = "LLM",
 ) -> str:
-    """OpenAI 호환 chat 1회 호출(temperature=0) → 응답 텍스트("" 가능).
+    """OpenAI 호환 chat 1회 호출 → 응답 텍스트("" 가능).
 
+    temperature 기본 0(결정적). RAG 답변 생성만 호출부에서 조정하고, 판정·합성 등
+    구조가 중요한 호출은 기본 0을 유지한다.
     base_url/api_key 를 주면 GitHub Models 등 OpenAI 호환 엔드포인트 겸용."""
     from openai import OpenAI
 
@@ -47,7 +50,7 @@ def openai_chat(
     kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
     resp = client.chat.completions.create(
         model=model,
-        temperature=0,
+        temperature=temperature,
         max_tokens=max_output_tokens,
         messages=[
             {"role": "system", "content": system},
@@ -67,17 +70,19 @@ def gemini_chat(
     *,
     json_mode: bool = False,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    temperature: float = 0.0,
     tag: str = "LLM",
 ) -> str:
-    """Gemini chat 1회 호출(temperature=0, google-genai SDK) → 응답 텍스트("" 가능).
+    """Gemini chat 1회 호출(google-genai SDK) → 응답 텍스트("" 가능).
 
+    temperature 기본 0(결정적). RAG 답변 생성만 호출부에서 조정한다.
     주의: 추론 모델은 내부 사고(thoughts)도 이 상한을 함께 소진한다. JSON 구조가 온전해야
     하는 호출(Probe 합성 등)은 호출부에서 상한을 넉넉히 주는 게 안전하다."""
     from google import genai
 
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
     config: dict = {
-        "temperature": 0,
+        "temperature": temperature,
         "system_instruction": system,
         "max_output_tokens": max_output_tokens,
     }

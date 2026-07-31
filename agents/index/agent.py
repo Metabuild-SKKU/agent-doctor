@@ -184,6 +184,20 @@ def _preferred_boundary(text: str, start: int, hard_end: int) -> int:
     return hard_end
 
 
+def _preferred_sentence_boundary(text: str, start: int, hard_end: int) -> int:
+    """문장 경계를 최우선으로 자른다 — gold 문장이 청크에 온전히 담기게.
+
+    _preferred_boundary 는 문단/줄바꿈(\\n\\n, \\n)을 문장 종결부보다 먼저 택해
+    한 문장이 여러 청크로 쪼개질 수 있다. 여기서는 종결부(. 。 ? ! …)를 먼저 찾고,
+    없을 때만 줄바꿈·공백으로 폴백한다(그래도 못 찾으면 hard_end 로 강제 분할)."""
+    minimum = start + max(1, (hard_end - start) // 2)
+    for separator in (". ", ".\n", "。", "? ", "?\n", "! ", "!\n", "…", "\n\n", "\n", " "):
+        position = text.rfind(separator, minimum, hard_end)
+        if position >= minimum:
+            return position + len(separator)
+    return hard_end
+
+
 def _fixed_chunks(
     text: str,
     chunk_size: int,
@@ -220,6 +234,7 @@ def _recursive_chunks(
     *,
     base_offset: int = 0,
     section: str | None = None,
+    boundary: Callable[[str, int, int], int] = _preferred_boundary,
 ) -> list[_ChunkDraft]:
     if not text:
         return []
@@ -237,7 +252,7 @@ def _recursive_chunks(
     start = 0
     while start < len(text):
         hard_end = min(len(text), start + chunk_size)
-        end = hard_end if hard_end == len(text) else _preferred_boundary(text, start, hard_end)
+        end = hard_end if hard_end == len(text) else boundary(text, start, hard_end)
         chunk, trimmed_start, trimmed_end = _trimmed_slice(text, start, end)
         if chunk:
             chunks.append(
@@ -320,6 +335,26 @@ def _markdown_recursive_strategy(
     return drafts
 
 
+def _recursive_sentence_strategy(
+    document: Document,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> list[_ChunkDraft]:
+    """문장 경계 우선 재귀 분할. markdown 구조에 기대지 않고 문장을 온전히 보존한다.
+
+    markdown_recursive 가 마크다운 섹션·문단을 먼저 자르는 탓에 서술형 평문에서 gold
+    문장이 청크 경계에 잘리는 경우(retrieval_semantic_mismatch Case1·chunking_context_mismatch)
+    를 겨냥한 처방용 전략이다. 분할은 _preferred_sentence_boundary 로 문장 종결부를 우선한다."""
+    text, start, _ = _trimmed_slice(document.content, 0, len(document.content))
+    return _recursive_chunks(
+        text,
+        chunk_size,
+        chunk_overlap,
+        base_offset=start,
+        boundary=_preferred_sentence_boundary,
+    )
+
+
 ChunkStrategy = Callable[[Document, int, int], list[_ChunkDraft]]
 
 CHUNK_STRATEGIES: dict[str, ChunkStrategy] = {
@@ -327,6 +362,7 @@ CHUNK_STRATEGIES: dict[str, ChunkStrategy] = {
     "markdown": _markdown_strategy,
     "recursive": _recursive_strategy,
     "markdown_recursive": _markdown_recursive_strategy,
+    "recursive_sentence": _recursive_sentence_strategy,
 }
 
 CHUNK_STAGE_ALIASES: dict[str | int, str] = {
@@ -366,7 +402,7 @@ def _resolve_chunk_strategy(strategy: str | int) -> str:
 def _configured_chunk_strategy(config: dict) -> str:
     raw_strategy = config.get(
         "chunk_stage",
-        config.get("chunk_strategy", "markdown_recursive"),
+        config.get("chunk_strategy", "fixed"),
     )
     return _resolve_chunk_strategy(raw_strategy)
 
@@ -389,7 +425,7 @@ def _chunk_document(
     document: Document,
     chunk_size: int,
     chunk_overlap: int,
-    strategy: str | int = "markdown_recursive",
+    strategy: str | int = "fixed",
 ) -> list[_ChunkDraft]:
     resolved_strategy = _resolve_chunk_strategy(strategy)
     chunker = CHUNK_STRATEGIES[resolved_strategy]

@@ -31,9 +31,11 @@ from __future__ import annotations
 # 실제 분포를 본 뒤 튜닝 예정.
 RECALL_FLOOR = 0.6
 
-# 종합점수(composite, 0~100) 통과 문턱. 기존 overall>=0.8 의도를 composite 로 옮긴 값
-# (composite 80 ≈ 품질·신뢰도 두 축이 대략 0.8 수준). 실제 분포를 본 뒤 튜닝 예정.
-COMPOSITE_PASS_THRESHOLD = 80.0
+# 종합점수(composite, 0~100) 통과 문턱. 처방을 더 공격적으로 적용·시연하도록 90 으로
+# 올린다(품질·신뢰도 두 축이 대략 0.9 수준). 이 값이 안 넘으면 라우팅은 예산(max_iterations)
+# 소진까지 처방을 계속 시도한 뒤 그때의 best 를 Serve 한다 — 즉 문턱을 높일수록 "통과" 대신
+# "예산 소진 후 Serve"로 끝나는 실행이 늘고, 그만큼 처방이 더 많이 발동한다.
+COMPOSITE_PASS_THRESHOLD = 90.0
 
 
 def passes(score_pass: bool, mean_recall_at_k: float | None = None) -> bool:
