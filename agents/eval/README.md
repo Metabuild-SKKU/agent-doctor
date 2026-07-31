@@ -251,6 +251,14 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | 리랭크 | `retrieval_reranker_demotion` | 리랭커 되돌리기 / 모델 교체 |
 | (잔여) | `retrieval_low_rank` | `use_reranker` 켜기 |
 
+**다른 A 라벨과의 배타** — 순위 라벨이 다룰 구간(`_rankable`)이면 `lexical_mismatch` ·
+`semantic_mismatch` 는 스스로 침묵한다. 두 라벨의 전제가 "dense 가 gold 를 놓쳤다"인데,
+창 안에 있다는 건 놓친 게 아니라 순위를 낮게 준 것이라 전제가 사실과 어긋나기 때문이다.
+순위 라벨끼리는 파이프라인 앞단이 뿌리다: `융합 손실`·`중복 밀림` > `후보창 밖` > `강등` > 잔여.
+
+`retrieval_missing_gold`(코퍼스 존재만 실측하는 폴백)와 `chunking_*`(맨 뒤 배치)은 예전부터
+순서로 갈리는 설계다 — 순위 라벨 분할과 무관하게 그대로 유지된다.
+
 판정 범위는 **도달 가능 창**(`metrics_common.reachable_window`)으로 제한한다 —
 `rerank_candidate_policy.max_candidates` 보다 뒤 순위의 gold 는 리랭커를 켜도 후보를 넓혀도
 닿지 않으므로 순위 문제가 아니라 표현 문제(`semantic`/`lexical mismatch`)로 인계한다.

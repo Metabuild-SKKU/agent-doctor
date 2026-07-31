@@ -260,6 +260,24 @@ class ReachableWindowTest(_DiagnoseTestBase):
         self.assertIsNone(diagnose.retrieval_lexical_mismatch(rec))
         self.assertTrue(diagnose.retrieval_low_rank(rec).confirmed)
 
+    def test_semantic_mismatch_yields_inside_window(self):
+        """창 안이면 dense 가 gold 를 '놓친' 게 아니라 순위를 낮게 준 것이다.
+
+        semantic 의 전제는 'dense·BM25 모두 놓침'이라, 창 안에서 발동하면 사실과 어긋난 주장을
+        확정으로 내게 된다. 게이트가 없으면 순위 라벨과 둘 다 확정으로 서서 순서로만 갈렸다.
+        """
+        self._with(retrieve=self._deep_ranked(8), keyword=[])   # BM25 는 놓침
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertIsNone(diagnose.retrieval_semantic_mismatch(rec))
+        self.assertTrue(diagnose.retrieval_low_rank(rec).confirmed)
+
+    def test_semantic_mismatch_takes_over_beyond_window(self):
+        """창 밖이면 리랭커로 못 고친다 → 표현 문제(임베딩·청킹)로 넘어간다."""
+        self._with(retrieve=self._deep_ranked(60), keyword=[])
+        rec = _record(("g_a", "g_b"), ("g_a",), recall=0.5)
+        self.assertIsNone(diagnose.retrieval_low_rank(rec))
+        self.assertTrue(diagnose.retrieval_semantic_mismatch(rec).confirmed)
+
 
 class RankFusionLossTest(_DiagnoseTestBase):
     """단일 채널은 gold 를 상위에 뒀는데 융합이 깎은 경우 — 처방이 리랭커가 아니라 가중치."""
@@ -345,6 +363,17 @@ class RerankStageTest(_DiagnoseTestBase):
     def test_low_rank_silent_when_stage_is_visible(self):
         rec = self._rec(["n1", "n2", "n3", "n4", "g_b"])
         self.assertIsNone(diagnose.retrieval_low_rank(rec))
+
+    def test_demotion_yields_when_candidate_miss_is_also_present(self):
+        """gold 가 여럿이라 '후보창 밖'과 '강등'이 함께 있으면 앞단(후보 선정)이 뿌리다.
+
+        후보 선정이 리랭크보다 먼저이므로 candidate_miss 가 가져간다 — 양보가 없으면 둘 다
+        확정으로 서서 튜플 순서로만 갈린다(처방은 창 확대 vs 리랭커 되돌리기로 정반대).
+        """
+        self._with(retrieve=["n1", "n2", "g_a", "n4", "g_b"])   # g_a=3위, g_b=5위, top_k=2
+        rec = self._rec(["n1", "n2", "g_a"])                    # g_a 만 후보창 안
+        self.assertTrue(diagnose.retrieval_rerank_candidate_miss(rec).confirmed)
+        self.assertIsNone(diagnose.retrieval_reranker_demotion(rec))
 
 
 class DuplicateCrowdingTest(_DiagnoseTestBase):

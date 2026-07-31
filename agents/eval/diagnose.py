@@ -382,11 +382,19 @@ def retrieval_reranker_demotion(record: EvalRecord) -> Optional[Finding]:
     optimize 의 롤백 신호이기도 하다.
 
     pre_rerank_ids 가 없으면(옛 계약 retriever) candidate_miss 와 구분이 불가해 침묵한다.
+
+    놓친 gold 가 여럿이라 '후보창 밖'과 '강등'이 한 probe 에 같이 있으면 candidate_miss 에
+    양보한다 — 후보 선정이 리랭크보다 앞단이고, 이 코드베이스는 앞단 원인을 뿌리로 본다
+    (융합 손실이 리랭크 단계 라벨보다 앞서는 것과 같은 기준). 양보하지 않으면 둘 다 확정으로
+    서서 튜플 순서로만 갈린다.
     """
     if not _rerank_stage_visible(record) or _upstream_rank_cause(record):
         return None
     pre = _gold_pre_rerank_ranks(record) or {}
-    targets = {g: r for g, r in _rankable(record).items() if pre.get(g) is not None}
+    rankable = _rankable(record)
+    if any(pre.get(g) is None for g in rankable):
+        return None                      # 후보창 밖 gold 가 함께 있음 → candidate_miss 가 앞단
+    targets = {g: r for g, r in rankable.items() if pre.get(g) is not None}
     if not targets:
         return None
     seen = ", ".join(f"{g}:{pre[g]}" for g in sorted(targets, key=lambda g: pre[g]))
@@ -454,9 +462,15 @@ def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     에서 라벨이 통째로 소실된다. 코퍼스에 없는 몫은 corpus_gap 이 additive 로 함께 붙는다.
     코퍼스 멤버십 미측정(None)은 corpus_gap 과 구분 불가라 예비(missing_gold 와 동일 기준).
     qtype=bridge 는 bridge 의존과 구분 불가라 양보(원 질문으론 hop2 를 원래 못 찾음).
+
+    도달 가능 창 안에 gold 가 있으면 양보한다(lexical_mismatch 와 같은 기준) — 그 경우
+    dense 는 gold 를 '놓친' 게 아니라 순위를 낮게 준 것이라 이 라벨의 전제가 사실과 어긋난다.
+    게이트가 없으면 순위 라벨과 이 라벨이 둘 다 확정으로 서서 튜플 순서로만 갈린다.
     """
     if record.probe.qtype == "bridge":
         return None                      # bridge 의존과 구분 불가 → bridge 에 양보
+    if _rankable(record):
+        return None                      # 순위 라벨이 다룰 구간 → 그쪽에 양보
     if _bm25_hits_gold(record) is not False:
         return None
     in_corpus = _missed_gold_in_corpus(record)
