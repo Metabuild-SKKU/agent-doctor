@@ -20,6 +20,9 @@ from agents.optimize.schemas import ConfigDiff, ConfigPatch
 
 CANONICAL_INDEX_CONFIG_KEYS: dict[str, str] = {
     "retriever.top_k": "top_k",
+    # 융합 가중치. 필드는 이미 state.index_config 에 있고 retriever 가 소비하지만
+    # 표준 경로가 없어 Optimize 가 건드리지 못했다(retrieval_rank_fusion_loss 처방).
+    "retriever.hybrid_dense_weight": "hybrid_dense_weight",
     "retriever.mmr": "use_mmr",
     "reranker.enabled": "use_reranker",
     "reranker.candidate_count": "rerank_candidates",
@@ -46,6 +49,10 @@ CANONICAL_INDEX_CONFIG_KEYS: dict[str, str] = {
 # 예: "chunker.chunk_size"를 읽을 때 현재 state의 "chunk_size"도 함께 본다.
 CONFIG_READ_PATHS: dict[str, tuple[str, ...]] = {
     "retriever.top_k": ("retriever.top_k", "top_k"),
+    "retriever.hybrid_dense_weight": (
+        "retriever.hybrid_dense_weight",
+        "hybrid_dense_weight",
+    ),
     "retriever.mmr": ("retriever.mmr", "use_mmr", "mmr"),
     "retriever.search_type": ("retriever.search_type", "search_type", "use_hybrid"),
     "reranker.enabled": ("reranker.enabled", "use_reranker"),

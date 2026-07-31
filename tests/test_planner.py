@@ -151,6 +151,91 @@ class GroundedValueTest(unittest.TestCase):
 
         self.assertEqual(request.search_space, {"retriever.top_k": [14]})
 
+    def test_candidate_miss_grounds_window_from_gold_rank_knee(self):
+        # 후보창은 '가장 늦게 나오는 gold 의 순위'가 근거다 — ×2 추측(40)이 아니라 무릎(28).
+        findings = [
+            make_finding(f"p{i}", "retrieval_rerank_candidate_miss",
+                         gold_ranks={"g": rank})
+            for i, rank in enumerate([24, 25, 26, 27, 28])
+        ]
+        state = make_state(findings)
+        state.index_config.update({"use_reranker": True, "rerank_candidates": 20})
+
+        request, _decision = planner.plan(state)
+
+        self.assertEqual(request.search_space, {"reranker.candidate_count": [28]})
+
+    def test_candidate_miss_keeps_reachable_ranks_from_mixed_probe(self):
+        """한 probe 에 도달 가능/불가 순위가 섞이면 도달 가능한 쪽 근거는 살아남아야 한다.
+
+        probe 단위(그 probe 의 최대 순위)로 상한을 걸면 90 때문에 30 이라는 멀쩡한 근거까지
+        같이 버려지고 방향 키워드 추측으로 내려간다.
+        """
+        findings = [
+            make_finding("p1", "retrieval_rerank_candidate_miss",
+                         gold_ranks={"g_near": 30, "g_far": 90}),
+        ]
+        state = make_state(findings)
+        state.index_config.update({
+            "use_reranker": True,
+            "rerank_candidates": 20,
+            "rerank_candidate_policy": {"max_candidates": 50},
+        })
+
+        request, _decision = planner.plan(state)
+
+        self.assertEqual(request.search_space, {"reranker.candidate_count": [30]})
+
+    def test_candidate_miss_respects_policy_ceiling(self):
+        # 후보 1개 = cross-encoder 추론 1쌍이라 상한을 넘는 후보는 내지 않는다.
+        findings = [
+            make_finding("p1", "retrieval_rerank_candidate_miss",
+                         gold_ranks={"g": 90}),
+        ]
+        state = make_state(findings)
+        state.index_config.update({
+            "use_reranker": True,
+            "rerank_candidates": 20,
+            "rerank_candidate_policy": {"max_candidates": 50},
+        })
+
+        request, _decision = planner.plan(state)
+
+        # 근거값이 상한 밖 → 방향 키워드 폴백(20×2=40)으로 내려간다. 90 은 나오지 않는다.
+        self.assertEqual(request.search_space, {"reranker.candidate_count": [40]})
+
+    def test_fusion_loss_shifts_weight_toward_favored_channel(self):
+        findings = [
+            make_finding("p1", "retrieval_rank_fusion_loss"),
+            make_finding("p2", "retrieval_rank_fusion_loss"),
+        ]
+        for finding in findings:
+            finding.metadata["favored_channel"] = "lexical"
+        state = make_state(findings)
+        state.index_config.update({"use_hybrid": True, "hybrid_dense_weight": 0.7})
+
+        request, _decision = planner.plan(state)
+
+        # lexical 우세 → dense 가중치를 내린다(정책 폭 0.1/0.2).
+        self.assertEqual(
+            request.search_space, {"retriever.hybrid_dense_weight": [0.6, 0.5]}
+        )
+
+    def test_fusion_loss_drops_key_without_direction_evidence(self):
+        """우세 채널이 동수면 근거가 없다 — 자리표시자 문자열이 config 에 새지 않아야 한다."""
+        findings = [
+            make_finding("p1", "retrieval_rank_fusion_loss"),
+            make_finding("p2", "retrieval_rank_fusion_loss"),
+        ]
+        findings[0].metadata["favored_channel"] = "dense"
+        findings[1].metadata["favored_channel"] = "lexical"
+        state = make_state(findings)
+        state.index_config.update({"use_hybrid": True, "hybrid_dense_weight": 0.7})
+
+        request, _decision = planner.plan(state)
+
+        self.assertNotIn("retriever.hybrid_dense_weight", request.search_space)
+
     def test_low_rank_does_not_ground_top_k(self):
         # low_rank 처방은 리랭커(use_reranker)뿐 — top_k 를 처방하지 않으므로
         # 순위가 있어도 top_k search_space 가 생기지 않는다(옵션 1).
@@ -1045,6 +1130,178 @@ class PlannerCandidateListTest(unittest.TestCase):
             "chunker.chunk_size",
             {"status": "direction_conflict"},
         ))
+
+
+class TopicClusterSignalDeferredTest(unittest.TestCase):
+    """topic_cluster 신호 소비가 꺼진 현재 동작 — 관측용 신호로만 유지.
+
+    planner._CONSUME_TOPIC_CLUSTER_SIGNAL=False 인 동안 _available_prescriptions 는
+    findings 를 줘도 applies_when 을 보지 않고, 신호값과 무관하게 전 처방을 순서대로
+    돌려줘야 한다(신호 배선 이전 = 순차 fallback 과 동작 동일). 소비를 켰을 때의 대조
+    로직 계약은 아래 TopicClusterAppliesWhenConsumeOnTest 가 별도로 고정한다.
+    """
+
+    LABEL = "retrieval_semantic_mismatch"
+
+    def _rule(self):
+        from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
+        return LABEL_TO_PRESCRIPTIONS[self.LABEL]
+
+    def _finding_with_signal(self, signal):
+        f = make_finding("p0", self.LABEL)
+        if signal is not None:
+            f.metadata["topic_cluster"] = signal
+        return f
+
+    def _ids(self, signal):
+        rule = self._rule()
+        avail = planner._available_prescriptions(
+            rule, self.LABEL, set(), [self._finding_with_signal(signal)]
+        )
+        return [p["id"] for p in avail]
+
+    def test_consume_flag_is_off(self):
+        # 이 PR 이 착지시키는 상태 = 소비 OFF. 켜지면 아래 회귀들이 의미를 잃으므로
+        # 플래그 자체를 명시적으로 고정한다(소비를 켤 때 이 테스트가 먼저 걸린다).
+        self.assertFalse(planner._CONSUME_TOPIC_CLUSTER_SIGNAL)
+
+    def test_all_signals_keep_all_prescriptions(self):
+        # 신호값이 무엇이든(소비 OFF) 전 처방이 순서대로 통과해야 한다.
+        rule = self._rule()
+        all_ids = [p["id"] for p in rule["prescriptions"]]
+        for signal in ("concentrated", "spread", "none", "unmeasured", None):
+            with self.subTest(signal=signal):
+                self.assertEqual(self._ids(signal), all_ids)
+
+    def test_no_findings_arg_is_legacy_blacklist_only(self):
+        # findings 를 안 주는 레거시 호출도 블랙리스트만 본다(소비 OFF 와 결과 동일).
+        rule = self._rule()
+        ids = [p["id"] for p in planner._available_prescriptions(rule, self.LABEL, set())]
+        self.assertEqual(ids, [p["id"] for p in rule["prescriptions"]])
+
+    def test_blacklist_still_filters_under_deferred_consume(self):
+        # 소비가 꺼져 있어도 블랙리스트는 계속 유효하다(신호와 무관한 기존 경로).
+        rule = self._rule()
+        blacklist = {(self.LABEL, "swap_embedding_model")}
+        finding = self._finding_with_signal("spread")
+        ids = [
+            p["id"]
+            for p in planner._available_prescriptions(
+                rule, self.LABEL, blacklist, [finding]
+            )
+        ]
+        self.assertNotIn("swap_embedding_model", ids)
+        self.assertIn("shrink_chunk_size", ids)
+
+
+class TopicClusterAppliesWhenConsumeOnTest(unittest.TestCase):
+    """소비를 켰을 때(_CONSUME_TOPIC_CLUSTER_SIGNAL=True)의 applies_when 대조 계약.
+
+    소비는 현재 꺼져 있지만 대조 로직(_prescription_applies)과 완화 경로는 그대로 배선돼
+    있다. 향후 캘리브레이션·임베딩 교체가 준비돼 소비를 켤 때 이 계약이 깨지지 않도록,
+    플래그를 켠 상태로 고정해 회귀를 잡아둔다.
+
+    rules.py 계약: spread/concentrated → swap_embedding_model 만, none → 청킹 처방만,
+    신호 미측정/unmeasured → 셋 다(순차 fallback).
+    """
+
+    LABEL = "retrieval_semantic_mismatch"
+
+    def setUp(self):
+        self._saved = planner._CONSUME_TOPIC_CLUSTER_SIGNAL
+        planner._CONSUME_TOPIC_CLUSTER_SIGNAL = True
+
+    def tearDown(self):
+        planner._CONSUME_TOPIC_CLUSTER_SIGNAL = self._saved
+
+    def _rule(self):
+        from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
+        return LABEL_TO_PRESCRIPTIONS[self.LABEL]
+
+    def _finding_with_signal(self, signal):
+        f = make_finding("p0", self.LABEL)
+        if signal is not None:
+            f.metadata["topic_cluster"] = signal
+        return f
+
+    def _ids(self, signal):
+        rule = self._rule()
+        avail = planner._available_prescriptions(
+            rule, self.LABEL, set(), [self._finding_with_signal(signal)]
+        )
+        return [p["id"] for p in avail]
+
+    def test_concentrated_keeps_only_embedding_swap(self):
+        self.assertEqual(self._ids("concentrated"), ["swap_embedding_model"])
+
+    def test_spread_keeps_only_embedding_swap(self):
+        self.assertEqual(self._ids("spread"), ["swap_embedding_model"])
+
+    def test_none_keeps_only_chunking(self):
+        # none → 청킹 처방만 남고 임베딩 교체는 빠진다. 청킹 전략 교체는 main 에서
+        # 2-후보 스윕(switch_to_recursive_sentence / switch_to_markdown_recursive)으로
+        # 분화됐으므로, 특정 id 를 박지 말고 "swap 을 뺀 나머지 = 청킹 처방 전부"인지 본다.
+        ids = self._ids("none")
+        self.assertNotIn("swap_embedding_model", ids)
+        self.assertIn("shrink_chunk_size", ids)
+        rule = self._rule()
+        chunking_ids = [
+            p["id"] for p in rule["prescriptions"] if p["id"] != "swap_embedding_model"
+        ]
+        self.assertEqual(ids, chunking_ids)
+
+    def test_missing_signal_keeps_all_prescriptions(self):
+        # 신호 미측정 → 전부 통과 = 기존 순차 fallback (동작 불변).
+        rule = self._rule()
+        all_ids = [p["id"] for p in rule["prescriptions"]]
+        self.assertEqual(self._ids(None), all_ids)
+
+    def test_prescription_without_applies_when_always_passes(self):
+        # applies_when 이 없는 라벨(예: retrieval_lexical_mismatch)은 신호와 무관하게 통과.
+        from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
+        label = "retrieval_lexical_mismatch"
+        rule = LABEL_TO_PRESCRIPTIONS[label]
+        f = make_finding("p0", label)
+        f.metadata["topic_cluster"] = "concentrated"   # 무관 신호
+        avail = planner._available_prescriptions(rule, label, set(), [f])
+        self.assertEqual(len(avail), len(rule["prescriptions"]))
+
+    def test_unmeasured_signal_keeps_all_prescriptions(self):
+        # 판정 불가(unmeasured)는 어느 허용 리스트에도 없지만, 완화 경로로 전부 통과해야
+        # 한다 — 근거가 없을 때는 신호 배선 이전의 순차 fallback 과 같아야 하기 때문.
+        rule = self._rule()
+        self.assertEqual(self._ids("unmeasured"), [p["id"] for p in rule["prescriptions"]])
+
+    def test_signal_relaxes_when_blacklist_exhausts_preferred(self):
+        """신호가 고른 처방이 블랙리스트에 걸리면 나머지로 완화된다(라벨 스킵 금지).
+
+        spread + swap_embedding_model 블랙리스트 조합. 완화가 없으면 후보가 []가 되어
+        _pick_top 이 라벨을 통째로 건너뛴다 — 신호 배선 이전에는 청킹 처방으로 넘어가던
+        경로라 회귀다.
+        """
+        rule = self._rule()
+        blacklist = {(self.LABEL, "swap_embedding_model")}
+        finding = self._finding_with_signal("spread")
+
+        avail = planner._available_prescriptions(rule, self.LABEL, blacklist, [finding])
+        ids = [p["id"] for p in avail]
+        self.assertNotIn("swap_embedding_model", ids)      # 블랙리스트는 계속 유효
+        self.assertIn("shrink_chunk_size", ids)            # 신호 조건은 완화됨
+
+        ranked = [(self.LABEL, [finding], rule, 1.0)]
+        self.assertIsNotNone(planner._pick_top(ranked, blacklist))
+
+    def test_blacklist_still_skips_label_when_fully_exhausted(self):
+        # 완화는 신호에만 적용된다 — 블랙리스트로 전부 소진되면 라벨은 그대로 스킵.
+        rule = self._rule()
+        blacklist = {(self.LABEL, p["id"]) for p in rule["prescriptions"]}
+        finding = self._finding_with_signal("spread")
+
+        self.assertEqual(
+            planner._available_prescriptions(rule, self.LABEL, blacklist, [finding]), []
+        )
+        ranked = [(self.LABEL, [finding], rule, 1.0)]
+        self.assertIsNone(planner._pick_top(ranked, blacklist))
 
 
 if __name__ == "__main__":

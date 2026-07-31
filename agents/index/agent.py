@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from agents.ingest.document_type import detect_document_type
 from agents.index.corpus_visualization import build_corpus_visualization_artifacts
 from agents.index.graph_index import build_graph_artifacts
 from agents.index.qdrant_store import (
@@ -174,6 +175,72 @@ def _split_markdown_sections(text: str) -> list[_SectionDraft]:
     return [_SectionDraft(text=body, section=None, start=start, end=end)] if body else []
 
 
+_MATH_PROBLEM_MARKER_RE = re.compile(
+    r"^\s*(?:(?:(?:문제|예제|유제|연습문제)\s*)?(?:\[|\()?(?P<number>\d{1,4})(?:\]|\))?\s*(?:번|[.)])?|SET\s*(?P<set_number>\d{1,3}))(?=\s|$|[:：])",
+    re.IGNORECASE,
+)
+
+
+def _math_problem_marker(line: str) -> str | None:
+    match = _MATH_PROBLEM_MARKER_RE.match(line)
+    if not match:
+        return None
+    number = match.group("number") or match.group("set_number")
+    if not number:
+        return None
+    prefix = "SET" if match.group("set_number") else "문제"
+    return f"{prefix} {number}"
+
+
+def _split_math_problem_sections(document: Document) -> list[_SectionDraft]:
+    """수학 교재 PDF에서 문제 번호 단위로 chunk 경계를 보존한다."""
+    text = document.content
+    starts: list[tuple[int, str]] = []
+    cursor = 0
+    for line in text.splitlines(keepends=True):
+        marker = _math_problem_marker(line.strip())
+        if marker:
+            starts.append((cursor, marker))
+        cursor += len(line)
+
+    if len(starts) < 2:
+        return []
+
+    sections: list[_SectionDraft] = []
+    first_start = starts[0][0]
+    preamble, preamble_start, preamble_end = _trimmed_slice(text, 0, first_start)
+    if preamble:
+        sections.append(
+            _SectionDraft(
+                text=preamble,
+                section="preamble",
+                start=preamble_start,
+                end=preamble_end,
+            )
+        )
+    for index, (start, marker) in enumerate(starts):
+        end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
+        body, body_start, body_end = _trimmed_slice(text, start, end)
+        if body:
+            sections.append(
+                _SectionDraft(
+                    text=body,
+                    section=marker,
+                    start=body_start,
+                    end=body_end,
+                )
+            )
+    return sections
+
+
+def _split_document_sections(document: Document) -> list[_SectionDraft]:
+    if detect_document_type(document.content, document.metadata) == "math":
+        math_sections = _split_math_problem_sections(document)
+        if math_sections:
+            return math_sections
+    return _split_markdown_sections(document.content)
+
+
 # recursive chunker가 문맥 경계에서 끊도록 후보 순서를 둔다.
 def _preferred_boundary(text: str, start: int, hard_end: int) -> int:
     minimum = start + max(1, (hard_end - start) // 2)
@@ -298,7 +365,7 @@ def _markdown_strategy(
             start=section.start,
             end=section.end,
         )
-        for section in _split_markdown_sections(document.content)
+        for section in _split_document_sections(document)
     ]
 
 
@@ -322,7 +389,7 @@ def _markdown_recursive_strategy(
     chunk_overlap: int,
 ) -> list[_ChunkDraft]:
     drafts: list[_ChunkDraft] = []
-    for section in _split_markdown_sections(document.content):
+    for section in _split_document_sections(document):
         drafts.extend(
             _recursive_chunks(
                 section.text,
@@ -435,6 +502,7 @@ def _chunk_document(
 # 청크/임베딩 결과를 바꾸는 설정만 재사용 판단에 반영한다.
 def _index_signature(config: dict) -> str:
     relevant = {
+        "chunk_preprocess_version": 1,
         "chunk_size": config["chunk_size"],
         "chunk_overlap": config["chunk_overlap"],
         "chunk_strategy": _configured_chunk_strategy(config),
@@ -825,6 +893,10 @@ def _chunk_metadata(
     # page_spans 는 문서 단위 정보라 청크마다 복사하면 payload 가 페이지 수만큼 불어난다.
     # 아래에서 이 청크의 "page" 하나로 접어 넣으므로 원본 목록은 뺀다.
     doc_metadata = {k: v for k, v in document.metadata.items() if k != "page_spans"}
+    document_type = detect_document_type(document.content, doc_metadata)
+    doc_metadata.setdefault("document_type", document_type)
+    if document_type == "math":
+        doc_metadata.setdefault("retrieval_profile", "math_formula")
 
     # Serve는 Qdrant payload만 보고 검색 옵션을 복원하므로 retrieval 설정도 같이 저장한다.
     return {
