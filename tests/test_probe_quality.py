@@ -10,11 +10,22 @@ LLM 응답이 토큰 상한 없이 잘리며 JSON 파싱에 실패 → 휴리스
 import os
 import sys
 import unittest
+from unittest import mock
 
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from agents.eval.probe_gen import _probe_surplus_count, probe_quality_issue
+from agents.eval import probe_gen
+from agents.eval.probe_gen import (
+    _HELD_OUT_FRAMES,
+    _clean_topic_of,
+    _generate_held_out_probes,
+    _held_out_question,
+    _llm_topic,
+    _probe_surplus_count,
+    probe_quality_issue,
+)
+from core.schema import Chunk
 
 
 class ProbeQualityGateTest(unittest.TestCase):
@@ -87,6 +98,181 @@ class ProbeQualityGateTest(unittest.TestCase):
         for answer in ("185명", "1,234억 원", "전체의 60%", "3.5% 인상되었습니다."):
             with self.subTest(answer=answer):
                 self.assertIsNone(probe_quality_issue("직원 수는 몇 명인가요?", answer))
+
+
+class TableSeparatorFurnitureTest(unittest.TestCase):
+    """표 셀 구분자 잔여물이 섞인 깨진 질문을 게이트가 잡는지.
+
+    실측(corpus 로그의 probe_held_out_000): 무응답 probe 가 원문 표 행을 주제로 긁어와
+    "...ㅣ 영 세율 제도..." 처럼 셀 구분자가 질문에 박혔다. GT 없는 무응답 probe 라 GT="" 로
+    질문 텍스트만 검사한다.
+    """
+
+    def test_rejects_hangul_bar_separator(self):
+        # ㅣ(U+3163 한글호환자모) — 실제 로그의 깨진 30번 질문.
+        issue = probe_quality_issue(
+            "자에 대한 과세정보를 활용 ㅣ 영 세율 제도 하여 추징한다는 것이 "
+            "국세청과 관련해 아직 공개되지 않은 세부 내규는 무엇인가요?",
+            "",
+        )
+        self.assertIsNotNone(issue)
+
+    def test_rejects_boxdrawing_and_repeated_pipe(self):
+        # │(U+2502)는 단독으로도 furniture. 파이프(|)는 표 행처럼 2개 이상 반복될 때만.
+        for question in (
+            "매출 │ 영업이익 항목과 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+            "가 | 나 | 다 항목과 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+        ):
+            with self.subTest(question=question):
+                self.assertIsNotNone(probe_quality_issue(question, ""))
+
+    def test_accepts_single_pipe_expression(self):
+        # 단독 파이프(비트연산·논리 OR·정규식)는 정상 표현이라 통과해야 한다(리뷰 지적 1).
+        # `_FURNITURE_RE` 는 공용 게이트라 일반 코퍼스의 정상 질문까지 폐기하면 안 된다.
+        for question in (
+            "A | B 비트 연산의 결과는 무엇인가요?",
+            "x | y 논리 OR 연산은 무엇을 의미하나요?",
+        ):
+            with self.subTest(question=question):
+                self.assertIsNone(probe_quality_issue(question, ""))
+
+    def test_accepts_clean_no_answer_question(self):
+        # 구분자 없는 정상 무응답 질문은 통과해야 한다.
+        self.assertIsNone(probe_quality_issue(
+            "영농조합법인 배당소득 저율과세와 관련해 아직 공개되지 않은 세부 내규는 무엇인가요?",
+            "",
+        ))
+
+
+class TruncatedUrlFurnitureTest(unittest.TestCase):
+    """청킹에 잘린 URL·위키/LaTeX 잔여물이 게이트를 빠져나가지 않는지(리뷰 Blocker).
+
+    _FURNITURE_RE 의 URL 규칙이 http/www. 접두를 요구하고 도메인 규칙이 .kr 만 잡아,
+    청크 경계에서 스킴이 잘린 조각("s://...")·위키 쿼리·LaTeX 마크업이 furniture 인데도
+    통과해 그대로 held-out 질문에 박혔다(실측: doc_6ecb97872f82_9).
+    """
+
+    def test_rejects_scheme_truncated_url(self):
+        for q in (
+            "s://ko.wikipedia.org/w/index.php?title=타 와 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+            "ttps://example.com/path 와 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+        ):
+            with self.subTest(q=q):
+                self.assertIsNotNone(probe_quality_issue(q, ""))
+
+    def test_rejects_schemeless_domain_with_path(self):
+        self.assertIsNotNone(probe_quality_issue(
+            "ko.wikipedia.org/w/index.php?title=x 와 관련해 아직 공개되지 않은 내규는 무엇인가요?", ""))
+
+    def test_rejects_wiki_and_latex_residue(self):
+        for q in (
+            "d {\\displaystyle a+ib+jc+kd} 와 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+            "문서 &oldid=12345 판과 관련해 아직 공개되지 않은 내규는 무엇인가요?",
+        ):
+            with self.subTest(q=q):
+                self.assertIsNotNone(probe_quality_issue(q, ""))
+
+    def test_accepts_plain_domain_word_without_path(self):
+        # 경로 슬래시 없는 ".com"·".org" 로 끝나는 정상 단어는 통과해야 한다(오탐 방지).
+        for q in (
+            "회사 이메일 도메인이 example.com 인 이유는 무엇인가요?",
+            "이 조직이 .org 도메인을 쓰는 근거는 무엇인가요?",
+        ):
+            with self.subTest(q=q):
+                self.assertIsNone(probe_quality_issue(q, ""))
+
+
+class CleanTopicOfTest(unittest.TestCase):
+    """_clean_topic_of: furniture 문장을 건너뛰고 깨끗한 주제를 고른다(무응답 전용)."""
+
+    def test_skips_furniture_first_line(self):
+        text = (
+            "활용 ㅣ 영 세율 제도 하여 추징\n"
+            "영농조합법인으로부터 받는 배당소득에 대한 저율 과세 혜택 규정입니다."
+        )
+        topic = _clean_topic_of(text)
+        self.assertIsNotNone(topic)
+        self.assertNotIn("ㅣ", topic)
+
+    def test_returns_none_when_all_furniture(self):
+        # 깨끗한 문장이 없으면 None → 호출부가 그 청크를 버린다.
+        self.assertIsNone(_clean_topic_of("페이지 522 ㅣ 전자공시시스템"))
+
+    def test_returns_none_for_empty(self):
+        self.assertIsNone(_clean_topic_of(""))
+
+
+class HeldOutQuestionContractTest(unittest.TestCase):
+    """held-out 무응답 probe 조립 경로(LLM 주제 / 휴리스틱 폴백)의 계약을 회귀로 고정한다.
+
+    계약(리뷰 High): held-out 은 반드시 코퍼스 전체에서 무응답이어야 한다. LLM 에게 질문 전체를
+    맡기지 않고 "주제"만 뽑게 한 뒤, 무응답 프레임(_HELD_OUT_FRAMES)을 템플릿이 유지한다 —
+    "아직 공개되지 않은…" 류 프레임은 정의상 코퍼스 어디에도 답이 없으므로 구성적으로 무응답이
+    보장된다(다른 청크가 topic 을 담고 있어도 그 세부는 부재). 조립부는 answer_exists=False,
+    gold_chunk_ids=[] 를 유지한다.
+    """
+
+    CTX = ("영농조합법인으로부터 받는 배당소득에 대한 저율 과세 혜택 규정입니다. "
+           "적용 세율은 5퍼센트입니다.")
+
+    def _chunks(self, n=3):
+        return [Chunk(chunk_id=f"c{i}", doc_id="d0", text=self.CTX) for i in range(n)]
+
+    def _all_frames_are_no_answer(self, question):
+        # 어떤 프레임이 쓰였든 무응답-보장 문구 중 하나로 끝나야 한다.
+        return any(frame.split("{topic}")[-1] in question for frame in _HELD_OUT_FRAMES)
+
+    def test_llm_topic_is_wrapped_in_no_answer_frame(self):
+        # LLM 은 주제만 뽑고, 무응답 프레임은 템플릿이 유지한다.
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=True), \
+             mock.patch.object(probe_gen.llm_provider, "chat_json",
+                               return_value={"topic": "배당소득 저율과세"}):
+            question = _held_out_question(self.CTX, frame_index=0)
+        self.assertIn("배당소득 저율과세", question)          # LLM 주제가 들어감
+        self.assertTrue(self._all_frames_are_no_answer(question))  # 무응답 프레임 유지
+
+    def test_llm_topic_with_furniture_falls_back_to_heuristic(self):
+        # LLM 이 furniture 섞인 주제를 내면 게이트가 걸러 휴리스틱 주제로 폴백한다.
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=True), \
+             mock.patch.object(probe_gen.llm_provider, "chat_json",
+                               return_value={"topic": "s://ko.wikipedia.org/w/index.php?title=x"}):
+            question = _held_out_question(self.CTX, frame_index=0)
+        self.assertIsNotNone(question)
+        self.assertNotIn("://", question)                     # furniture 주제는 안 쓰임
+        self.assertTrue(self._all_frames_are_no_answer(question))
+
+    def test_no_key_uses_heuristic_topic_and_frame(self):
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
+            question = _held_out_question(self.CTX, frame_index=0)
+        self.assertIsNotNone(question)
+        self.assertTrue(self._all_frames_are_no_answer(question))
+
+    def test_frame_index_rotates(self):
+        # frame_index 로 문형을 순환해 단조로움을 피한다.
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
+            qs = {_held_out_question(self.CTX, frame_index=i) for i in range(len(_HELD_OUT_FRAMES))}
+        self.assertEqual(len(qs), len(_HELD_OUT_FRAMES))       # 모두 서로 다른 프레임
+
+    def test_furniture_only_chunk_returns_none(self):
+        # 깨끗한 주제가 없는 청크는 None → 호출부가 그 청크를 버린다.
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
+            self.assertIsNone(_held_out_question("페이지 522 ㅣ 전자공시시스템"))
+
+    def test_llm_topic_returns_none_without_key(self):
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
+            self.assertIsNone(_llm_topic(self.CTX))
+
+    def test_assembled_probes_are_no_answer_with_empty_gold(self):
+        # 조립부 계약: answer_exists=False, gold_chunk_ids=[], 무응답 프레임, 게이트 통과.
+        with mock.patch.object(probe_gen.llm_provider, "has_key", return_value=False):
+            probes = _generate_held_out_probes(self._chunks(), n=2)
+        self.assertEqual(len(probes), 2)
+        for p in probes:
+            self.assertFalse(p.answer_exists)
+            self.assertEqual(p.gold_chunk_ids, [])
+            self.assertIsNone(p.ground_truth)
+            self.assertTrue(self._all_frames_are_no_answer(p.question))
+            self.assertIsNone(probe_quality_issue(p.question, ""))  # 게이트 통과분만 조립
 
 
 class ProbeSurplusCountTest(unittest.TestCase):

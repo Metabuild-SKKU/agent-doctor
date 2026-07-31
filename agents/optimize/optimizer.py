@@ -49,7 +49,11 @@ DEFAULT_CONSTRAINTS: dict[str, dict[str, Any]] = {
     "reranker.candidate_count": {"min": 4, "max": 100},
     "chunker.chunk_size": {"min": 200, "max": 1500},
     "chunker.chunk_overlap": {"min": 0, "max": 300},
-    "chunker.strategy": {"allowed": ["recursive_sentence"]},
+    # rules 가 청킹 교체를 2-후보 스윕(recursive_sentence·markdown_recursive)으로 등록하므로
+    # 둘 다 허용해야 한다 — recursive_sentence 만 두면 markdown_recursive 후보가 실행 전에
+    # 필터돼 스윕이 사실상 1개가 된다(이 PR 목표인 '실행 불가 처방 언블록'과 충돌).
+    "chunker.strategy": {"allowed": ["recursive_sentence", "markdown_recursive"]},
+    "generation.temperature": {"min": 0.0, "max": 1.0},
 }
 
 
@@ -60,23 +64,38 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
     # Eval Agent가 state.index_config.top_k를 실제 검색 개수로 사용한다.
     # (Index도 청크 metadata에 기록한다 — 소비처가 확인돼 허용으로 전환.)
     "retriever.top_k": True,
-    "hybrid_search": False,
-    # 공통 Retriever가 hybrid_dense_weight를 hybrid_search의 융합 가중치로 그대로 쓴다
-    # (agents/rag/retriever.py). hybrid_search 자체를 켜고 끄는 것과 달리 소비처가 확인돼
-    # 허용으로 둔다 — use_hybrid가 꺼져 있으면 값이 안 읽힐 뿐 파이프라인이 깨지지 않는다.
+    # Index(agent.py)와 공통 Retriever(rag/retriever.py)가 use_hybrid를 실제 검색에
+    # 소비한다(Qdrant sparse+dense RRF). config_mapper가 retriever.search_type을
+    # use_hybrid로 매핑하고 STATE_MAPPABLE에도 있어 소비처가 확인됨 → 허용으로 전환.
+    "hybrid_search": True,
+    # 공통 Retriever가 hybrid_dense_weight를 융합 가중치로 그대로 쓴다
+    # (agents/rag/retriever.py). use_hybrid 가 꺼져 있으면 값이 안 읽힐 뿐이라 안전하다.
     "hybrid_fusion_weight": True,
+    # 공통 Retriever가 use_mmr 로 후보풀을 MMR 재정렬한다(임베딩 코사인, 질의벡터 불필요).
+    "mmr": True,
     "chunking": True,
     "embedding_model": False,
     # 공통 Retriever가 Eval과 Serve에서 같은 설정으로 CrossEncoder를 실행한다.
     "reranker": True,
     "context_compression": False,
-    "chunking_strategy": False,
+    # Index(agent.py)가 CHUNK_STRATEGIES 레지스트리에 recursive_sentence 를 등록해
+    # config["chunk_strategy"] 로 실제 소비한다. config_mapper 가 chunker.strategy 를
+    # chunk_strategy 로 매핑하고 제약(allowed=recursive_sentence·markdown_recursive)·REINDEX 경로도
+    # 있어 소비처가 확인됨 → 허용으로 전환.
+    "chunking_strategy": True,
+    # generator(_build_prompt)가 프롬프트 플래그를, provider가 temperature를 실제
+    # 소비한다(Eval이 index_config를 generate_answer로 전달). Tier1 처방 허용.
+    "generation_prompt": True,
+    "generation_temperature": True,
+    # 모델 교체(Tier3)는 검증된 후보가 아직 없어 막아둔다.
+    "generation_model": False,
 }
 
 
 # canonical config 경로가 요구하는 사용자 pipeline capability다.
 PATH_CAPABILITIES: dict[str, str] = {
     "retriever.top_k": "retriever.top_k",
+    "retriever.mmr": "mmr",
     "retriever.search_type": "hybrid_search",
     "retriever.hybrid_dense_weight": "hybrid_fusion_weight",
     "reranker.enabled": "reranker",
@@ -86,6 +105,13 @@ PATH_CAPABILITIES: dict[str, str] = {
     "chunker.chunk_overlap": "chunking",
     "chunker.strategy": "chunking_strategy",
     "embedding.model": "embedding_model",
+    "generation.temperature": "generation_temperature",
+    "generation.grounding_strict": "generation_prompt",
+    "generation.require_citation": "generation_prompt",
+    "generation.restate_question": "generation_prompt",
+    "generation.completeness_mode": "generation_prompt",
+    "generation.abstention_strict": "generation_prompt",
+    "generation.model": "generation_model",
 }
 
 
@@ -93,13 +119,24 @@ PATH_CAPABILITIES: dict[str, str] = {
 # downstream capability가 추가되더라도 mapper 계약이 함께 갱신되기 전에는 적용하지 않는다.
 STATE_MAPPABLE_PATHS: set[str] = {
     "retriever.top_k",
+    "retriever.mmr",
     "retriever.search_type",
     "retriever.hybrid_dense_weight",
     "reranker.enabled",
     "reranker.candidate_count",
     "chunker.chunk_size",
     "chunker.chunk_overlap",
+    "chunker.strategy",
     "embedding.model",
+    # 생성(B그룹 Tier1) — index_config에 매핑되고 generator가 소비한다.
+    # generation.model은 capability=False라 실행 단계에서 걸러진다(후보 부재).
+    "generation.temperature",
+    "generation.grounding_strict",
+    "generation.require_citation",
+    "generation.restate_question",
+    "generation.completeness_mode",
+    "generation.abstention_strict",
+    "generation.model",
 }
 
 
@@ -566,10 +603,25 @@ def _run_internal(
         )
 
     if adapter_result.status == "skipped":
-        metadata["error_code"] = adapter_result.metadata.get(
+        error_code = adapter_result.metadata.get(
             "error_code",
             "internal_skipped",
         )
+        if (
+            path in {"chunker.chunk_size", "chunker.chunk_overlap"}
+            and error_code in {
+                "missing_chunk_precheck_context",
+                "chunk_precheck_unavailable",
+            }
+        ):
+            return _run_rules(
+                request,
+                candidate,
+                search_space,
+                skipped=skipped,
+                fallback_reason=error_code,
+            )
+        metadata["error_code"] = error_code
         return OptimizationResult(
             request_id=request.request_id,
             status="skipped",

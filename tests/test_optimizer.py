@@ -41,6 +41,16 @@ class OptimizerPolicyTest(unittest.TestCase):
 
         self.assertEqual(values, [100])
 
+    def test_both_chunking_strategies_survive_constraint(self):
+        # 리뷰 blocker: rules 가 2-후보 스윕(recursive_sentence·markdown_recursive)을 등록하는데
+        # allowed 가 recursive_sentence 만이면 markdown_recursive 가 필터돼 스윕이 1개가 된다.
+        values = filter_candidate_values(
+            "chunker.strategy",
+            ["recursive_sentence", "markdown_recursive"],
+            {"chunk_strategy": "fixed"},
+        )
+        self.assertEqual(values, ["recursive_sentence", "markdown_recursive"])
+
     def test_reranker_is_enabled_because_common_retriever_consumes_it(self):
         supported, reason = is_capability_supported("reranker")
 
@@ -429,6 +439,63 @@ class OptimizerExecutionTest(unittest.TestCase):
             result.metadata["error_code"],
             "invalid_internal_next_config",
         )
+
+    def test_chunk_prescreener_recoverable_skip_falls_back_to_rules(self):
+        candidate = self.make_candidate(
+            search_space={"chunker.chunk_size": [400]},
+        )
+        request = self.make_request(
+            optimizer="internal",
+            candidates=[candidate],
+            max_trials=1,
+        )
+
+        for error_code in (
+            "missing_chunk_precheck_context",
+            "chunk_precheck_unavailable",
+        ):
+            with self.subTest(error_code=error_code):
+                def runner(_request):
+                    return InternalAdapterResult(
+                        request_id="request-1",
+                        status="skipped",
+                        error="사전검사를 실행할 수 없음",
+                        metadata={"error_code": error_code},
+                    )
+
+                result = run(request, backend_runners={"internal": runner})
+
+                self.assertEqual(result.status, "proposed")
+                self.assertEqual(result.optimizer, "rules")
+                self.assertEqual(
+                    result.config_patch.changes,
+                    {"chunker.chunk_size": 400},
+                )
+                self.assertEqual(result.metadata["fallback_reason"], error_code)
+
+    def test_chunk_prescreener_nonrecoverable_skip_does_not_fall_back(self):
+        candidate = self.make_candidate(
+            search_space={"chunker.chunk_size": [400]},
+        )
+        request = self.make_request(
+            optimizer="internal",
+            candidates=[candidate],
+            max_trials=1,
+        )
+
+        def runner(_request):
+            return InternalAdapterResult(
+                request_id="request-1",
+                status="skipped",
+                error="사전검사 실패",
+                metadata={"error_code": "chunk_precheck_failed"},
+            )
+
+        result = run(request, backend_runners={"internal": runner})
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(result.optimizer, "internal")
+        self.assertEqual(result.metadata["error_code"], "chunk_precheck_failed")
 
     def test_ragbuilder_result_is_normalized(self):
         request = self.make_request(optimizer="ragbuilder")

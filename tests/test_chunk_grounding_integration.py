@@ -5,7 +5,7 @@ from unittest.mock import patch
 from agents.eval.probe_gen import _SynthesizedProbe, generate_probes
 from agents.optimize import planner
 from agents.optimize.adapters.chunk_prescreener import run as run_chunk_prescreener
-from core.schema import Chunk, DiagnosticReport, Document, Finding
+from core.schema import Chunk, DiagnosticReport, Document, Finding, Probe
 from core.state import AgentDoctorState
 
 
@@ -29,7 +29,15 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
     @patch("agents.eval.probe_gen._llm_synthesize_query")
     def test_generated_gold_spans_drive_chunk_prescreener(self, synthesize):
         evidence = "정답" * 100
-        content = ("머리" * 50) + evidence + ("꼬리" * 600)
+        content = (
+            ("머리" * 50)
+            + ". 도입 문장입니다. "
+            + evidence
+            + "입니다. "
+            + ("꼬리" * 100)
+            + ". "
+            + ("후속" * 500)
+        )
         document = Document("d1", "memory", "txt", content)
         chunk_text = content[:800]
         chunk = Chunk(
@@ -63,13 +71,16 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
             },
         )
         state.probes = generate_probes(state)
+        grounded_probe_ids = [
+            probe.probe_id for probe in state.probes if probe.gold_spans
+        ]
         finding = Finding(
             finding_id="f1",
             type="retrieval_failure",
             severity="warning",
             description="검색 context가 너무 깁니다.",
             label="too_long_context",
-            affected_probes=[probe.probe_id for probe in state.probes],
+            affected_probes=grounded_probe_ids,
         )
         state.report = DiagnosticReport(
             report_id="r1",
@@ -88,47 +99,36 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
         )
         result = run_chunk_prescreener(request)
 
-        self.assertTrue(all(probe.gold_spans for probe in state.probes))
+        self.assertTrue(grounded_probe_ids)
         self.assertEqual(request.optimizer, "internal")
         self.assertGreater(len(request.search_space["chunker.chunk_size"]), 1)
         self.assertEqual(result.status, "completed")
-        self.assertIn(
-            result.best_config["chunker.chunk_size"],
-            request.search_space["chunker.chunk_size"],
-        )
+        self.assertEqual(result.best_config["chunker.chunk_size"], 800)
+        self.assertTrue(result.metadata["best_is_baseline"])
 
-    # 예전엔 휴리스틱 폴백(_llm_generate_single_hop=None)으로 Probe 를 만들었지만,
-    # 그 경로는 원문 조각을 질문·정답에 그대로 써서 '질문=정답' Probe 가 되고 품질
-    # 게이트가 전부 폐기한다(Probe 0개 → 테스트 주제인 프리스크리너까지 못 감).
-    # 관심사는 "문서 여러 개의 gold_span 이 청크 후보를 이끄는지" 이므로, 게이트를
-    # 통과하면서 evidence 로 정확한 span 을 남기는 RAGAS 합성 경로를 쓴다.
-    @patch("agents.eval.probe_gen._llm_synthesize_query")
-    def test_generated_spans_drive_multiple_chunk_candidates(self, synthesize):
-        evidence = "정답" * 100          # span 길이 200 → chunk_size 800 보다 작아야 축소 후보가 나온다
+    def test_structural_spans_drive_multiple_chunk_candidates(self):
         documents = [
-            Document(f"d{i}", "memory", "txt", ("머리" * 50) + evidence + ("꼬리" * 600))
+            Document(
+                f"d{i}",
+                "memory",
+                "txt",
+                ("가" * 239)
+                + ".\n\n"
+                + str(i)
+                + ("나" * 556),
+            )
             for i in range(3)
         ]
         chunks = [
             Chunk(
                 f"d{i}_chunk_000",
                 f"d{i}",
-                document.content[:800],
-                char_span=(0, 800),
+                document.content,
+                char_span=(0, len(document.content)),
                 metadata={"chunk_index": 0},
             )
             for i, document in enumerate(documents)
         ]
-        # 멀티홉 Probe 는 source 를 2개 받으므로 양쪽에 인용을 준다 — 한쪽만 주면 나머지
-        # source 의 span 이 청크 전체(800)로 폴백해 p85 를 끌어올리고, 축소 후보가 사라진다.
-        synthesize.return_value = _SynthesizedProbe(
-            question="정답 근거는 무엇인가요?",
-            ground_truth="문서에 제시된 근거입니다.",
-            evidence=[
-                {"source_index": 0, "quote": evidence},
-                {"source_index": 1, "quote": evidence},
-            ],
-        )
         state = AgentDoctorState(
             documents=documents,
             chunks=chunks,
@@ -142,13 +142,28 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
                     "rounding_step": 50,
                     "path_fractions": [0.33, 0.66, 1.0],
                     "candidate_count": 3,
-                    # 단일 문서 통합 fixture이므로 작은 표본을 명시적으로 허용한다
-                    # (멀티홉 Probe 는 두 source 의 span 을 하나로 묶어 세므로 표본이 준다).
-                    "min_span_count": 1,
+                    "min_span_count": 3,
                 },
             },
         )
-        state.probes = generate_probes(state)
+        state.probes = [
+            Probe(
+                probe_id=f"probe_{i}",
+                question=f"문서 {i}의 첫 문단은 무엇인가요?",
+                source="taxonomy",
+                answer_exists=True,
+                ground_truth=document.content[:240],
+                gold_chunk_ids=[chunks[i].chunk_id],
+                gold_spans=[{"doc_id": document.doc_id, "start": 0, "end": 240}],
+                metadata={
+                    "span_grounding": {
+                        "status": "exact",
+                        "span_qualities": ["exact"],
+                    }
+                },
+            )
+            for i, document in enumerate(documents)
+        ]
         finding = Finding(
             finding_id="f1",
             type="retrieval_failure",
@@ -173,28 +188,33 @@ class ChunkGroundingIntegrationTest(unittest.TestCase):
             },
         )
 
-        # evidence 인용이 원문에 정확히 앵커돼 span 길이가 인용 길이(200)로 잡힌다.
-        # generate_probes 는 ragas/datamorgana 를 섞어 만들므로 개수를 고정하지 않고,
-        # "인용 길이 span 이 다수이고 그게 후보 산정을 이끈다" 는 성질을 본다.
-        span_lengths = [
-            span["end"] - span["start"]
-            for probe in state.probes
-            for span in probe.gold_spans
-        ]
-        self.assertGreaterEqual(len(span_lengths), 3)
-        self.assertEqual(min(span_lengths), len(evidence))
-        self.assertTrue(all(probe.gold_spans for probe in state.probes))
-        self.assertEqual(request.optimizer, "internal")
-        # span 200 → target 250(=200×1.2 를 50 단위 올림), 현재 800 에서 그 사이를
-        # path_fractions 로 끊은 값. span 길이가 바뀌면 이 값도 같이 움직인다.
         self.assertEqual(
-            request.search_space["chunker.chunk_size"],
-            [600, 450, 250],
+            [span["end"] - span["start"] for probe in state.probes for span in probe.gold_spans],
+            [240, 240, 240],
         )
+        self.assertTrue(all(
+            probe.metadata["span_grounding"]["status"] == "exact"
+            for probe in state.probes
+        ))
+        self.assertEqual(request.optimizer, "internal")
+        candidates = request.search_space["chunker.chunk_size"]
+        self.assertGreater(len(candidates), 1)
+        self.assertTrue(all(600 <= value < 800 for value in candidates))
         self.assertEqual(
             request.metadata["candidate_grounding"]["status"],
             "grounded",
         )
+        self.assertEqual(
+            request.metadata["candidate_grounding"]["source"],
+            "structural_evidence_windows",
+        )
+        result = run_chunk_prescreener(request)
+        self.assertEqual(result.status, "completed")
+        self.assertIn(
+            result.best_config["chunker.chunk_size"],
+            candidates,
+        )
+        self.assertFalse(result.metadata["best_is_baseline"])
 
 
 if __name__ == "__main__":

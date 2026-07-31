@@ -101,6 +101,24 @@ def make_report(overall, pass_threshold=False, label="too_long_context"):
     )
 
 
+class OptimizeManualLogTest(unittest.TestCase):
+    def test_manual_prescriptions_are_logged(self):
+        """D그룹(manual) 결정이면 라벨 헤드라인 + 매뉴얼 스텝이 출력로그에 남는다."""
+        from agents.optimize.schemas import OptimizeDecision
+        dec = OptimizeDecision(
+            mode="manual_required", status="manual_required",
+            requires_user_confirmation=True, next_route="serve",
+            reason="사람 개입 필요(D그룹)", manual_labels=["corpus_gap"],
+        )
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_manual_prescriptions(dec)
+        out = buf.getvalue()
+        self.assertIn("수동 조치 필요: corpus_gap", out)
+        self.assertIn("코퍼스에서 빠진 근거를 특정", out)  # 매뉴얼 스텝
+        self.assertIn("재색인", out)
+
+
 class OptimizeCandidateLogTest(unittest.TestCase):
     def test_request_skip_does_not_reassign_reason_to_first_candidate(self):
         result = OptimizationResult(
@@ -620,7 +638,11 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         )
 
     def test_inapplicable_prescription_falls_through_to_next(self):
-        """issue #26: 미지원 처방이 최우선이어도 다음 actionable finding을 적용한다."""
+        """issue #26: 적용 불가 처방이 최우선이어도 다음 actionable finding을 적용한다.
+
+        lexical_mismatch(12건)가 최우선이지만 baseline이 이미 hybrid라 enable_hybrid는
+        유효 후보가 없어(no-op) 적용 불가 → blacklist 되고 missing_gold(increase_top_k)로
+        폴스루한다. (enable_hybrid 자체는 dense baseline에선 정상 적용된다 — hybrid 언블록.)"""
         def _finding(pid, label, **metadata):
             return Finding(
                 finding_id=f"{pid}:{label}",
@@ -659,6 +681,7 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                 "chunk_size": 512,
                 "chunk_overlap": 50,
                 "embedding_model": "BAAI/bge-m3",
+                "use_hybrid": True,   # 이미 hybrid → enable_hybrid는 no-op(적용 불가)
             },
             iteration=0,
             max_iterations=3,
@@ -680,6 +703,36 @@ class OptimizeAgentForwardTest(unittest.TestCase):
     def test_always_returns_state_even_without_report(self):
         result = agent.run(AgentDoctorState(report=None, index_config={}, iteration=0))
         self.assertIsInstance(result, AgentDoctorState)
+
+
+class OptimizeCGroupUnblockTest(unittest.TestCase):
+    """C그룹 언블록: lost_in_the_middle / context_noise_interference 가 실행 가능한
+    처방(top_k 축소 / MMR)을 맨 앞 후보로 내는지 고정. 나머지(정렬·필터 프롬프트)는
+    소비 경로가 없어 뒤쪽 fallback 으로만 남고 optimizer 가 걸러낸다."""
+
+    def _first_candidate_space(self, label):
+        from agents.optimize.planner import plan
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="r",
+                findings=[Finding(
+                    finding_id="f1", type="context_failure", severity="critical",
+                    description="c", label=label, affected_probes=["p1"],
+                )],
+                composite_score={"total": 40.0},
+            ),
+        )
+        request, decision = plan(state)
+        self.assertEqual(decision.mode, "apply_optimize")
+        return request.candidates[0].search_space
+
+    def test_lost_in_the_middle_leads_with_top_k(self):
+        space = self._first_candidate_space("lost_in_the_middle")
+        self.assertIn("retriever.top_k", space)
+
+    def test_context_noise_interference_leads_with_mmr(self):
+        space = self._first_candidate_space("context_noise_interference")
+        self.assertEqual(space, {"retriever.mmr": [True]})
 
 
 class OptimizeAgentRollbackTest(unittest.TestCase):

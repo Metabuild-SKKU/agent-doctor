@@ -588,6 +588,181 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
             state.blacklist,
         )
 
+    def test_reranker_precision_floor_is_relaxed_when_low_rank_improves(self):
+        before_findings = [
+            self._finding(),
+            Finding(
+                finding_id="p2:retrieval_low_rank",
+                type="retrieval_failure",
+                severity="warning",
+                description="정답 청크의 순위가 낮음",
+                label="retrieval_low_rank",
+                confirmed=True,
+                affected_probes=["p2"],
+            ),
+        ]
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="before",
+                findings=before_findings,
+                overall_score=0.41,
+                ragas_scores={"context_precision": 0.50},
+                pass_threshold=False,
+            ),
+            runtime_capabilities={
+                "reranker": {
+                    "status": "verified",
+                    "model": qdrant_store.DEFAULT_RERANKER_MODEL,
+                    "retryable": False,
+                    "reason": None,
+                }
+            },
+        )
+
+        state = run_optimize(state)
+        self.assertTrue(state.index_config["use_reranker"])
+
+        state.report = DiagnosticReport(
+            report_id="after",
+            findings=[self._finding()],
+            overall_score=0.46,
+            ragas_scores={"context_precision": 0.20},
+            runtime_summary={
+                "reranker": {
+                    "enabled": True,
+                    "attempted": 2,
+                    "applied": 2,
+                }
+            },
+            pass_threshold=False,
+        )
+        state = run_optimize(state)
+
+        # 완화 판정의 핵심: 처방은 유지되고(롤백 없음) precision 위반이 지워진다.
+        self.assertTrue(state.index_config["use_reranker"])
+        self.assertEqual(state.optimization_history[0].status, "applied")
+        self.assertEqual(state.optimization_history[0].metadata["floor_violations"], [])
+
+        # 순위 원인 분할 이후: low_rank 의 처방은 enable_reranker 하나뿐이라, 리랭커가 이미
+        # 켜진 상태에서 같은 라벨이 남아 있으면 그 쌍은 더 시도할 게 없어(no_valid_candidate_values)
+        # 소진 처리된다. 품질 때문에 롤백된 게 아니므로 위 세 단언(유지·applied·위반 없음)이
+        # 완화 판정의 검증이고, 이 소진은 그와 별개다.
+        #   분할 전에는 low_rank 에 widen_rerank_candidates 가 2순위로 달려 있어 다음 후보로
+        #   넘어갔다. 지금은 창 확대가 retrieval_rerank_candidate_miss 로 옮겨갔고, 실제
+        #   파이프라인에서도 리랭커가 켜진 뒤의 순위 실패는 그 라벨(또는 reranker_demotion)로
+        #   잡히므로 low_rank 쪽이 소진돼도 처방이 막히지 않는다.
+        self.assertIn(("retrieval_low_rank", "enable_reranker"), state.blacklist)
+
+    def test_reranker_precision_floor_still_rolls_back_without_low_rank_improvement(self):
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="before",
+                findings=[self._finding()],
+                overall_score=0.41,
+                ragas_scores={"context_precision": 0.50},
+                pass_threshold=False,
+            ),
+            runtime_capabilities={
+                "reranker": {
+                    "status": "verified",
+                    "model": qdrant_store.DEFAULT_RERANKER_MODEL,
+                    "retryable": False,
+                    "reason": None,
+                }
+            },
+        )
+
+        state = run_optimize(state)
+        self.assertTrue(state.index_config["use_reranker"])
+
+        state.report = DiagnosticReport(
+            report_id="after",
+            findings=[self._finding()],
+            overall_score=0.46,
+            ragas_scores={"context_precision": 0.20},
+            runtime_summary={
+                "reranker": {
+                    "enabled": True,
+                    "attempted": 2,
+                    "applied": 2,
+                }
+            },
+            pass_threshold=False,
+        )
+        state = run_optimize(state)
+
+        self.assertFalse(state.index_config["use_reranker"])
+        self.assertEqual(state.optimization_history[0].status, "failed")
+        self.assertEqual(
+            state.optimization_history[0].metadata["floor_violations"],
+            ["context_precision"],
+        )
+        self.assertIn(
+            ("retrieval_low_rank", "enable_reranker"),
+            state.blacklist,
+        )
+
+    def test_reranker_precision_floor_still_rolls_back_with_multiple_floor_violations(self):
+        before_findings = [
+            self._finding(),
+            Finding(
+                finding_id="p2:retrieval_low_rank",
+                type="retrieval_failure",
+                severity="warning",
+                description="gold chunk is ranked too low",
+                label="retrieval_low_rank",
+                confirmed=True,
+                affected_probes=["p2"],
+            ),
+        ]
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="before",
+                findings=before_findings,
+                overall_score=0.41,
+                ragas_scores={"context_precision": 0.50, "faithfulness": 0.80},
+                pass_threshold=False,
+            ),
+            runtime_capabilities={
+                "reranker": {
+                    "status": "verified",
+                    "model": qdrant_store.DEFAULT_RERANKER_MODEL,
+                    "retryable": False,
+                    "reason": None,
+                }
+            },
+        )
+
+        state = run_optimize(state)
+        self.assertTrue(state.index_config["use_reranker"])
+
+        state.report = DiagnosticReport(
+            report_id="after",
+            findings=[self._finding()],
+            overall_score=0.46,
+            ragas_scores={"context_precision": 0.20, "faithfulness": 0.40},
+            runtime_summary={
+                "reranker": {
+                    "enabled": True,
+                    "attempted": 2,
+                    "applied": 2,
+                }
+            },
+            pass_threshold=False,
+        )
+        state = run_optimize(state)
+
+        self.assertFalse(state.index_config["use_reranker"])
+        self.assertEqual(state.optimization_history[0].status, "failed")
+        self.assertEqual(
+            state.optimization_history[0].metadata["floor_violations"],
+            ["context_precision", "faithfulness"],
+        )
+        self.assertIn(
+            ("retrieval_low_rank", "enable_reranker"),
+            state.blacklist,
+        )
+
 
 class RerankerMetadataValidationTest(unittest.TestCase):
     def test_invalid_runtime_values_fall_back_to_safe_defaults(self):

@@ -32,7 +32,7 @@ STEP1  Probe 생성        probe_gen.py       user_log(최우선) / 지식그래
                                             + DataMorgana-lite + 무응답(Held-out·False Premise)
                                             / 그래프가 비면 단일홉 폴백. eval_probes.json 캐시(probe_store.py)
 STEP2  검색 + 생성        agents/rag/        retriever.py(벡터 검색, 키워드 폴백) + generator.py(LLM 생성, 추출식 폴백)
-STEP3-1 규칙 지표         metrics_basic.py   Recall@k(span 우선), answer_match, Oracle F1, EM (diagnose 진입 시 계산)
+STEP3-1 규칙 지표         metrics_basic.py   Recall@k(span 우선), answer_match(짧은 정답 containment·긴 정답 창 F1), Oracle F1, EM
                           metrics_search.py  tier2 측정 — gold 순위 재검색 / BM25 / 코퍼스 조회
 STEP3-2 LLM(RAGAS) 진단   metrics_ragas.py   Faithfulness/ContextPrecision/Recall/Relevancy/AnswerCorrectness (DEEP 이상)
 STEP4  성공판정 + 원인 판정 diagnose.py        _is_success 게이트 → 실패일 때만 라벨 판정 → Finding(label=처방 라벨)
@@ -72,18 +72,90 @@ Eval은 인덱스 fingerprint, 검색 설정, Probe 입력, 진단 모드, 모�
 | `None` | 판정 불가 (대조할 정답셋 없음) | `[]` 반환 (실패라 단정할 근거가 없다) |
 | `False` | 실패 | A/B/C 원인 판정으로 진행 |
 
-판정 기준은 **recall + answer_match**이고, DEEP 이상이면 RAGAS `answer_correctness`가 문턱 미만일 때
-lexical 통과를 **강등**한다(부정문·`3월`↔`3일` 같은 근접 오답 차단). recall 은 정답셋이 있는 경로에서만
+판정 기준은 **recall + 정답 혼합 점수**다. recall 은 정답셋이 있는 경로에서만
 본다 — 무응답 기대 probe 는 gold 가 없어 `recall_at_k = -1` 이라, 앞에서 보면 올바른 기권까지 실패가 된다.
+
+#### 정답 판정 — lexical 단독 문턱을 버리고 RAGAS 와 섞는다 (2026-07-30)
+
+lexical char-F1(`answer_match`)은 KorQuAD 추출형 짧은 정답용 지표다. 생성 답변에 쓰면 두 방향으로
+어긋난다: gold 가 3~5문장이면 근거·소제목을 갖춘 *맞은* 답변이 precision 감점으로 0.3~0.4 로 깎이고,
+gold 가 묻지도 않은 수식어를 하나 더 갖고 있으면 맞은 단답도 0.49 가 된다. 그 답변들이 `f1 < 0.5`
+게이트에서 실패로 잡히고, 검색·오라클은 통과했으니 C그룹(`context_noise_interference`,
+`chunking_underchunking`)으로 오진돼 optimize 가 엉뚱한 처방(top_k↓·노이즈 필터)을 받았다.
+반대로 의미 지표(RAGAS)만 단독 문턱으로 쓰면 판정기 편차에 그대로 노출된다. 그래서 **두 축을 섞은
+점수 하나**로 판정한다(`diagnose._answer_ok` / `types.blend_answer_score`).
+
+```
+semantic     = max(answer_correctness, gold 커버리지 TP/(TP+FN))   # 커버리지는 faithfulness ≥ 0.7 일 때만
+answer_score = 0.4·lexical + 0.6·semantic                          # ANSWER_SEMANTIC_WEIGHT = 0.6
+통과          = semantic ≥ 0.3 (ANSWER_SEMANTIC_FLOOR) and answer_score ≥ 0.5 (ANSWER_PASS_THRESHOLD)
+```
+
+| 상황 | 판정 |
+|---|---|
+| 맞은 단답, gold 에 여분 수식어 (`lexical 0.49` · `semantic 0.73`) | `0.63` **통과** (기존엔 실패) |
+| 맞은 서술형 장문 (`lexical 0.34` · 커버리지 `1.0`) | `0.74` **통과** |
+| 근접 오답·부정문 (`lexical 0.9` · `semantic 0.2`) | 바닥선에서 **실패** |
+| 길게 쓴 무관한 답 (`lexical 0.39` · `semantic` 낮음) | **실패** |
+| RAGAS 미측정(DEEP 미만·판정기 degrade) | lexical 단독 `F1_PASS_THRESHOLD(0.5)` — 기존 동작 |
+
+- 의미축 바닥선(`ANSWER_SEMANTIC_FLOOR`)이 기존 `answer_correctness` 강등 규칙의 역할을 잇는다
+  (부정문·`3월`↔`3일` 차단). 레거시 `ANSWER_CORRECTNESS_MIN` 은 게이트에서 더 쓰지 않는다.
+- 의미축에 gold 커버리지를 함께 넣는 이유: `answer_correctness = TP/(TP+0.5(FP+FN))` 의 분모에
+  군더더기(FP)가 들어가 verbose 정답을 lexical 과 **같은 방향**으로 깎는다. 커버리지는 FP 를 빼고
+  '정답 요소를 다 담았나'만 묻는 recall 축이고, 누락·모순은 FN 으로 분류되므로 근접 오답은 여전히 떨어진다.
+- lexical 쪽도 tier1 에서 한 겹 보정한다: `metrics_basic.best_window_char_f1` — 정답 ≥30자 + 답변이
+  1.3배 이상 길면 precision 분모를 답변 전체가 아니라 **정답 길이만큼의 창**으로 잡는다(실측: 맞은
+  서술형 답변 0.34→0.63, 길게 쓴 무관한 답변 0.29→0.39 로 여전히 미달 — 창 크기가 고정돼 길게 써서
+  점수를 버는 경로는 없다).
+- `oracle_f1` 도 같은 이유로 깎이므로 `_oracle_ok` 이 오라클 트랙에 동일한 혼합 점수를 쓴다.
+- 게이트는 record 의 RAGAS dict 만 읽는다(LLM 재호출 없음) — `report._oracle_accuracy` 가 성공
+  probe 에도 `_oracle_ok` 을 부르기 때문에 지켜야 하는 성질이다.
+- probe 로그에 `answer=0.63(의미 0.73, 커버리지 0.50)` 이 함께 찍혀, f1 이 낮은데 통과한(또는 f1 이
+  높은데 실패한) 근거를 볼 수 있다. Finding 의 `reason` 도 `answer=…(f1 …·의미 …)` 로 기록된다.
+
+**의미축에 넣지 않는 것** (게이트가 승격까지 하므로, 신뢰할 수 없는 성분은 통과를 만든다):
+
+| 제외 대상 | 이유 |
+|---|---|
+| `answer_correctness_degraded` (유사도 단독 계산) | 한국어는 같은 주제면 사실이 틀려도 코사인이 0.8 대 — 승격에 쓰면 오답이 통과한다. 강등 전용이던 시절엔 안전했던 폴백이다 |
+| 커버리지 < `GOLD_COVERAGE_MIN(0.8)` | 부분 답변이 커버리지를 '부분 점수'로 들고 통과하면 `generation_partial_answer` 진단이 사라진다. 누락 감점은 FN 을 분모에 넣는 `answer_correctness` 몫 |
+| 근거 없는(faithfulness < 0.7) 커버리지 | 파라미터 기억으로 맞힌 답까지 올리면 `generation_parametric_overreliance` 가 잡을 케이스를 가린다 |
+
+**남는 위험 (튜닝 대상)**
+
+- 가중치 0.4/0.6 · 문턱 0.5 의 기하학: 의미축이 **0.834 이상이면 lexical 0 이어도 통과**하고,
+  의미축이 바닥선(0.3)이면 lexical 0.8 을 넘겨야 통과한다. 즉 판정 권한의 60%가 LLM 판정기에 있다.
+  판정기를 덜 믿고 싶으면 `ANSWER_SEMANTIC_WEIGHT` 를 낮춘다.
+- gold 문장 수가 1~2개인 probe 는 커버리지가 사실상 0/1 이라, 판정기의 TP 오분류 하나가 곧 통과다
+  (문턱 0.8 은 그런 probe 에서 사실상 '전부 맞음'만 통과시키지만, 그 판단이 LLM 한 번에 달려 있다).
+- gold 답변이 질문이 묻지 않은 수식어까지 담고 있으면 커버리지가 구조적으로 낮게 나온다
+  (실측 사례: `f1=0.49` probe 의 커버리지 0.5). 이건 지표가 아니라 **probe gold 품질** 문제라
+  STEP1 쪽에서 줄여야 한다 — 커버리지에 하한 veto 를 걸면 그런 정답이 다시 실패한다.
+- `_oracle_ok` 도 완화됐으므로 `_generation_failed`(B) 전제가 덜 성립하고 `_context_failed`(C)
+  전제는 더 자주 성립한다 — 같은 실패가 B에서 C로 **재분류**될 수 있다(원인 자체는 C 가 더 맞지만,
+  라벨 분포·처방 순서가 이전 실행과 달라진다).
+- `bad_gold_answer`(사람 검수 큐로 가는 D 라벨)는 `_oracle_ok` 실패가 전제라 **발동이 줄기만 한다**
+  — 새 게이트의 통과집합이 옛 게이트의 상위집합이기 때문(전수 격자로 고정:
+  `tests/test_answer_match.py::TestGateMonotonicity`). 줄어드는 대부분은 '오라클 답이 gold 와
+  의미상 같은데 표현만 달라서 정답셋 오류로 몰리던' 오탐이지만, **gold 가 질문이 묻지 않은 요소까지
+  담아 lexical 이 낮던 유형은 이제 통과**해 라벨로 남지 않는다(성공 probe 는 findings 가 비어야
+  하므로 라벨을 붙일 수 없다). 그 신호는 리포트 카운터 `semantic_rescued` 가 대신 들고 있다 —
+  'lexical 미달인데 의미축으로 통과' 건수 = 정답셋 품질 검수 후보이자 채점 변경의 영향 크기.
+  (C 슬롯의 `bad_gold_answer` 는 슬롯 전제가 `_oracle_ok` 를 요구하는데 함수는 그 반대를 요구해
+  이번 변경과 무관하게 원래부터 도달 불가다 — 실질 발동 경로는 B 슬롯 하나뿐.)
+- 점수 스케일이 전반적으로 올라간다. `composite`/`reliability`/`oracle_accuracy` 를 이 변경 **이전
+  실행과 직접 비교하면 개선으로 오독**된다(optimize history 의 before/after 포함) — 재베이스라인 필요.
 
 성공/실패는 별도 필드를 두지 않는다. 이 게이트 덕에 **`findings` 가 비었으면 성공**이 규약이 아니라
 구조적 보장이 된다(`_is_success()`/`diagnose()` 의 판정 자체가 그 보장이다).
 
 **주의(종합점수 통일, 2026-07-27)**: 위 보장은 여전히 참이지만, `scoring.reliability_score`가
 집계하는 값은 더 이상 "findings 유무의 이진 카운트(통과 probe 수 / 전체)"가 아니다. gold probe는
-`recall@k × max(f1_score, answer_correctness)`의 **연속값**으로 신뢰도를 매기고, 이는 `findings`와
-디커플링됐다 — 예를 들어 char-F1이 낮아 finding이 붙은 probe도 `answer_correctness`가 높으면
-신뢰도 점수는 부분점수를 받는다(긴 서술형 gold에서 char-F1이 구조적으로 저평가되는 문제의 완화책).
+`recall@k × answer_score`(게이트와 같은 혼합 점수)의 **연속값**으로 신뢰도를 매기고, 이는 `findings`와
+디커플링됐다 — 예를 들어 char-F1이 낮아 finding이 붙은 probe도 의미축이 높으면 신뢰도 점수는
+부분점수를 받는다. 게이트와 같은 값을 보므로 '통과했는데 신뢰도만 낮게 남아 optimize 탐색이 반대
+방향을 가리키는' 어긋남도 없다.
 무응답 기대 probe(`answer_exists=False`)만 여전히 findings 유무의 이진값(1/0)을 쓴다.
 즉 **화면에 보이는 "신뢰도" 숫자는 "findings 없는 probe의 비율"이 아니라 "probe별 soft 신뢰도의
 평균"이다.** 자세한 배경은 `agents/optimize/history.py`의 `judge`/`_read_score` 주석과 PR #47 참고.

@@ -26,6 +26,46 @@ _METRIC_LABELS = {
     "response_relevancy": ("답변 관련성", "답이 질문에 얼마나 들어맞는지입니다."),
 }
 
+_PRESCRIPTION_POINT_LABELS = {
+    "enable_reranker": "리랭커 활성화",
+    "widen_rerank_candidates": "후보군 확대",
+    "enable_hybrid": "하이브리드 검색",
+    "swap_embedding_model": "임베딩 교체",
+    "shrink_chunk_size": "청크 축소",
+    "decrease_chunk_size": "청크 축소",
+    "increase_chunk_size": "청크 확대",
+    "increase_chunk_overlap": "겹침 확대",
+    "switch_chunking_strategy": "청킹 전략 변경",
+    "increase_top_k": "top_k 확대",
+    "decrease_top_k": "top_k 축소",
+    "dynamic_top_k": "동적 top_k",
+    "expand_query": "질의 확장",
+    "enable_query_decomposition": "질의 분해",
+    "expand_bridge_entity_query": "연결어 확장",
+    "enable_mmr": "MMR 활성화",
+    "enable_adaptive_retrieval": "적응형 검색",
+    "relax_reranker_threshold": "리랭커 완화",
+    "tighten_reranker_threshold": "리랭커 강화",
+    "swap_reranker_model": "리랭커 교체",
+    "lower_temperature": "생성 온도 낮춤",
+    "strict_grounding_prompt": "근거 지시 강화",
+    "upgrade_generation_model": "생성 모델 교체",
+    "completeness_prompt": "완전성 지시",
+    "checklist_review_step": "체크리스트 검증",
+    "llm_verification_pass": "LLM 재검증",
+    "restate_question": "질문 재진술",
+    "strengthen_abstention_prompt": "기권 기준 강화",
+    "require_citation": "인용 필수화",
+    "require_numeric_citation": "수치 인용 강화",
+    "enable_calculation_check": "계산 검증",
+    "force_hop_evidence_binding": "근거 연결 강화",
+    "enable_bridge_entity_verifier": "연결어 검증",
+    "context_compression": "컨텍스트 압축",
+    "reorder_context_edges": "컨텍스트 재정렬",
+    "enable_noise_filter": "노이즈 필터",
+    "strict_conflict_prompt": "충돌 검증",
+}
+
 
 def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> dict[str, Any]:
     report = state.report
@@ -35,7 +75,11 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
     confirmed = [f for f in findings if f.confirmed]
 
     kept = sum(1 for h in history if h.status == "applied" and not h.metadata.get("pending"))
-    rolled = sum(1 for h in history if h.status == "failed")
+    errors = sum(1 for h in history if _is_study_error(h))
+    rolled = sum(
+        1 for h in history
+        if h.status == "failed" and not _is_study_error(h)
+    )
     pending = sum(1 for h in history if h.metadata.get("pending"))
 
     # 헤드라인 '종합 점수' = 설계 종합점수(composite, 0~100). 없으면 overall×100 폴백.
@@ -58,6 +102,7 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
             "findings_count": len(findings),
             "kept": kept,
             "rolled": rolled,
+            "errors": errors,
             "pending": pending,
         },
         "priority": _build_priority(confirmed),
@@ -66,12 +111,14 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
         "rxs": _build_rxs(history),
         "dxs": _build_dxs(findings),
         "qas": _build_qas(state, findings),
+        "recommendations": _build_recommendations(state, findings),
         "transparency": {
             "duration_label": "",
             "question_count": len(state.probes),
             "rx_count": len(history),
             "rx_kept": kept,
             "rx_rolled": rolled,
+            "rx_errors": errors,
             "chunk_count": len(state.chunks),
         },
     }
@@ -177,21 +224,72 @@ def _course_point_score(item, key: str, fallback: float) -> float:
     return _to_100(raw) if raw is not None else fallback
 
 
+def _is_study_error(item) -> bool:
+    """후보 평가가 끝나기 전에 study 자체가 실패한 이력인지 구분한다."""
+    return "study_error" in item.metadata
+
+
+def _course_point_label(item, prescription_index: int) -> str:
+    """차트 폭에 맞는 짧은 처방명. Rx 순번 대신 실제 처방의 의미를 보여준다.
+
+    prescription_index는 차트 점 번호가 아니라 optimization history의 처방 순번이다.
+    실패한 처방이 실패·복구 두 점을 만들더라도 다음 처방의 순번은 하나만 증가한다.
+    """
+    prescription_id = item.selected_prescription_id or ""
+    if prescription_id in _PRESCRIPTION_POINT_LABELS:
+        return _PRESCRIPTION_POINT_LABELS[prescription_id]
+    if prescription_id:
+        return prescription_id.replace("_", " ")[:18]
+    return f"처방 {prescription_index}"
+
+
 def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
     # baseline_score 는 이미 헤드라인 스케일(0~100) — 여기서 다시 _to_100 하지 않는다.
-    points = [{"label": "기준선", "score": baseline_score, "kept": True}]
-    for idx, item in enumerate(history, start=1):
+    points = [{
+        "label": "기준선",
+        "score": baseline_score,
+        "kept": True,
+        "kind": "baseline",
+    }]
+    for prescription_index, item in enumerate(history, start=1):
+        # study 오류는 전후 점수가 관측되지 않았다. baseline 폴백으로 가짜 하락·복구
+        # 점을 만들지 말고, 오류 상세는 처방 이력 카드에만 남긴다.
+        if _is_study_error(item):
+            continue
+
         kept = item.status == "applied" and not item.metadata.get("pending")
+        rolled_back = item.status == "failed"
         before = _course_point_score(item, "before", baseline_score)
         after = _course_point_score(item, "after", before)
-        point = {
-            "label": f"Rx{idx} · {item.selected_prescription_id or ''}",
+        # 같은 진단 라벨에 여러 처방을 시도해도 Rx 순번만으로 뭉뚱그리지 않고,
+        # 차트에서는 실제 처방 이름을 점 이름으로 쓴다.
+        label = _course_point_label(item, prescription_index)
+
+        if rolled_back:
+            # 실패한 처방은 롤백 전 실측 점수와 복원된 점수를 각각 한 점으로 남긴다.
+            # 이전에는 after를 세로 보조선에만 넣어 본선에서 점수 변화가 보이지 않았다.
+            points.extend([
+                {
+                    "label": f"{label} 실패",
+                    "score": after,
+                    "kept": False,
+                    "kind": "failed",
+                },
+                {
+                    "label": "원상 복구",
+                    "score": before,
+                    "kept": True,
+                    "kind": "rollback",
+                },
+            ])
+            continue
+
+        points.append({
+            "label": label,
             "score": after if kept else before,
             "kept": kept,
-        }
-        if not kept:
-            point["roll"] = after
-        points.append(point)
+            "kind": "kept" if kept else "pending",
+        })
     return points
 
 
@@ -203,9 +301,13 @@ def _changed_keys(before: dict, after: dict) -> list[str]:
 def _build_rxs(history: list) -> list[dict[str, Any]]:
     out = []
     for idx, item in enumerate(history, start=1):
+        study_error = _is_study_error(item)
         kept = item.status == "applied" and not item.metadata.get("pending")
-        rolled_back = item.status == "failed"
-        state_key = "kept" if kept else ("rolled" if rolled_back else "pending")
+        rolled_back = item.status == "failed" and not study_error
+        state_key = (
+            "error" if study_error else
+            ("kept" if kept else ("rolled" if rolled_back else "pending"))
+        )
 
         changed = _changed_keys(item.before_config, item.after_config)
         if changed:
@@ -217,9 +319,12 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
         # 헤드라인(composite)과 일관되게 처방 카드 점수도 종합점수로 표시.
         # (유지/롤백 판정 자체는 overall 탐색 신호 기준이므로 direction 과 verdict 이
         #  드물게 어긋날 수 있으나, 표시 점수는 사용자가 보는 종합점수로 통일한다.)
-        before_head = _course_point_score(item, "before", 0.0)
-        after_head = _course_point_score(item, "after", before_head)
-        direction = "up" if after_head >= before_head else "down"
+        score = None
+        if not study_error:
+            before_head = _course_point_score(item, "before", 0.0)
+            after_head = _course_point_score(item, "after", before_head)
+            direction = "up" if after_head >= before_head else "down"
+            score = [str(before_head), str(after_head), direction]
 
         out.append({
             "state": state_key,
@@ -227,20 +332,21 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             "change": change,
             "target": ", ".join(item.failure_labels),
             "reason": ["처방 근거", item.reason or ""],
-            "score": [
-                str(before_head),
-                str(after_head),
-                direction,
-            ],
+            "score": score,
             "verdict": (
+                ["error", "실험 오류 · 설정 원복"] if study_error else
                 ["keep", "유지"] if kept else
                 ["roll", "롤백"] if rolled_back else
                 ["pending", "판정 대기"]
             ),
             "drill": {
-                "label": "판정 근거",
+                "label": "오류 원인" if study_error else "판정 근거",
                 "rows": [],
-                "caption": item.rollback_reason or item.reason or "",
+                "caption": (
+                    str(item.metadata.get("study_error", ""))
+                    if study_error else
+                    (item.rollback_reason or item.reason or "")
+                ),
             },
         })
     return out
@@ -261,51 +367,183 @@ def _build_dxs(findings: list) -> list[dict[str, Any]]:
     return out
 
 
-def _build_qas(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
-    """근사치 구성: 실제 생성 답변 텍스트는 state 에 남지 않으므로, Probe/Finding 데이터를
-    조합해 질문·기대정답·처방 전후 상태를 재구성한다(문자 그대로의 답변 비교가 아님).
-    state.report 는 최신 Eval 방문 결과만 담으므로, 여기 남은 confirmed finding 은 아직
-    미해결이다. optimization_history 에서 유지(kept)된 처방의 failure_labels 는 그 라벨의
-    문제가 해결됐다고 보고 별도로 "해결됨" 카드를 만든다."""
-    probes_by_id = {p.probe_id: p for p in state.probes}
-    unresolved_labels = {f.label for f in findings if f.confirmed and f.label}
+# ── 남은 권고 (자동 처방으로 끝나지 않는 항목) ──────────────────────
+# 두 부류를 모은다:
+#   - manual(D그룹): config로 못 고침 → 사람이 문서 보강/probe 재생성. rules.py 의
+#     매뉴얼 스텝과 "어디가 문제인지"(질문·근거 문서)를 함께 실어 구체화한다.
+#   - preliminary(의심): 표준 검진으론 원인 미확정 → 정밀 검진 필요.
+# 확정 자동처방 대상(dxs/rxs에서 다룸)은 여기서 제외한다.
 
-    out = []
+_REC_TITLES = {
+    "corpus_gap": "코퍼스에 근거가 없는 질문 {n}건",
+    "corpus_gap_partial_hop": "일부 단계 근거가 없는 질문 {n}건",
+    "bad_gold_answer": "정답셋이 의심되는 질문 {n}건",
+}
+_REC_CTAS = {
+    "corpus_gap": "문서 보강 필요",
+    "corpus_gap_partial_hop": "문서 보강 필요",
+    "bad_gold_answer": "probe 재생성 필요",
+}
+# manual finding.metadata["group"] → 배지. D 이외(예비가 A/B/C일 수 있음)는 prelim에서 처리.
+_REC_GROUP_BADGES = {"D": ["data", "D · 데이터"]}
 
-    for item in state.optimization_history or []:
-        kept = item.status == "applied" and not item.metadata.get("pending")
-        if not kept:
+
+def _rec_source_docs(probe) -> list[str]:
+    """probe 가 근거로 삼는 원본 문서들(재청킹에도 안 깨지는 gold_doc_id / gold_spans.doc_id).
+    누락 gold 를 콕 집으려면 finding.metadata['missing_gold_ids'] 가 필요하나(Eval 계약, PR #55),
+    아직 없으므로 probe 의 gold 문서 전체를 degradation 으로 보여준다."""
+    docs: list[str] = []
+    if getattr(probe, "gold_doc_id", None):
+        docs.append(probe.gold_doc_id)
+    for span in getattr(probe, "gold_spans", None) or []:
+        doc = span.get("doc_id") if isinstance(span, dict) else None
+        if doc and doc not in docs:
+            docs.append(doc)
+    return docs
+
+
+def _rec_manual_steps(rule: dict) -> list[dict[str, str]]:
+    """rules.py 의 매뉴얼 처방 스텝(manual=True)을 렌더용으로."""
+    steps = []
+    for p in rule.get("prescriptions", []):
+        if not p.get("manual"):
             continue
-        for label in item.failure_labels:
-            if label in unresolved_labels:
-                continue  # 나중에 다시 발견됨 → 미해결 쪽에서 다룬다
-            out.append({
-                "label": label,
-                "solved": True,
-                "q": "",
-                "gold": "",
-                "before": f"처방 전 진단 라벨: {label}",
-                "bnote": "",
-                "after": f"처방({item.selected_prescription_id or ''}) 적용 후 재검증 통과",
-                "fix": item.selected_prescription_id or "",
-            })
+        steps.append({"action": p.get("action", ""), "detail": p.get("detail", "")})
+    return steps
 
+
+# bad_gold_answer 소스별 조치 — 사용자 제공 정답은 자동 재생성 대상이 아니라 사람 검수,
+# 우리가 만든 probe 는 재생성 대상. 분기 로직은 rules.py(선언)가 아니라 여기(resolver)에 둔다.
+# 실제 제외·재평가 실행은 Eval 재평가 루프 몫이므로, 여기서는 소스에 맞는 안내만 한다.
+_BAD_GOLD_BY_SOURCE = {
+    "user_log": "사용자 제공 정답 — 자동 재생성 대상 아님. 검수·수정 요청",
+}
+_BAD_GOLD_DEFAULT_ACTION = "자동 생성 probe — 재생성 후 재평가 대상"
+
+
+def _rec_items(label: str, findings: list, probes_by_id: dict) -> list[dict[str, str]]:
+    """이 권고가 걸린 질문들을 '어디가 문제인지'와 함께 per-probe 로.
+    corpus_gap 계열은 근거 문서를, bad_gold_answer 는 기대 정답 + 소스별 조치를 보여준다."""
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
     for f in findings:
-        if not f.confirmed:
-            continue
-        for probe_id in f.affected_probes:
-            probe = probes_by_id.get(probe_id)
+        for pid in f.affected_probes:
+            if pid in seen:
+                continue
+            seen.add(pid)
+            probe = probes_by_id.get(pid)
             if probe is None:
                 continue
-            out.append({
-                "label": f"{f.metadata.get('group', '')} · {f.label or f.type}",
-                "solved": False,
-                "q": probe.question,
-                "gold": probe.ground_truth or "",
-                "before": f.description,
-                "bnote": "",
-                "after": "처방 후에도 재현됨 — 여전히 미해결" if f.prescription else "아직 처방되지 않음",
-                "fix": f.prescription or "미처방",
-            })
+            if label == "bad_gold_answer":
+                action = _BAD_GOLD_BY_SOURCE.get(getattr(probe, "source", ""), _BAD_GOLD_DEFAULT_ACTION)
+                items.append({
+                    "q": probe.question,
+                    "where": action,          # 소스별 조치를 위치 슬롯에 실어 렌더 재사용
+                    "gold": probe.ground_truth or "",
+                })
+            else:
+                docs = _rec_source_docs(probe)
+                where = ("근거 문서: " + ", ".join(docs)) if docs else "근거 문서 미상"
+                # Eval이 missing_gold_ids를 실었으면 '전체 gold 중 몇 개가 없는지'를 정밀 표기.
+                missing = f.metadata.get("missing_gold_ids") if f.metadata else None
+                total = len(getattr(probe, "gold_chunk_ids", None) or [])
+                if missing and total:
+                    where += f" (gold {total}개 중 {len(missing)}개 누락)"
+                items.append({"q": probe.question, "where": where, "gold": ""})
+    return items
 
-    return out[:6]
+
+def _build_recommendations(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
+    from agents.optimize.rules import get_rule, is_manual
+
+    probes_by_id = {p.probe_id: p for p in state.probes}
+    groups: dict[str, list] = {}
+    order: list[str] = []
+    for f in findings:
+        label = f.label
+        if not label:
+            continue
+        # manual(D) 또는 예비(의심)만. 확정 자동처방 대상은 dxs/rxs 몫.
+        if not (is_manual(label) or not f.confirmed):
+            continue
+        if label not in groups:
+            groups[label] = []
+            order.append(label)
+        groups[label].append(f)
+
+    out: list[dict[str, Any]] = []
+    for label in order:
+        fs = groups[label]
+        rule = get_rule(label) or {}
+        n = len({pid for f in fs for pid in f.affected_probes})
+        if is_manual(label):
+            title = _REC_TITLES.get(label, "사람 조치가 필요한 질문 {n}건").format(n=n)
+            out.append({
+                "kind": "manual",
+                "code": label,
+                "badge": _REC_GROUP_BADGES.get(rule.get("group"), ["data", "D · 데이터"]),
+                "title": title,
+                "desc": rule.get("manual_action", ""),
+                "cta": _REC_CTAS.get(label, "사람 조치 필요"),
+                "steps": _rec_manual_steps(rule),
+                "items": _rec_items(label, fs, probes_by_id),
+            })
+        else:
+            # 예비(의심): 원인 미확정 → 정밀 검진 안내. 제목은 진단 설명 첫 줄에서 군더더기 제거.
+            title = fs[0].description.split("\n")[0]
+            for token in ("[예비] ", "[A그룹] ", "[B그룹] ", "[C그룹] ", "[D그룹] "):
+                title = title.replace(token, "")
+            out.append({
+                "kind": "prelim",
+                "code": label,
+                "badge": ["prelim", "의심"],
+                "title": f"{title[:50]} · 질문 {n}건",
+                "desc": "표준 검진으로는 원인을 확정할 수 없어 정밀 검진이 필요합니다.",
+                "cta": "정밀 검진 실행 →",
+                "steps": [],
+                "items": _rec_items(label, fs, probes_by_id),
+            })
+    return out
+
+
+def _build_qas(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
+    """실패한 검증 질문을 실제 Eval 답변과 함께 UI 데이터로 변환한다.
+
+    한 probe에 Finding이 여러 개여도 질문 카드는 하나만 만들고 진단 설명과 처방을
+    합친다. 예비 Finding도 평가상 실패한 질문이므로 숨기지 않는다. 이 섹션은 최신
+    Eval의 실제 실패 질문만 다루므로, 질문·답변 근거가 없는 과거 처방 이력에서
+    "해결됨" 카드를 추정하지 않는다. 실패 질문은 DiagnosticReport에 보존된 만큼
+    모두 전달하며 표시 상한을 임의로 두지 않는다.
+    """
+    report = state.report
+    failed_questions = getattr(report, "failed_questions", []) if report else []
+    findings_by_probe: dict[str, list] = {}
+    for finding in findings:
+        for probe_id in finding.affected_probes:
+            findings_by_probe.setdefault(probe_id, []).append(finding)
+
+    out = []
+    for result in failed_questions:
+        probe_id = result.get("probe_id", "")
+        related = findings_by_probe.get(probe_id, [])
+        labels = [
+            f"{finding.metadata.get('group', '')} · {finding.label or finding.type}".strip(" ·")
+            for finding in related
+        ]
+        reasons = list(dict.fromkeys(
+            str(finding.metadata.get("reason") or "").strip() or finding.description
+            for finding in related
+        ))
+        prescriptions = list(dict.fromkeys(
+            finding.prescription or "미처방" for finding in related
+        ))
+        out.append({
+            "label": " / ".join(labels) or "검증 실패",
+            "q": result.get("question", ""),
+            "gold": result.get("expected_answer", ""),
+            "actual": result.get("actual_answer", ""),
+            "diagnosis": " / ".join(reasons) or "실패 원인을 확인하지 못했습니다.",
+            "fix": " / ".join(prescriptions) or "미처방",
+        })
+
+    return out
