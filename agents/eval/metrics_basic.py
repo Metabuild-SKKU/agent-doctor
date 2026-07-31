@@ -4,7 +4,7 @@ agents/eval/metrics_basic.py
 
 LLM 호출도, 추가 검색 쿼리도 쓰지 않는다 — 이미 가진 답변·정답·청크 좌표만으로 계산하므로
 모드 게이트 없이 FAST 부터 항상 동작한다. 담는 것:
-  · 정답 매칭 지표 : char_f1 / answer_match / exact_match
+  · 정답 매칭 지표 : char_f1 / best_window_char_f1 / answer_match / exact_match
   · 검색 지표      : recall_at_k / span_recall_at_k
   · 무응답 판별    : is_abstention
   · 진입 시 계산   : _compute_metrics (record 에 recall/f1/oracle_f1/EM 저장)
@@ -85,12 +85,17 @@ def exact_match(prediction: str, reference: str) -> bool:
     return _normalize(prediction) == _normalize(reference)
 
 
-# ── 정답 매칭 (KorQuAD 문자 F1 + 짧은 정답 문자-recall) ───────────
+# ── 정답 매칭 (KorQuAD 문자 F1 + 짧은 정답 문자-recall + 긴 정답 창 F1) ───────────
 # 정답이 짧고, 답변이 문장이면 precision이 감소함
 # 짧은 정답은 recall(정답 문자가 답변에 담겼나)만 보는 게 표준이다.
 
 _SHORT_REF_MAX_CHARS = 10   # 정규화 후 정답 문자 수 이하면 '짧은 정답'으로 보고 recall 경로 허용
 _CONTAINMENT_MIN = 0.9      # 짧은 정답은 recall 이 이 이상(정답이 거의 다 담김)일 때만 recall 로 통과
+
+# 긴 서술형 정답용 창(window) 경로 — 아래 best_window_char_f1 참고.
+_LONG_REF_MIN_CHARS = 30    # 정규화 후 정답이 이보다 길면 '서술형'으로 보고 창 경로 허용
+_VERBOSE_RATIO_MIN = 1.3    # 답변이 정답보다 이 배수 이상 길 때만(=verbose) 창 경로를 켠다
+_WINDOW_STRIDE_DIV = 8      # 창 이동 간격 = 정답 길이 / 이 값 (작을수록 촘촘·느림)
 
 
 def char_recall(prediction: str, reference: str) -> float:
@@ -105,14 +110,57 @@ def char_recall(prediction: str, reference: str) -> float:
     return num_same / len(ref)
 
 
-def answer_match(prediction: str, reference: str) -> float:
-    """정답 매칭 점수(규칙 기반 tier1). 기준은 KorQuAD 문자 단위 F1이고, 짧은 정답(정규화 후 ≤10자)은
-    '정답 문자가 답변에 거의 다 담겼을 때(recall ≥ 0.9, containment)'에 한해 recall 로 통과시켜
-    완결 문장의 precision 감점을 피한다. reference 없으면 0.0.
+def best_window_char_f1(prediction: str, reference: str) -> float:
+    """답변에서 '정답과 가장 잘 맞는 구간'만 떼어내 잰 문자 F1(0~1).
 
-    recall 문턱(containment)을 둔 이유: 문턱 없이 max(f1, recall) 이면 정답 문자를 일부만 공유하는
-    근접 오답(gold '145' ↔ 답 '150' → recall 0.67)도 통과해 너무 후해진다. recall 을 '거의 완전
-    포함'으로 제한하면 verbose 정답(recall≈1.0, '332cm입니다')은 살리고 near-miss 오답은 char_f1 로 떨어진다.
+    왜 필요한가: char_f1 의 precision 분모가 답변 전체 길이라, 긴 서술형 gold 를 상대로 근거·
+    소제목·부연을 갖춘 정답 답변(gold 의 3~5배 길이)은 정답을 다 담아도 F1 이 0.3~0.4 로
+    깎인다. 이건 답이 틀린 게 아니라 채점 단위가 어긋난 것이다(KorQuAD 는 추출형 짧은
+    정답용 지표) — 그래서 답변 전체가 아니라 정답 길이만큼의 창(window) 안에서 precision 을
+    잰다. 창 크기를 정답 길이로 고정하므로 '길게 써서 점수를 버는' 경로는 생기지 않는다
+    (분모가 답변 길이와 무관하게 len(ref) 로 고정된다).
+
+    창을 len(ref) 로 두면 P=R 이라 F1 = (창 안에서 겹친 정답 문자)/len(ref) 로 수렴한다 —
+    즉 '정답 내용이 답변의 어느 한 구간에 얼마나 응집해 있나'를 재는 값이다.
+    답변이 정답보다 짧으면 창을 못 잡으므로 char_f1 을 그대로 돌려준다."""
+    pred = _chars(prediction)
+    ref = _chars(reference)
+    if not pred or not ref:
+        return 0.0
+    width = len(ref)
+    if len(pred) <= width:
+        return char_f1(prediction, reference)
+
+    ref_counter = Counter(ref)
+    stride = max(1, width // _WINDOW_STRIDE_DIV)
+    starts = list(range(0, len(pred) - width + 1, stride))
+    if starts[-1] != len(pred) - width:
+        starts.append(len(pred) - width)          # 끝까지 훑도록 마지막 창을 붙인다
+
+    best = 0.0
+    for start in starts:
+        num_same = sum((Counter(pred[start:start + width]) & ref_counter).values())
+        if num_same == 0:
+            continue
+        precision = num_same / width
+        recall = num_same / len(ref)
+        best = max(best, 2 * precision * recall / (precision + recall))
+    return best
+
+
+def answer_match(prediction: str, reference: str) -> float:
+    """정답 매칭 점수(규칙 기반 tier1). 기준은 KorQuAD 문자 단위 F1이고, 정답 길이에 따라 두
+    보정 경로를 둔다. reference 없으면 0.0.
+
+    · 짧은 정답(정규화 후 ≤10자): '정답 문자가 답변에 거의 다 담겼을 때(recall ≥ 0.9,
+      containment)'에 한해 recall 로 통과시켜 완결 문장의 precision 감점을 피한다.
+      recall 문턱을 둔 이유: 문턱 없이 max(f1, recall) 이면 정답 문자를 일부만 공유하는
+      근접 오답(gold '145' ↔ 답 '150' → recall 0.67)도 통과해 너무 후해진다. recall 을 '거의 완전
+      포함'으로 제한하면 verbose 정답(recall≈1.0, '332cm입니다')은 살리고 near-miss 오답은 char_f1 로 떨어진다.
+    · 긴 서술형 정답(≥30자)에 답변이 1.3배 이상 길면: 창 F1(best_window_char_f1)을 함께 보고
+      큰 값을 쓴다. 답변 전체를 precision 분모로 쓰면 정답을 다 담은 서술형 답변이 구조적으로
+      0.3~0.4 로 깎여, 맞은 답이 실패로 판정되고 C그룹(context) 원인으로 오진되기 때문이다.
+      창 크기가 len(ref) 로 고정돼 '길게 쓰면 이득'은 생기지 않는다.
 
     [남는 한계] 부정/모순('사망'⊂'사망하지 않았다', recall=1.0)과 '3월'↔'3일'(char_f1=0.5)은
     문자 단위로 못 거른다 → 의미 판정은 tier3(RAGAS), 관측은 EM 병기가 담당한다."""
@@ -124,6 +172,10 @@ def answer_match(prediction: str, reference: str) -> float:
         rc = char_recall(prediction, reference)
         if rc >= _CONTAINMENT_MIN:              # 정답이 거의 다 담김 → recall 로 precision 감점 상쇄
             return max(f1, rc)
+        return f1
+    pred = _chars(prediction)
+    if len(ref) >= _LONG_REF_MIN_CHARS and len(pred) >= len(ref) * _VERBOSE_RATIO_MIN:
+        return max(f1, best_window_char_f1(prediction, reference))
     return f1
 
 

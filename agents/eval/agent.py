@@ -677,7 +677,15 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
             f"{str(bool(rec.retrieval_details.get('search_fallback_used'))).lower()}, "
             f"reranker={rec.retrieval_details.get('reranker_status', 'disabled')}"
         )
-    print(f"    recall@k={recall}  f1={f1}  oracle_f1={oracle}")
+    metric_line = f"    recall@k={recall}  f1={f1}  oracle_f1={oracle}"
+    # 판정 기준은 f1 단독이 아니라 혼합 점수(answer_score = lexical·의미 가중합)다 —
+    # 그 값과 의미축을 함께 남기지 않으면 'f1 이 낮은데 왜 통과(또는 통과 못)했나'를 로그만
+    # 보고 알 수 없다. 의미축은 DEEP 에서만 측정되므로 있을 때만 붙인다.
+    if p.ground_truth and rec.answer_semantic is not None:
+        metric_line += (f"  answer={_fmt_metric(rec.answer_score)}"
+                        f"(의미 {_fmt_metric(rec.answer_semantic)}"
+                        f", 커버리지 {_fmt_metric(rec.gold_coverage)})")
+    print(metric_line)
     if p.ground_truth and rec.best_gold_answer_f1 > rec.raw_f1_score:
         print(
             f"    gold_variant: raw_f1={_fmt_metric(rec.raw_f1_score)} "
