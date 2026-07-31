@@ -31,9 +31,18 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+# 크레딧 소진(OpenAI insufficient_quota)은 같은 429 지만 기다려도 풀리지 않는다 —
+# 재시도는 실패를 40초쯤 늦출 뿐이라 즉시 전파한다. Gemini 무료 티어의
+# RESOURCE_EXHAUSTED 에는 이 코드가 없어 재시도 동작이 그대로다.
+_NON_RETRYABLE_MARKERS = ("insufficient_quota",)
+
+
 def is_rate_limit(exc: Exception) -> bool:
     """rate limit(429/quota/RESOURCE_EXHAUSTED) 계열 예외인지 status/메시지로 느슨히 판별.
     provider별 예외 타입을 직접 import 하지 않기 위함."""
+    code = str(getattr(exc, "code", "") or "").lower()
+    if any(m in str(exc).lower() or m == code for m in _NON_RETRYABLE_MARKERS):
+        return False
     status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     if status == 429:
         return True

@@ -46,6 +46,22 @@ class IsRateLimitTest(unittest.TestCase):
     def test_unrelated_error_is_not_rate_limit(self):
         self.assertFalse(is_rate_limit(Exception("invalid API key")))
 
+    def test_insufficient_quota_is_not_retried(self):
+        # OpenAI 크레딧 소진. 같은 429 지만 기다려도 풀리지 않는다.
+        self.assertFalse(is_rate_limit(FakeExc(
+            "Error code: 429 - {'error': {'message': 'You exceeded your current quota', "
+            "'type': 'insufficient_quota'}}", status_code=429)))
+
+    def test_insufficient_quota_code_is_not_retried(self):
+        self.assertFalse(is_rate_limit(FakeExc("boom", code="insufficient_quota")))
+
+    def test_gemini_resource_exhausted_quota_is_still_retried(self):
+        # Gemini 무료 티어의 429 도 "quota" 문구를 쓴다 — 이쪽은 재시도가 맞다.
+        self.assertTrue(is_rate_limit(Exception(
+            "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded "
+            "your current quota, please check your plan and billing details.', "
+            "'status': 'RESOURCE_EXHAUSTED'}}")))
+
 
 if __name__ == "__main__":
     unittest.main()
