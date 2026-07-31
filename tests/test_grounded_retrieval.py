@@ -73,6 +73,28 @@ class GroundedCreditDiagnoseTest(unittest.TestCase):
         self.assertEqual([f.label for f in findings], ["bad_gold_chunk"])
         self.assertIsNone(rec.retrieval_axis)
 
+    def test_corpus_gap_blocks_grounded_credit(self):
+        # 리뷰 지적(Medium): 골드가 코퍼스에 없으면 grounded 성공 처리를 하지 않는다 —
+        # 크레딧을 주면 'gold 하나가 코퍼스에 없다'는 corpus_gap 사실이 사라진다.
+        from core.schema import Finding
+        sentinel = Finding(finding_id="cg", type="gap", severity="warning", description="d",
+                           label="corpus_gap", confirmed=True, affected_probes=["p1"])
+        rec = _rec(recall=0.0, f1=1.0, oracle_f1=1.0, faith=0.9)
+        with patch.object(diagnose, "_compute_metrics"), \
+             patch.object(diagnose, "_compute_ragas_real"), \
+             patch.object(diagnose, "_compute_ragas_oracle"), \
+             patch.object(diagnose, "_corpus_gap_premise", return_value=True), \
+             patch.object(diagnose, "_retrieval_fixable", return_value=False), \
+             patch.object(diagnose, "corpus_gap", return_value=sentinel), \
+             patch.object(diagnose, "corpus_gap_partial_hop", return_value=None), \
+             patch.object(diagnose, "_generation_failed", return_value=False), \
+             patch.object(diagnose, "_context_failed", return_value=False), \
+             patch.object(diagnose, "generation_parametric_overreliance", return_value=None), \
+             patch.object(diagnose, "generation_abstention_failure", return_value=None):
+            labels = [f.label for f in diagnose.diagnose(rec, mode=int(Mode.DEEP))]
+        self.assertIn("corpus_gap", labels)            # corpus_gap 보존
+        self.assertIsNone(rec.retrieval_axis)          # grounded 크레딧 안 실림
+
 
 class GroundedCreditReliabilityTest(unittest.TestCase):
     """reliability 가 pass/fail 과 같은 판정(retrieval_axis)을 쓴다."""

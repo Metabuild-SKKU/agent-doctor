@@ -90,6 +90,28 @@ class DiagnoseShortCircuitTest(unittest.TestCase):
             findings = diagnose.diagnose(rec, mode=int(Mode.DEEP))
         self.assertEqual([f.label for f in findings], ["bad_gold_chunk"])
 
+    def test_corpus_gap_preempts_bad_gold_chunk(self):
+        # 리뷰 지적(Medium): 골드가 코퍼스에 없으면(corpus_gap) 단락하지 않고 양보한다 —
+        # 없는 청크는 '재지정' 불가라 additive corpus_gap 이 그 사실을 보고해야 한다.
+        from core.schema import Finding
+        sentinel = Finding(finding_id="cg", type="gap", severity="warning", description="d",
+                           label="corpus_gap", confirmed=True, affected_probes=["p1"])
+        rec = _rec(f1=1.0, oracle_f1=0.0, faith=1.0, recall=0.0)
+        with patch.object(diagnose, "_compute_metrics"), \
+             patch.object(diagnose, "_compute_ragas_real"), \
+             patch.object(diagnose, "_compute_ragas_oracle"), \
+             patch.object(diagnose, "_corpus_gap_premise", return_value=True), \
+             patch.object(diagnose, "_retrieval_fixable", return_value=False), \
+             patch.object(diagnose, "corpus_gap", return_value=sentinel), \
+             patch.object(diagnose, "corpus_gap_partial_hop", return_value=None), \
+             patch.object(diagnose, "_generation_failed", return_value=False), \
+             patch.object(diagnose, "_context_failed", return_value=False), \
+             patch.object(diagnose, "generation_parametric_overreliance", return_value=None), \
+             patch.object(diagnose, "generation_abstention_failure", return_value=None):
+            labels = [f.label for f in diagnose.diagnose(rec, mode=int(Mode.DEEP))]
+        self.assertIn("corpus_gap", labels)            # additive corpus_gap 보존
+        self.assertNotIn("bad_gold_chunk", labels)     # 단락 안 탐
+
 
 class GoldLabelingErrorScoringTest(unittest.TestCase):
     """점수 제외는 넓히되(정답 텍스트+청크 둘 다), 재생성 대상은 답 오류만 유지한다."""

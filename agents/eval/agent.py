@@ -739,26 +739,47 @@ def _short_cid(cid: str) -> str:
     return cid[i + 1:] if i != -1 else cid
 
 
-def _doc_tag(cid: str) -> str:
-    """청크 id 에서 문서 식별자를 짧게 뽑는다: 'doc_ace9d8c1ce5d_chunk_016' → 'ace9d8'.
+def _cid_doc(cid: str) -> str:
+    """청크 id 의 문서 부분(전체) — 문서 동일성 판정용: 'doc_ace9d8c1ce5d_chunk_016' → 'doc_ace9d8c1ce5d'.
 
-    _short_cid 가 문서 접두를 버리므로, 서로 다른 문서의 'chunk_005' 가 로그에서
-    똑같이 보인다 — 검색이 골드와 다른 문서의 동명 청크를 가져왔는데도 '골드를 가져온
-    것처럼' 보이는 착시(그래서 recall=0 이 모순처럼 읽힌다)를 만든다. 문서가 섞일 때
-    이 태그를 붙여 동명 청크를 구분한다."""
+    동일성은 반드시 전체 doc id 로 판정한다 — 절단값(_doc_tag)으로 판정하면 접두가 겹치는
+    두 문서가 같은 것으로 접혀 걷어내려던 착시가 그대로 남는다."""
     i = cid.rfind("_chunk_")
-    doc = cid[:i] if i != -1 else cid
+    return cid[:i] if i != -1 else cid
+
+
+def _doc_tag(cid: str) -> str:
+    """로그 표시용 짧은 문서 태그(문서 해시 앞 6자): 'doc_ace9d8c1ce5d_chunk_016' → 'ace9d8'.
+
+    _short_cid 가 문서 접두를 버려서 서로 다른 문서의 'chunk_005' 가 똑같이 보이는 착시를
+    구분하려고 붙인다. 절단이라 표시 전용이고, 문서 동일성 판정에는 쓰지 않는다(_cid_doc)."""
+    doc = _cid_doc(cid)
     if doc.startswith("doc_"):
         doc = doc[4:]
-    return doc[:6] or doc
+    return doc[:6]
 
 
-def _fmt_cids(cids: list[str], multi_doc: bool) -> str:
-    """청크 id 리스트를 로그용으로 축약. 여러 문서가 섞였을 때만 문서 태그(@)를 붙여
-    동명 청크의 문서 간 충돌을 드러낸다(단일 문서면 기존 표시 그대로)."""
-    if multi_doc:
-        return ", ".join(f"{_short_cid(c)}@{_doc_tag(c)}" for c in cids)
-    return ", ".join(_short_cid(c) for c in cids)
+def _fmt_cids(cids: list[str], colliding: set[str]) -> str:
+    """청크 id 리스트를 로그용으로 축약. 같은 short_cid 가 문서 간 충돌하는 항목에만 문서
+    태그(@)를 붙여 그 착시만 걷어낸다 — 충돌 없는 항목은 기존 표시를 유지한다(태그 남발 방지)."""
+    parts = []
+    for c in cids:
+        short = _short_cid(c)
+        parts.append(f"{short}@{_doc_tag(c)}" if short in colliding else short)
+    return ", ".join(parts)
+
+
+def _colliding_short_cids(*cid_groups: list[str]) -> set[str]:
+    """검색∪골드에서 같은 short_cid 가 서로 다른 문서(_cid_doc)에 걸친 것들 — 실제 착시 대상.
+
+    다문서 코퍼스에선 top-k 가 여러 문서에 걸치는 게 정상이라 '문서 ≥2'만으로 태그를 켜면
+    거의 모든 줄에 붙는다. 착시는 동명 청크가 문서 간 충돌할 때만 생기므로 그 조건으로 좁힌다."""
+    docs_by_short: dict[str, set[str]] = {}
+    for group in cid_groups:
+        for c in group:
+            if c:
+                docs_by_short.setdefault(_short_cid(c), set()).add(_cid_doc(c))
+    return {short for short, docs in docs_by_short.items() if len(docs) > 1}
 
 
 def _mark(ok: bool) -> str:
@@ -784,12 +805,12 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
     recall = _fmt_metric(rec.recall_at_k)
     f1 = _fmt_metric(rec.f1_score, bool(p.ground_truth))
     oracle = _fmt_metric(rec.oracle_f1, rec.oracle_answer is not None)
-    # 검색·골드가 여러 문서에 걸치면 문서 태그를 붙인다 — 서로 다른 문서의 동명 청크
-    # (예: 골드 doc_A_chunk_005 vs 검색 doc_B_chunk_005)가 축약 표시로 겹쳐 보여
-    # 'recall=0 인데 chunk_005 가 검색에 있다'는 착시를 만드는 걸 막는다.
-    multi_doc = len({_doc_tag(c) for c in [*rec.retrieved_chunk_ids, *p.gold_chunk_ids] if c}) > 1
-    retrieved = _fmt_cids(rec.retrieved_chunk_ids, multi_doc)
-    gold = _fmt_cids(p.gold_chunk_ids, multi_doc)
+    # 같은 short_cid 가 서로 다른 문서에 걸친 항목에만 문서 태그를 붙인다 — 골드
+    # doc_A_chunk_005 와 검색 doc_B_chunk_005 가 축약 표시로 겹쳐 'recall=0 인데 chunk_005 가
+    # 검색에 있다'는 착시를 만드는 걸, 그 충돌 항목만 골라 걷어낸다(태그 남발 없이).
+    colliding = _colliding_short_cids(rec.retrieved_chunk_ids, p.gold_chunk_ids)
+    retrieved = _fmt_cids(rec.retrieved_chunk_ids, colliding)
+    gold = _fmt_cids(p.gold_chunk_ids, colliding)
     # 판정은 finding 유무로 — diagnose 가 원인을 하나도 못 붙였으면 정상 처리된 probe 다.
     status = _mark(not rec.findings) + (f" {len(rec.findings)}건" if rec.findings else "")
 
