@@ -612,9 +612,9 @@ class OptimizeCGroupUnblockTest(unittest.TestCase):
         space = self._first_candidate_space("lost_in_the_middle")
         self.assertIn("retriever.top_k", space)
 
-    def test_context_noise_interference_leads_with_mmr(self):
+    def test_context_noise_interference_leads_with_context_compression(self):
         space = self._first_candidate_space("context_noise_interference")
-        self.assertEqual(space, {"retriever.mmr": [True]})
+        self.assertEqual(space, {"context.compression.enabled": [True]})
 
 
 class OptimizeAgentRollbackTest(unittest.TestCase):

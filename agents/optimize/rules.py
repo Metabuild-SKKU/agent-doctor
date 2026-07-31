@@ -622,7 +622,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"context_compression": True},  # 관련도 낮은 청크 필터링/압축
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                # TODO(index-합의): context_compression 필드 index_config에 없음
             },
             {
                 "id": "shrink_chunk_size",
@@ -673,17 +672,17 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         "target_metrics": ["noise_sensitivity"],  # 비-gold 상충 청크가 답변을 오염
         "prescriptions": [
             {
+                "id": "context_compression",
+                "patch": {"context.compression.enabled": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+            {
                 # 관련성+다양성 균형으로 후보풀을 재정렬해 중복·잡음 청크 쏠림을 억제.
                 # 값 키는 A그룹과 통일한다 — flat "mmr":True 대신 canonical retriever.mmr.
                 # 공통 Retriever 가 use_mmr 로 소비해 실행 가능(retriever.mmr → use_mmr 매핑).
                 "id": "enable_mmr",
                 "patch": {"retriever.mmr": True},
-                "reindex": False,
-                "cost": None,           # 숫자 튜닝 필요
-            },
-            {
-                "id": "context_compression",
-                "patch": {"context.compression.enabled": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },

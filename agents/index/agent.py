@@ -650,6 +650,12 @@ def _positive_int(
     return min(parsed, maximum) if maximum is not None else parsed
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 def _refresh_runtime_capabilities(
     state: AgentDoctorState,
     config: dict,
@@ -734,8 +740,9 @@ def _generation_runtime_metadata(config: dict) -> dict[str, Any]:
     if enabled is None:
         enabled = config.get("context.compression.enabled")
     if enabled is not None:
-        metadata["context_compression"] = bool(enabled)
-        metadata["context.compression.enabled"] = bool(enabled)
+        enabled_value = _as_bool(enabled)
+        metadata["context_compression"] = enabled_value
+        metadata["context.compression.enabled"] = enabled_value
 
     aliases = (
         ("context_compression_max_contexts", "context_filter_max_contexts"),

@@ -105,6 +105,7 @@ class ServeApiTests(unittest.TestCase):
     def test_answer_uses_context_compression_config_from_chunk_metadata(self):
         original_retriever = api._retriever
         original_chunks = api._chunks_raw
+        original_generation_config = dict(api._generation_config)
         try:
             api._chunks_raw = [
                 {
@@ -116,6 +117,7 @@ class ServeApiTests(unittest.TestCase):
                     },
                 }
             ]
+            api.configure_generation({"temperature": 0.1})
             api._retriever = self._fake_retriever()
             with (
                 patch.dict("os.environ", {}, clear=True),
@@ -129,9 +131,11 @@ class ServeApiTests(unittest.TestCase):
             self.assertTrue(config["context.compression.enabled"])
             self.assertEqual(config["context_compression_max_contexts"], 2)
             self.assertEqual(config["context_compression_min_contexts"], 1)
+            self.assertEqual(config["temperature"], 0.1)
         finally:
             api._retriever = original_retriever
             api._chunks_raw = original_chunks
+            api.configure_generation(original_generation_config)
 
 
 if __name__ == "__main__":

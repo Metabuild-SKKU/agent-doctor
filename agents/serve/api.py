@@ -116,9 +116,8 @@ def _public_index_settings(retriever: Retriever | None) -> dict:
 
 def _answer_generation_config(retriever: Retriever) -> dict:
     settings = retriever.settings
-    config = dict(_generation_config)
-    if not config:
-        config = _stored_generation_config()
+    config = _stored_generation_config()
+    config.update(_generation_config)
     env_context_compression = os.getenv("RAG_CONTEXT_COMPRESSION")
     if env_context_compression is not None:
         config["context_compression"] = env_context_compression
