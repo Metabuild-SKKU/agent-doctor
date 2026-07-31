@@ -250,18 +250,20 @@ def _redundancy_above_gold(record: EvalRecord):
         if not targets:
             return {}
 
-        deepest = max(targets.values())
-        views = [
-            _chunk_view(cid)
-            for cid in hit_ids[:deepest - 1]
-            if cid not in golds
-        ]
         # 위에서부터 훑으며 near-duplicate 그룹을 만든다(대표는 먼저 나온 것).
+        # 순위는 반드시 **전체 목록 기준**으로 담는다 — gold 를 뺀 목록의 인덱스를 쓰면
+        # 위에 낀 gold 만큼 앞으로 당겨져, 어떤 gold 보다 아래에 있는 중복이 '위에 있다'로
+        # 오집계된다(그 gold 는 접어도 안 올라오는데 회복 가능으로 잡힌다).
+        # gold 는 경쟁 청크가 아니므로 그룹핑에서만 빼고, 순위 좌표계는 건드리지 않는다.
+        deepest = max(targets.values())
         representatives: list[dict] = []
-        redundant_ranks: list[int] = []          # 잉여 청크가 놓인 순위(1-based)
-        for index, view in enumerate(views, start=1):
+        redundant_ranks: list[int] = []          # 잉여 청크가 놓인 전체 순위(1-based)
+        for full_rank, chunk_id in enumerate(hit_ids[:deepest - 1], start=1):
+            if chunk_id in golds:
+                continue
+            view = _chunk_view(chunk_id)
             if any(_near_duplicate(view, rep) for rep in representatives):
-                redundant_ranks.append(index)
+                redundant_ranks.append(full_rank)
             else:
                 representatives.append(view)
 

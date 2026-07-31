@@ -878,6 +878,23 @@ def _ground_chunk_overlap_candidates(
     return candidates, metadata
 
 
+def _probe_required_candidates(finding: Finding, max_allowed: int) -> int | None:
+    """probe 하나가 gold 를 리랭커 후보에 담으려면 필요한 최소 후보 수(상한 안쪽만).
+
+    _probe_required_top_k 와 달리 상한 밖 gold 순위를 **먼저** 버리고 최댓값을 뽑는다.
+    나중에 거르면 도달 불가 gold 하나가 그 probe 의 도달 가능한 근거까지 끌고 나간다.
+    """
+    ranks = finding.metadata.get("gold_ranks")
+    if isinstance(ranks, dict):
+        reachable = [
+            r for r in ranks.values()
+            if isinstance(r, int) and not isinstance(r, bool) and r <= max_allowed
+        ]
+        return max(reachable) if reachable else None
+    required = _probe_required_top_k(finding)     # 순위 미측정 → 개수 근사 폴백
+    return required if required is not None and required <= max_allowed else None
+
+
 def _ground_rerank_candidates(
     findings: list[Finding], state: AgentDoctorState, _direction: Any
 ) -> tuple[list[int] | None, dict[str, Any] | None]:
@@ -892,12 +909,16 @@ def _ground_rerank_candidates(
     이건 wide_n 밖 gold(순위 None)를 top_k 근거에서 빼는 것과 같은 이유다. 안 빼면 창 밖
     gold 하나가 무릎을 상한 위로 끌어올려, 실제로 도달 가능한 gold 들의 근거값까지 통째로
     날아가고 방향 키워드 추측(×2)으로 내려간다.
+
+    ⚠ 제외는 **gold 순위 단위**로 해야 한다. probe 단위(= 그 probe 의 최대 순위)로 거르면
+    한 probe 안에 30위(도달 가능)와 90위(불가)가 섞였을 때 max=90 이라 그 probe 가 통째로
+    빠지고, 30위라는 멀쩡한 근거까지 같이 날아간다 — 막으려던 현상이 probe 안에서 재현된다.
     """
     policy = state.index_config.get("rerank_candidate_policy") or {}
     max_allowed = int(policy.get("max_candidates", _DEFAULT_MAX_RERANK_CANDIDATES))
     required = [
-        r for r in (_probe_required_top_k(f) for f in findings)
-        if r is not None and r <= max_allowed
+        r for r in (_probe_required_candidates(f, max_allowed) for f in findings)
+        if r is not None
     ]
     if not required:
         return None, None
@@ -1227,6 +1248,16 @@ def _build_request(
             name: dict(capability)
             for name, capability in state.runtime_capabilities.items()
             if isinstance(capability, dict)
+        },
+    }
+    # 후보창 상한은 config 정책값이라 optimizer 의 정적 DEFAULT_CONSTRAINTS 로는 표현할 수 없다.
+    # 여기서 실어 보내야 근거값·방향 폴백(현재값×2)·Eval 이 직접 넘긴 후보까지 한 지점에서
+    # 걸린다 — 근거값 계산에서만 상한을 보면 폴백 경로가 상한을 넘겨 config 에 박힌다
+    # (현재값 30 이면 ×2=60 > 50).
+    policy = state.index_config.get("rerank_candidate_policy") or {}
+    metadata["constraints"] = {
+        "reranker.candidate_count": {
+            "max": int(policy.get("max_candidates", _DEFAULT_MAX_RERANK_CANDIDATES)),
         },
     }
     if candidates and "candidate_grounding" in candidates[0].metadata:

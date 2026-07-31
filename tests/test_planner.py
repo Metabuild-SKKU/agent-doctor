@@ -164,6 +164,27 @@ class GroundedValueTest(unittest.TestCase):
 
         self.assertEqual(request.search_space, {"reranker.candidate_count": [28]})
 
+    def test_candidate_miss_keeps_reachable_ranks_from_mixed_probe(self):
+        """한 probe 에 도달 가능/불가 순위가 섞이면 도달 가능한 쪽 근거는 살아남아야 한다.
+
+        probe 단위(그 probe 의 최대 순위)로 상한을 걸면 90 때문에 30 이라는 멀쩡한 근거까지
+        같이 버려지고 방향 키워드 추측으로 내려간다.
+        """
+        findings = [
+            make_finding("p1", "retrieval_rerank_candidate_miss",
+                         gold_ranks={"g_near": 30, "g_far": 90}),
+        ]
+        state = make_state(findings)
+        state.index_config.update({
+            "use_reranker": True,
+            "rerank_candidates": 20,
+            "rerank_candidate_policy": {"max_candidates": 50},
+        })
+
+        request, _decision = planner.plan(state)
+
+        self.assertEqual(request.search_space, {"reranker.candidate_count": [30]})
+
     def test_candidate_miss_respects_policy_ceiling(self):
         # 후보 1개 = cross-encoder 추론 1쌍이라 상한을 넘는 후보는 내지 않는다.
         findings = [

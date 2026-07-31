@@ -565,6 +565,23 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                 )
                 self.assertEqual(out.index_config[key], value)
 
+    def test_candidate_widening_never_exceeds_policy_ceiling(self):
+        """정책 상한은 근거값 계산뿐 아니라 방향 폴백(현재값×2)에도 걸려야 한다.
+
+        근거값이 없으면 폴백이 30×2=60 을 내는데, 이를 거르는 게 optimizer 의 정적 제약
+        (max=100)뿐이면 정책 상한 50 을 넘는 값이 실제 config 에 박힌다.
+        """
+        state = self._rank_cause_state(
+            "retrieval_rerank_candidate_miss",
+            {},                                   # gold_ranks 없음 → 방향 폴백 경로
+            {"use_reranker": True, "rerank_candidates": 30,
+             "rerank_candidate_policy": {"max_candidates": 50}},
+        )
+
+        out = agent.run(state)
+
+        self.assertLessEqual(out.index_config["rerank_candidates"], 50)
+
     def test_duplicate_crowding_is_reported_without_prescription(self):
         """중복 밀림은 지금 config 에 레버가 없다 — 리랭커를 억지로 처방하지 않고 미룬다.
 

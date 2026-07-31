@@ -524,6 +524,42 @@ class DuplicateCrowdingTest(_DiagnoseTestBase):
         self.assertTrue(finding.confirmed)
         self.assertEqual(finding.metadata["crowding_analysis"]["g_a"]["redundant"], 2)
 
+    def test_redundancy_counts_full_ranks_not_filtered_indices(self):
+        """중복의 순위는 gold 를 뺀 목록이 아니라 '전체 목록' 기준이어야 한다.
+
+        gold 를 뺀 인덱스를 쓰면 위에 낀 gold 만큼 앞으로 당겨져, 어떤 gold보다 아래에 있는
+        중복이 '위에 있다'로 오집계된다 — 접어도 안 올라오는데 회복 가능으로 잡힌다.
+        놓친 gold 가 순위에 흩어진 multi-hop 구성에서 나온다.
+
+        전체 순위: 1=dupA 2=x2 3=g_hi 4=x4 5=g_mid 6=dupB 7=x7 8=g_low  (top_k=4)
+        dupB(6위)는 dupA 의 중복이지만 g_mid(5위)보다 아래다.
+        """
+        same = "완전히 동일한 안내 문구가 반복되는 청크입니다"
+        chunks = [
+            Chunk("dupA", "docA", same, char_span=(0, 40)),
+            Chunk("dupB", "docB", same, char_span=(0, 40)),
+            Chunk("x2", "docX", "무관한 본문 하나", char_span=(0, 20)),
+            Chunk("x4", "docY", "무관한 본문 둘", char_span=(0, 20)),
+            Chunk("x7", "docZ", "무관한 본문 셋", char_span=(0, 20)),
+            Chunk("g_hi", "docG", "정답 근거 상", char_span=(0, 20)),
+            Chunk("g_mid", "docG", "정답 근거 중", char_span=(40, 60)),
+            Chunk("g_low", "docG", "정답 근거 하", char_span=(80, 100)),
+        ]
+        self._with(
+            retrieve=["dupA", "x2", "g_hi", "x4", "g_mid", "dupB", "x7", "g_low"],
+            chunks=chunks,
+        )
+        rec = _record(("g_hi", "g_mid", "g_low"), ("dupA", "x2", "g_hi", "x4"),
+                      recall=0.3)
+
+        analysis = metrics_search._redundancy_above_gold(rec)
+        # g_mid(5위) 위에는 중복이 없다 — dupB 는 6위라 아래다.
+        self.assertEqual(analysis["g_mid"], {"rank": 5, "redundant": 0,
+                                             "projected_rank": 5})
+        # g_low(8위) 위에는 dupB(6위)가 실제로 있다.
+        self.assertEqual(analysis["g_low"]["redundant"], 1)
+        self.assertIsNone(diagnose.retrieval_duplicate_crowding(rec))
+
     def test_low_rank_yields_to_duplicate_crowding(self):
         same = "완전히 동일한 안내 문구가 반복되는 청크입니다"
         self._with(retrieve=["n1", "n2", "n3", "g_a"],
