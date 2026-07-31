@@ -76,9 +76,14 @@ class DiagnoseShortCircuitTest(unittest.TestCase):
 
     def setUp(self):
         metrics_common.set_mode(Mode.DEEP)
+        # tier2 자원(chunks 등)은 전역이라 앞선 모듈이 남긴 코퍼스가 그대로 보인다.
+        # 그러면 이 가짜 record 의 gold 가 '코퍼스에 없음' 으로 읽혀 corpus_gap 이 먼저
+        # 발동하고 단락 검증이 무너진다 — 판정만 보게 자원을 비우고 시작한다.
+        metrics_common.set_context()
 
     def tearDown(self):
         metrics_common.set_mode(Mode.FAST)
+        metrics_common.set_context()
 
     def test_mislabel_suppresses_false_causes(self):
         # recall=0 이라 정상 경로면 retrieval_low_rank 가 붙어야 하지만, 골드 오라벨이 감지되면
