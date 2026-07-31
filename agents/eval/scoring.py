@@ -62,17 +62,16 @@ def _probe_reliability(record: EvalRecord) -> float:
     """probe 1개의 신뢰도를 [0,1] 연속값으로 — 이진 판정(_is_success)의 매끄러운 대응물.
 
     · 무응답 기대(answer_exists=False): 연속 축이 없어 finding 유무로 1/0(옳게 기권=1).
-    · gold 대조 probe: 검색축(recall@k) × 답변축. 답변축은 lexical f1_score 와 의미
-      answer_correctness 중 높은 값 — char-F1 이 낮아도 의미가 맞으면 부분점수를 준다.
-      (게이트 _f1_ok 는 answer_correctness 로 강등만 하지만, 신뢰도 축은 승격까지 허용해
-       긴 서술형 gold 에서 char-F1 이 구조적으로 저평가되는 문제를 완화한다.)
+    · gold 대조 probe: 검색축(recall@k) × 답변축. 답변축은 게이트와 같은 혼합 점수
+      record.answer_score (lexical f1_score 와 RAGAS 의미축의 가중합, types.blend_answer_score)다.
+      게이트(_answer_ok)와 같은 값을 보므로, 게이트가 통과시킨 probe 의 신뢰도가 낮게 남아
+      optimize 탐색이 반대 방향을 가리키는 일이 없다. 문턱을 넘지 못한 probe 도 점수만큼
+      부분점수를 받아 탐색 신호가 매끄럽게 이어진다.
     두 축의 곱이라 검색·답변 어느 한쪽이 무너지면 신뢰도가 낮게 나온다(이진 게이트의 AND 대응)."""
     if record.probe.answer_exists is False:
         return 0.0 if record.findings else 1.0
     retrieval = _clamp01(record.recall_at_k)
-    ac = record.ragas_answer_correctness
-    answer = _clamp01(max(record.f1_score, ac if ac is not None else 0.0))
-    return retrieval * answer
+    return retrieval * _clamp01(record.answer_score)
 
 
 def _clamp01(value: float) -> float:

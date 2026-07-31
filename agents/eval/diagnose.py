@@ -33,7 +33,8 @@ from typing import Optional
 from core.schema import Finding
 from agents.eval.types import (
     DEFAULT_TOP_K, EvalRecord, Mode, resolve_mode,
-    F1_PASS_THRESHOLD, ANSWER_CORRECTNESS_MIN, EVIDENCE_DENSITY_MIN,
+    F1_PASS_THRESHOLD, ANSWER_PASS_THRESHOLD, ANSWER_SEMANTIC_FLOOR,
+    ANSWER_CORRECTNESS_MIN, EVIDENCE_DENSITY_MIN,
     CONTEXT_CHARS_MAX, CONTEXT_MIDDLE_BAND,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN, RAGAS_CONTEXT_PRECISION_MIN,
 )
@@ -61,31 +62,64 @@ def _recall_ok(record: EvalRecord) -> bool:
     """검색 성공"""
     return record.recall_at_k >= 1
 
-def _f1_ok(record: EvalRecord) -> bool:
+def _degraded_near_miss(record: EvalRecord, *, oracle: bool) -> bool:
+    """유사도 단독으로 계산된 answer_correctness 가 근접 오답 문턱 미만인가 — 강등 전용 신호.
+
+    degraded(=factual TP/FP/FN 분류 실패) 값은 의미축(승격)에서 빼지만, 강등에서까지 빼면
+    'degrade 는 판정을 느슨하게 만들지 않는다'는 규약(metrics_ragas._answer_correctness 주석)이
+    깨진다 — 실제로 lexical 0.5·degraded ac 0.0 이 옛 게이트에선 실패, 새 게이트에선 통과였다.
+    승격은 막고 강등만 남겨, 판정기가 죽었을 때 게이트가 헐거워지지 않게 한다.
     """
-    Response 정답 판정
-    1. lexical(f1_score) 임계값 이상
-    2-1. llm이 사용 가능하다면, ragas answer_correctness도 임계값 이상이어야함.
-    """
-    if record.f1_score < F1_PASS_THRESHOLD:
+    ragas = record.oracle_ragas if oracle else record.ragas
+    if not ragas.get("answer_correctness_degraded"):
         return False
-    
-    ac = record.ragas_answer_correctness
-    if ac is None:
-        return True
-    return ac >= ANSWER_CORRECTNESS_MIN
+    ac = record.oracle_ragas_answer_correctness if oracle else record.ragas_answer_correctness
+    return ac is not None and ac < ANSWER_CORRECTNESS_MIN
+
+
+def _answer_ok(record: EvalRecord, *, oracle: bool) -> bool:
+    """정답 판정 — lexical 과 RAGAS 의미축을 섞은 한 점수(answer_score)로 판정한다.
+
+    lexical 단독 게이트를 버린 이유: char-F1 은 표현 차이·길이에 흔들려서(gold 가 묻지 않은
+    수식어를 하나 더 갖고 있으면 맞은 답도 0.49) 문턱 하나로 정답을 가를 수 없다. 실제로
+    문턱 바로 아래로 떨어진 정답들이 실패로 잡히고, 검색·오라클은 통과했으니 C그룹
+    (context_noise_interference·chunking_underchunking)으로 오진돼 optimize 가 엉뚱한
+    처방을 받았다. 반대로 의미축(RAGAS)만 쓰면 판정기 편차에 그대로 노출된다 —
+    그래서 가중합(types.blend_answer_score)으로 서로의 흔들림을 흡수시킨다.
+
+    · 판정기 degrade + 근접 오답 문턱 미만(_degraded_near_miss): 실패 — 승격은 못 하지만
+      강등은 하는 값이라, 판정기가 죽었을 때 게이트가 헐거워지지 않게 막는다.
+    · 의미축 미측정(DEEP 미만·판정기 degrade): lexical 단독 F1_PASS_THRESHOLD (기존 동작).
+    · 의미축 < ANSWER_SEMANTIC_FLOOR: lexical 이 아무리 높아도 실패 — 표면형만 비슷한
+      근접 오답(부정문·'3월'↔'3일')을 거르던 강등 규칙을 이 바닥선이 이어받는다.
+    · 그 밖: answer_score >= ANSWER_PASS_THRESHOLD.
+
+    통과집합은 옛 게이트(lexical 단독 + ac 강등)의 상위집합이다 — 전수 격자로 '옛 통과 →
+    새 실패' 0건을 확인했다(tests/test_answer_match.py::TestGateMonotonicity). 그래서
+    _oracle_ok 실패를 전제로 하는 라벨(bad_gold_answer·B그룹)은 발동이 줄기만 하고 늘지 않는다.
+
+    비용: 두 트랙 모두 record dict 만 읽는다(LLM 트리거 없음). _oracle_ok 은
+    report._oracle_accuracy 가 성공 probe 에도 부르므로 이 성질이 지켜져야 한다.
+    """
+    if _degraded_near_miss(record, oracle=oracle):
+        return False
+    lexical = record.oracle_f1 if oracle else record.f1_score
+    semantic = record.oracle_answer_semantic if oracle else record.answer_semantic
+    if semantic is None:
+        return lexical >= F1_PASS_THRESHOLD
+    if semantic < ANSWER_SEMANTIC_FLOOR:
+        return False
+    score = record.oracle_answer_score if oracle else record.answer_score
+    return score >= ANSWER_PASS_THRESHOLD
+
+
+def _f1_ok(record: EvalRecord) -> bool:
+    """실제 트랙 정답 판정(이름은 호출부 호환 유지 — 실제 기준은 혼합 점수 _answer_ok)."""
+    return _answer_ok(record, oracle=False)
 
 def _oracle_ok(record: EvalRecord) -> bool:
-    """"
-    Oracle 정답 판정 (위와 동일)
-    """
-    if record.oracle_f1 < F1_PASS_THRESHOLD:
-        return False
-    
-    ac = record.oracle_ragas_answer_correctness
-    if ac is None:
-        return True
-    return ac >= ANSWER_CORRECTNESS_MIN
+    """오라클 트랙 정답 판정 (기준 동일)."""
+    return _answer_ok(record, oracle=True)
 
 def _abstained(record: EvalRecord) -> bool:
     """기권 판정 — DEEP+ 는 AspectCritic, 미만·미측정은 마커 휴리스틱(tier1).
@@ -121,7 +155,7 @@ def _parametric_overreliance(record: EvalRecord) -> bool:
 
 
 def _is_success(record: EvalRecord) -> Optional[bool]:
-    """probe 단위 성공/실패 판정 — recall + answer_match(tier1) + RAGAS answer_correctness(tier3).
+    """probe 단위 성공/실패 판정 — recall + 정답 혼합 점수(_answer_ok: lexical tier1 × 의미 tier3).
 
     True  = 성공 (검색·정답 모두 통과 / 무응답 기대인데 올바르게 기권)
     False = 실패
@@ -138,7 +172,7 @@ def _is_success(record: EvalRecord) -> Optional[bool]:
         return _abstained(record)                       # 무응답 기대 → 올바른 기권이 성공(recall 무관)
     if not record.probe.ground_truth:
         return None                                     # 대조할 정답 없음 → 판정 불가
-    # 검색 성공(recall=1) + 정답 일치(answer_match, DEEP 이면 ragas answer_correctness 로 강등)
+    # 검색 성공(recall=1) + 정답 일치(혼합 점수 — DEEP 이면 RAGAS 의미축이 함께 들어간다)
     return _recall_ok(record) and _f1_ok(record) and _grounded_ok(record)
 
 def _is_multi_hop(record: EvalRecord) -> bool:
@@ -342,7 +376,7 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     finding = _finding(
         record, "chunking_context_mismatch", "retrieval_failure", confirmed=True,
         reason=f"boundary_split={analysis.get('boundary_split_count')}, "
-               f"recall@k={_v(record.recall_at_k)}, f1={_v(record.f1_score)}",
+               f"recall@k={_v(record.recall_at_k)}, {_answer_reason(record)}",
     )
     finding.metadata["boundary_analysis"] = dict(analysis)
     return finding
@@ -521,7 +555,7 @@ def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
     judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
     no_answer_expected = record.probe.answer_exists is False
     trigger = ("answer_exists=False" if no_answer_expected
-               else f"gold_in_corpus=False, f1={_v(record.f1_score)}(오답)")
+               else f"gold_in_corpus=False, {_answer_reason(record)}(오답)")
     finding = _finding(
         record, "generation_abstention_failure", "generation_failure", confirmed=True,
         reason=f"{trigger}, 기권 아님({judge})",
@@ -541,7 +575,7 @@ def generation_parametric_overreliance(record: EvalRecord) -> Optional[Finding]:
     return _finding(
         record, "generation_parametric_overreliance", "generation_failure", confirmed=True,
         reason=f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
-               f"f1={_v(record.f1_score)}(정답), recall@k={_v(record.recall_at_k)}",
+               f"{_answer_reason(record)}(정답), recall@k={_v(record.recall_at_k)}",
     )
 
 
@@ -795,7 +829,7 @@ def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     return _finding(
         record, "context_noise_interference", "context_failure", confirmed=True,
         reason=f"faithfulness={_v(faith)}>={RAGAS_FAITHFULNESS_MIN}(검색 context 엔 근거 있음), "
-               f"recall@k={_v(record.recall_at_k)}, f1={_v(record.f1_score)}",
+               f"recall@k={_v(record.recall_at_k)}, {_answer_reason(record)}",
     )
 
 def context_failure(record: EvalRecord) -> Optional[Finding]:
@@ -829,7 +863,7 @@ def bad_gold_answer(record: EvalRecord) -> Optional[Finding]:
         and rel is not None and rel >= RAGAS_RESPONSE_RELEVANCY_MIN):
         return _finding(
             record, "bad_gold_answer", "gap", confirmed=True,
-            reason=f"faithfulness={_v(faith)}, response_relevancy={_v(rel)}, f1={_v(record.f1_score)}",
+            reason=f"faithfulness={_v(faith)}, response_relevancy={_v(rel)}, {_answer_reason(record)}",
         )
     return None
 
@@ -1030,10 +1064,27 @@ _RANK_LABELS = {
 
 
 def _v(x) -> str:
-    """reason 문자열용 값 포맷(float 은 소수 2자리, None 은 '-')."""
+    """reason 문자열용 값 포맷(float 은 소수 3자리, None 은 '-').
+
+    3자리인 이유: 2자리면 임계값 비교가 자기모순처럼 읽힌다 — 실제 0.699 인 값이
+    'context_precision=0.70<0.7' 로 찍혀 '같은 값인데 왜 실패?' 로 오독된다.
+    """
     if x is None:
         return "-"
-    return f"{x:.2f}" if isinstance(x, float) else str(x)
+    return f"{x:.3f}" if isinstance(x, float) else str(x)
+
+
+def _answer_reason(record: EvalRecord) -> str:
+    """reason 문자열용 정답 판정 근거 — 'answer=0.63(f1 0.49·의미 0.73)'.
+
+    f1 만 적으면 오독을 부른다: 판정은 f1 단독이 아니라 혼합 점수(_answer_ok)라, f1 이 문턱
+    아래인데 통과한(또는 f1 이 문턱 위인데 실패한) 라벨의 근거가 로그에서 사라진다.
+    의미축 미측정(DEEP 미만)이면 lexical 단독 판정이므로 f1 만 적는다."""
+    semantic = record.answer_semantic
+    if semantic is None:
+        return f"f1={_v(record.f1_score)}"
+    return (f"answer={_v(record.answer_score)}"
+            f"(f1 {_v(record.f1_score)}·의미 {_v(semantic)})")
 
 
 def _rollup_reason(record: EvalRecord) -> str:
@@ -1043,7 +1094,7 @@ def _rollup_reason(record: EvalRecord) -> str:
     저모드에서는 값만 봐선 '왜 롤업인지'를 알 수 없다 → 실행 모드를 함께 남긴다.
     """
     return (f"구체 원인 미실측(mode={active_mode()}), "
-            f"oracle_f1={_v(record.oracle_f1)}, f1={_v(record.f1_score)}, "
+            f"oracle_f1={_v(record.oracle_f1)}, {_answer_reason(record)}, "
             f"faithfulness={_v(_faith_oracle(record))}, relevancy={_v(_rel_oracle(record))}")
 
 

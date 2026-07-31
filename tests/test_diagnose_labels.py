@@ -23,8 +23,8 @@ from core.schema import Probe, Chunk
 from agents.eval import metrics_common, metrics_search, diagnose
 from agents.eval.types import (
     EvalRecord, Mode,
-    F1_PASS_THRESHOLD, RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN,
-    CONTEXT_CHARS_MAX,
+    F1_PASS_THRESHOLD, ANSWER_SEMANTIC_FLOOR, RAGAS_FAITHFULNESS_MIN,
+    RAGAS_RESPONSE_RELEVANCY_MIN, CONTEXT_CHARS_MAX,
 )
 
 
@@ -35,7 +35,7 @@ def _record(
     recall=1.0, f1=1.0, oracle_f1=1.0, qtype=None,
     answer_exists=None, ground_truth="정답", answer="답변", oracle_answer="오라클 답변",
     faith=None, rel=None, faith_oracle=None, rel_oracle=None,
-    gold_spans=None, counts_oracle=None,
+    gold_spans=None, counts_oracle=None, counts_real=None, ac=None,
 ):
     """라벨 함수가 읽는 필드만 채운 EvalRecord. RAGAS 는 *_done 을 세워 LLM 경로를 막는다."""
     probe = Probe(
@@ -55,6 +55,13 @@ def _record(
     rec.oracle_f1 = oracle_f1
     if faith is not None or rel is not None:
         rec.ragas = {"faithfulness": faith, "response_relevancy": rel}
+    if ac is not None:
+        rec.ragas["answer_correctness"] = ac
+    if counts_real is not None:                         # (tp, fp, fn) — gold 커버리지 승격용
+        tp, fp, fn = counts_real
+        rec.ragas.update({"answer_correctness_tp": tp,
+                          "answer_correctness_fp": fp,
+                          "answer_correctness_fn": fn})
     rec.ragas_done = True
     if faith_oracle is not None or rel_oracle is not None:
         rec.oracle_ragas = {"faithfulness": faith_oracle, "response_relevancy": rel_oracle}
@@ -1336,6 +1343,66 @@ class GapLabelTest(_DiagnoseTestBase):
                       ground_truth=None, answer="지어낸 답")
         self.assertEqual({f.label for f in diagnose.diagnose(rec, Mode.STANDARD)},
                          {"generation_abstention_failure"})
+
+
+# ══════════════════════════════════════════════════════════════════
+#  정답 게이트: lexical 단독 문턱 대신 혼합 점수(_answer_ok)
+#    f1 하나로 가르면 맞은 답이 문턱 바로 아래(0.49)에서 실패로 잡히고 C그룹으로 오진됐다.
+#    이제 lexical·의미축 가중합으로 판정하며, 의미축 바닥선이 근접 오답을 막는다.
+# ══════════════════════════════════════════════════════════════════
+
+class AnswerScoreGateTest(_DiagnoseTestBase):
+    def setUp(self):
+        super().setUp()
+        metrics_common.set_mode(Mode.DEEP)              # RAGAS 의미축은 tier3
+
+    def test_lexical_just_below_threshold_passes_with_semantics(self):
+        """실측 사례: 정답인데 f1=0.49 로 실패했던 probe — 의미축이 높으면 통과한다."""
+        rec = _record(f1=0.49, faith=0.9, ac=0.73, counts_real=(1, 0, 1))
+        self.assertLess(rec.f1_score, F1_PASS_THRESHOLD)
+        self.assertTrue(diagnose._f1_ok(rec))
+
+    def test_verbose_answer_passes_via_coverage(self):
+        """긴 서술형 gold: FP 때문에 ac 가 깎여도 커버리지가 의미축을 지탱한다."""
+        rec = _record(f1=0.34, faith=0.9, ac=0.45, counts_real=(5, 6, 0))
+        self.assertEqual(rec.answer_semantic, 1.0)      # max(ac, 커버리지)
+        self.assertTrue(diagnose._f1_ok(rec))
+
+    def test_semantic_floor_blocks_near_miss(self):
+        """표면형만 비슷한 근접 오답: lexical 이 높아도 의미축 바닥선에서 실패한다."""
+        rec = _record(f1=0.9, faith=0.9, ac=0.2, counts_real=(1, 1, 4))
+        self.assertLess(rec.answer_semantic, ANSWER_SEMANTIC_FLOOR)
+        self.assertFalse(diagnose._f1_ok(rec))
+
+    def test_blend_threshold_boundary(self):
+        """lexical 0 이어도 의미축만으로 문턱을 넘을 수 있고(패러프레이즈), 못 넘으면 실패다."""
+        self.assertTrue(diagnose._f1_ok(_record(f1=0.0, faith=0.9, ac=0.9)))
+        self.assertFalse(diagnose._f1_ok(_record(f1=0.0, faith=0.9, ac=0.8)))
+
+    def test_coverage_ignored_without_grounding(self):
+        """근거 없는 답(faithfulness 미달)의 커버리지는 의미축으로 인정하지 않는다."""
+        rec = _record(f1=0.34, faith=0.3, counts_real=(5, 6, 0))
+        self.assertIsNone(rec.answer_semantic)          # ac 없음 + 커버리지 인정 안 됨
+        self.assertFalse(diagnose._f1_ok(rec))
+
+    def test_lexical_only_when_semantics_unmeasured(self):
+        """RAGAS 미측정(DEEP 미만·판정기 degrade)이면 기존 lexical 단독 게이트 그대로."""
+        self.assertFalse(diagnose._f1_ok(_record(f1=0.49)))
+        self.assertTrue(diagnose._f1_ok(_record(f1=0.5)))
+
+    def test_context_slot_not_entered_for_passing_answer(self):
+        """혼합 점수로 통과한 probe 는 실패가 아니므로 C그룹(context) 오진이 사라진다."""
+        rec = _record(f1=0.49, oracle_f1=0.53, faith=0.9, ac=0.73, counts_real=(1, 0, 1))
+        self.assertFalse(diagnose._context_failed(rec))
+        self.assertIsNone(diagnose.context_noise_interference(rec))
+        self.assertIsNone(diagnose.chunking_underchunking(rec))
+
+    def test_oracle_track_uses_same_blend(self):
+        """오라클 답변도 같은 이유로 깎인다 — 오라클 트랙에 같은 기준을 적용한다."""
+        rec = _record(oracle_f1=0.34, faith_oracle=0.9, counts_oracle=(5, 6, 0))
+        self.assertTrue(diagnose._oracle_ok(rec))
+        rec_wrong = _record(oracle_f1=0.34, faith_oracle=0.9, counts_oracle=(1, 1, 4))
+        self.assertFalse(diagnose._oracle_ok(rec_wrong))
 
 
 # ══════════════════════════════════════════════════════════════════
