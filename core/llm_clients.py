@@ -21,6 +21,15 @@ GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 # 만들어냈다. 상한은 비용 방어이자 "잘림"을 조기에 드러내는 장치다.
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
 
+# o-series/gpt-5 계열은 max_tokens 를 400 으로 거부하고(max_completion_tokens 만 허용),
+# temperature 도 1 외의 값을 받지 않는다. 모델명으로 갈라 파라미터를 맞춘다.
+_REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """o-series/gpt-5 계열인지. GitHub Models 의 'publisher/model' 형식도 처리."""
+    return model.rsplit("/", 1)[-1].strip().lower().startswith(_REASONING_MODEL_PREFIXES)
+
 
 def openai_chat(
     system: str,
@@ -37,7 +46,8 @@ def openai_chat(
     """OpenAI 호환 chat 1회 호출 → 응답 텍스트("" 가능).
 
     temperature 기본 0(결정적). RAG 답변 생성만 호출부에서 조정하고, 판정·합성 등
-    구조가 중요한 호출은 기본 0을 유지한다.
+    구조가 중요한 호출은 기본 0을 유지한다. 추론 모델(o-series/gpt-5)은 temperature 를
+    받지 않아 무시된다 — 그 모델들은 결정성을 보장하지 못한다.
     base_url/api_key 를 주면 GitHub Models 등 OpenAI 호환 엔드포인트 겸용."""
     from openai import OpenAI
 
@@ -48,10 +58,13 @@ def openai_chat(
         client_kwargs["api_key"] = api_key
     client = OpenAI(**client_kwargs)
     kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
+    if _is_reasoning_model(model):
+        kwargs["max_completion_tokens"] = max_output_tokens
+    else:
+        kwargs["max_tokens"] = max_output_tokens
+        kwargs["temperature"] = temperature
     resp = client.chat.completions.create(
         model=model,
-        temperature=temperature,
-        max_tokens=max_output_tokens,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},

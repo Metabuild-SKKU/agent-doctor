@@ -6,11 +6,12 @@ import json
 import math
 import os
 import re
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from core.llm_usage import log_usage
+from core.llm_clients import openai_chat
 from core.schema import Chunk
 
 _STOPWORDS = {
@@ -32,33 +33,19 @@ def _keyword_entities(text: str, limit: int = 8) -> tuple[list[str], list[dict]]
 
 
 # LLM을 쓸 수 있으면 entity/relation JSON만 받아온다.
+# 호출은 core/llm_clients.openai_chat 에 위임한다 — 직접 호출하던 시절엔 출력 상한이
+# 없어 반복 생성이 최대치까지 달릴 수 있었다(청크마다 1회라 피해가 곱해진다).
 def _llm_entities(text: str, model: str) -> tuple[list[str], list[dict]]:
-    from openai import OpenAI
-
-    response = OpenAI().chat.completions.create(
-        model=model,
-        response_format={"type": "json_object"},
-        temperature=0,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "기술 문서에서 핵심 entity와 entity 간 relation을 추출한다. "
-                    '반드시 {"entities":["..."],"relations":'
-                    '[{"source":"...","target":"...","type":"..."}]} JSON으로 답한다.'
-                ),
-            },
-            {"role": "user", "content": text[:8000]},
-        ],
+    raw = openai_chat(
+        "기술 문서에서 핵심 entity와 entity 간 relation을 추출한다. "
+        '반드시 {"entities":["..."],"relations":'
+        '[{"source":"...","target":"...","type":"..."}]} JSON으로 답한다.',
+        text[:8000],
+        model,
+        json_mode=True,
+        tag="Index",
     )
-    if response.usage:
-        log_usage(
-            model,
-            response.usage.prompt_tokens,
-            response.usage.completion_tokens,
-            tag="Index",
-        )
-    data = json.loads(response.choices[0].message.content or "{}")
+    data = json.loads(raw or "{}")
     entities = [str(item).strip() for item in data.get("entities", []) if str(item).strip()]
     relations = [
         {
@@ -72,10 +59,29 @@ def _llm_entities(text: str, model: str) -> tuple[list[str], list[dict]]:
     return entities[:12], relations[:20]
 
 
+# auto 모드는 OPENAI_API_KEY 존재만으로 켜진다 — 다른 용도(Eval provider 등)로 키를
+# 넣었을 뿐인데 청크마다 LLM 호출이 붙는 걸 모르고 지나가지 않도록 알린다.
+# 프로세스당 한 번 — Optimize 루프가 Index 를 여러 번 돌려도 줄이 늘지 않는다.
+_llm_extraction_notified = False
+_llm_extraction_lock = threading.Lock()
+
+
+def _notify_llm_extraction_once(model: str) -> None:
+    global _llm_extraction_notified
+    with _llm_extraction_lock:
+        if _llm_extraction_notified:
+            return
+        _llm_extraction_notified = True
+    print(f"[Index] OPENAI_API_KEY 감지 — 그래프 entity 추출을 LLM({model})로 수행합니다. "
+          f"청크당 1회 호출이며, 끄려면 config graph_extraction=keyword.")
+
+
 # 설정과 API key 상태에 따라 LLM/keyword 추출을 고른다.
 def _extract(chunk: Chunk, config: dict) -> tuple[list[str], list[dict], str]:
     mode = config.get("graph_extraction", "auto")
     if mode in {"auto", "llm"} and os.getenv("OPENAI_API_KEY"):
+        if mode == "auto":
+            _notify_llm_extraction_once(config.get("graph_llm_model", "gpt-4.1-mini"))
         try:
             entities, relations = _llm_entities(
                 chunk.text,

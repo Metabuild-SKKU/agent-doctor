@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 from core.llm_clients import (
     DEFAULT_MAX_OUTPUT_TOKENS,
@@ -24,8 +25,32 @@ from core.llm_clients import (
 from core.llm_retry import run_with_retry
 
 
+_KNOWN_PROVIDERS = {"openai", "gemini", "github"}
+# 이미 경고한 미지원 provider 값(Eval 은 스레드로 병렬 호출하므로 lock 으로 보호).
+_warned_providers: set[str] = set()
+_warned_providers_lock = threading.Lock()
+
+
+def _warn_unknown_provider_once(raw: str) -> None:
+    """미지원 EVAL_LLM_PROVIDER 값 경고를 값당 한 번만 출력한다."""
+    with _warned_providers_lock:
+        if raw in _warned_providers:
+            return
+        _warned_providers.add(raw)
+    print(f"[Eval] 알 수 없는 EVAL_LLM_PROVIDER '{raw}' — openai 로 폴백 "
+          f"(openai|gemini|github)")
+
+
 def _provider() -> str:
-    return os.getenv("EVAL_LLM_PROVIDER", "openai").strip().lower()
+    """활성 provider. 오타 등 미지원 값은 openai 로 떨어지므로 경고를 남긴다 —
+    Gemini 로 돌린다고 믿은 실행이 조용히 OpenAI 로 과금되는 걸 막기 위함."""
+    raw = os.getenv("EVAL_LLM_PROVIDER", "openai").strip().lower()
+    if not raw:  # 빈 값은 "기본값" 의사표시로 보고 경고하지 않는다.
+        return "openai"
+    if raw not in _KNOWN_PROVIDERS:
+        _warn_unknown_provider_once(raw)
+        return "openai"
+    return raw
 
 
 def has_key() -> bool:

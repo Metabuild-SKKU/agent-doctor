@@ -34,6 +34,10 @@ _PRICES_USD_PER_1M = {
     "gemini-embedding-001": (0.15, 0.0),
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4o": (2.50, 10.00),
+    # Index 그래프 entity 추출 기본 모델(core/state.py graph_llm_model)과 그 형제들.
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1-nano": (0.10, 0.40),
+    "gpt-4.1": (2.00, 8.00),
     "text-embedding-3-small": (0.02, 0.0),
 }
 
