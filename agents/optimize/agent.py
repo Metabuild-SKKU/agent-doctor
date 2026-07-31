@@ -136,47 +136,6 @@ def _stop_at_optimize_visit_limit(
     return state
 
 
-def _stop_at_optimize_visit_limit(
-    state: AgentDoctorState,
-) -> AgentDoctorState:
-    """Optimize 절대 방문 상한에 도달하면 진행 중 설정을 복원하고 종료한다."""
-    pending = history.find_active_study(state.optimization_history)
-    if pending is None:
-        pending = history.find_pending(state.optimization_history)
-
-    before_config = dict(state.index_config)
-    if pending is not None:
-        state.index_config = dict(pending.before_config)
-        pending.after_config = dict(state.index_config)
-        pending.status = "failed"
-        pending.rollback_reason = "Optimize 절대 방문 상한 도달"
-        pending.metadata.update(
-            {
-                "pending": False,
-                "active_study": False,
-                "visit_limit_reached": True,
-            }
-        )
-        pending.metadata.pop("before_report", None)
-        state.reindex_required = bool(
-            pending.metadata.get("reindex_required", True)
-        )
-
-    changed = before_config != state.index_config
-    state.status = "rolled_back" if changed else "verified"
-    state.error = None
-    print(
-        "[Optimize] 절대 방문 상한 도달: "
-        f"{state.optimize_visit_count}/{state.max_optimize_visits}"
-    )
-    print(
-        "[Optimize] 진행 중 설정을 baseline으로 복원"
-        if changed
-        else "[Optimize] 추가 처방 없이 종료"
-    )
-    return state
-
-
 def _unjudgeable_exclusions(
     optimization_history: list[OptimizationHistoryItem],
 ) -> set[tuple[str, str]]:
