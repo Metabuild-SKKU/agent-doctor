@@ -77,7 +77,7 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
     "embedding_model": False,
     # 공통 Retriever가 Eval과 Serve에서 같은 설정으로 CrossEncoder를 실행한다.
     "reranker": True,
-    "context_compression": False,
+    "context_compression": True,
     # Index(agent.py)가 CHUNK_STRATEGIES 레지스트리에 recursive_sentence 를 등록해
     # config["chunk_strategy"] 로 실제 소비한다. config_mapper 가 chunker.strategy 를
     # chunk_strategy 로 매핑하고 제약(allowed=recursive_sentence·markdown_recursive)·REINDEX 경로도
@@ -124,6 +124,7 @@ STATE_MAPPABLE_PATHS: set[str] = {
     "retriever.hybrid_dense_weight",
     "reranker.enabled",
     "reranker.candidate_count",
+    "context.compression.enabled",
     "chunker.chunk_size",
     "chunker.chunk_overlap",
     "chunker.strategy",

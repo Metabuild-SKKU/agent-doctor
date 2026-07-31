@@ -6,6 +6,7 @@ _start_api_server 가 실패(프로세스 조기 종료/타임아웃)를 bool �
 run() 이 이를 받아 status="error" 로 종료하며 Claude Desktop MCP 등록을
 건너뛰는지(죽은 엔드포인트 등록 방지) 확인한다.
 """
+import json
 import os
 import sys
 import tempfile
@@ -131,6 +132,33 @@ class RunTest(unittest.TestCase):
         self.assertEqual(result.status, "done")
         self.assertEqual(result.mcp_endpoint, f"http://localhost:{serve_agent.API_PORT}")
         mock_register.assert_called_once()
+
+    def test_run_persists_generation_config_to_chunks_file(self):
+        state = _state_with_chunks()
+        state.index_config.update(
+            {
+                "context_compression": True,
+                "context_compression_max_contexts": 2,
+                "context_compression_min_contexts": 1,
+                "context_compression_max_sentences": 3,
+            }
+        )
+
+        with patch.object(serve_agent, "_start_api_server", return_value=True), \
+             patch.object(serve_agent, "_register_to_claude_desktop"):
+            result = serve_agent.run(state)
+
+        self.assertEqual(result.status, "done")
+        payload = json.loads(serve_agent.CHUNKS_FILE.read_text(encoding="utf-8"))
+        metadata = payload[0]["metadata"]
+        self.assertTrue(metadata["context_compression"])
+        self.assertTrue(metadata["context.compression.enabled"])
+        self.assertEqual(metadata["context_compression_max_contexts"], 2)
+        self.assertEqual(metadata["context_filter_max_contexts"], 2)
+        self.assertEqual(metadata["context_compression_min_contexts"], 1)
+        self.assertEqual(metadata["context_filter_min_contexts"], 1)
+        self.assertEqual(metadata["context_compression_max_sentences"], 3)
+        self.assertEqual(metadata["context_filter_max_sentences"], 3)
 
     def test_no_chunks_still_errors(self):
         state = AgentDoctorState()  # chunks 비어 있음

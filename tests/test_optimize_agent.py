@@ -730,9 +730,9 @@ class OptimizeCGroupUnblockTest(unittest.TestCase):
         space = self._first_candidate_space("lost_in_the_middle")
         self.assertIn("retriever.top_k", space)
 
-    def test_context_noise_interference_leads_with_mmr(self):
+    def test_context_noise_interference_leads_with_context_compression(self):
         space = self._first_candidate_space("context_noise_interference")
-        self.assertEqual(space, {"retriever.mmr": [True]})
+        self.assertEqual(space, {"context.compression.enabled": [True]})
 
 
 class OptimizeAgentRollbackTest(unittest.TestCase):
@@ -752,7 +752,11 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         state = agent.run(state)                            # 방문2: 판정 → 롤백
         self.assertEqual(state.status, "applied")           # 같은 라벨의 다음 처방은 계속 진행
         self.assertEqual(state.index_config["top_k"], 4)    # 첫 후보는 baseline으로 복원
-        self.assertEqual(state.index_config["chunk_size"], 256)
+        self.assertTrue(state.index_config["context_compression"])
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "context_compression",
+        )
         self.assertEqual(len(state.blacklist), 1)
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
@@ -859,7 +863,11 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         state.report = make_report(50.0)                    # 악화
         state = agent.run(state)                            # 방문2: 같은 라벨의 다음 처방
         self.assertEqual(state.iteration, 3)                # 후보/처방 전환은 증가 없음
-        self.assertEqual(state.index_config["chunk_size"], 256)
+        self.assertTrue(state.index_config["context_compression"])
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "context_compression",
+        )
         self.assertEqual(state.status, "applied")
 
     def test_baseline_dead_end_preserves_same_visit_rollback(self):

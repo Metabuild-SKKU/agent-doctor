@@ -367,6 +367,213 @@ class RagGeneratorTests(unittest.TestCase):
 
         self.assertEqual(answer, "재택근무는 주 2일까지 가능합니다.")
 
+    def test_context_compression_filters_noise_before_generation(self):
+        contexts = [
+            "Remote work is allowed two days per week. Cafeteria menu changes daily.",
+            "Parking registration is handled by the facilities team.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            answer = generate_answer(
+                "How many remote work days are allowed?",
+                contexts,
+                config={
+                    "context_compression": True,
+                    "context_compression_max_contexts": 1,
+                },
+            )
+
+        self.assertEqual(answer, "ok")
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual(
+            [context.text for context in prompt_contexts],
+            ["Remote work is allowed two days per week."],
+        )
+
+    def test_context_compression_disabled_preserves_contexts(self):
+        contexts = [
+            "Remote work is allowed two days per week. Cafeteria menu changes daily.",
+            "Parking registration is handled by the facilities team.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer("How many remote work days are allowed?", contexts)
+
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual([context.text for context in prompt_contexts], contexts)
+
+    def test_context_compression_handles_korean_particles(self):
+        contexts = [
+            "식당 메뉴는 매일 바뀝니다.",
+            "재택근무는 주 2일까지 가능합니다. 사무실 좌석 예약은 별도입니다.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer(
+                "재택근무 가능 일수는?",
+                contexts,
+                config={"context_compression": True},
+            )
+
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual(len(prompt_contexts), 2)
+        self.assertEqual(prompt_contexts[0].citation_index, 1)
+        self.assertEqual(prompt_contexts[1].citation_index, 2)
+        self.assertEqual(prompt_contexts[1].text, "재택근무는 주 2일까지 가능합니다.")
+
+    def test_context_compression_trims_unmatched_contexts(self):
+        contexts = [
+            "Remote work is allowed two days per week. Cafeteria menu changes daily.",
+            "Parking registration is handled by facilities. Lunch menus rotate daily.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer(
+                "How many remote work days are allowed?",
+                contexts,
+                config={
+                    "context_compression": True,
+                    "context_compression_min_contexts": 2,
+                    "context_compression_max_sentences": 1,
+                },
+            )
+
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual(len(prompt_contexts), 2)
+        self.assertEqual(prompt_contexts[0].text, "Remote work is allowed two days per week.")
+        self.assertEqual(prompt_contexts[1].text, "Parking registration is handled by facilities.")
+
+    def test_context_compression_min_contexts_overrides_smaller_max_contexts(self):
+        contexts = [
+            "Remote work is allowed two days per week.",
+            "Parking registration is handled by facilities.",
+            "Lunch menus rotate daily.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer(
+                "How many remote work days are allowed?",
+                contexts,
+                config={
+                    "context_compression": True,
+                    "context_compression_max_contexts": 1,
+                    "context_compression_min_contexts": 2,
+                },
+            )
+
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual(len(prompt_contexts), 2)
+        self.assertEqual(prompt_contexts[0].citation_index, 1)
+        self.assertEqual(prompt_contexts[1].citation_index, 2)
+
+    def test_context_compression_fallback_uses_compressed_context(self):
+        contexts = [
+            "Remote work is allowed two days per week. Cafeteria menu changes daily.",
+            "Parking registration is handled by facilities.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value=None):
+            answer = generate_answer(
+                "How many remote work days are allowed?",
+                contexts,
+                config={
+                    "context_compression": True,
+                    "context_compression_max_contexts": 1,
+                },
+            )
+
+        self.assertEqual(answer, "Remote work is allowed two days per week.")
+
+    def test_answer_question_marks_compressed_fallback_as_extractive(self):
+        retriever = build_retriever(
+            [
+                Chunk(
+                    chunk_id="remote",
+                    doc_id="policy",
+                    text="Remote work is allowed two days per week. Cafeteria menu changes daily.",
+                )
+            ]
+        )
+
+        with (
+            patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}),
+            patch("agents.rag.generator._llm_generate", return_value=None),
+        ):
+            response = answer_question(
+                "How many remote work days are allowed?",
+                retriever,
+                provider="openai",
+                top_k=1,
+                config={
+                    "context_compression": True,
+                    "context_compression_max_contexts": 1,
+                },
+            )
+
+        self.assertEqual(response["answer"], "Remote work is allowed two days per week.")
+        self.assertEqual(response["generation_mode"], "extractive")
+
+    def test_context_compression_preserves_original_when_all_scores_are_zero(self):
+        contexts = [
+            "복리후생 제도는 별도 공지합니다.",
+            "사내 교육 일정은 다음 주에 공개됩니다.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer(
+                "원격 근무 신청 기준은?",
+                contexts,
+                config={"context_compression": True},
+            )
+
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual([context.text for context in prompt_contexts], contexts)
+
+    def test_context_compression_preserves_citation_rank_after_filtering(self):
+        contexts = [
+            "식당 메뉴는 매일 바뀝니다.",
+            "주차 등록은 시설팀에서 처리합니다.",
+            "재택근무는 주 2일까지 가능합니다. 사무실 좌석 예약은 별도입니다.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer(
+                "재택근무 가능 일수는?",
+                contexts,
+                config={
+                    "context_compression": True,
+                    "context_compression_max_contexts": 2,
+                },
+            )
+
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual(len(prompt_contexts), 2)
+        self.assertEqual(prompt_contexts[0].citation_index, 1)
+        self.assertEqual(prompt_contexts[1].citation_index, 3)
+        self.assertEqual(prompt_contexts[1].text, "재택근무는 주 2일까지 가능합니다.")
+
+    def test_context_compression_keeps_rank_one_when_synonym_has_no_overlap(self):
+        contexts = [
+            "To use vacation, get manager approval first. Then register it in HR.",
+            "PTO questions can be sent to the HR team.",
+        ]
+
+        with patch("agents.rag.generator._llm_generate", return_value="ok") as generate:
+            generate_answer(
+                "What is the PTO request procedure?",
+                contexts,
+                config={
+                    "context_compression": True,
+                    "context_compression_max_contexts": 1,
+                },
+            )
+
+        prompt_contexts = generate.call_args.args[1]
+        self.assertEqual(len(prompt_contexts), 2)
+        self.assertEqual(prompt_contexts[0].citation_index, 1)
+        self.assertIn("manager approval", prompt_contexts[0].text)
+        self.assertEqual(prompt_contexts[1].citation_index, 2)
+
 
 class MmrSelectTests(unittest.TestCase):
     @staticmethod

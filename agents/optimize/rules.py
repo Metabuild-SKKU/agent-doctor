@@ -763,7 +763,6 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"context_compression": True},  # 관련도 낮은 청크 필터링/압축
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                # TODO(index-합의): context_compression 필드 index_config에 없음
             },
             {
                 "id": "shrink_chunk_size",
@@ -805,13 +804,20 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
 
     "context_noise_interference": {
         "group": "C",
+        "assigned": "권성우",
+        "status": "ready",              # context_compression은 현재 index_config에 매핑됨
         # enable_mmr 이 실행 가능해져 ready 로 승격. 다양성 재정렬은 중복·잡음 근접청크를
         # 줄여 노이즈 오염을 완화하는 정당한 처방이다. noise_filter/conflict_prompt 는
         # 소비 노드가 없어 optimizer 가 후보 단계에서 자동으로 걸러낸다.
-        "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["noise_sensitivity"],  # 비-gold 상충 청크가 답변을 오염
         "prescriptions": [
+            {
+                "id": "context_compression",
+                "patch": {"context.compression.enabled": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
             {
                 # 관련성+다양성 균형으로 후보풀을 재정렬해 중복·잡음 청크 쏠림을 억제.
                 # 값 키는 A그룹과 통일한다 — flat "mmr":True 대신 canonical retriever.mmr.
