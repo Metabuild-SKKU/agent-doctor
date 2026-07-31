@@ -237,6 +237,7 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `reranker_low_precision` | A 청킹 | 3 | 예비만 (리랭크 전/후 대조 불가 → 인과 미측정) |
 | `bad_gold_answer` | D 데이터 | 3 | RAGAS 2지표(진짜 확정은 사람) |
 | `corpus_gap` | D 데이터 | 2 | 코퍼스 조회(누락 gold id 는 `metadata.missing_gold_ids`) |
+| `corpus_gap_partial_hop` | D 데이터 | 2 | 코퍼스 조회(hop별) |
 
 #### 순위 원인은 단계로 나뉜다
 
@@ -279,7 +280,6 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 `rerank_candidate_policy.max_candidates` 보다 뒤 순위의 gold 는 리랭커를 켜도 후보를 넓혀도
 닿지 않으므로 순위 문제가 아니라 표현 문제(`semantic`/`lexical mismatch`)로 인계한다.
 이 경계가 없으면 wide-N(=100) 안의 모든 검색 실패가 `low_rank` 하나로 흡수된다.
-| `corpus_gap_partial_hop` | D 데이터 | 2 | 코퍼스 조회(hop별) |
 
 >  "확정(`confirmed`)"은 처방이 통한다는 뜻이 아니라 **그 원인의 판별 신호가 실제로 측정됐다**는
 > 뜻이다. C그룹은 신호가 전부 실측이라 `deep` 에서 확정된다. 예비로 남는 건 판별 신호 자체가
