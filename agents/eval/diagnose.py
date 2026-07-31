@@ -968,6 +968,48 @@ def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
     return finding
 
 
+def _unwarranted_abstention(record: EvalRecord) -> bool:
+    """근거가 top-k 안에 있는데 기권했나 — B(생성)와 C(context 구조)를 가르는 배타 신호.
+
+    C 라벨들은 전부 '틀린 답을 냈다'를 전제로 인과를 세우는데(노이즈에 이끌림·리랭커가 무관한
+    청크를 올림·청크가 커서 노이즈), 기권은 답을 내지 않은 것이라 그 서사가 성립하지 않는다.
+    실측(corpus_20260730 로그, probe_qa_42204): 같은 질문이 gold 2위에서도 기권했고 3·4위에서는
+    맞혔다 — 순위·배치로 설명되지 않으므로 남는 설명은 '있는 근거를 생성이 안 썼다'뿐이다.
+
+    비용: 마커(tier1)로 먼저 거르고 그때만 판정기(_abstained → AspectCritic, probe 당 1회
+    memoize)를 부른다. 마커 없는 기권 표현은 못 잡지만, 그 대가로 실패 probe 전부에 LLM 을
+    물리지 않는다(_expects_abstention 과 같은 규약).
+    """
+    if record.probe.answer_exists is False:
+        return False                     # 무응답 기대 → 기권이 정답(generation_abstention_failure 영역)
+    if not record.probe.ground_truth or not _recall_ok(record):
+        return False                     # 근거를 못 가져왔으면 기권이 옳은 행동 → A그룹 몫
+    if _f1_ok(record):
+        return False                     # 답이 맞았으면 기권이 아니다
+    if not is_abstention(record.generated_answer):
+        return False                     # 싼 게이트 — 마커가 없으면 판정기까지 가지 않는다
+    return _abstained(record)
+
+
+def generation_unwarranted_abstention(record: EvalRecord) -> Optional[Finding]:
+    """
+    근거는 검색됐는데(recall=1) 답하지 않고 기권 — 생성측 실패.
+    확정: recall=1 + 오답 + 기권 판정(DEEP+ AspectCritic / 미만은 마커 휴리스틱).
+
+    generation_abstention_failure 의 반대 방향이다 — 그쪽은 '기권했어야 하는데 지어냄',
+    이쪽은 '답할 수 있었는데 기권함'. 처방이 정반대라(기권 강화 vs 완화) 한 라벨로 못 묶는다.
+    슬롯 밖 additive: 전제가 오라클 통과 여부와 무관해 B슬롯(_generation_failed)에 안 걸린다.
+    """
+    if not _unwarranted_abstention(record):
+        return None
+    judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
+    return _finding(
+        record, "generation_unwarranted_abstention", "generation_failure", confirmed=True,
+        reason=f"recall@k={_v(record.recall_at_k)}(근거 검색됨), "
+               f"oracle_f1={_v(record.oracle_f1)}, {_answer_reason(record)}, 기권({judge})",
+    )
+
+
 def generation_parametric_overreliance(record: EvalRecord) -> Optional[Finding]:
     """
     정답이지만 검색 context 에 근거가 없음 — 모델 파라미터 기억에 의존.
@@ -1090,8 +1132,16 @@ def generation_failure(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def _context_failed(record: EvalRecord) -> bool:
-    """컨텍스트 구조 문제(C) 전제: 검색 성공(recall=1)·생성 가능(oracle 통과)인데 실제 답만 틀림."""
-    return _recall_ok(record) and _oracle_ok(record) and not _f1_ok(record)
+    """컨텍스트 구조 문제(C) 전제: 검색 성공(recall=1)·생성 가능(oracle 통과)인데 실제 답만 틀림.
+
+    기권은 뺀다 — '틀린 답'이 아니라 '답 안 함'이라 C 라벨들의 인과가 성립하지 않는다.
+    실측(corpus_20260730 로그): 같은 기권 답변 하나가 실행마다 context_noise_interference ↔
+    reranker_low_precision 으로 갈렸다. 둘 다 검색을 고치라는 처방인데 그 probe 는 recall=1·
+    oracle 통과, 즉 검색이 성공한 상태였다. 그 자리는 generation_unwarranted_abstention 이
+    가져간다(B그룹 additive).
+    """
+    return (_recall_ok(record) and _oracle_ok(record) and not _f1_ok(record)
+            and not _unwarranted_abstention(record))
 
 def _context_ungrounded(record: EvalRecord) -> bool:
     """C 전제 + 실제 답이 gold·노이즈 어디에도 근거 없음(real faithfulness 낮음).
@@ -1630,6 +1680,9 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
     # B: 기권 실패 (additive) — corpus_gap probe 는 gold context 가 없어 오라클 트랙이 안 돌고
     # _generation_failed 가 안 켜져 B 슬롯에 도달하지 못한다(슬롯 경유분은 _dedup 이 접는다).
     findings.append(generation_abstention_failure(record))
+    # B: 근거는 있는데 기권 (additive) — C 전제(_context_failed)가 같은 신호로 스스로 닫히므로
+    # 슬롯 경합이 아니라 자리 교대다.
+    findings.append(generation_unwarranted_abstention(record))
 
     findings = _dedup(_collect(*findings))
     findings.sort(key=lambda f: (

@@ -174,6 +174,10 @@ answer_score = 0.4·lexical + 0.6·semantic                          # ANSWER_SE
 무응답 기대 probe(`answer_exists=False`)에는 D도 붙지 않는다(채울 자료가 없으므로) —
 남는 건 B의 `generation_abstention_failure` 하나다.
 
+기권(답을 안 냄)은 C 슬롯을 아예 닫는다(`_context_failed`의 `_unwarranted_abstention` 조건) —
+C 라벨들은 전부 "틀린 답을 냈다"를 전제로 인과를 세우는데 기권에는 그 서사가 성립하지 않는다.
+그 자리는 B의 `generation_unwarranted_abstention`이 additive로 가져간다.
+
 ---
 
 ## 입출력 (계약)
@@ -300,6 +304,7 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `generation_hop_binding_error` | B 생성 | 3 | RAGAS faithfulness(+추론검증) |
 | `generation_contradiction` / `numerical_error` / `misinterpretation` | B 생성 | 3 | 추론 실패 모드 단일분류(LLM 1회) |
 | `generation_abstention_failure` | B 생성 | 2~3 | 기권했어야 하는데 지어냄(두 갈래는 `metadata.trigger`로 구분 — `no_answer_expected` / `corpus_gap`) |
+| `generation_unwarranted_abstention` | B 생성 | 1~3 | 근거는 검색됐는데(recall=1) 기권 — C 전제를 닫고 자리를 가져간다 |
 | `generation_parametric_overreliance` | B 생성 | 3 | 정답이지만 real faithfulness 낮음 |
 | `generation_failure` (롤업) | B 생성 | 3 | DEEP에서 세분화 (항상 예비) |
 | `too_long_context` | C context | 3 | context 길이 + 근거 없음, gold 는 양끝 |

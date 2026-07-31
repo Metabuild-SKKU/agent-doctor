@@ -668,6 +668,19 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         ],
     },
 
+    "generation_unwarranted_abstention": {
+        "group": "B",
+        # generation_abstention_failure 의 반대 방향(답할 수 있었는데 기권) — 처방도 반대라
+        # '기권 완화' 레버가 필요한데 지금 generation_config 에는 없다. grounding_strict 를
+        # 끄는 건 대체재가 아니다(근거 없는 답까지 허용돼 환각 처방이 된다) → draft.
+        # 라벨은 남겨서 "검색은 성공했는데 생성이 포기했다"를 리포트로 알린다.
+        "status": "draft",
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        "target_metrics": ["answer_correctness"],  # 근거는 있는데 답을 안 냄 → 정답 일치
+        "prescriptions": [],
+        # BLOCKER: 기권 문턱을 낮추는 generation_config 필드가 없음(프롬프트 문구는 generator 소유).
+    },
+
     "generation_parametric_overreliance": {
         "group": "B",
         "status": "ready",              # abstention_strict 플래그가 generator에 소비됨(Tier1)

@@ -1061,6 +1061,50 @@ class GenerationLabelTest(_DiagnoseTestBase):
         self.assertEqual(picked.label, "generation_failure")
         self.assertFalse(picked.confirmed)
 
+    def test_unwarranted_abstention_confirmed_when_evidence_was_retrieved(self):
+        """근거는 top-k 안(recall=1)인데 기권 — 검색이 아니라 생성이 포기한 것."""
+        rec = _record(f1=0.0, answer="제공된 정보로는 알 수 없습니다",
+                      faith=1.0, rel=1.0, faith_oracle=1.0, rel_oracle=1.0)
+        finding = diagnose.generation_unwarranted_abstention(rec)
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+        self.assertEqual(finding.type, "generation_failure")
+
+    def test_unwarranted_abstention_takes_over_context_slot(self):
+        """C 라벨(노이즈 유인)은 '틀린 답'을 전제로 하므로 기권에는 성립하지 않는다."""
+        rec = _record(f1=0.0, answer="제공된 정보로는 알 수 없습니다",
+                      faith=1.0, rel=1.0, faith_oracle=1.0, rel_oracle=1.0)
+        self.assertFalse(diagnose._context_failed(rec))
+        self.assertIsNone(diagnose.context_noise_interference(rec))
+        self.assertIsNone(diagnose.reranker_low_precision(rec))
+
+    def test_unwarranted_abstention_silent_when_gold_was_not_retrieved(self):
+        """근거를 못 가져왔으면 기권이 옳은 행동 — A그룹(검색) 몫이다."""
+        rec = _record(("g_a", "g_b"), ("g_c",), recall=0.0, f1=0.0,
+                      answer="제공된 정보로는 알 수 없습니다", faith=1.0, rel=1.0)
+        self.assertIsNone(diagnose.generation_unwarranted_abstention(rec))
+
+    def test_unwarranted_abstention_silent_when_answer_is_correct(self):
+        rec = _record(f1=1.0, answer="엄지입니다", faith=1.0, rel=1.0)
+        self.assertIsNone(diagnose.generation_unwarranted_abstention(rec))
+
+    def test_unwarranted_abstention_defers_to_aspect_critic(self):
+        """마커('알 수 없')는 있지만 판정기가 '기권 아님'이라 보면 라벨을 붙이지 않는다."""
+        judge = _FakeAbstentionJudge(0)
+        self._with(ragas=judge)
+        rec = _record(f1=0.0, answer="정확히는 알 수 없지만 답은 엄지입니다",
+                      faith=1.0, rel=1.0, faith_oracle=1.0, rel_oracle=1.0)
+        self.assertIsNone(diagnose.generation_unwarranted_abstention(rec))
+        self.assertIn("abstention", judge.calls)
+
+    def test_unwarranted_abstention_skips_judge_without_marker(self):
+        """마커가 없으면 판정기(LLM)까지 가지 않는다 — 실패 probe 전부에 비용을 물리지 않기 위함."""
+        judge = _FakeAbstentionJudge(1)
+        self._with(ragas=judge)
+        rec = _record(f1=0.0, answer="엄지입니다", faith=1.0, rel=1.0)
+        self.assertIsNone(diagnose.generation_unwarranted_abstention(rec))
+        self.assertEqual(judge.calls, [])
+
     def test_hallucination_confirmed_below_faithfulness_threshold(self):
         rec = _record(oracle_f1=0.1, faith_oracle=RAGAS_FAITHFULNESS_MIN - 0.01)
         finding = diagnose.generation_hallucination(rec)
