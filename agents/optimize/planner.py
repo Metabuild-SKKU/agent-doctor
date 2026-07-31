@@ -44,6 +44,7 @@ from core.state import AgentDoctorState
 from core.schema import Document, Finding
 from agents.optimize import rules
 from agents.optimize import gate
+from agents.optimize import history
 from agents.optimize.config_mapper import canonicalize_path, get_current_value
 from agents.optimize.evidence_window import build_evidence_windows
 from agents.optimize.schemas import (
@@ -1500,6 +1501,10 @@ def _build_request(
         # 탐색까지 통일한다(과거 overall 을 따로 쓴 이유였던 '이진 신뢰도의 계단'이 사라짐).
         # 근거: history.judge 주석 + scoring.reliability_score.
         "primary_metric": "composite_score",
+        # sweep 이 "baseline 을 이겼다"고 판정하는 최소 상승폭. judge(유지/롤백)와 같은
+        # 값이어야 "sweep 이 고른 최선이 judge 에서 탈락"하는 예산 낭비가 생기지 않는다.
+        # primary_metric 이 정규화 composite(0~1)이라 마진도 같은 스케일이다.
+        "min_delta": history.MIN_IMPROVEMENT_MARGIN,
         "study_baseline_config": dict(state.index_config),
         "baseline_metrics": _report_metrics(state),
         "trial_results": [],

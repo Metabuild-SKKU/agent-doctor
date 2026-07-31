@@ -276,15 +276,24 @@ python3 -m compileall -q agents core tests
 
 ## 7. 완료 기준
 
-- [ ] 마진 상수가 **한 곳**에만 정의되고 두 모듈이 공유한다
-- [ ] `history.judge`가 마진 미만 상승을 유지하지 않는다
-- [ ] `internal_adapter`가 `min_delta`를 planner로부터 실제로 받는다
-- [ ] 경계값에서 두 모듈의 판정이 일치한다
-- [ ] floor 위반이 마진보다 우선한다
-- [ ] `min_delta > 0` 활성화로 열리는 `missing_scorable_baseline` 경로가
+- [x] 마진 상수가 **한 곳**에만 정의되고 두 모듈이 공유한다
+      (`history.MIN_IMPROVEMENT_MARGIN` → planner가 `metadata["min_delta"]`로 중계)
+- [x] `history.judge`가 마진 미만 상승을 유지하지 않는다
+- [x] `internal_adapter`가 `min_delta`를 planner로부터 실제로 받는다
+- [x] 경계값에서 두 모듈의 판정이 일치한다
+      (`tests/test_improvement_margin.py::ThresholdConsistencyTest`, 마진 ±1e-12)
+- [x] floor 위반이 마진보다 우선한다
+- [x] `min_delta > 0` 활성화로 열리는 `missing_scorable_baseline` 경로가
       품질 실패가 아닌 **측정 불가**로 분류된다
-- [ ] 마진 탈락 사유가 사용자 리포트에 노출된다
-- [ ] 기존 optimize 테스트 전량 통과
+      (`_fail_active_study(unjudgeable=True)` → blacklist 대신 `_unjudgeable_exclusions`)
+- [x] 마진 탈락 사유가 사용자 리포트에 노출된다
+      (`Verdict.reason` → `reporter.build_trial_report` summary)
+- [x] 기존 optimize 테스트 전량 통과
+
+부작용 계측(§4.1)은 `history.finalize_item`이 이력 항목에 남긴다 —
+`margin_rejected`(마진 때문에 탈락), `score_delta`(그때의 실제 점수 차이),
+`improvement_margin`(적용된 마진 값). 조기 종료는 planner의
+`reason="처방 후보가 모두 블랙리스트에 걸림"` 결정으로 이미 구분된다.
 
 ---
 

@@ -442,6 +442,10 @@ class Verdict:
         unjudgeable: 리포트 부재로 '측정 자체가 없어' 롤백한 경우 True.
             처방이 나빴다는 증거가 아니라 판정이 불가했다는 뜻이므로, config 복원은
             하되 블랙리스트 등록은 건너뛴다(무죄추정). 정상 판정(유지/롤백)은 False.
+        margin_rejected: 점수가 오르긴 했으나 상승폭이
+            history.MIN_IMPROVEMENT_MARGIN 미만이라 롤백한 경우 True. 마진 값이
+            노이즈보다 과도하게 큰지 사후 검증하기 위한 기록이며, 판정 자체는
+            일반 롤백과 같다(하락으로 롤백한 경우는 False).
     """
 
     keep: bool
@@ -452,6 +456,7 @@ class Verdict:
     floor_violations: list[str] = field(default_factory=list)
     reason: str = ""
     unjudgeable: bool = False
+    margin_rejected: bool = False
 
 
 @dataclass

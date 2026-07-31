@@ -858,11 +858,18 @@ def _continue_internal_study(
     if result.metadata.get("adapter_status") == "completed":
         return _finish_internal_study(state, item, result)
 
+    # min_delta 비교에 쓸 scorable baseline 이 없어 sweep 이 끝나지 못한 경우는
+    # '처방이 나빴다'가 아니라 '측정이 성립하지 않았다'이다. 품질 blacklist 대신
+    # unjudgeable 로 기록해 다음 파이프라인 실행에서 재시도할 수 있게 한다.
+    unjudgeable = (
+        result.metadata.get("stop_reason") == "missing_scorable_baseline"
+    )
     return _fail_active_study(
         state,
         item,
         result.error or result.message or "internal study를 완료하지 못했습니다.",
         retryable=True,
+        unjudgeable=unjudgeable,
     )
 
 
@@ -1000,8 +1007,14 @@ def _fail_active_study(
     reason: str,
     *,
     retryable: bool = False,
+    unjudgeable: bool = False,
 ) -> AgentDoctorState:
-    """study 오류 시 baseline으로 복원하고 재시도 가능 여부를 구분한다."""
+    """study 오류 시 baseline으로 복원하고 재시도 가능 여부를 구분한다.
+
+    ``unjudgeable``은 '측정 자체가 성립하지 않음'(예: min_delta 비교에 필요한
+    scorable baseline 부재)이다. 처방이 나빴다는 증거가 아니므로 영구 blacklist에
+    넣지 않고, 같은 실행 안에서만 _unjudgeable_exclusions로 재선택을 제한한다.
+    """
     before_config_for_log, _before_report, changed = _restore_history_item_baseline(
         state,
         item,
@@ -1009,6 +1022,7 @@ def _fail_active_study(
         metadata={
             "study_error": reason,
             "study_retryable": retryable,
+            "unjudgeable": unjudgeable,
         },
     )
     label = item.failure_labels[0] if item.failure_labels else ""
@@ -1023,9 +1037,12 @@ def _fail_active_study(
     )
     # 상태 계약 손상은 같은 처방으로 회복되지 않으므로 즉시 차단한다. 일시적인
     # adapter 오류는 한 번 재시도하되 반복되면 무한 루프 방지를 위해 차단한다.
+    # 측정 불가(unjudgeable)는 품질 증거가 없으므로 blacklist 대신 실행 범위
+    # 제한(_unjudgeable_exclusions)에 맡긴다.
     if (
         label
         and prescription_id
+        and not unjudgeable
         and (not retryable or previous_same_errors >= 1)
     ):
         state.blacklist.add((label, prescription_id))
