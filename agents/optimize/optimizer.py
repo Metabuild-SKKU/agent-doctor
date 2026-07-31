@@ -141,6 +141,13 @@ BACKEND_SUPPORTED_PATHS: dict[str, set[str]] = {
         "retriever.top_k",
         "chunker.chunk_size",
         "chunker.chunk_overlap",
+        # rules가 청킹 교체를 2-후보(recursive_sentence·markdown_recursive)로 등록하고
+        # 제약(allowed)도 두 값을 허용하므로, 실제 비교는 sweep이 해야 등록 의도가 실현된다.
+        # 여기서 빠져 있으면 planner가 internal을 요청한 회차에 이 축이
+        # unsupported_backend_path로 걸러져, 실행 가능한 처방이 통째로 스킵된다.
+        # internal_adapter는 후보값 타입에 무관하다(동등 비교·dedupe만 하고 산술은
+        # 점수 쪽에서만 쓴다) — 범주형 축을 위한 타입 분기가 필요 없다.
+        "chunker.strategy",
     },
     "ragbuilder": {
         "retriever.top_k",

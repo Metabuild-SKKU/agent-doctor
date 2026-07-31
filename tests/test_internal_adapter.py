@@ -501,5 +501,146 @@ class InternalAdapterTest(unittest.TestCase):
         self.assertEqual(request, before)
 
 
+class InternalAdapterCategoricalAxisTest(unittest.TestCase):
+    """범주형 축(chunker.strategy)도 숫자 축과 같은 계약으로 sweep된다."""
+
+    def make_request(self, **overrides):
+        values = {
+            "request_id": "strategy-request",
+            "iteration": 0,
+            "baseline_config": {
+                "chunk_size": 512,
+                "chunk_overlap": 50,
+                "chunk_strategy": "fixed",
+            },
+            "failure_label": "chunking_context_mismatch",
+            "search_space": {
+                "chunker.strategy": ["recursive_sentence", "markdown_recursive"]
+            },
+            "target_metrics": ["context_recall"],
+            "optimizer": "internal",
+            "max_trials": 2,
+            "metadata": {"baseline_metrics": {"mean_recall_at_k": 0.5}},
+        }
+        values.update(overrides)
+        return OptimizationRequest(**values)
+
+    def _evaluator(self, scores):
+        def evaluator(config, _request):
+            return {"mean_recall_at_k": scores[config["chunk_strategy"]]}
+
+        return evaluator
+
+    def test_categorical_sweep_evaluates_every_candidate(self):
+        seen = []
+
+        def evaluator(config, _request):
+            seen.append(config["chunk_strategy"])
+            return {
+                "mean_recall_at_k": {
+                    "fixed": 0.5,
+                    "recursive_sentence": 0.62,
+                    "markdown_recursive": 0.81,
+                }[config["chunk_strategy"]]
+            }
+
+        result = run(self.make_request(), evaluator=evaluator)
+
+        self.assertEqual(result.status, "completed")
+        # baseline은 metadata.baseline_metrics로 이미 채점돼 재평가되지 않는다.
+        self.assertEqual(seen, ["recursive_sentence", "markdown_recursive"])
+        self.assertEqual(result.best_config, {"chunker.strategy": "markdown_recursive"})
+        self.assertEqual(result.best_score, 0.81)
+
+    def test_candidate_equal_to_current_value_is_dropped(self):
+        # 현재 전략이 후보에 포함되면 no-op이라 정규화 단계에서 제외된다.
+        # "2후보 스윕"이라는 등록 표현과 실제 trial 수가 달라질 수 있다.
+        request = self.make_request(
+            baseline_config={
+                "chunk_size": 512,
+                "chunk_overlap": 50,
+                "chunk_strategy": "markdown_recursive",
+            }
+        )
+
+        result = run(request, evaluator=self._evaluator({
+            "markdown_recursive": 0.5,
+            "recursive_sentence": 0.7,
+        }))
+
+        self.assertEqual(result.search_space, {"chunker.strategy": ["recursive_sentence"]})
+        self.assertEqual(
+            [trial.config for trial in result.trial_results if not trial.is_baseline],
+            [{"chunker.strategy": "recursive_sentence"}],
+        )
+        self.assertEqual(result.best_config, {"chunker.strategy": "recursive_sentence"})
+
+    def test_string_fingerprints_are_stable_and_distinct(self):
+        scores = {
+            "recursive_sentence": 0.62,
+            "markdown_recursive": 0.81,
+        }
+
+        first = run(self.make_request(), evaluator=self._evaluator(scores))
+        second = run(self.make_request(), evaluator=self._evaluator(scores))
+
+        fingerprints = [trial.fingerprint for trial in first.trial_results]
+        self.assertEqual(len(set(fingerprints)), len(fingerprints))
+        self.assertTrue(all(fingerprints))
+        self.assertEqual(
+            fingerprints,
+            [trial.fingerprint for trial in second.trial_results],
+        )
+
+    def test_baseline_trial_uses_study_baseline_strategy(self):
+        result = run(self.make_request())
+
+        baseline = next(trial for trial in result.trial_results if trial.is_baseline)
+        self.assertEqual(
+            baseline.metadata["effective_config"]["chunk_strategy"],
+            "fixed",
+        )
+        self.assertEqual(result.best_config, {"chunker.strategy": "fixed"})
+        self.assertEqual(result.next_config, {"chunker.strategy": "recursive_sentence"})
+
+    def test_baseline_is_kept_when_no_candidate_improves(self):
+        result = run(
+            self.make_request(
+                metadata={"baseline_metrics": {"mean_recall_at_k": 0.8}},
+            ),
+            evaluator=self._evaluator({
+                "recursive_sentence": 0.62,
+                "markdown_recursive": 0.55,
+            }),
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertTrue(result.metadata["best_is_baseline"])
+        self.assertEqual(result.best_config, {"chunker.strategy": "fixed"})
+
+    def test_direction_and_objective_follow_the_metric_not_the_axis_type(self):
+        request = self.make_request(
+            target_metrics=["noise_sensitivity"],
+            metadata={
+                "primary_metric": "noise_sensitivity",
+                "baseline_metrics": {"noise_sensitivity": 0.4},
+            },
+        )
+
+        def evaluator(config, _request):
+            return {
+                "noise_sensitivity": {
+                    "recursive_sentence": 0.2,
+                    "markdown_recursive": 0.6,
+                }[config["chunk_strategy"]]
+            }
+
+        result = run(request, evaluator=evaluator)
+
+        self.assertEqual(result.direction, "minimize")
+        self.assertEqual(result.objective_metric, "noise_sensitivity")
+        self.assertEqual(result.best_config, {"chunker.strategy": "recursive_sentence"})
+
+
 if __name__ == "__main__":
     unittest.main()

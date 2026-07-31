@@ -280,16 +280,38 @@ python3 -m compileall -q agents core tests
 
 ## 7. 완료 기준
 
-- [ ] `internal` backend가 `chunker.strategy`를 거부하지 않는다
-- [ ] 범주형 후보가 sweep에서 실제로 평가·비교된다
-- [ ] 현재값과 같은 후보가 정규화 단계에서 제외된다
-- [ ] 문자열 fingerprint가 안정적이다
-- [ ] `allowed` 밖의 값이 걸러진다
-- [ ] `chunker.strategy`가 재색인 경로를 탄다
-- [ ] `chunk_precheck_context`가 strategy에 붙지 않으며 그 근거가 기록됐다
-- [ ] chunk_size/overlap의 기존 prescreener 동작이 변하지 않는다
-- [ ] `internal_adapter`에 타입 분기가 추가되지 않았다
-- [ ] 전체 optimize 테스트 통과
+- [x] `internal` backend가 `chunker.strategy`를 거부하지 않는다
+- [x] 범주형 후보가 sweep에서 실제로 평가·비교된다
+- [x] 현재값과 같은 후보가 정규화 단계에서 제외된다
+- [x] 문자열 fingerprint가 안정적이다
+- [x] `allowed` 밖의 값이 걸러진다
+- [x] `chunker.strategy`가 재색인 경로를 탄다
+- [x] `chunk_precheck_context`가 strategy에 붙지 않으며 그 근거가 기록됐다
+- [x] chunk_size/overlap의 기존 prescreener 동작이 변하지 않는다
+- [x] `internal_adapter`에 타입 분기가 추가되지 않았다
+- [x] 전체 optimize 테스트 통과
+
+### 7.1 구현 결과 메모 — §1.2의 전제 정정
+
+**§1.2가 "planner는 이미 internal을 요청한다"고 적었으나, rules 기본 흐름에서는
+그렇지 않다.** planner는 `candidates[0].search_space`의 **후보값 개수**로
+`use_internal`을 정하는데(`planner._build_request`), 두 전략은 rules.py에서
+**별개의 처방 2개**로 등록돼 있어 각 candidate의 search_space가
+`{"chunker.strategy": [값 1개]}`가 된다 → `candidate_count == 1` → `optimizer="rules"`.
+
+따라서 이번 변경이 실제로 푸는 것은 다음 두 경로다.
+
+1. **차단 해제**: 앞선 후보(예: chunk_size)가 필터돼 optimizer가 전략 후보까지
+   내려온 회차에, backend가 `internal`이면 `unsupported_backend_path`로 요청 전체가
+   스킵됐다. 이제 전략 축이 그 회차에서 실행된다(후보 1개 + baseline 비교).
+2. **범주형 sweep 지원**: Eval이 `Finding.metadata["parameter_candidates"]`로
+   `chunker.strategy` 후보 2개를 넘기면 한 study 안에서 두 전략이 실측 비교된다
+   (`tests/test_planner.py::test_chunk_strategy_candidates_make_one_internal_request`).
+
+rules.py의 처방 2개를 **한 candidate의 2후보 search_space로 합치는 일**은 이번
+범위 밖이다(§4.2 "planner 변경 없음"). 그 병합은 §8이 가리키는 action 중심 전환에서
+`chunker.strategy:replace` + 후보값 2개로 정의되며, 그전에 planner에서 처방을 임의로
+합치면 처방 단위 blacklist·효과 귀속 계약이 흐트러진다.
 
 ---
 
