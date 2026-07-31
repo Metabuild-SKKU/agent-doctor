@@ -13,6 +13,7 @@ from collections import Counter
 from typing import Any
 from weakref import WeakKeyDictionary
 
+from agents.ingest.document_type import has_math_signal
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -37,6 +38,21 @@ SPARSE_VECTOR_NAME = "sparse"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 VECTOR_DIM = 1024
+
+_LATEX_FRAC_RE = re.compile(r"\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}")
+_PI_FRACTION_RE = re.compile(r"(π|pi)\s*/\s*([0-9]+)", re.IGNORECASE)
+_KOREAN_FRAC_RE = re.compile(
+    r"([0-9]+)\s*분의\s*(파이|π|pi|[A-Za-z가-힣0-9]+)",
+    re.IGNORECASE,
+)
+_MATH_SYMBOL_ALIASES = (
+    ("π", "pi"),
+    ("파이", "pi"),
+    ("∞", "infinity"),
+    ("무한대", "infinity"),
+    ("≤", "<="),
+    ("≥", ">="),
+)
 
 def _env_float(name: str, default: float) -> float:
     """환경변수 float 파싱 — 비정수/오타면 기본값으로 폴백. import 시점 크래시 방지
@@ -500,8 +516,62 @@ def search(
 
 
 # 형태소 분석기 없이도 테스트/하이브리드 검색이 돌아가게 가볍게 쪼갠다.
+def normalize_math_text(text: str) -> str:
+    """수식/한국어 표현 차이를 sparse·keyword 검색 힌트로 확장한다."""
+    value = text or ""
+    if not has_math_signal(value):
+        return value
+
+    aliases: list[str] = []
+
+    for numerator, denominator in _LATEX_FRAC_RE.findall(value):
+        num = _normalize_math_piece(numerator)
+        den = _normalize_math_piece(denominator)
+        if num and den:
+            aliases.extend([f"{num}/{den}", f"{num} over {den}"])
+
+    for denominator, numerator in _KOREAN_FRAC_RE.findall(value):
+        num = _normalize_math_piece(numerator)
+        den = _normalize_math_piece(denominator)
+        if num and den:
+            aliases.extend([f"{num}/{den}", f"{num} over {den}"])
+
+    for numerator, denominator in _PI_FRACTION_RE.findall(value):
+        num = _normalize_math_piece(numerator)
+        den = _normalize_math_piece(denominator)
+        if num and den:
+            aliases.extend([f"{num}/{den}", f"{num} over {den}"])
+            if num == "pi":
+                aliases.append(f"π/{den}")
+
+    for left, right in _MATH_SYMBOL_ALIASES:
+        if left in value:
+            aliases.append(right)
+        if right in value:
+            aliases.append(left)
+
+    for base, power in re.findall(r"([A-Za-z가-힣]+)\s*\^\s*\{?([0-9]+)\}?", value):
+        aliases.append(f"{base}{power}")
+
+    if not aliases:
+        return value
+    unique_aliases = []
+    for alias in aliases:
+        alias = alias.strip()
+        if alias and alias not in unique_aliases:
+            unique_aliases.append(alias)
+    return f"{value} {' '.join(unique_aliases)}"
+
+
+def _normalize_math_piece(value: str) -> str:
+    value = (value or "").strip().lower()
+    value = value.replace("\\", "").replace("{", "").replace("}", "")
+    return {"π": "pi", "파이": "pi"}.get(value, value)
+
+
 def _tokens(text: str) -> list[str]:
-    return re.findall(r"[가-힣]+|[A-Za-z][A-Za-z0-9_+.-]*|\d+", text.lower())
+    expanded = normalize_math_text(text)
+    return re.findall(r"[가-힣]+|[A-Za-z][A-Za-z0-9_+./-]*|\d+(?:/\d+)?", expanded.lower())
 
 
 # 나중에 Qdrant sparse vector로 옮기기 쉽게 indices/values 형태로 맞춰 둔다.
