@@ -286,7 +286,11 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | 라벨 | 그룹 | tier | 확정 자원 |
 |---|---|:---:|---|
 | `retrieval_incomplete_enumeration` | A 검색 | 1 | gold수 vs top-k 순수 규칙 |
-| `retrieval_low_rank` | A 검색 | 2 | top-N 재검색 |
+| `retrieval_rank_fusion_loss` | A 검색 | 2 | 채널별(dense/BM25) 순위 vs 융합 순위 |
+| `retrieval_duplicate_crowding` | A 검색 | 2 | 상위 경쟁청크 중복 분석(재검색 0회) |
+| `retrieval_rerank_candidate_miss` | A 검색 | 2 | 리랭크 직전 후보 목록(`pre_rerank_ids`) |
+| `retrieval_reranker_demotion` | A 검색 | 2 | 리랭크 직전 후보 목록(`pre_rerank_ids`) |
+| `retrieval_low_rank` | A 검색 | 2 | top-N 재검색 (위 넷이 아닌 잔여) |
 | `retrieval_lexical_mismatch` | A 검색 | 2 | BM25 조회 |
 | `retrieval_semantic_mismatch` | A 검색 | 2 | BM25 + 코퍼스 확인 |
 | `retrieval_missing_gold` | A 검색 | 2 | 코퍼스 멤버십 조회 |
@@ -306,6 +310,50 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `bad_gold_answer` | D 데이터 | 3 | RAGAS 2지표(진짜 확정은 사람) |
 | `corpus_gap` | D 데이터 | 2 | 코퍼스 조회(누락 gold id 는 `metadata.missing_gold_ids`) |
 | `corpus_gap_partial_hop` | D 데이터 | 2 | 코퍼스 조회(hop별) |
+
+#### 순위 원인은 단계로 나뉜다
+
+최종 순위는 `채널 검색(dense/BM25) → 융합 → 후보창 → 리랭크 → top_k 컷` 을 거쳐 만들어진다.
+"순위가 낮다"는 증상이고, **어느 단계에서 gold 를 잃었는지가 처방을 정한다**.
+
+| 잃은 단계 | 라벨 | 처방 |
+|---|---|---|
+| 융합 | `retrieval_rank_fusion_loss` | `hybrid_dense_weight` 를 우세 채널 쪽으로 |
+| 경쟁 구성 | `retrieval_duplicate_crowding` | MMR (리랭커로는 안 고쳐진다 — 레버 미구현이라 `draft`) |
+| 후보창 | `retrieval_rerank_candidate_miss` | `rerank_candidates` 확대 |
+| 리랭크(강등) | `retrieval_reranker_demotion` | 리랭커 되돌리기 / 모델 교체 |
+| 리랭크(못 올림) | `retrieval_reranker_ineffective` | 모델 교체 (미정 → `draft`) |
+| (잔여) | `retrieval_low_rank` | `use_reranker` 켜기 |
+
+순위 라벨의 관할(`_rank_scope`)은 세 갈래의 합집합이다.
+
+| 갈래 | 뜻 | 창 적용 |
+|---|---|---|
+| `_rankable` | 융합 순위가 top_k 밖 | 적용 (리랭크 계열 처방의 도달 범위) |
+| `_rerank_lost` | 리랭크 **전엔 top_k 안**이었는데 결과엔 없음 (강등) | 무관 (융합 순위와 독립) |
+| `_rerank_not_lifted` | 후보엔 있었으나 리랭크 전에도 top_k 밖 (못 올림) | 무관 |
+| 융합 손실 | 단일 채널은 top_k 안인데 융합이 밀어냄 | **미적용** |
+
+`_rerank_lost` 가 따로 필요한 이유는 wide 재검색이 리랭크를 끄기 때문이다 — 융합이 gold 를 3위에
+뒀는데 리랭커가 12위로 떨어뜨렸다면 융합 순위는 top_k 이내라 첫 갈래에 안 잡히지만, 그건
+교과서적인 리랭커 강등이다.
+
+융합 손실에 창을 적용하지 않는 이유는 **처방마다 도달 범위가 다르기** 때문이다. 창의 논거는
+"리랭커가 닿는 범위"인데 `hybrid_dense_weight` 는 리랭커와 무관하게 어떤 융합 순위든 끌어올릴 수
+있다. 게이트는 처방을 따라간다.
+
+**다른 A 라벨과의 배타** — 순위 라벨이 다룰 구간(`_rank_scope`)이면 `lexical_mismatch` ·
+`semantic_mismatch` 는 스스로 침묵한다. 두 라벨의 전제가 "dense 가 gold 를 놓쳤다"인데,
+창 안에 있다는 건 놓친 게 아니라 순위를 낮게 준 것이라 전제가 사실과 어긋나기 때문이다.
+순위 라벨끼리는 파이프라인 앞단이 뿌리다: `융합 손실`·`중복 밀림` > `후보창 밖` > `강등` > 잔여.
+
+`retrieval_missing_gold`(코퍼스 존재만 실측하는 폴백)와 `chunking_*`(맨 뒤 배치)은 예전부터
+순서로 갈리는 설계다 — 순위 라벨 분할과 무관하게 그대로 유지된다.
+
+판정 범위는 **도달 가능 창**(`metrics_common.reachable_window`)으로 제한한다 —
+`rerank_candidate_policy.max_candidates` 보다 뒤 순위의 gold 는 리랭커를 켜도 후보를 넓혀도
+닿지 않으므로 순위 문제가 아니라 표현 문제(`semantic`/`lexical mismatch`)로 인계한다.
+이 경계가 없으면 wide-N(=100) 안의 모든 검색 실패가 `low_rank` 하나로 흡수된다.
 
 >  "확정(`confirmed`)"은 처방이 통한다는 뜻이 아니라 **그 원인의 판별 신호가 실제로 측정됐다**는
 > 뜻이다. C그룹은 신호가 전부 실측이라 `deep` 에서 확정된다. 예비로 남는 건 판별 신호 자체가

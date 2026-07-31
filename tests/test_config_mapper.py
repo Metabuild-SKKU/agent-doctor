@@ -40,6 +40,7 @@ class ConfigMapperTest(unittest.TestCase):
                 "retriever.search_type": "hybrid",
                 "reranker.enabled": True,
                 "reranker.candidate_count": 40,
+                "context.compression.enabled": True,
                 "chunker.chunk_size": 400,
             }
         )
@@ -51,6 +52,7 @@ class ConfigMapperTest(unittest.TestCase):
                 "use_hybrid": True,
                 "use_reranker": True,
                 "rerank_candidates": 40,
+                "context_compression": True,
                 "chunk_size": 400,
             },
         )

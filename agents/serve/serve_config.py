@@ -41,6 +41,14 @@ GENERATION_KEYS: tuple[str, ...] = (
     "completeness_mode",
     "abstention_strict",
     "generation_model",
+    "context_compression",
+    "context.compression.enabled",
+    "context_compression_max_contexts",
+    "context_filter_max_contexts",
+    "context_compression_min_contexts",
+    "context_filter_min_contexts",
+    "context_compression_max_sentences",
+    "context_filter_max_sentences",
 )
 
 SERVE_CONFIG_KEYS: tuple[str, ...] = RETRIEVAL_KEYS + GENERATION_KEYS

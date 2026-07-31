@@ -77,7 +77,7 @@ except ImportError:  # pragma: no cover
 import graph
 from core.schema import DiagnosticReport, Finding
 from core.state import AgentDoctorState
-from agents.optimize import agent, history
+from agents.optimize import agent, history, rules
 from agents.optimize.schemas import (
     ConfigPatch,
     OptimizationHistoryItem,
@@ -490,9 +490,8 @@ class OptimizeAgentForwardTest(unittest.TestCase):
             ["retrieval_low_rank"],
         )
 
-    def test_enabled_reranker_widens_candidate_count(self):
-        """reranker가 이미 켜져 있으면 다음 처방이 후보 수를 실제 config에 반영한다."""
-        state = make_state(overall=30.0, label="retrieval_low_rank")
+    def _reranker_on_state(self, label):
+        state = make_state(overall=30.0, label=label)
         state.index_config.update(
             {
                 "use_reranker": True,
@@ -508,6 +507,11 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                 "reason": None,
             }
         }
+        return state
+
+    def test_candidate_miss_widens_candidate_count(self):
+        """후보창 밖 gold(candidate_miss)는 후보 수를 실제 config에 반영한다."""
+        state = self._reranker_on_state("retrieval_rerank_candidate_miss")
 
         out = agent.run(state)
 
@@ -516,6 +520,120 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertFalse(out.reindex_required)
         self.assertEqual(
             out.optimization_history[-1].selected_prescription_id,
+            "widen_rerank_candidates",
+        )
+
+    def _rank_cause_state(self, label, metadata=None, config=None):
+        finding = Finding(
+            finding_id=f"p1:{label}", type="retrieval_failure", severity="warning",
+            description=label, label=label, confirmed=True,
+            affected_probes=["p1"], metadata=dict(metadata or {}),
+        )
+        index_config = {
+            "top_k": 5, "chunk_size": 512, "chunk_overlap": 50,
+            "use_hybrid": True, "hybrid_dense_weight": 0.7,
+            "use_reranker": False, "rerank_candidates": 20,
+            "rerank_candidate_policy": {"max_candidates": 50},
+        }
+        index_config.update(config or {})
+        state = make_state(overall=30.0, label=label)
+        state.report.findings = [finding]
+        state.index_config = index_config
+        state.runtime_capabilities = {
+            "reranker": {
+                "status": "verified",
+                "model": "BAAI/bge-reranker-v2-m3",
+                "retryable": False,
+                "reason": None,
+            }
+        }
+        return state
+
+    def test_rank_cause_prescriptions_reach_index_config(self):
+        """순위 원인 4형제의 처방이 실제 config 변경까지 도달하는지 end-to-end 고정.
+
+        rules.py 에 처방을 적어도 optimizer 의 경로 레지스트리
+        (STATE_MAPPABLE_PATHS / BACKEND_SUPPORTED_PATHS / PATH_CAPABILITIES)에 빠져 있으면
+        unsupported_backend_path 로 조용히 건너뛰고 다음 후보가 대신 적용된다. 라벨별
+        '무엇이 바뀌어야 하는가'를 여기서 못박아 그 누락을 드러낸다.
+        """
+        cases = [
+            # (라벨, finding metadata, 시작 config, 기대 처방, 기대 config 변화)
+            ("retrieval_low_rank", {}, {},
+             "enable_reranker", ("use_reranker", True)),
+            ("retrieval_rank_fusion_loss", {"favored_channel": "lexical"}, {},
+             "rebalance_hybrid_weight", ("hybrid_dense_weight", 0.6)),
+            ("retrieval_rank_fusion_loss", {"favored_channel": "dense"}, {},
+             "rebalance_hybrid_weight", ("hybrid_dense_weight", 0.8)),
+            ("retrieval_rerank_candidate_miss", {"gold_ranks": {"g": 34}},
+             {"use_reranker": True},
+             "widen_rerank_candidates", ("rerank_candidates", 34)),
+            ("retrieval_reranker_demotion", {"pre_rerank_ranks": {"g": 12}},
+             {"use_reranker": True},
+             "disable_reranker", ("use_reranker", False)),
+        ]
+        for label, metadata, config, expected_id, (key, value) in cases:
+            with self.subTest(label=label, metadata=metadata):
+                out = agent.run(self._rank_cause_state(label, metadata, config))
+
+                self.assertEqual(out.status, "applied")
+                self.assertEqual(
+                    out.optimization_history[-1].selected_prescription_id,
+                    expected_id,
+                )
+                self.assertEqual(out.index_config[key], value)
+
+    def test_candidate_widening_never_exceeds_policy_ceiling(self):
+        """정책 상한은 근거값 계산뿐 아니라 방향 폴백(현재값×2)에도 걸려야 한다.
+
+        근거값이 없으면 폴백이 30×2=60 을 내는데, 이를 거르는 게 optimizer 의 정적 제약
+        (max=100)뿐이면 정책 상한 50 을 넘는 값이 실제 config 에 박힌다.
+        """
+        state = self._rank_cause_state(
+            "retrieval_rerank_candidate_miss",
+            {},                                   # gold_ranks 없음 → 방향 폴백 경로
+            {"use_reranker": True, "rerank_candidates": 30,
+             "rerank_candidate_policy": {"max_candidates": 50}},
+        )
+
+        out = agent.run(state)
+
+        self.assertLessEqual(out.index_config["rerank_candidates"], 50)
+
+    def test_duplicate_crowding_is_reported_without_prescription(self):
+        """중복 밀림은 지금 config 에 레버가 없다 — 리랭커를 억지로 처방하지 않고 미룬다.
+
+        deduplicate 는 기본값이 이미 True 인 본문 해시 완전일치 제거라 near-duplicate 를
+        못 걸러낸다(= patch 를 내도 config 가 안 바뀐다). mmr 필드는 아직 없다.
+        """
+        state = self._rank_cause_state(
+            "retrieval_duplicate_crowding",
+            {"crowding_analysis": {"g": {"rank": 4, "redundant": 2,
+                                         "projected_rank": 2}}},
+        )
+        before = dict(state.index_config)
+
+        out = agent.run(state)
+
+        self.assertEqual(out.status, "skipped")
+        self.assertEqual(out.index_config, before)
+        self.assertFalse(rules.is_actionable("retrieval_duplicate_crowding"))
+
+    def test_low_rank_does_not_widen_candidate_count(self):
+        """low_rank 는 'gold 가 후보창 안'이라는 신호라 창 확대가 처방이 아니다.
+
+        예전에는 같은 라벨에 enable_reranker → widen_rerank_candidates 가 순차로 달려 있어,
+        리랭커가 이미 켜진 상태에서 신호 없이 창을 넓혔다. 창을 넓혀야 하는 케이스는
+        retrieval_rerank_candidate_miss 로 분리됐다.
+        """
+        state = self._reranker_on_state("retrieval_low_rank")
+
+        out = agent.run(state)
+
+        self.assertEqual(out.index_config["rerank_candidates"], 20)   # 그대로
+        self.assertNotEqual(
+            getattr(out.optimization_history[-1], "selected_prescription_id", None)
+            if out.optimization_history else None,
             "widen_rerank_candidates",
         )
 
@@ -612,9 +730,9 @@ class OptimizeCGroupUnblockTest(unittest.TestCase):
         space = self._first_candidate_space("lost_in_the_middle")
         self.assertIn("retriever.top_k", space)
 
-    def test_context_noise_interference_leads_with_mmr(self):
+    def test_context_noise_interference_leads_with_context_compression(self):
         space = self._first_candidate_space("context_noise_interference")
-        self.assertEqual(space, {"retriever.mmr": [True]})
+        self.assertEqual(space, {"context.compression.enabled": [True]})
 
 
 class OptimizeAgentRollbackTest(unittest.TestCase):
@@ -634,7 +752,11 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         state = agent.run(state)                            # 방문2: 판정 → 롤백
         self.assertEqual(state.status, "applied")           # 같은 라벨의 다음 처방은 계속 진행
         self.assertEqual(state.index_config["top_k"], 4)    # 첫 후보는 baseline으로 복원
-        self.assertEqual(state.index_config["chunk_size"], 256)
+        self.assertTrue(state.index_config["context_compression"])
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "context_compression",
+        )
         self.assertEqual(len(state.blacklist), 1)
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
@@ -741,7 +863,11 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         state.report = make_report(50.0)                    # 악화
         state = agent.run(state)                            # 방문2: 같은 라벨의 다음 처방
         self.assertEqual(state.iteration, 3)                # 후보/처방 전환은 증가 없음
-        self.assertEqual(state.index_config["chunk_size"], 256)
+        self.assertTrue(state.index_config["context_compression"])
+        self.assertEqual(
+            state.optimization_history[-1].selected_prescription_id,
+            "context_compression",
+        )
         self.assertEqual(state.status, "applied")
 
     def test_baseline_dead_end_preserves_same_visit_rollback(self):
