@@ -21,7 +21,9 @@
 - 기존 chunk prescreener가 실제 청커를 dry-run해 정답 전체 포함률과 경계 회복률을
   비교하고, 동률이면 중복량이 가장 작은 overlap을 선택한다.
 - `chunking_context_mismatch`는 `ready`로 승격했으며 처방 순서는
-  `increase_chunk_overlap → increase_chunk_size → switch_chunking_strategy`다.
+  `increase_chunk_overlap → increase_chunk_size → switch_to_recursive_sentence →
+  switch_to_markdown_recursive`다. 청킹 전략 교체는 상급 전략 2개를 순서 후보로 두고
+  Eval이 실측 채택한다(코퍼스 타입 의존이라 하나로 고정하지 않음, baseline 동일값은 no-op 필터).
 
 - **완료**: `agent.py`(Phase 1 순방향 실행 + Phase 2 방문 간 판정·롤백), `history.py`
   (하한선 검사, judge, pending→확정 2단계 이력), `reporter.py`(decision/verdict 기반

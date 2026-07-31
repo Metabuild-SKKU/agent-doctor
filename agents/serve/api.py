@@ -19,9 +19,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents.rag.generator import answer_question
 from agents.rag.retriever import Retriever, get_retriever
-# 지문 알고리즘은 Serve agent 와 공유한다(agents/serve/fingerprint.py) — agent.py 가
-# 지문 하나 때문에 이 모듈(uvicorn/fastapi/qdrant_client)을 import 하지 않도록 분리.
-from agents.serve.fingerprint import corpus_fingerprint
+# 지문·서빙설정 로직은 Serve agent 와 공유한다(agents/serve/*.py) — agent.py 가 이 모듈
+# (uvicorn/fastapi/qdrant_client)을 import 하지 않도록 순수 모듈로 분리.
+from agents.serve.serve_config import (
+    read_serve_config, serving_fingerprint, generation_subset,
+)
 
 app = FastAPI(title="Agent Doctor API", version="0.1.0")
 
@@ -36,6 +38,15 @@ _retriever: Retriever | None = None
 _chunks_raw: list[dict] = []
 _chunks_file: str | None = None
 _fingerprint: str = ""
+# Optimize(B그룹)가 고른 생성 설정. init_qdrant 가 서빙 설정 사이드카에서 읽어 주입한다.
+# 비어 있으면(사이드카 없음) generator 기본값(현 동작)을 쓴다.
+_generation_config: dict = {}
+
+
+def configure_generation(generation_config: dict | None) -> None:
+    """서빙에 쓸 generation_config를 설정한다(파이프라인 Serve 단계에서 호출)."""
+    global _generation_config
+    _generation_config = dict(generation_config or {})
 
 
 def init_qdrant(chunks_file: str) -> None:
@@ -43,12 +54,19 @@ def init_qdrant(chunks_file: str) -> None:
 
     _chunks_file = chunks_file
     _chunks_raw = json.loads(Path(chunks_file).read_text(encoding="utf-8"))
-    _fingerprint = corpus_fingerprint(_chunks_raw)
-    print(f"[API] loaded {len(_chunks_raw)} chunks (fingerprint {_fingerprint})")
+    # 파이프라인이 고른 검색·생성 설정을 사이드카에서 읽어 retriever/generator 에 주입한다.
+    # (없으면 빈 dict → 기본 동작). 지문에 설정을 포함해, 설정만 바뀌어도 reload 가 걸린다.
+    serve_config = read_serve_config(chunks_file)
+    _fingerprint = serving_fingerprint(_chunks_raw, serve_config)
+    configure_generation(generation_subset(serve_config))
+    print(f"[API] loaded {len(_chunks_raw)} chunks (fingerprint {_fingerprint}), "
+          f"serve_config {len(serve_config)}개 키")
 
     _retriever = get_retriever(
         _chunks_raw,
         {
+            # 최적화된 top_k·reranker·mmr·hybrid 등(get_retriever 가 아는 키만 사용).
+            **serve_config,
             "qdrant_url": os.getenv("QDRANT_URL", ":memory:"),
             "qdrant_api_key": os.getenv("QDRANT_API_KEY"),
         },
@@ -77,6 +95,8 @@ def _public_index_settings(retriever: Retriever | None) -> dict:
         "hybrid_dense_weight": settings.hybrid_dense_weight,
         "use_reranker": settings.use_reranker,
         "reranker_model": settings.reranker_model,
+        "use_mmr": settings.use_mmr,
+        "mmr_lambda": settings.mmr_lambda,
         "recreate_collection_on_dimension_mismatch": (
             settings.recreate_collection_on_dimension_mismatch
         ),
@@ -126,7 +146,7 @@ def answer(query: str, top_k: int | None = None):
         raise HTTPException(status_code=400, detail="query must not be blank")
     if top_k is not None and top_k <= 0:
         raise HTTPException(status_code=400, detail="top_k must be positive")
-    return answer_question(query, retriever, top_k=top_k)
+    return answer_question(query, retriever, top_k=top_k, config=_generation_config)
 
 
 @app.get("/documents")
