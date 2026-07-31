@@ -2,8 +2,62 @@
 
 > 상태: 구현 전 설계·작업 계획
 > 작업 브랜치: `feature/action-centered-optimizer`
-> 최초 조사 기준: `origin/main`의 `a35677f`
+> 최초 조사 기준: `origin/main`의 `a35677f` (**낡음 — 아래 재조사 기준으로 대체**)
+> **재조사 기준: `origin/main`의 `23a6fe7`** (PR #56 병합 후)
 > 목표: Optimize의 선택 중심을 failure label에서 실제 실행 가능한 config action으로 완전히 옮긴다.
+
+### ⚠️ 기준 커밋 갱신 이력
+
+이 문서의 §2·§6은 처음 `a35677f` 기준으로 작성됐다. 그 이후 `origin/main`이 크게
+앞서가면서 전제가 달라졌다.
+
+```text
+a35677f → 23a6fe7 (optimize 관련)
+  rules.py            +216 / -119
+  optimizer.py        +44
+  config_mapper.py    +21
+  core/state.py       +29
+  agents/serve/*      +400 이상
+  합계                +772 / -201
+```
+
+전제를 바꾼 변경은 다음 셋이다.
+
+1. **B그룹(generation) 5개 라벨이 `draft` → `ready`로 승격됐다.**
+   `generation_config` 부재라는 블로커가 해소되어 `config_mapper`에 `generation.*`
+   7경로가 추가됐고, generator가 실제로 소비한다.
+2. **`chunker.strategy`·`retriever.mmr`가 실행 가능해졌다.** 초판 §2.4가 차단으로
+   분류한 항목 중 넷이 이미 해제됐다.
+3. **`optimizer.py`에 실행 가능성 정책이 정식으로 들어왔다.**
+   `STATE_MAPPABLE_PATHS` / `PATH_CAPABILITIES` / `DEFAULT_CAPABILITIES` /
+   `BACKEND_SUPPORTED_PATHS` / `DEFAULT_CONSTRAINTS`가 이미 존재한다. §6.4가 신설을
+   전제로 쓰였으나 실제로는 **추출·공유**가 맞다.
+
+§2.1·§2.4·§6.1은 재조사 결과로 교체했다. §3.1·§4.3·§4.4는 그 결과에 따라
+정책을 수정했다.
+
+### 이슈 #67과의 관계 — 이 작업을 지금 하는 이유
+
+이슈 #67은 처방 전역 우선순위로의 **전면 전환을 반대**했다. 근거는 넷이었다.
+
+| #67의 근거 | 재조사 결과 (`23a6fe7`) |
+| --- | --- |
+| ① `cost`/`confidence`가 전부 비어 정렬 재료가 없다 | **여전히 사실.** `cost` 51/51 None, `diagnosis_confidence` 25/25 None |
+| ② 라벨 간 공유 처방이 적다 | **해소됨.** 실행 가능 action 16개 중 **10개가 2개 이상 라벨의 지지**를 받는다 |
+| ③ A>C>B 인과가 깨진다 | **위험이 커졌다.** B그룹이 ready가 되어 실제로 A와 경쟁한다 |
+| ④ 측정이 병목이다 | **대응 착수.** keep/rollback 판정에 최소 개선 마진을 도입한다(§5.11) |
+
+따라서 이 작업의 성격을 다음과 같이 정의한다.
+
+- **이번 전환은 성능 개선이 아니라 구조 선투자다.** ①이 비어 있는 한 점수 공식은
+  사실상 `고유 probe 수 ÷ action 비용`으로 축약되며, 이는 현재 `planner._score`와
+  재료가 같다. 즉 **선택 결과가 크게 달라지리라 기대해선 안 된다.**
+- 그럼에도 지금 하는 이유는 ②가 해소되어 통합할 실익이 생겼고, `confidence`가
+  나중에 채워질 때 **코드 변경 없이 곧바로 반영되는 자리를 미리 만들어 두기**
+  위해서다.
+- ③은 §4.3의 hard tier를 **불변조건**으로 격상해 방어한다.
+- ④는 §5.11로 이번 범위에 포함한다.
+- 이 판단이 틀렸을 경우를 대비해 §8 단계 3에 **중단 기준**을 둔다.
 
 ---
 
@@ -65,15 +119,38 @@
 
 현재 여러 label이 아래와 같은 실제 config 변경을 공유한다.
 
-| Canonical action | 지지하는 대표 label |
-| --- | --- |
-| `retriever.top_k:increase` | `retrieval_missing_gold`, `retrieval_incomplete_enumeration` |
-| `retriever.top_k:decrease` | `too_long_context` |
-| `chunker.chunk_size:increase` | `retrieval_missing_gold`, `chunking_context_mismatch`, `chunking_overchunking` |
-| `chunker.chunk_size:decrease` | `retrieval_semantic_mismatch`, `too_long_context` |
-| `chunker.chunk_overlap:increase` | `retrieval_missing_gold`, `chunking_context_mismatch` |
-| `reranker.enabled:set:true` | `retrieval_low_rank` |
-| `reranker.candidate_count:increase` | `retrieval_low_rank` |
+`23a6fe7` 기준 전수조사 결과다. ready 라벨 16개가 선언한 처방에서 canonical action
+25개가 나오고, 그중 **실행 가능한 것이 16개**다. 실행 가능한 16개 중 **10개를 둘 이상의
+라벨이 함께 지지한다.**
+
+| Canonical action | 지지 | tier | 지지하는 label |
+| --- | --- | --- | --- |
+| `chunker.chunk_size:increase` | 3 | A | `chunking_context_mismatch`, `chunking_overchunking`, `retrieval_missing_gold` |
+| `chunker.chunk_size:decrease` | 3 | A·C | `chunking_underchunking`, `retrieval_semantic_mismatch`, `too_long_context` |
+| `generation.require_citation:set:true` | 3 | B | `generation_abstention_failure`, `generation_hallucination`, `generation_parametric_overreliance` |
+| `generation.abstention_strict:set:true` | 3 | B | `generation_abstention_failure`, `generation_hallucination`, `generation_parametric_overreliance` |
+| `chunker.chunk_overlap:increase` | 2 | A | `chunking_context_mismatch`, `retrieval_missing_gold` |
+| `chunker.strategy:set:recursive_sentence` | 2 | A | `chunking_context_mismatch`, `retrieval_semantic_mismatch` |
+| `chunker.strategy:set:markdown_recursive` | 2 | A | `chunking_context_mismatch`, `retrieval_semantic_mismatch` |
+| `generation.temperature:decrease` | 2 | B | `generation_hallucination`, `generation_parametric_overreliance` |
+| `retriever.mmr:set:true` | 2 | A·C | `retrieval_incomplete_enumeration`, `context_noise_interference` |
+| `retriever.top_k:increase` | 2 | A | `retrieval_incomplete_enumeration`, `retrieval_missing_gold` |
+| `retriever.top_k:decrease` | 2 | C | `lost_in_the_middle`, `too_long_context` |
+| `reranker.enabled:set:true` | 1 | A | `retrieval_low_rank` |
+| `reranker.candidate_count:increase` | 1 | A | `retrieval_low_rank` |
+| `retriever.search_type:set:hybrid` | 1 | A | `retrieval_lexical_mismatch` |
+| `generation.completeness_mode:set:true` | 1 | B | `generation_partial_answer` |
+| `generation.restate_question:set:true` | 1 | B | `generation_misinterpretation` |
+
+이 표에서 곧바로 읽히는 세 가지를 이 문서의 정책 근거로 삼는다.
+
+1. **공유는 충분하다.** 16개 중 10개가 공유 → 통합의 실익이 있다(#67 우려 ② 해소).
+2. **같은 축의 경쟁이 실재한다.** `chunker.chunk_size`(증가 3 ⟷ 감소 3),
+   `retriever.top_k`(증가 2 ⟷ 감소 2), `chunker.strategy`(두 값 2 ⟷ 2).
+   → §4.4의 충돌 정책이 형식이 아니라 실제로 발동한다.
+3. **B그룹이 링 위에 있다.** `require_citation`·`abstention_strict`가 각각 3표이고,
+   generation 경로는 재색인이 없어 비용이 A그룹 `top_k`와 같다(둘 다 1).
+   비용이 약분되면 **B가 A를 점수로 이긴다.** → §4.3 hard tier가 필수다.
 
 현재 구조에서는 같은 `top_k 증가`라도 prescription ID나 소유 label이 다르면 서로 다른
 후보처럼 취급될 수 있다. 이 때문에 다음 문제가 생긴다.
@@ -129,18 +206,59 @@ label_score = frequency × confidence ÷ cost
 대표적으로 다음 action은 rule에 존재해도 capability 또는 mapping 때문에 기본 경로에서
 차단될 수 있다.
 
-| Action | 대표 차단 이유 |
+**초판의 차단 목록은 낡았다.** `23a6fe7` 기준으로 다시 조사한 결과는 다음과 같다.
+판정 기준은 `optimizer.STATE_MAPPABLE_PATHS` 통과 여부와
+`DEFAULT_CAPABILITIES[PATH_CAPABILITIES[path]]` 값이다.
+
+**초판 차단 목록 7개 중 4개가 이미 해제됐다.**
+
+| 초판이 차단으로 본 action | `23a6fe7` 실제 |
 | --- | --- |
-| `retriever.search_type:set:hybrid` | runtime/capability 확인 필요 |
-| `embedding.model:set:<model>` | embedding model capability 및 재색인 필요 |
-| `chunker.strategy:set:recursive_sentence` | state mapping/capability 확인 필요 |
-| `query_rewrite:set:expand` | state mapping 또는 소비 노드 부재 |
-| `mmr:set:true` | canonical mapping/소비 경로 확인 필요 |
-| `adaptive_retrieval:set:true` | state mapping 또는 소비 노드 부재 |
-| `context.compression.enabled:set:true` | capability 및 소비 노드 부재 |
+| `retriever.search_type:set:hybrid` | ✅ **해제** — `use_hybrid` 매핑, capability `hybrid_search=True` |
+| `chunker.strategy:set:recursive_sentence` | ✅ **해제** — `chunk_strategy` 매핑, capability `chunking_strategy=True` |
+| `mmr:set:true` | ✅ **해제** — `retriever.mmr` → `use_mmr`, capability `mmr=True` |
+| `embedding.model:set:<model>` | ⚠️ 차단이지만 **이유가 다름** — 매핑은 되고 `embedding_model=False`(검증된 후보 부재) |
+| `query_rewrite:set:expand` | ❌ 차단 유지 — `STATE_MAPPABLE_PATHS` 미등록 |
+| `adaptive_retrieval:set:true` | ❌ 차단 유지 — 동일 |
+| `context.compression.enabled:set:true` | ❌ 차단 유지 — `context_compression=False` |
+
+**현재 차단 중인 action 9개 (전량)**
+
+| Action | 차단 사유 |
+| --- | --- |
+| `query_rewrite:set:expand` | `STATE_MAPPABLE_PATHS` 미등록 |
+| `adaptive_retrieval:set:true` | 〃 |
+| `answer_checklist_review:set:true` | 〃 |
+| `conflict_resolution_prompt:set:...` | 〃 |
+| `context_ordering:set:most_relevant_edges` | 〃 |
+| `noise_filter:set:true` | 〃 |
+| `context.compression.enabled:set:true` | capability `context_compression=False` |
+| `embedding.model:set:<model>` | capability `embedding_model=False` |
+| `generation.model:set:upgrade` | capability `generation_model=False` |
+
+두 차단 사유는 성격이 다르므로 **분리해 기록한다**(§5.7).
+
+- `STATE_MAPPABLE_PATHS` 미등록 = mapper 계약 부재 → 영구적, catalog에 `blocked` 명시
+- `capability=False` = 소비 경로는 있으나 검증된 후보/구현 부재 → 조건부, 나중에 해제 가능
 
 Action 집계 시 rule status만 보지 않고, 현재 baseline과 runtime에서 실제 실행 가능한지
 확인한 뒤 점수를 계산해야 한다.
+
+### 2.5 sweep 가능 축이 3개뿐이다 (초판 누락)
+
+`optimizer.BACKEND_SUPPORTED_PATHS["internal"]`은 다음 셋만 지원한다.
+
+```text
+retriever.top_k
+chunker.chunk_size
+chunker.chunk_overlap
+```
+
+나머지 13개 실행 가능 action은 **`rules` backend로 1회 적용만 가능하다.** 이 사실이
+§4.5(후보값 통합)와 §5.8(반복 예산)에 영향을 준다.
+
+- 후보값이 여러 개라도 sweep 대상이 아닌 축은 **후보 하나를 골라 1회 적용**해야 한다.
+- `chunker.strategy`는 후보가 2개인데 internal sweep 대상이 아니다 → §3.1 참고.
 
 ---
 
@@ -203,18 +321,67 @@ retriever.top_k:increase
 retriever.top_k:decrease
 chunker.chunk_size:increase
 chunker.chunk_size:decrease
-reranker.enabled:set:true
-retriever.search_type:set:hybrid
-embedding.model:set:sentence-transformers/all-MiniLM-L6-v2
+reranker.enabled:enable
+retriever.search_type:replace        # 후보값 [hybrid]
+chunker.strategy:replace             # 후보값 [recursive_sentence, markdown_recursive]
+embedding.model:replace              # 후보값 [<model>...]
 ```
 
 원칙:
 
 - action key에는 label이나 기존 prescription ID를 넣지 않는다.
 - 방향 action의 실제 후보 숫자는 key에 넣지 않는다.
-- 고정값 교체 action은 stable value를 key에 포함한다.
+- **고정값 교체 action은 값을 key에 넣지 않는다.** 축 단위 `replace` action 하나로 두고,
+  값은 전부 후보값으로 넘긴다. (초판 규칙에서 **변경** — 아래 이유 참고)
+- boolean 축은 `set:true`/`set:false` 대신 `enable`/`disable`을 쓴다.
 - 한 action은 canonical config 축 하나만 소유한다.
 - 보조 안전 플래그는 patch에 추가할 수 있지만 action의 정체성은 하나로 유지한다.
+
+#### 초판 규칙을 바꾼 이유 — starvation(영구 교착)
+
+초판은 "고정값 교체 action은 stable value를 key에 포함한다"였다. 이 규칙을 `23a6fe7`의
+`chunker.strategy`에 적용하면 **그 축이 영원히 선택되지 않는다.**
+
+```text
+chunker.strategy:set:recursive_sentence   ← chunking_context_mismatch, retrieval_semantic_mismatch
+chunker.strategy:set:markdown_recursive   ← chunking_context_mismatch, retrieval_semantic_mismatch
+                                             └ 지지 label 집합이 완전히 동일
+```
+
+지지 probe 집합이 같으면 두 action의 점수는 **수학적으로 항상 정확히 같다.** 그러면
+§4.4의 충돌 보류 규칙에 영구히 걸려 **한 번도 시도되지 않는다.** 왕복(oscillation)의
+반대인 기아(starvation)이며, `conflict_margin_ratio`를 어떤 값으로 정해도 해소되지 않는다.
+
+이는 `origin/main`이 의도적으로 만든 설계를 되돌리는 것이기도 하다. `optimizer.py`의
+제약 주석이 이를 명시한다.
+
+```python
+# rules 가 청킹 교체를 2-후보 스윕(recursive_sentence·markdown_recursive)으로 등록하므로
+# 둘 다 허용해야 한다 — recursive_sentence 만 두면 markdown_recursive 후보가 실행 전에
+# 필터돼 스윕이 사실상 1개가 된다(이 PR 목표인 '실행 불가 처방 언블록'과 충돌).
+"chunker.strategy": {"allowed": ["recursive_sentence", "markdown_recursive"]},
+```
+
+즉 두 값은 **경쟁자가 아니라 같은 action의 두 후보**다. 값을 key에서 빼면 이 의도가
+보존된다.
+
+**정밀도 손실은 없다.** blacklist는 action key가 아니라 `ActionAttemptKey`(§3.5)로
+걸리며, 여기에 `candidate_fingerprint`가 포함되어 "어떤 값으로 시도했는가"는 여전히
+정확히 구분된다.
+
+**다만 §2.5의 제약과 충돌한다.** `chunker.strategy`는 후보가 2개인데 internal sweep
+대상이 아니다(`BACKEND_SUPPORTED_PATHS["internal"]`에 없음). 따라서 다음 중 하나를
+합의해야 한다.
+
+| 선택지 | 내용 | 비용 |
+| --- | --- | --- |
+| (a) `internal`에 `chunker.strategy` 추가 | 2후보를 정식 sweep | adapter 변경 필요 |
+| (b) rules backend가 후보 하나만 적용 | 나머지 후보는 다음 방문에 | sweep 이점 상실 |
+| (c) 이번 범위에서 제외 | 단일 후보로 고정 | 기존 2-후보 설계 후퇴 |
+
+권장은 **(b)** 다. §12 권장 범위("차단 기능 활성화는 별도 PR")와 일관되고,
+`ActionStudyKey`로 "이 baseline에서 어떤 후보를 이미 썼는지" 추적하면 다음 방문에
+자연스럽게 나머지 후보로 넘어간다.
 
 ### 3.2 LabelActionRule
 
@@ -429,7 +596,32 @@ candidate.causal_rank
 이 구조는 label을 먼저 선택하지 않는다. Action끼리 경쟁하되 기존 검색 우선 인과 정책을
 안전장치로 유지한다.
 
-실험 데이터가 쌓이면 hard tier를 group multiplier로 바꿀 수 있도록 정책 객체로 분리한다.
+#### 🔒 이 조항은 불변조건이다 (초판에서 격상)
+
+초판은 hard tier를 "초기 권장안"으로 두고 "실험 데이터가 쌓이면 group multiplier로
+바꿀 수 있도록" 여지를 남겼다. **`23a6fe7`에서는 이를 선택지로 두면 안 된다.**
+
+초판이 작성된 `a35677f`에서는 B그룹이 전부 `draft`라 A와 경쟁할 일이 없었다. 그래서
+hard tier가 형식적 안전장치였다. 지금은 다르다.
+
+```text
+[B] generation.require_citation:enable   지지 3 probe군 ÷ 비용 1 = 3.0   ← 이긴다
+[A] retriever.top_k:increase             지지 2 probe군 ÷ 비용 1 = 2.0
+```
+
+generation 경로는 **재색인이 없어 비용이 1**이고, `retriever.top_k`도 1이다. 비용이
+약분되면 순수 지지 수 싸움이 되며, `require_citation`·`abstention_strict`는 각각
+**3개 라벨의 지지**를 받는다. hard tier가 없으면 **검색이 새는 상태에서 생성 프롬프트를
+먼저 손대는 순서 역전이 기본 시나리오가 된다**(garbage-in tuning).
+
+따라서:
+
+- **hard tier는 정렬 1차 키로 유지한다.** `causal_rank`가 다르면 점수를 보지 않는다.
+- group multiplier(§5.4의 대안)는 **B그룹이 ready인 한 채택하지 않는다.** multiplier는
+  지지 수가 충분히 몰리면 여전히 역전을 허용하기 때문이다(`10×1 > 2×3`).
+- 정책 객체로 분리하는 것은 유지하되, 기본값 교체는 별도 PR과 별도 근거를 요구한다.
+- §7.11 invariant에 "B그룹 action은 실행 가능한 A/C action이 남아 있는 한 선택되지
+  않는다"를 추가한다.
 
 ### 4.4 반대 방향 충돌
 
@@ -453,6 +645,60 @@ chunker.chunk_size:decrease
 7. 양쪽 점수와 보류 이유를 report metadata에 남긴다.
 
 근소한 충돌을 단순 다수결로 처리하면 config가 증가와 감소를 왕복할 수 있다.
+
+#### 실제 충돌 축에 적용한 결과 (`23a6fe7`)
+
+이 정책을 §2.1의 충돌 3축에 적용하면 **3단계까지 가는 축은 하나뿐이다.**
+
+| 축 | 1단계 tier | 2단계 grounded | 결과 |
+| --- | --- | --- | --- |
+| `retriever.top_k` | 증가 **A** vs 감소 **C** | — | ✅ **1단계 종료.** 충돌 정책 불필요 |
+| `chunker.strategy` | 양쪽 A | 양쪽 없음 | — §3.1로 해소(단일 action + 후보 2개) |
+| `chunker.chunk_size` | 양쪽 A¹ | **양쪽 있음**² | ⚠️ **3단계까지 진행 — 유일한 실제 대상** |
+
+¹ 감소 쪽은 A·C 혼합이나 §4.3의 `causal_rank` = "가장 높은 tier"에 따라 A로 판정된다.
+² 증가 = `chunking_overchunking`, 감소 = `too_long_context`가 각각
+`_ground_chunk_size_candidates`로 근거값을 만든다.
+
+#### 대부분의 왕복은 근거값 계산이 먼저 차단한다 (초판 누락)
+
+`planner._ground_chunk_size_candidates`는 gold span 길이 분포(P85)로 목표값을 정한 뒤,
+방향이 맞지 않으면 후보 생성 자체를 실패시킨다.
+
+```python
+if (direction == "decrease" and target >= current_int) or (
+    direction == "increase" and target <= current_int
+):
+    metadata["status"] = "direction_conflict"
+    return None, metadata
+```
+
+§4.6에 따라 **후보값이 없는 action은 점수 계산 전에 제외**되므로, 정상적으로 근거가
+계산되는 상황에서는 **증가·감소가 동시에 링에 오르지 않는다.** 즉 충돌 정책이 실제로
+필요한 것은 근거 계산이 실패하는 다음 경우로 한정된다.
+
+```text
+missing_gold_spans      gold span 없음
+insufficient_spans      span 3개 미만
+invalid_policy          정책값 무효
+```
+
+이때만 방향 키워드 폴백(`×2` / `÷2`)으로 양쪽이 살아남는다.
+
+#### `conflict_margin_ratio` 합의값
+
+노이즈 한 개 차이로 방향이 뒤집히지 않도록 **상대·절대 조건을 모두** 건다.
+
+```text
+우세 판정 조건 (둘 다 만족해야 함)
+  (a) 상대: (우세 점수 - 열세 점수) / 우세 점수 >= 0.20
+  (b) 절대: 고유 probe 지지 수 차이 >= 2
+
+둘 중 하나라도 미충족 → 해당 축을 이번 방문 보류, 다음 순위 축으로
+```
+
+(b)가 필요한 이유는 상대 조건만 두면 `3 : 2`가 33%로 통과하는데, probe 1개 차이는
+§5.11의 측정 노이즈 안에 묻히기 때문이다.
 
 ### 4.5 후보값 통합
 
@@ -556,18 +802,19 @@ Optimizer는 실행 직전 동일 정책을 재검증해 외부 입력 변조를
 - score breakdown에 `confidence_source` 기록
 - 별도 Eval 작업에서 Finding별 confidence를 생산
 
-### 5.4 Group 인과
+### 5.4 Group 인과 — **합의 완료**
 
 선택지:
 
-- A > C > B hard tier
-- group multiplier
-- B action 전에 A/C 해결 필수
+- A > C > B hard tier ← **채택**
+- ~~group multiplier~~ — B그룹이 ready인 한 채택하지 않는다(§4.3)
+- B action 전에 A/C 해결 필수 — hard tier로 사실상 충족
 
-권장:
+결정:
 
-- 첫 구현에서는 hard tier 유지
-- 구조 전환과 그룹 정책 변경을 한 번에 섞지 않음
+- **hard tier를 불변조건으로 유지한다.** 근거와 수치는 §4.3 참고.
+- 구조 전환과 그룹 정책 변경을 한 번에 섞지 않는다.
+- multiplier 전환은 별도 PR + 별도 근거를 요구한다.
 
 ### 5.5 Conflict 처리
 
@@ -638,6 +885,78 @@ Action이 지지받았다는 사실과 label이 실제 해결됐다는 사실을
 4. 기존 필드를 deprecated
 5. 저장 상태 호환 요구 확인 후 제거
 
+### 5.11 개선 판정 최소 마진 — **합의 완료** (신설)
+
+이슈 #67의 선결 과제 ②(측정 노이즈)에 대한 대응이다. 초판에는 없던 항목이며,
+**이번 범위에 포함한다.**
+
+#### 문제
+
+현재 판정은 티끌만큼만 올라도 유지한다.
+
+```python
+# history.py judge()
+if after_score > before_score:      # 0.0001 상승도 "개선"
+    return Verdict(keep=True, ...)
+```
+
+측정 노이즈로 우연히 오른 값을 개선으로 오인하면, 롤백 안전망을 **통과하면서**
+왕복이 발생한다. 롤백은 "점수가 안 올랐을 때" 작동하는데 노이즈가 점수를 올려버리기
+때문에, §4.4의 충돌 정책만으로는 막을 수 없다.
+
+#### 결정
+
+```text
+최소 개선 마진 = composite 표시 점수 기준 2점
+적용 지점      = 두 곳 모두 동일한 값
+```
+
+| 적용 지점 | 함수 | 역할 |
+| --- | --- | --- |
+| keep/rollback 판정 | `history.judge` | 적용된 config를 유지할지 |
+| sweep best 선정 | `internal_adapter._best_completed_trial` | baseline 대비 나은 후보인지 |
+
+**⚠️ 스케일 주의.** 두 지점 모두 내부적으로 **0~1 정규화 값**을 쓴다.
+
+```python
+# history._read_score
+return float(total) / 100.0          # composite 0~100 → 0~1
+
+# planner._report_metrics
+metrics["composite_score"] = float(composite_total) / 100.0
+```
+
+따라서 **표시 점수 2점 = 내부 값 `0.02`** 이다. 상수를 하드코딩하지 말고 한 곳에
+정의해 두 모듈이 공유한다.
+
+```python
+MIN_IMPROVEMENT_MARGIN = 0.02        # composite 표시 기준 2점
+```
+
+`judge`만 고치고 sweep을 두면 **"sweep이 고른 최선이 judge에서 탈락"**해 예산 한 번을
+통째로 날린다. 반드시 함께 적용한다.
+
+#### 부작용 — 조기 종료 위험
+
+마진을 올리면 롤백이 늘고, 롤백은 blacklist를 채운다.
+
+```python
+# planner.plan()
+reason="처방 후보가 모두 블랙리스트에 걸림"   → use_current → serve
+```
+
+즉 **마진 ↑ → 롤백 ↑ → 후보 고갈 → 아무 개선 없이 종료**가 가능하다. 2점은 실측
+테스트로 정한 값이나, 다음을 함께 기록해 사후 검증할 수 있게 한다.
+
+- 마진 때문에 탈락한 시도 수와 그때의 점수 차이
+- blacklist 고갈로 조기 종료한 횟수
+
+#### 후속 (별도 작업)
+
+고정값 2점은 노이즈 크기를 **가정**할 뿐 측정하지 않는다. Eval이 probe별 점수를
+노출할 수 있게 되면 표준오차(`std/√n`) 기반 동적 마진으로 대체할 수 있다. 이는
+Eval과의 계약 변경이 필요하므로 별도 작업으로 둔다.
+
 ---
 
 ## 6. 파일별 구현 계획
@@ -653,25 +972,54 @@ Action이 지지받았다는 사실과 label이 실제 해결됐다는 사실을
 - reindex/cost/capability/prerequisite의 단일 진실 원천
 - conflict family 정의
 
-우선 등록:
+**초판의 등록 목록(7개)은 `a35677f` 기준이라 낡았다.** `23a6fe7`에서 실행 가능한
+action은 16개이며, catalog는 **차단된 9개도 blocked reason과 함께** 등록한다.
 
-```text
-retriever.top_k:increase
-retriever.top_k:decrease
-chunker.chunk_size:increase
-chunker.chunk_size:decrease
-chunker.chunk_overlap:increase
-reranker.enabled:set:true
-reranker.candidate_count:increase
-```
+#### 우선 등록 — 실행 가능 16개
 
-후속 등록:
+| action key | tier | reindex | sweep |
+| --- | --- | --- | --- |
+| `retriever.top_k:increase` | A | — | internal |
+| `retriever.top_k:decrease` | C | — | internal |
+| `chunker.chunk_size:increase` | A | ✔ | internal |
+| `chunker.chunk_size:decrease` | A·C | ✔ | internal |
+| `chunker.chunk_overlap:increase` | A | ✔ | internal |
+| `chunker.strategy:replace` | A | ✔ | rules only ⚠️ |
+| `reranker.enabled:enable` | A | — | rules only |
+| `reranker.candidate_count:increase` | A | — | rules only |
+| `retriever.search_type:replace` | A | — | rules only |
+| `retriever.mmr:enable` | A·C | — | rules only |
+| `generation.require_citation:enable` | B | — | rules only |
+| `generation.abstention_strict:enable` | B | — | rules only |
+| `generation.temperature:decrease` | B | — | rules only |
+| `generation.completeness_mode:enable` | B | — | rules only |
+| `generation.restate_question:enable` | B | — | rules only |
+| `generation.grounding_strict:enable`¹ | B | — | rules only |
 
-```text
-retriever.search_type:set:hybrid
-embedding.model:set:<model>
-chunker.strategy:set:recursive_sentence
-```
+¹ `STATE_MAPPABLE_PATHS`·`PATH_CAPABILITIES`에는 있으나 `23a6fe7`의 ready 라벨 처방에서
+직접 참조되지 않는다. catalog에는 등록하되 지지 label이 없으면 후보에 오르지 않는다.
+
+**⚠️ `internal` sweep이 지원하는 축은 셋뿐이다**(§2.5). 나머지 13개는 `rules` backend로
+1회 적용된다. `chunker.strategy:replace`는 후보가 2개인데 sweep 대상이 아니므로
+§3.1의 (b)안을 따른다.
+
+#### 차단 등록 — 9개 (blocked reason 필수)
+
+| action key | blocked reason | 성격 |
+| --- | --- | --- |
+| `query_rewrite:*` | `not_state_mappable` | 영구 — mapper 계약 부재 |
+| `adaptive_retrieval:enable` | `not_state_mappable` | 〃 |
+| `answer_checklist_review:enable` | `not_state_mappable` | 〃 |
+| `conflict_resolution_prompt:replace` | `not_state_mappable` | 〃 |
+| `context_ordering:replace` | `not_state_mappable` | 〃 |
+| `noise_filter:enable` | `not_state_mappable` | 〃 |
+| `context.compression.enabled:enable` | `capability_off` | 조건부 — 소비 노드 부재 |
+| `embedding.model:replace` | `capability_off` | 조건부 — 검증된 후보 부재 |
+| `generation.model:replace` | `capability_off` | 조건부 — 검증된 후보 부재 |
+
+두 사유는 해제 조건이 다르므로 **catalog에서 구분해 기록한다**(§5.7).
+`capability_off`는 `DEFAULT_CAPABILITIES` 값만 바꾸면 열리지만, `not_state_mappable`은
+`config_mapper` 계약과 소비 노드가 함께 추가돼야 한다.
 
 검증:
 
@@ -753,6 +1101,18 @@ def rank_action_candidates(
 
 Planner와 optimizer가 공유할 순수 실행 가능성 정책이다.
 
+**이것은 신설이 아니라 추출이다.** `23a6fe7`의 `optimizer.py`에 이미 다음이 모두
+존재하며, 새 로직을 만드는 것이 아니라 planner도 쓸 수 있게 옮기는 작업이다.
+
+| 기존 위치 | 심볼 |
+| --- | --- |
+| `optimizer.py:45` | `DEFAULT_CONSTRAINTS` |
+| `optimizer.py:61` | `DEFAULT_CAPABILITIES` |
+| `optimizer.py:91` | `PATH_CAPABILITIES` |
+| `optimizer.py:113` | `STATE_MAPPABLE_PATHS` |
+| `optimizer.py:138` | `BACKEND_SUPPORTED_PATHS` |
+| `optimizer.py` | `REINDEX_PATHS` |
+
 이동 또는 공유:
 
 - constraints
@@ -763,6 +1123,9 @@ Planner와 optimizer가 공유할 순수 실행 가능성 정책이다.
 - runtime capability merge
 - candidate value filtering
 - no-op filtering
+
+주의: 옮기면서 값을 바꾸지 않는다. 특히 `DEFAULT_CONSTRAINTS["chunker.strategy"]`의
+`allowed` 2값은 §3.1의 2-후보 설계 근거이므로 유지한다.
 
 API:
 
@@ -1331,6 +1694,10 @@ Iteration 주석을 label 처리 단계에서 ActionStudy 적용 횟수로 변�
 10. 새 baseline/candidate 과도한 차단 금지
 11. 충돌 정책 미통과 축 자동 적용 금지
 12. 적용/rollback 후 config는 허용 snapshot
+13. **B그룹 action은 실행 가능한 A/C action이 남아 있는 한 선택되지 않는다** (§4.3)
+14. **같은 축의 여러 고정값은 단일 action의 후보로 통합된다** — 서로 경쟁하지 않는다(§3.1)
+15. **어떤 축도 "지지가 동일해서" 영구 보류되지 않는다** — starvation 부재
+16. **개선 마진 미달 시 keep되지 않는다** — judge와 sweep이 같은 임계를 쓴다(§5.11)
 
 ---
 
@@ -1343,10 +1710,19 @@ Iteration 주석을 label 처리 단계에서 ActionStudy 적용 횟수로 변�
 - 기존 선택 결과 characterization test
 - chunk/gate/reranker 핵심 회귀 확인
 
+**⚠️ 동점 입력은 characterization 대상에서 제외한다.** 현재 `_group_by_label`은 dict
+삽입 순서에 의존하는데, §4.2·§7.11이 결정적 tie-break(`action_key` 사전순 등)를
+새로 도입한다. 동점 케이스에서는 선택이 바뀌는 것이 **정상**이므로, 이를 미리
+구분해 두지 않으면 단계 1·2의 "기존 동작 변화 없음" 완료 조건과 충돌한다.
+
+- 동점 입력: 변화 허용 + 결정성만 검증
+- 비동점 입력: 기존 선택과 완전 일치 요구
+
 완료 조건:
 
 - 변경 전 baseline 기록
 - 환경 실패와 코드 실패 구분
+- 동점/비동점 fixture 분리 완료
 
 ### 단계 1. Schema와 action catalog
 
@@ -1378,10 +1754,36 @@ Iteration 주석을 label 처리 단계에서 ActionStudy 적용 횟수로 변�
 
 이 단계는 최종 절충안이 아니라 구현 검증을 위한 임시 상태다.
 
+#### 🛑 중단 기준 (신설)
+
+이 작업은 §1에서 밝혔듯 **재료(`cost`/`confidence`)가 비어 있는 상태의 구조 선투자**다.
+그 판단이 틀렸을 경우 되돌릴 수 있도록, shadow mode 관측 결과에 중단 기준을 둔다.
+
+shadow mode에서 legacy 선택과 action 선택을 비교해 다음을 기록한다.
+
+```text
+총 비교 횟수
+선택이 달라진 횟수
+그중 "공유 지지 합산" 때문에 달라진 횟수
+그중 conflict 보류로 축이 바뀐 횟수
+```
+
+판단:
+
+| 관측 | 조치 |
+| --- | --- |
+| 선택이 달라진 사례가 **0건** | 전환 보류. 구조만 남기고 선택 로직은 legacy 유지 |
+| 달라졌으나 **전부 tie-break 차이** | 전환 보류. 실익 없음이 확인된 것 |
+| 공유 합산으로 달라진 사례 **1건 이상** | 계속 진행 |
+
+0건이어도 §6.1~§6.4의 catalog·eligibility 추출은 **유지할 가치가 있다**(중복 선언
+제거, 정책 단일화). 중단은 "선택 로직 전환"에만 적용한다.
+
 완료 조건:
 
 - deterministic ranking
 - probe dedupe와 conflict 테스트
+- shadow mode 비교 로그 수집 및 중단 기준 판정
 
 ### 단계 4. Planner 선택 중심 전환
 
@@ -1517,6 +1919,9 @@ python3 -m unittest discover -s tests
 - [ ] 한 번에 config 축 하나만 변경한다.
 - [ ] 실행 불가능 action은 경쟁 전에 제외된다.
 - [ ] 증가/감소 충돌을 임의로 선택하지 않는다.
+- [ ] **B그룹 action이 A/C를 앞질러 선택되지 않는다.**
+- [ ] **개선 마진 미달을 개선으로 판정하지 않는다.**
+- [ ] **지지가 동일한 축이 영구 보류되지 않는다.**
 - [ ] exact 실패 transition은 재시도하지 않는다.
 - [ ] 다른 baseline/candidate를 과도하게 차단하지 않는다.
 - [ ] rollback cache와 reindex 요구가 보존된다.
@@ -1552,12 +1957,17 @@ python3 -m unittest discover -s tests
 | 위험 | 영향 | 완화 |
 | --- | --- | --- |
 | 같은 probe의 다중 label 과대투표 | generic action 독점 | probe별 최대 confidence 한 번 |
-| 증가/감소 action 왕복 | iteration 소모 | conflict 정책과 transition fingerprint |
+| **기준 커밋 낡음** | 잘못된 전제 위 설계 | 재조사 기준 `23a6fe7` 명시, 착수 전 재확인 |
+| **동점 action 영구 교착(starvation)** | **축이 한 번도 시도되지 않음** | 고정값을 key에서 빼고 후보로 통합(§3.1) |
+| **측정 노이즈로 인한 가짜 개선** | **왕복이 롤백 안전망을 통과** | 최소 개선 마진 2점, judge·sweep 동시 적용(§5.11) |
+| **마진 과대 → 후보 고갈 조기 종료** | 개선 기회 상실 | 마진 탈락 로그 기록 후 사후 조정(§5.11) |
+| 증가/감소 action 왕복 | iteration 소모 | 근거값 `direction_conflict` 선차단 + conflict 정책(§4.4) |
 | action 전체 과도한 blacklist | 유효 후보 차단 | baseline/candidate 단위 attempt key |
 | label별 후보 근거 유실 | 잘못된 숫자 선택 | support별 provenance 보존 |
 | capability 미지원 action 득표 | 실행 가능 action starvation | 점수 계산 전 eligibility |
 | target metric union 왜곡 | objective 모호 | composite를 primary로 유지 |
-| B action 조기 실행 | garbage-in tuning | 초기 A > C > B hard tier |
+| **B action 조기 실행** | **garbage-in tuning (B그룹 ready로 실재화)** | A > C > B hard tier를 **불변조건**으로(§4.3) |
+| sweep 미지원 축의 다후보 | 후보 일부 미검증 | `ActionStudyKey`로 방문 간 이어서 소진(§2.5·§3.1) |
 | reranker 예외 유실 | 잘못된 판정 | action key 기반 guardrail 테스트 |
 | chunk 경계 회귀 | 후보 dead zone | 기존 characterization/invariant 테스트 |
 | schema 동시 변경 | UI/adapter 파손 | dual-read migration |
@@ -1567,20 +1977,29 @@ python3 -m unittest discover -s tests
 
 ## 12. 구현 전 최종 합의 체크리스트
 
-- [ ] Action key 형식
-- [ ] 고유 probe 기반 투표
-- [ ] 초기 A > C > B hard tier 유지 여부
-- [ ] conflict margin 및 grounded 우선 정책
+**합의 완료**
+
+- [x] **Action key 형식** — 방향은 key에, **고정값은 key에 넣지 않고 후보값으로**(§3.1)
+- [x] **A > C > B hard tier** — 유지, **불변조건으로 격상**(§4.3·§5.4)
+- [x] **conflict margin** — 상대 20% **그리고** 절대 probe 2 이상(§4.4)
+- [x] **개선 판정 최소 마진** — composite 2점(내부 `0.02`), judge·sweep 양쪽 동일(§5.11)
+- [x] **confidence 생산** — 이번 범위 밖. `1.0` fallback 유지(§5.3), 근거는 §1
+- [x] **차단 기능 활성화** — 별도 PR. catalog에는 blocked reason으로만 등록(§6.1)
+
+**미합의 — 착수 전 결정 필요**
+
+- [ ] `chunker.strategy` 2후보 처리: §3.1의 (a)/(b)/(c) 중 택1 — **권장 (b)**
+- [ ] 고유 probe 기반 투표 (§4.2 공식 확정)
 - [ ] 후보값 union과 candidate budget
-- [ ] iteration을 ActionStudy 횟수로 변경
+- [ ] iteration을 ActionStudy 횟수로 변경 — `max_iterations=3` 예산과의 상호작용 시나리오
 - [ ] exact attempt blacklist 범위
-- [ ] inverse transition 차단 범위
+- [ ] inverse transition 차단 범위 — 정확 전이만 vs 축 전체 보류
 - [ ] 새 state field와 legacy 호환 기간
 - [ ] `selected_prescription_id` 제거 시점
 - [ ] resolved label 계산 방식
 - [ ] UI의 supporting/opposing label 표현
-- [ ] hybrid/embedding/chunk strategy 활성화를 별도 작업으로 둘지
-- [ ] confidence 생산을 별도 Eval 작업으로 둘지
+- [ ] `base_cost` 실제 값 표 — 실행 가능 16개 전부
+- [ ] shadow mode 중단 기준 수치 확정 (§8 단계 3)
 
 권장 범위:
 
