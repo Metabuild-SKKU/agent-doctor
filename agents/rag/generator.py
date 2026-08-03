@@ -585,6 +585,11 @@ def _build_prompt(
             "조금이라도 확신이 없으면 지어내지 말고 반드시 "
             "'제공된 정보로는 알 수 없습니다'라고 답하라."
         )
+    if _gen_flag(config, "abstention_relaxed", False):
+        clauses.append(
+            "컨텍스트에 질문과 관련된 근거가 조금이라도 있으면 그것을 바탕으로 최대한 답하라. "
+            "명백히 근거가 전혀 없을 때에만 '제공된 정보로는 알 수 없습니다'라고 답하라."
+        )
     if _gen_flag(config, "completeness_mode", False):
         clauses.append("질문에 여러 항목이나 하위 질문이 있으면 빠짐없이 모두 답하라.")
     if _gen_flag(config, "restate_question", False):

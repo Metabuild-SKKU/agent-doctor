@@ -16,6 +16,7 @@ retrieve_fn/keyword_fn 을 주입해 흉내낸다.
 import os
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -1869,6 +1870,64 @@ class AssemblyTest(_DiagnoseTestBase):
         self.assertEqual(diagnose._group_of("chunking_context_mismatch", "retrieval_failure"), "A")
         self.assertEqual(diagnose._group_of("generation_hallucination", "generation_failure"), "B")
         self.assertEqual(diagnose._group_of("context_failure", "context_failure"), "C")
+
+
+class WrongfulAbstentionTest(_DiagnoseTestBase):
+    """버그2(probe_qa_42204): 유효 근거(recall=1·oracle 통과)를 두고 기권('알 수 없습니다')한
+    경우. 기권 답은 주장이 없어 faithfulness=1 로 C 게이트를 trivially 통과해
+    context_noise_interference·reranker_low_precision 로 오라벨됐다. _context_failed 가 기권을
+    배제하고, 진실한 원인은 B 슬롯 generation_wrongful_abstention 이 짚는다."""
+
+    ABSTAIN = "제공된 정보로는 알 수 없습니다"
+
+    def setUp(self):
+        super().setUp()
+        metrics_common.set_mode(Mode.DEEP)
+
+    def _abstained_rec(self, **kw):
+        # recall=1(gold 검색)·oracle_f1=1(골드로 답 나옴)·f1=0(실제론 기권)·faith 높음.
+        return _record(recall=1.0, f1=0.0, oracle_f1=1.0, answer=self.ABSTAIN,
+                       faith=1.0, rel=1.0, **kw)
+
+    def test_fires_when_valid_evidence_but_abstained(self):
+        rec = self._abstained_rec()
+        finding = diagnose.generation_wrongful_abstention(rec)
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding.label, "generation_wrongful_abstention")
+        self.assertTrue(finding.confirmed)
+
+    def test_silent_when_actually_answered(self):
+        # 기권이 아니라 실제 답을 냈으면(설령 오답이어도) 이 라벨 아님.
+        rec = _record(recall=1.0, f1=0.3, oracle_f1=1.0, answer="세종대왕입니다", faith=1.0)
+        self.assertIsNone(diagnose.generation_wrongful_abstention(rec))
+
+    def test_silent_when_abstention_is_correct(self):
+        # 무응답 기대 probe 는 기권이 옳다 → generation_abstention_failure 의 짝이 아님.
+        rec = _record(answer_exists=False, ground_truth=None, answer=self.ABSTAIN,
+                      recall=1.0, oracle_f1=1.0)
+        self.assertIsNone(diagnose.generation_wrongful_abstention(rec))
+
+    def test_context_failed_excludes_abstention(self):
+        # C 전제가 기권을 배제 → context_noise_interference 침묵(유령 오라벨 방지).
+        rec = self._abstained_rec()
+        self.assertFalse(diagnose._context_failed(rec))
+        self.assertIsNone(diagnose.context_noise_interference(rec))
+
+    def test_reranker_low_precision_excludes_abstention(self):
+        # 같은 배제로 reranker_low_precision 오라벨(반복1 실측)도 사라진다.
+        rec = self._abstained_rec(retrieval_details={"reranked": True})
+        rec.ragas["context_precision"] = 0.4      # 낮은 정밀도여도
+        self.assertIsNone(diagnose.reranker_low_precision(rec))
+
+    def test_full_diagnose_routes_to_generation_not_context(self):
+        rec = self._abstained_rec()
+        with unittest.mock.patch.object(diagnose, "_compute_metrics"), \
+             unittest.mock.patch.object(diagnose, "_compute_ragas_real"), \
+             unittest.mock.patch.object(diagnose, "_compute_ragas_oracle"):
+            labels = [f.label for f in diagnose.diagnose(rec, mode=int(Mode.DEEP))]
+        self.assertIn("generation_wrongful_abstention", labels)
+        self.assertNotIn("context_noise_interference", labels)
+        self.assertNotIn("reranker_low_precision", labels)
 
 
 if __name__ == "__main__":

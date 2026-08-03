@@ -41,6 +41,7 @@ CANONICAL_INDEX_CONFIG_KEYS: dict[str, str] = {
     "generation.restate_question": "restate_question",
     "generation.completeness_mode": "completeness_mode",
     "generation.abstention_strict": "abstention_strict",
+    "generation.abstention_relaxed": "abstention_relaxed",
     "generation.model": "generation_model",
 }
 
@@ -79,6 +80,7 @@ CONFIG_READ_PATHS: dict[str, tuple[str, ...]] = {
     "generation.restate_question": ("generation.restate_question", "restate_question"),
     "generation.completeness_mode": ("generation.completeness_mode", "completeness_mode"),
     "generation.abstention_strict": ("generation.abstention_strict", "abstention_strict"),
+    "generation.abstention_relaxed": ("generation.abstention_relaxed", "abstention_relaxed"),
     "generation.model": ("generation.model", "generation_model"),
 }
 

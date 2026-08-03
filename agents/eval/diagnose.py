@@ -873,7 +873,22 @@ def _generation_failed(record: EvalRecord) -> bool:
         return True
     if record.probe.answer_exists is False and not _abstained(record):
         return True
+    if _wrongful_abstention_premise(record):    # 유효 근거 두고 기권 → 생성측 과다 기권
+        return True
     return False
+
+
+def _wrongful_abstention_premise(record: EvalRecord) -> bool:
+    """유효한 근거가 있는데 기권했나 — 과다 기권(B) 전제.
+
+    검색 성공(recall=1) + 골드로 답 나옴(oracle 통과) = 답의 근거가 실제로 top-k 에 있었는데
+    모델이 '제공된 정보로는 알 수 없습니다'로 회피한 경우다. 기권이 옳은 상황(_expects_abstention:
+    무응답 기대·코퍼스 결손)은 제외한다 — 그건 generation_abstention_failure 의 정반대 짝이다.
+
+    _abstained 를 맨 뒤에 둔다 — AspectCritic(LLM) 호출이라, 싼 지표 조건으로 먼저 걸러
+    recall=1·oracle 통과·기권 기대 아님인 좁은 집합에서만 판정을 부른다(record 단위 memoize)."""
+    return (_recall_ok(record) and _oracle_ok(record)
+            and not _expects_abstention(record) and _abstained(record))
 
 
 def _reasoning_mode(record: EvalRecord) -> Optional[str]:
@@ -985,6 +1000,27 @@ def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
     )
     finding.metadata["trigger"] = "no_answer_expected" if no_answer_expected else "corpus_gap"
     return finding
+
+
+def generation_wrongful_abstention(record: EvalRecord) -> Optional[Finding]:
+    """유효한 근거를 두고 잘못 기권함 — generation_abstention_failure 의 정반대 짝.
+
+    확정: 검색 성공(recall=1)·골드로 답 나옴(oracle 통과)인데 실제 답은 기권('제공된 정보로는
+    알 수 없습니다'). 답의 근거가 실제로 top-k 에 있었는데 모델이 회피한 것이라, 검색·컨텍스트
+    구조가 아니라 생성측 과다 기권이다. 처방은 노이즈필터/MMR 이 아니라 기권 완화(relax_abstention).
+
+    기권 답은 주장이 없어 faithfulness=1 로 C 게이트(context_noise_interference·
+    reranker_low_precision)를 trivially 통과해 오라벨됐었다(실측: probe_qa_42204 반복1 →
+    reranker_low_precision, 반복2·3 → context_noise_interference). _context_failed 가 기권을
+    제외하고 이 라벨이 B 슬롯에서 진실한 원인을 짚는다."""
+    if not _wrongful_abstention_premise(record):
+        return None
+    judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
+    return _finding(
+        record, "generation_wrongful_abstention", "generation_failure", confirmed=True,
+        reason=f"recall@k={_v(record.recall_at_k)}, oracle 통과(근거 있음), "
+               f"기권함({judge}), {_answer_reason(record)}",
+    )
 
 
 def generation_parametric_overreliance(record: EvalRecord) -> Optional[Finding]:
@@ -1109,8 +1145,14 @@ def generation_failure(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def _context_failed(record: EvalRecord) -> bool:
-    """컨텍스트 구조 문제(C) 전제: 검색 성공(recall=1)·생성 가능(oracle 통과)인데 실제 답만 틀림."""
-    return _recall_ok(record) and _oracle_ok(record) and not _f1_ok(record)
+    """컨텍스트 구조 문제(C) 전제: 검색 성공(recall=1)·생성 가능(oracle 통과)인데 실제 답만 틀림.
+
+    기권은 제외한다 — 유효 근거를 두고 기권한 건 컨텍스트 '구조'(노이즈·길이·배치)로 답이
+    틀린 게 아니라 생성측 과다 기권이다(generation_wrongful_abstention, B). 제외하지 않으면
+    기권 답이 주장 없음 → faithfulness=1 로 context_noise_interference·reranker_low_precision
+    게이트를 trivially 통과해 오라벨되고, 노이즈필터/MMR 같은 엉뚱한 처방을 부른다."""
+    return (_recall_ok(record) and _oracle_ok(record)
+            and not _f1_ok(record) and not _abstained(record))
 
 def _context_ungrounded(record: EvalRecord) -> bool:
     """C 전제 + 실제 답이 gold·노이즈 어디에도 근거 없음(real faithfulness 낮음).
@@ -1241,6 +1283,9 @@ def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     faithfulness 는 retrieved_context(gold+노이즈) 기준이라, 노이즈 청크의 정보를 가져다 쓰면
     '근거 있음'으로 높게 나온다. 낮은 쪽은 gold·노이즈 어디에도 없는 생성측 이탈이라 다른 원인이다.
     처방(enable_noise_filter/mmr)은 rules.py draft — filtering/MMR/reranker 필드 합의 미완.
+
+    기권은 _context_failed 가 이미 배제한다 — 기권 답은 주장이 없어 faithfulness=1 로 이 게이트를
+    trivially 통과하지만 '노이즈에 이끌림'이 아니라 과다 기권(generation_wrongful_abstention)이다.
     """
     if not _context_failed(record):
         return None
@@ -1427,6 +1472,7 @@ _RETRIEVAL_CAUSE = (
 )
 # parametric_overreliance 는 여기 없다 — 슬롯 밖 additive(diagnose 참조).
 _GENERATION_CAUSE = (
+    generation_wrongful_abstention,
     generation_abstention_failure, bad_gold_answer_oracle,
     # reasoning_failure 한 함수가 라벨 4개를 낸다
     # (contradiction/numerical_error/misinterpretation/hop_binding_error).

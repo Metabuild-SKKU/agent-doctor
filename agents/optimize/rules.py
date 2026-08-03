@@ -668,6 +668,23 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         ],
     },
 
+    "generation_wrongful_abstention": {
+        "group": "B",
+        "status": "ready",              # abstention_relaxed 플래그가 generator에 소비됨(Tier1)
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        # 유효 근거를 두고 기권 → '있는 근거로 답했나'가 목표라 answer_relevancy
+        "target_metrics": ["answer_relevancy"],
+        "prescriptions": [
+            {
+                # 근거가 있으면 기권 말고 답하도록 완화(strengthen_abstention 의 반대).
+                "id": "relax_abstention",
+                "patch": {"generation.abstention_relaxed": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+    },
+
     "generation_parametric_overreliance": {
         "group": "B",
         "status": "ready",              # abstention_strict 플래그가 generator에 소비됨(Tier1)
