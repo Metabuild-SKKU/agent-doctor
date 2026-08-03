@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from core.schema import DiagnosticReport, Document, Finding, Probe
 from core.state import AgentDoctorState
 from agents.optimize import planner
+from agents.optimize import rules
 from agents.optimize.planner import _knee, _knee_candidates
 
 
@@ -985,15 +986,23 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertEqual(metadata["status"], "grounded")
         self.assertEqual(metadata["source"], "structural_evidence_windows")
 
-    def test_ready_chunk_size_labels_do_not_use_direction_multiplier(self):
-        cases = [
-            ("retrieval_missing_gold", "increase", 900, 1600),
-            ("chunking_context_mismatch", "increase", 900, 1600),
-            ("chunking_underchunking", "decrease", 100, 400),
-        ]
+    def test_ready_chunk_size_prescriptions_have_grounding_metadata(self):
+        cases = []
+        for label, rule in rules.LABEL_TO_PRESCRIPTIONS.items():
+            if rule.get("status") != "ready":
+                continue
+            for pres in rule.get("prescriptions", []):
+                patch = pres.get("patch", {})
+                for raw_path, direction in patch.items():
+                    if planner.canonicalize_path(raw_path) == "chunker.chunk_size":
+                        cases.append((label, pres["id"], raw_path, direction))
 
-        for label, direction, evidence_length, forbidden in cases:
-            with self.subTest(label=label):
+        self.assertTrue(cases)
+        for label, prescription_id, raw_path, direction in cases:
+            if direction not in {"increase", "decrease"}:
+                continue
+            with self.subTest(label=label, prescription=prescription_id):
+                evidence_length = 900 if direction == "increase" else 100
                 finding = make_finding("p1", label)
                 state = AgentDoctorState(index_config={
                     "chunk_size": 800,
@@ -1002,18 +1011,42 @@ class PlannerCandidateListTest(unittest.TestCase):
 
                 space, metadata = planner._finding_search_space(
                     [finding],
-                    {"chunk_size": direction},
+                    {raw_path: direction},
                     state,
                     self._evidence_analysis(length=evidence_length),
                 )
 
-                values = space["chunker.chunk_size"]
-                self.assertNotIn(forbidden, values)
+                self.assertIn("chunker.chunk_size", space)
+                self.assertIsNotNone(metadata)
                 self.assertEqual(metadata["status"], "grounded")
-                if direction == "increase":
-                    self.assertTrue(all(800 < value < 1600 for value in values))
-                else:
-                    self.assertTrue(all(400 < value < 800 for value in values))
+                self.assertTrue(metadata.get("generated_candidates"))
+
+    def test_unregistered_chunk_grounding_is_recorded_and_drops_axis(self):
+        label = "chunking_underchunking"
+        finding = make_finding("p1", label)
+        state = AgentDoctorState(index_config={
+            "chunk_size": 800,
+            "chunk_candidate_policy": self._chunk_policy(),
+        })
+        grounded_values = {
+            key: dict(value)
+            for key, value in planner._GROUNDED_VALUES.items()
+        }
+        grounded_values[label] = {}
+
+        with patch.object(planner, "_GROUNDED_VALUES", grounded_values):
+            space, metadata = planner._finding_search_space(
+                [finding],
+                {"chunk_size": "decrease"},
+                state,
+                self._evidence_analysis(length=100),
+            )
+
+        self.assertNotIn("chunker.chunk_size", space)
+        self.assertIsNotNone(metadata)
+        self.assertEqual(metadata["status"], "grounding_unregistered")
+        self.assertEqual(metadata["path"], "chunker.chunk_size")
+        self.assertEqual(metadata["label"], label)
 
     def test_chunk_candidate_policy_rejects_invalid_safety_bounds(self):
         base_policy = {

@@ -1392,19 +1392,55 @@ def _grounded_search_space(
     space: dict[str, list] = {}
     grounding_metadata: dict[str, Any] | None = None
     for key, compute in _GROUNDED_VALUES.get(label, {}).items():
-        if key not in changes:
+        change_key = key if key in changes else next(
+            (
+                raw_path
+                for raw_path in changes
+                if canonicalize_path(raw_path) == canonicalize_path(key)
+            ),
+            None,
+        )
+        if change_key is None:
             continue
         values, metadata = compute(
             findings,
             state,
-            changes.get(key),
+            changes.get(change_key),
             evidence_analysis,
         )
         if values:
-            space[key] = values
+            space[change_key] = values
         if metadata is not None:
             grounding_metadata = metadata
     return space, grounding_metadata
+
+
+def _has_grounding_calculator(label: str, raw_path: str) -> bool:
+    registered = _GROUNDED_VALUES.get(label, {})
+    path = canonicalize_path(raw_path)
+    return any(canonicalize_path(key) == path for key in registered)
+
+
+def _unregistered_chunk_grounding(
+    label: str,
+    raw_path: str,
+    patch_value: Any,
+) -> dict[str, Any] | None:
+    path = canonicalize_path(raw_path)
+    if path not in _SYMBOLIC_FALLBACK_ALLOWED:
+        return None
+    if patch_value not in {"increase", "decrease", _GROUNDED_ONLY}:
+        return None
+    if _has_grounding_calculator(label, raw_path):
+        return None
+    return {
+        "status": "grounding_unregistered",
+        "source": "planner._GROUNDED_VALUES",
+        "label": label,
+        "path": path,
+        "raw_path": raw_path,
+        "direction": patch_value,
+    }
 
 
 # ── 6. 처방 후보 생성 (rules.py → PrescriptionCandidate) ──────────
@@ -1502,6 +1538,8 @@ def _finding_search_space(
     )
 
     resolved: dict[str, list] = {}
+    candidate_grounding_metadata = grounding_metadata
+    label = findings[0].label if findings else ""
     for raw_path, patch_value in changes.items():
         path = canonicalize_path(raw_path)
         fallback_values = fallback.get(raw_path) or fallback.get(path) or []
@@ -1509,6 +1547,12 @@ def _finding_search_space(
         grounded_values = grounded.get(raw_path) or grounded.get(path)
         evidence_values = supplied_values or grounded_values
         values = list(evidence_values) if evidence_values else []
+        unregistered_grounding = (
+            _unregistered_chunk_grounding(label, raw_path, patch_value)
+            if not evidence_values
+            else None
+        )
+        path_grounding_metadata = unregistered_grounding or grounding_metadata
         current = get_current_value(state.index_config, path)
         if (
             path == "retriever.top_k"
@@ -1528,7 +1572,7 @@ def _finding_search_space(
             ]
         allows_symbolic_fallback = _allows_symbolic_fallback(
             path,
-            grounding_metadata,
+            path_grounding_metadata,
         )
         if values:
             resolved[path] = list(values)
@@ -1536,16 +1580,18 @@ def _finding_search_space(
             # 폴백까지 비면 그 키는 후보값을 못 만든 것이다. 빈 리스트를 남기면
             # optimizer 가 '축은 있는데 값이 없는' search_space 를 받게 되므로 아예 뺀다.
             resolved[path] = list(fallback_values)
+        if unregistered_grounding is not None:
+            candidate_grounding_metadata = unregistered_grounding
         if supplied_values and path in {
             "chunker.chunk_size",
             "chunker.chunk_overlap",
         }:
-            grounding_metadata = {
+            candidate_grounding_metadata = {
                 "status": "explicit_candidates",
                 "source": "finding.metadata.parameter_candidates",
                 "generated_candidates": list(supplied_values),
             }
-    return resolved, grounding_metadata
+    return resolved, candidate_grounding_metadata
 
 
 def _allows_symbolic_fallback(
