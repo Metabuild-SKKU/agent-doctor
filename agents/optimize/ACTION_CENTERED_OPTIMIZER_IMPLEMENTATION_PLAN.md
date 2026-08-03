@@ -615,7 +615,7 @@ rollback cache·reindex 요구, `graph.py` route 무변경.
 | 단계 | 내용 | 완료 조건 |
 | --- | --- | --- |
 | ~~**0-A**~~ | ~~선행 PR ①② 병합~~ | ✅ **완료** — #76(마진), #73(sweep 축) 병합 |
-| **0** | Baseline 고정 — 테스트 실행, action inventory fixture, characterization | 동점/비동점 fixture 분리(아래) |
+| ~~**0**~~ | ~~Baseline 고정~~ | ✅ **완료** — 아래 결과 |
 | **1** | schema + action catalog + label rule이 action key 참조 | 기존 동작 변화 없음, catalog 무결성 통과 |
 | **2** | candidate value 로직 분리 | 기존 planner/chunk 테스트 동일 결과 |
 | **3** | aggregation shadow mode (선택은 legacy 유지, 비교 로그) | 결정적 ranking, probe dedupe, **중단 기준 판정** |
@@ -625,11 +625,39 @@ rollback cache·reindex 요구, `graph.py` route 무변경.
 | **7** | reporter·serve 전환 | CLI/report/웹이 같은 action 표시 |
 | **8** | compatibility 제거·문서 갱신 | 실행 코드에 prescription pair 제어 참조 없음 |
 
-**단계 0 주의**: 현재 `_group_by_label`은 dict 삽입 순서에 의존하는데 §4.2가 결정적
-tie-break를 도입한다. 동점 입력에서는 선택이 바뀌는 것이 **정상**이므로 미리 분리한다.
+### 단계 0 결과 (완료)
 
-- 동점 입력: 변화 허용 + 결정성만 검증
-- 비동점 입력: 기존 선택과 완전 일치 요구
+| 산출물 | 내용 |
+| --- | --- |
+| `tools/action_inventory.py` | rules + optimizer 정책에서 실행 가능 action을 집계. §2 현황표의 생성기이자 §2.2에서 제안한 자동화 |
+| `tests/test_action_inventory.py` | 집계 결과를 baseline으로 고정 (12 tests) |
+| `tests/test_planner_characterization.py` | 전환 전 선택 결과 박제 (13 tests) |
+
+**테스트 baseline** (`origin/main` 머지 후)
+
+```text
+960 tests / 약 14초 (단계 0 산출물 25개 포함, 이전 936)
+환경 사유 수집 에러 3~4건 — 코드 회귀 아님
+  test_pipeline    data/pdf_corpus.json 없음 (실데이터 필요)
+  test_ragas_eval  OPENAI_API_KEY 실키 필요
+  test_oauth       OAuth 수동 확인 스크립트
+  test_eval        ⚠️ flaky — 실행마다 수집 성공/실패가 갈린다(외부 상태 의존)
+```
+
+네 파일 모두 `unittest.TestCase`가 아닌 **실행 스크립트**인데 `test_*.py` 이름 때문에
+오수집된다. 구현 중 실패가 나면 이 목록과 대조해 **환경 문제인지 코드 회귀인지**
+즉시 구분한다.
+
+**동점 입력을 characterization에 넣지 않았다.** 현재 `_group_by_label`은 dict 삽입
+순서에 의존하는데 §4.2가 결정적 tie-break를 도입하므로, 동점에서는 선택이 바뀌는 것이
+**정상**이다. 그런 입력을 박제하면 단계 1·2의 "기존 동작 변화 없음"과 충돌한다.
+
+- 비동점 입력(`GroupPriority`·`ScoreOrder`·`SearchSpace`·`DecisionMode`) → 전환 후에도 **같은 선택** 요구
+- 동점 입력(`TieBreakDeterminism`) → 선택 내용이 아니라 **결정성만** 검증
+
+`PrescriptionOrderCharacterization`은 예외다. "라벨이 처방 순서를 소유한다"는 성질을
+박제했는데 **전환으로 사라지는 것이 목표**다. 단계 4에서 action 기준 테스트로 교체하며,
+그때 이 클래스가 깨지는 것이 전환이 실제로 일어났다는 증거가 된다.
 
 **단계 3 중단 기준**: shadow mode에서 legacy와 action 선택을 비교해 기록한다.
 
