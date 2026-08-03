@@ -620,10 +620,13 @@ rollback cache·reindex 요구, `graph.py` route 무변경.
 | ~~**2**~~ | ~~candidate value 분리~~ | ✅ planner 1839 → 791줄 |
 | ~~**3**~~ | ~~aggregation shadow mode~~ | ✅ 중단 기준 판정 통과(§8.1) |
 | ~~**4**~~ | ~~planner 선택 중심 전환~~ | ✅ 알려진 실패 21건은 5~7에서 해소 |
-| **5** | history·blacklist·iteration 전환 | §8.2 |
-| **6** | reranker·adapter guardrail 이관 | §8.3 |
+| ~~**5**~~ | ~~history·blacklist·iteration 전환~~ | ✅ 16건 해소 (§8.2 결과) |
+| ~~**6**~~ | ~~reranker·adapter guardrail 이관~~ | ✅ 5건 해소 (§8.3 결과) |
 | **7** | reporter·serve 전환 | §8.4 |
 | **8** | compatibility 제거·문서 갱신 | §8.5 |
+
+알려진 실패 21건은 전부 해소됐다. 현재 **1052 tests 전부 통과**
+(환경 사유 4개 모듈 `test_pipeline`·`test_ragas_eval`·`test_oauth`·`test_eval` 제외).
 
 ### 8.1 중단 기준 판정 결과 (단계 3)
 
@@ -696,6 +699,34 @@ ActionStudyKey    = (action_key, baseline_fingerprint, search_space_fingerprint)
 - `(label, prescription_id)` 튜플이 실행 제어에 쓰이지 않음
 - rollback 후 재색인 요구·visit limit·pending finalize 동작 불변
 
+#### 단계 5 결과 — 계획과 달랐던 것
+
+**뒤집힌 동작 2건.** 둘 다 계획대로 두기로 확인했다.
+
+| 동작 | 이전 | 지금 | 근거 |
+| --- | --- | --- | --- |
+| 예산 소진 후 같은 라벨의 다음 처방 | iteration 미소비로 계속 적용 | 다른 action = 새 study 라 롤백만 확정하고 종료 | §5.3. 라벨 하나가 예산 밖에서 무한히 config 를 갈아 끼울 수 있던 구멍 |
+| 노이즈 우세 시 C를 A보다 먼저 | `_context_noise_precedes_top_k_expansion` 예외 | tier 가 무조건 우선 | §4.3 hard tier 불변조건 |
+
+**계획에 없던 구멍 3건을 함께 막았다.**
+
+1. **단계 4 회귀** — `_build_action_request` 가 `rerank_candidate_policy` 상한을
+   `metadata["constraints"]` 로 싣지 않아, 방향 폴백(현재값×2=60)이 정책 상한 50 을
+   넘겨 config 에 박혔다. eligibility 와 optimizer 재검증 양쪽에 정책 제약을 넘긴다.
+2. **끝난 sweep 의 자기 재탐색** — study key 는 baseline fingerprint 를 담는데
+   sweep 승자가 **그 action 자신 때문에** baseline 을 움직여 fingerprint 가 어긋난다.
+   다음 방문에 같은 축을 곧바로 다시 훑었다(이미 잰 값을 다시 재는 낭비).
+   측정한 후보를 **결과 baseline 기준으로도** 소진 처리해 §5.1 의 "후보 소진으로
+   축이 닫힌다"가 실제로 성립하게 했다.
+3. **설명 유실** — 실행 가능한 action 이 하나도 없으면 request 가 없어 제외 사유를
+   실을 곳이 사라졌다. `OptimizeDecision.metadata` 에
+   `rejected_actions`/`deferred_axes` 를 담는다.
+
+**`PrescriptionOrderCharacterization` 교체.** 단계 0 이 예고한 대로 이 클래스는
+전환으로 깨졌다. `LabelNoLongerOwnsExecutionOrderTest` 로 교체해 **새 규칙**
+(tier → 점수 → grounded → 비용 → key 사전순, 선언 순서 미개입)을 박제했다.
+박제를 그냥 두면 "전환이 일어났다"와 "테스트가 깨졌다"를 구분할 수 없다.
+
 ### 8.3 단계 6 — reranker·adapter guardrail 이관
 
 **실패 중인 테스트 3건**(`test_enable_reranker`)이 완료 지표다.
@@ -727,6 +758,25 @@ ActionStudyKey    = (action_key, baseline_fingerprint, search_space_fingerprint)
 - RAGBuilder payload: `failure_label`/`related_failure_labels` → action 중심.
   외부 호환이 필요하면 대표 label 은 설명용 compatibility field 로만 유지
 - chunk prescreener: 여러 support 의 span/document 통합, 동일 span dedupe
+
+#### 단계 6 결과 — ⚠️ 의 답
+
+**optimizer 의 deferred 경로는 살아 있다. 그런데 그게 문제가 아니었다.**
+
+runtime 정보가 아직 없는 첫 방문에서는 planner 가 통과시키고 optimizer 가 최종
+판정한다 — 그 경로는 정상 동작한다(테스트로 고정). 실제 원인은 반대쪽이었다:
+**runtime 상태가 이미 "unavailable" 로 알려졌거나 선행 조건이 미충족이면 planner 가
+점수 경쟁 전에 걸러내 deferred 기록이 아예 생기지 않았다.**
+
+판정이 앞단으로 옮겨오면 **보고 책임도 함께 옮겨와야 한다.** planner 의
+`rejected_actions` 중 `runtime_capability_unavailable`·`prerequisite_unmet` 을
+agent 가 보류로 번역해 리포트에 싣는다. 어느 계층이 걸렀는지는 사용자 관심사가
+아니므로 optimizer 가 거른 경우와 보고 형태가 같다.
+
+**소진 표현이 바뀌었다.** no-op 축(예: 리랭커가 이미 켜진 상태의
+`reranker.enabled:enable`)은 예전엔 선택된 뒤 optimizer 가 `no_valid_candidate_values`
+로 거절하며 blacklist 에 올렸다. 이제는 선택 전에 걸러지고 품질 실패로 기록되지
+않는다 — 실행조차 안 된 처방을 비난하지 않는 쪽이 맞다.
 
 ### 8.4 단계 7 — reporter·serve 전환
 
