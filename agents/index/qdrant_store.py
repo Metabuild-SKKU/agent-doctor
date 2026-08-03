@@ -179,18 +179,6 @@ def _load_reranker(model_name: str) -> tuple[Any | None, str]:
         return model, "ready"
 
 
-def ensure_reranker(model_name: str = DEFAULT_RERANKER_MODEL) -> bool:
-    """리랭커를 미리 로드해 둔다(이미 캐시돼 있으면 no-op). 준비됐으면 True.
-
-    호출부가 리랭크 시간을 재기 전에 부르라고 있는 함수다 — rerank_with_status 는 내부에서
-    _load_reranker 를 부르므로, 그냥 재면 모델 로드(2GB 대)가 첫 쿼리의 '쌍당 비용'으로
-    귀속된다. 평소엔 Index 의 preflight 가 이미 캐시해 두지만, 추론 실패로 evict + 쿨다운이
-    걸린 뒤 만료되면 임의의 쿼리가 그 재로드를 뒤집어쓴다.
-    """
-    model, _status = _load_reranker(model_name)
-    return model is not None
-
-
 def probe_reranker_capability(
     model_name: str = DEFAULT_RERANKER_MODEL,
     *,
@@ -834,18 +822,29 @@ def rerank_with_status(
     results: list[dict],
     model_name: str = DEFAULT_RERANKER_MODEL,
     top_k: int = 5,
-) -> tuple[list[dict], str]:
-    """재정렬 결과와 실제 실행 상태를 함께 반환한다."""
+) -> tuple[list[dict], str, float]:
+    """재정렬 결과·실행 상태·**추론에만 든 시간(초)** 을 함께 반환한다.
+
+    시간을 호출부가 아니라 여기서 재는 이유가 둘 있다.
+      1) 모델 로드 제외가 구조로 보장된다 — _load_reranker 는 타이머 바깥이다. 호출부에서
+         재면 쿨다운 만료 직후 첫 쿼리가 2GB 대 재로드를 '쌍당 비용'으로 뒤집어쓴다.
+      2) seam 이 하나로 유지된다 — 이 함수만 패치하면 테스트에서 모델 로드가 일어나지 않는다.
+         호출부에 사전 로드를 따로 두면 그 패치를 우회해 단위 테스트가 실모델을 내려받는다.
+    실행하지 못한 경우(후보 없음·로드 실패·쿨다운·추론 실패)는 0.0 — 리랭크한 적이 없는
+    시간을 쌍당 비용 집계에 섞지 않는다.
+    """
     if not results:
-        return [], "not_attempted"
+        return [], "not_attempted", 0.0
     model, load_status = _load_reranker(model_name)
     if model is None:
-        return results[:top_k], load_status
+        return results[:top_k], load_status, 0.0
 
     try:
+        started = time.monotonic()
         scores = list(
             model.predict([(query, item.get("text", "")) for item in results])
         )
+        elapsed = time.monotonic() - started
         if len(scores) != len(results):
             raise ValueError(
                 f"reranker 점수 개수 불일치: {len(scores)} != {len(results)}"
@@ -861,13 +860,13 @@ def rerank_with_status(
             f"[Index] reranker 추론 실패, 기존 순위 유지 "
             f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
         )
-        return results[:top_k], "inference_failed"
+        return results[:top_k], "inference_failed", 0.0
     reranked = [
         {**item, "retrieval_score": item.get("score", 0.0), "score": float(score)}
         for item, score in zip(results, scores)
     ]
     reranked.sort(key=lambda item: item["score"], reverse=True)
-    return reranked[:top_k], "applied"
+    return reranked[:top_k], "applied", elapsed
 
 
 def rerank(
@@ -877,7 +876,7 @@ def rerank(
     top_k: int = 5,
 ) -> list[dict]:
     """기존 호출자를 위해 결과 리스트만 반환하는 호환 API."""
-    reranked, _status = rerank_with_status(
+    reranked, _status, _seconds = rerank_with_status(
         query,
         results,
         model_name=model_name,

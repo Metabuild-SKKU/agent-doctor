@@ -31,7 +31,6 @@ from agents.index.qdrant_store import (
     delete_document_chunks,
     embed,
     ensure_collection,
-    ensure_reranker,
     hybrid_search,
     keyword_search,
     rerank_with_status,
@@ -514,20 +513,18 @@ class Retriever:
         rerank_seconds = 0.0
         rerank_pairs = 0
         if reranker_attempted:
-            # 모델 로드는 타이머 밖에서 끝낸다 — rerank_with_status 가 내부에서 로드까지 하므로,
-            # 쿨다운 만료 직후 첫 쿼리가 2GB 대 재로드를 '쌍당 비용'으로 뒤집어쓴다.
-            ensure_reranker(self.settings.reranker_model)
             attempted_pairs = len(results)
-            rerank_started = time.monotonic()
-            results, reranker_status = rerank_with_status(
+            # 시간은 rerank_with_status 가 추론 구간만 재서 돌려준다 — 여기서 감싸면 모델
+            # 로드가 섞이고, 사전 로드를 따로 부르면 그게 별도 seam 이 돼 이 함수를 패치한
+            # 테스트가 실모델을 내려받는다(둘 다 겪었다).
+            results, reranker_status, measured = rerank_with_status(
                 query,
                 results,
                 model_name=self.settings.reranker_model,
                 top_k=rerank_top_k,
             )
-            elapsed = time.monotonic() - rerank_started
             reranked = reranker_status == "applied"
-            rerank_seconds = elapsed if reranked else 0.0
+            rerank_seconds = measured if reranked else 0.0
             rerank_pairs = attempted_pairs if reranked else 0
 
         mmr_applied = False

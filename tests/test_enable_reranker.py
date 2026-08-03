@@ -166,6 +166,35 @@ class RerankerExecutionTest(unittest.TestCase):
         self.assertIsNotNone(model)
         self.assertNotIn(model_name, qdrant_store._failed_rerankers)
 
+    def test_patching_rerank_seam_avoids_model_load(self):
+        """rerank_with_status 하나만 패치하면 실모델 로드가 일어나지 않아야 한다.
+
+        사전 로드를 호출부에 따로 두면 그게 별도 seam 이 돼 이 패치를 우회하고, 단위 테스트가
+        2GB 대 모델을 내려받는다(실측: 이 파일 0.8초 → 12초). 시간 계측을 rerank_with_status
+        안으로 넣어 seam 을 하나로 유지하는 이유다."""
+        chunks = [
+            {"chunk_id": f"c{i}", "doc_id": "d1", "text": f"alpha 문서 {i}", "metadata": {}}
+            for i in range(3)
+        ]
+        retriever = Retriever(
+            chunks,
+            RetrievalSettings(
+                use_reranker=True, reranker_model="test/never-loaded", rerank_candidates=3
+            ),
+            client=None,
+        )
+
+        with patch.object(qdrant_store, "_load_reranker") as loader:
+            with patch(
+                "agents.rag.retriever.rerank_with_status",
+                side_effect=lambda q, r, model_name, top_k: (r[:top_k], "applied", 0.5),
+            ):
+                result = retriever.search_with_details("alpha", top_k=2)
+
+        loader.assert_not_called()
+        self.assertEqual(result["rerank_seconds"], 0.5)
+        self.assertEqual(result["rerank_pairs"], 3)
+
     def test_search_reports_rerank_cost(self):
         """리랭크 소요 시간·쌍 수를 검색 결과에 실어 리포트가 비용을 집계할 수 있게 한다."""
         chunks = [
