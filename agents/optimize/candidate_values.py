@@ -963,13 +963,16 @@ _GROUNDED_VALUES: dict[str, dict[str, Any]] = {
     "retrieval_missing_gold": {
         "top_k": _ground_top_k_from_gold,
         "chunk_overlap": _ground_chunk_overlap_candidates,
+        "chunk_size": _ground_chunk_size_candidates,
     },
     "chunking_context_mismatch": {
         "chunk_overlap": _ground_chunk_overlap_candidates,
+        "chunk_size": _ground_chunk_size_candidates,
     },
     # gold span 이 청크보다 길어 겹침으로는 못 담는 경우 — 필요한 크기를 span 길이에서 계산한다
     # (없으면 _concrete_values 의 방향 폴백으로 현재값 배수 추측이 된다).
     "chunking_overchunking": {"chunk_size": _ground_chunk_size_candidates},
+    "chunking_underchunking": {"chunk_size": _ground_chunk_size_candidates},
     "too_long_context": {"chunk_size": _ground_chunk_size_candidates},
 }
 
@@ -986,16 +989,27 @@ def _grounded_search_space(
     space: dict[str, list] = {}
     grounding_metadata: dict[str, Any] | None = None
     for key, compute in _GROUNDED_VALUES.get(label, {}).items():
-        if key not in changes:
+        # rules.py 는 같은 축을 flat("chunk_size")으로도 canonical 로도 선언한다.
+        # 문자 그대로 비교하면 표기가 다른 순간 근거 계산이 조용히 건너뛰어지고
+        # 방향 키워드 추측으로 내려간다.
+        change_key = key if key in changes else next(
+            (
+                raw_path
+                for raw_path in changes
+                if canonicalize_path(raw_path) == canonicalize_path(key)
+            ),
+            None,
+        )
+        if change_key is None:
             continue
         values, metadata = compute(
             findings,
             state,
-            changes.get(key),
+            changes.get(change_key),
             evidence_analysis,
         )
         if values:
-            space[key] = values
+            space[change_key] = values
         if metadata is not None:
             grounding_metadata = metadata
     return space, grounding_metadata
@@ -1069,6 +1083,41 @@ def _supplied_candidates(findings: list[Finding]) -> dict[str, list]:
     return supplied
 
 
+def _has_grounding_calculator(label: str, raw_path: str) -> bool:
+    """이 라벨이 이 축의 근거 계산기를 등록해 뒀는가."""
+    registered = _GROUNDED_VALUES.get(label, {})
+    path = canonicalize_path(raw_path)
+    return any(canonicalize_path(key) == path for key in registered)
+
+
+def _unregistered_chunk_grounding(
+    label: str,
+    raw_path: str,
+    patch_value: Any,
+) -> dict[str, Any] | None:
+    """근거 계산기를 아예 등록하지 않은 chunk 축을 **드러낸다**.
+
+    등록 누락과 "계산했는데 근거가 부족했다"는 다른 상황인데, 둘 다 근거값이 없다는
+    같은 모습으로 나타난다. 구분하지 않으면 라벨이 조용히 현재값 배수 추측으로
+    내려가고 아무도 알아채지 못한다 — chunk 축은 재색인을 유발하므로 대가가 크다.
+    """
+    path = canonicalize_path(raw_path)
+    if path not in _SYMBOLIC_FALLBACK_ALLOWED:
+        return None
+    if patch_value not in {"increase", "decrease", _GROUNDED_ONLY}:
+        return None
+    if _has_grounding_calculator(label, raw_path):
+        return None
+    return {
+        "status": "grounding_unregistered",
+        "source": "candidate_values._GROUNDED_VALUES",
+        "label": label,
+        "path": path,
+        "raw_path": raw_path,
+        "direction": patch_value,
+    }
+
+
 def _finding_search_space(
     findings: list[Finding],
     changes: dict,
@@ -1096,6 +1145,9 @@ def _finding_search_space(
     )
 
     resolved: dict[str, list] = {}
+    # 축마다 근거 상태가 다를 수 있으므로 반환용 metadata 를 따로 들고 간다.
+    candidate_grounding_metadata = grounding_metadata
+    label = findings[0].label if findings else ""
     for raw_path, patch_value in changes.items():
         path = canonicalize_path(raw_path)
         fallback_values = fallback.get(raw_path) or fallback.get(path) or []
@@ -1103,6 +1155,12 @@ def _finding_search_space(
         grounded_values = grounded.get(raw_path) or grounded.get(path)
         evidence_values = supplied_values or grounded_values
         values = list(evidence_values) if evidence_values else []
+        unregistered_grounding = (
+            _unregistered_chunk_grounding(label, raw_path, patch_value)
+            if not evidence_values
+            else None
+        )
+        path_grounding_metadata = unregistered_grounding or grounding_metadata
         current = get_current_value(state.index_config, path)
         if (
             path == "retriever.top_k"
@@ -1122,7 +1180,7 @@ def _finding_search_space(
             ]
         allows_symbolic_fallback = _allows_symbolic_fallback(
             path,
-            grounding_metadata,
+            path_grounding_metadata,
         )
         if values:
             resolved[path] = list(values)
@@ -1130,16 +1188,18 @@ def _finding_search_space(
             # 폴백까지 비면 그 키는 후보값을 못 만든 것이다. 빈 리스트를 남기면
             # optimizer 가 '축은 있는데 값이 없는' search_space 를 받게 되므로 아예 뺀다.
             resolved[path] = list(fallback_values)
+        if unregistered_grounding is not None:
+            candidate_grounding_metadata = unregistered_grounding
         if supplied_values and path in {
             "chunker.chunk_size",
             "chunker.chunk_overlap",
         }:
-            grounding_metadata = {
+            candidate_grounding_metadata = {
                 "status": "explicit_candidates",
                 "source": "finding.metadata.parameter_candidates",
                 "generated_candidates": list(supplied_values),
             }
-    return resolved, grounding_metadata
+    return resolved, candidate_grounding_metadata
 
 
 def _allows_symbolic_fallback(
@@ -1149,8 +1209,12 @@ def _allows_symbolic_fallback(
     """Chunk 방향 추측의 허용 여부를 명시적인 grounding status로 결정한다."""
 
     allowed_statuses = _SYMBOLIC_FALLBACK_ALLOWED.get(path)
-    if allowed_statuses is None or grounding_metadata is None:
+    if allowed_statuses is None:
         return True
+    # 근거가 아예 없는 것을 "허용"으로 읽으면 chunk 축이 조용히 현재값 배수 추측으로
+    # 내려간다 — 이 축은 재색인을 유발하므로 추측의 대가가 크다.
+    if grounding_metadata is None:
+        return False
     status = grounding_metadata.get("status")
     return isinstance(status, str) and status in allowed_statuses
 
