@@ -43,7 +43,7 @@ class _StubJudge:
         self.statements = statements
         self.embed = embed
 
-    def chat(self, judge, prompt):
+    def chat(self, judge, prompt, label=""):
         if "statements" in prompt and "TP" not in prompt:      # StatementGenerator 호출
             return {"statements": ["s1", "s2"]} if self.statements else {}
         return self.payload

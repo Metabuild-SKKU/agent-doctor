@@ -403,7 +403,7 @@ def evaluate_reasoning_mode(record: EvalRecord, judge) -> dict:
         "reference": record.probe.ground_truth or "",
     }
     d = _chat(judge, _ragas_prompt(_REASONING_MODE_INSTRUCTION, _SCHEMA_REASONING_MODE,
-                                   _REASONING_MODE_EXAMPLES, inp))
+                                   _REASONING_MODE_EXAMPLES, inp), label="reasoning_mode")
     mode = d.get("mode")
     if not isinstance(mode, str) or mode not in _REASONING_MODES:
         return {}                                    # 미상·파싱 실패 → 미측정
@@ -424,13 +424,17 @@ def evaluate_abstention(record: EvalRecord, judge) -> dict:
 #  RAGAS 지표 알고리즘 (소스와 동일)
 # ══════════════════════════════════════════════════════════════════
 
-def _decompose_statements(judge, question: str, text: str) -> list[str]:
+def _decompose_statements(judge, question: str, text: str, label: str = "statements") -> list[str]:
     """RAGAS StatementGenerator: 텍스트를 대명사 없는 독립 주장 문장들로 분해.
-    faithfulness·answer_correctness 가 공유(답변/정답 모두 이 형식으로 분해)."""
+    faithfulness·answer_correctness 가 공유(답변/정답 모두 이 형식으로 분해).
+
+    label 은 실패 로그 구분용 — 한 함수를 세 자리(faithfulness/정답분해/골드분해)가
+    공유해서, 이름이 없으면 어느 쪽이 비었는지 로그로 못 가린다."""
     if not (text or "").strip():
         return []
     d = _chat(judge, _ragas_prompt(_FAITH_STMT_INSTRUCTION, _SCHEMA_STATEMENTS,
-                                   _FAITH_STMT_EXAMPLES, {"question": question, "answer": text}))
+                                   _FAITH_STMT_EXAMPLES, {"question": question, "answer": text}),
+              label=label)
     return [s for s in _as_list(d, "statements") if isinstance(s, str) and s.strip()]
 
 
@@ -439,13 +443,14 @@ def _faithfulness(judge, question: str, answer: str, contexts: list[str]):
     if not (answer or "").strip() or not contexts:
         return None
     # 1. 문장 분해: 검증가능한 주장들로 분해
-    statements = _decompose_statements(judge, question, answer)
+    statements = _decompose_statements(judge, question, answer, "faithfulness.statements")
     if not statements:
         return None
     # 2. NLI 판정: 각 주장이 컨텍스트만으로 추론 가능한지 판단
     context_str = "\n".join(contexts)
     d2 = _chat(judge, _ragas_prompt(_FAITH_NLI_INSTRUCTION, _SCHEMA_NLI,
-                                    _FAITH_NLI_EXAMPLES, {"context": context_str, "statements": statements}))
+                                    _FAITH_NLI_EXAMPLES, {"context": context_str, "statements": statements}),
+               label="faithfulness.nli")
     verdicts = [v for v in _as_list(d2, "statements") if isinstance(v, dict)]
     if not verdicts:
         return None
@@ -470,13 +475,21 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
     counts: dict = {}                            # TP/FP/FN — factual 성공 시에만 채운다
 
     # ① factual F1 — 답변 문장을 정답 기준 TP/FP/FN 으로 분류
-    ans_stmts = _decompose_statements(judge, question, answer)
-    ref_stmts = _decompose_statements(judge, question, reference)
+    degrade_reason = ""                          # factual 을 못 잰 이유(로그용) — 성공하면 빈 값
+    ans_stmts = _decompose_statements(judge, question, answer, "correctness.answer_statements")
+    ref_stmts = _decompose_statements(judge, question, reference, "correctness.gold_statements")
+    if not ans_stmts or not ref_stmts:
+        degrade_reason = (f"문장 분해 실패(answer={len(ans_stmts)}문장, "
+                          f"gold={len(ref_stmts)}문장, gold {len(reference)}자)")
     if ans_stmts and ref_stmts:
         d = _chat(judge, _ragas_prompt(_CORRECTNESS_INSTRUCTION, _SCHEMA_CORRECTNESS, _CORRECTNESS_EXAMPLES,
-                                       {"question": question, "answer": ans_stmts, "ground_truth": ref_stmts}))
+                                       {"question": question, "answer": ans_stmts, "ground_truth": ref_stmts}),
+                  label="correctness.classify")
         tp, fp, fn = len(_as_list(d, "TP")), len(_as_list(d, "FP")), len(_as_list(d, "FN"))
         denom = tp + 0.5 * (fp + fn)
+        if denom <= 0:
+            degrade_reason = (f"TP/FP/FN 분류 무응답(answer={len(ans_stmts)}문장, "
+                              f"gold={len(ref_stmts)}문장, gold {len(reference)}자)")
         # denom==0 = 분류가 한 건도 안 나옴. 분해된 문장이 있으면 정상 분류는 최소 1건이 나오므로
         # 이건 판정기 무응답/파싱 실패다 — 이 성분만 버리고 남은 성분으로 계속 간다.
         # (예전엔 여기서 함수 전체가 None 이라 '미측정'이 되어, 판정기가 죽으면 강등이 통째로
@@ -510,8 +523,12 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
     # 유사도가 할 수 있는 일은 '강등'뿐이고 통과시키는 답은 지표가 없었어도 통과했을 답이다.
     # 다만 부정문·근접 오답은 유사도도 높게 나와 못 거르므로, 그 실행의 정답 판정이
     # degrade 됐다는 사실 자체를 리포트로 드러낸다(집계: report._degraded_correctness_count).
+    # degrade 는 리포트에 건수만 남아서, 원인이 '골드가 길어 분해가 안 됨'인지 '분류 호출이
+    # 죽음'인지 구분이 안 된다. 처방이 갈리는 지점이라(전자는 골드/프롬프트, 후자는 출력 상한)
+    # 사유와 규모를 여기서 한 줄로 드러낸다. chat_json 쪽 라벨 로그와 짝을 이룬다.
     if not factual_measured:
         out["answer_correctness_degraded"] = True
+        print(f"[Eval] answer_correctness degrade — {degrade_reason or '원인 미상'}")
     return out
 
 
@@ -522,7 +539,8 @@ def _response_relevancy(judge, question: str, answer: str):
     # 답변으로부터 질문 n회 생성 (inner 동시성 1이면 기존 순차와 동일, 결과는 순서 보존)
     drafts = parallel_map(
         lambda _i: _chat(judge, _ragas_prompt(_RELEVANCY_INSTRUCTION, _SCHEMA_RELEVANCY,
-                                              _RELEVANCY_EXAMPLES, {"response": answer})),
+                                              _RELEVANCY_EXAMPLES, {"response": answer}),
+                         label="response_relevancy"),
         list(range(RELEVANCY_STRICTNESS)),
         _inner_concurrency(),
     )
@@ -552,7 +570,8 @@ def _context_precision(judge, question: str, reference: str, contexts: list[str]
     decisions = parallel_map(
         lambda c: _chat(judge, _ragas_prompt(_CTX_PREC_INSTRUCTION, _SCHEMA_VERDICT,
                                              _CTX_PREC_EXAMPLES,
-                                             {"question": question, "context": c, "answer": reference})),
+                                             {"question": question, "context": c, "answer": reference}),
+                        label="context_precision"),
         list(contexts),
         _inner_concurrency(),
     )
@@ -565,7 +584,8 @@ def _context_recall(judge, question: str, reference: str, contexts: list[str]):
         return None
     context_str = "\n".join(contexts)
     d = _chat(judge, _ragas_prompt(_CTX_RECALL_INSTRUCTION, _SCHEMA_RECALL, _CTX_RECALL_EXAMPLES,
-                                   {"question": question, "context": context_str, "answer": reference}))
+                                   {"question": question, "context": context_str, "answer": reference}),
+              label="context_recall")
     cls = _as_list(d, "classifications")
     if not cls:
         return None
@@ -576,7 +596,7 @@ def _aspect_critic(judge, definition: str, user_input: str, response: str, conte
     """RAGAS AspectCritic: definition 기준 이진 판정(strictness=1 → 단일 호출)."""
     instruction = _ASPECT_INSTRUCTION_TMPL.format(definition=definition)
     inp = {"user_input": user_input, "response": response, "retrieved_contexts": contexts}
-    d = _chat(judge, _ragas_prompt(instruction, _SCHEMA_VERDICT, [], inp))
+    d = _chat(judge, _ragas_prompt(instruction, _SCHEMA_VERDICT, [], inp), label="aspect_critic")
     return 1 if _truthy(d.get("verdict")) else 0
 
 
@@ -628,9 +648,12 @@ def _average_precision(verdicts: list[int]) -> float:
     )
     return numerator / denominator
 
-def _chat(judge, prompt: str) -> dict:
-    """RAGAS 형식 단일 프롬프트를 JSON 강제로 호출 → dict. 실패 시 {}."""
-    return llm_provider.chat_json("", prompt)
+def _chat(judge, prompt: str, label: str = "") -> dict:
+    """RAGAS 형식 단일 프롬프트를 JSON 강제로 호출 → dict. 실패 시 {}.
+
+    label 은 실패 로그에 찍히는 호출 이름 — 호출부가 9곳인데 로그가 전부 같은 문구라
+    어느 지표의 심판이 죽었는지 못 가렸다(정답 판정 degrade 원인 추적)."""
+    return llm_provider.chat_json("", prompt, label=label)
 
 
 def _embed(judge, texts: list[str]) -> list[list[float]]:
