@@ -83,19 +83,22 @@ _FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
 _rerankers: dict[str, Any] = {}
 _failed_rerankers: dict[str, float] = {}
 _FAILED_RERANKER_RETRY_SEC = _env_float("INDEX_RERANKER_RETRY_SEC", 300.0)
-# 리랭커(cross-encoder) 입력 토큰 상한. 0 이하면 모델 기본값을 쓴다.
+# 리랭커(cross-encoder) 입력 토큰 상한. 0 이하면 모델 기본값(이 모델은 8192)을 쓴다.
 #
-# 상한이 없으면 리랭크 1쌍의 비용이 chunk_size 에 그대로 비례한다 — 이 모델의 tokenizer 는
-# model_max_length=8192 라 청크를 통째로 받는다(실측, 한국어: 512자=304토큰 / 1024자=604토큰).
-# Optimize 가 chunk_size 를 키우는 처방 하나를 내면 Eval·Serve 의 검색 시간이 함께 뛰는데
-# (실측 corpus_20260730: 청크 수는 절반인데 STEP2 검색 구간이 23초 → 915초), 그 비용은 어떤
-# 지표에도 안 잡혀 다음 처방 판정이 무시한다.
+# [역할] 폭주 차단용 안전망이지 비용 절감 장치가 아니다. 기본값 1024 는 **정책 내 구성에서는
+# 발동하지 않는다** — 실측(한국어, 이 모델 tokenizer): 1024자=584토큰 / 1500자(정책 최대,
+# optimizer.DEFAULT_CONSTRAINTS)=854토큰 이라, 한국어는 약 1800자를 넘어야 걸린다.
+# 게다가 sentence-transformers 의 텍스트 패딩은 batch-longest(padding=True)라 상한보다 짧은
+# 입력의 계산량은 상한과 무관하다. 즉 이 값을 낮추지 않는 한 리랭크 비용은 안 줄어든다.
 #
-# 기본값 1024 는 '정책상 가능한 최대 청크를 자르지 않는 최소 상한'이다 —
-# optimizer.DEFAULT_CONSTRAINTS 의 chunker.chunk_size 최대가 1500자이고, 위 환산비로 약
-# 885토큰이라 쿼리·특수토큰을 더해도 1024 안에 들어온다. 더 낮게(예: 512=약 868자) 잡으면
-# 합법적인 chunk_size 후보가 리랭커 입력에서만 잘려, Optimize 의 청크 크기 비교가
-# '진짜 품질 차이'인지 '뒤가 잘려서'인지 구분되지 않는다. 모델 기본값(8192) 대비로는 8배 축소다.
+# [왜 그래도 두나] 상한이 아예 없으면 한 쌍이 8192토큰까지 열린다. 정책 밖 구성(수동
+# chunk_size, 청킹 전략 교체로 길어진 청크)이나 코퍼스 특성에 따라 그 꼬리가 실제로 열리므로
+# 최악값을 8배 좁혀 둔다.
+#
+# [왜 더 낮추지 않나] 512(약 868자)로 낮추면 정책상 합법인 chunk_size 후보가 리랭커 입력에서만
+# 잘려, Optimize 의 청크 크기 비교가 '진짜 품질 차이'인지 '뒤가 잘려서'인지 구분되지 않는다.
+# 비용을 실제로 누르려면 상한이 아니라 rerank_candidates(쌍 수)를 줄이거나 리랭커를 끄는 쪽이다.
+# 실측 근거는 새로 붙은 계측(runtime_summary.search / reranker)으로 다음 실행에서 잡는다.
 _RERANKER_MAX_LENGTH = _env_int("INDEX_RERANKER_MAX_LENGTH", 1024)
 _collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, dict[str, bool]] = (
     WeakKeyDictionary()
