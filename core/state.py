@@ -123,7 +123,12 @@ class AgentDoctorState:
             "max_ratio": 0.40,
             "max_overlap": 300,
         },
-        "graph_enabled": True,
+        # 지식그래프 산출물(graphml/mermaid/pyvis)은 시각화·구조 확인용이고 검색 품질에
+        # 관여하지 않는데, graph_extraction="auto" 가 API 키만 있으면 청크마다 LLM 을
+        # 1회씩 부른다 — 코퍼스가 크면 조용히 가장 비싼 단계가 된다(실제로 Eval/RAG 용으로
+        # 넣은 OpenRouter 키가 이 단계까지 켜서 gpt-4.1-mini 호출이 대량 발생했다).
+        # 필요할 때만 명시적으로 켜도록 기본을 끔으로 둔다.
+        "graph_enabled": False,
         "graph_extraction": "auto",
         "graph_llm_model": DEFAULT_GRAPH_LLM_MODEL,
         "graph_similarity_threshold": 0.9,

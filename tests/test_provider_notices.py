@@ -206,6 +206,26 @@ class RagAutoNoticeTest(unittest.TestCase):
         self.assertNotIn("auto → OpenAI", log)
 
 
+class GraphExtractionDefaultOffTest(unittest.TestCase):
+    """지식그래프 단계가 기본으로 꺼져 있는지(회귀).
+
+    켜져 있으면 graph_extraction="auto" 가 API 키만 있으면 청크마다 LLM 을 부른다 —
+    Eval/RAG 용으로 넣은 키가 검색 품질과 무관한 단계까지 켜서 과금이 발생했다."""
+
+    def test_graph_disabled_by_default(self):
+        from core.state import AgentDoctorState
+
+        self.assertFalse(AgentDoctorState().index_config["graph_enabled"])
+
+    def test_llm_extraction_is_unreachable_while_disabled(self):
+        # graph_enabled=False 면 build_graph_artifacts 자체를 안 부르므로
+        # graph_extraction 값과 무관하게 LLM 호출 경로에 도달하지 않는다.
+        from core.state import AgentDoctorState
+
+        config = AgentDoctorState().index_config
+        self.assertFalse(config.get("graph_enabled", True))
+
+
 class EmbeddingFallbackTest(unittest.TestCase):
     """임베딩 API 가 없는 provider 조합의 폴백 사슬: API > 로컬 BGE-M3 > 결측."""
 
