@@ -274,6 +274,31 @@ class TestDegradeDoesNotFlipExactMatch(unittest.TestCase):
         finally:
             metrics_common.set_mode(Mode.FAST)
 
+    def test_exact_match_ungrounded_still_demotes(self):
+        """부정문 오답('X 가 아니다'): 완전일치라도 문맥과 충돌해 근거성이 낮으면 강등 유지 —
+        면제 조건에 faithfulness 를 걸어 degrade 실행의 면제 구멍을 좁힌다."""
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            rec = self._record(f1=F1_EXACT_MATCH, ragas={
+                "faithfulness": 0.1, "answer_correctness": 0.1,
+                "answer_correctness_degraded": True})
+            self.assertTrue(diagnose._degraded_near_miss(rec, oracle=False))
+            self.assertFalse(diagnose._f1_ok(rec))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
+    def test_exact_match_faith_unmeasured_still_demotes(self):
+        """근거성 미측정(faithfulness None)이면 면제하지 않고 기존 강등으로 흐른다(보수적)."""
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            rec = self._record(f1=F1_EXACT_MATCH, ragas={
+                "answer_correctness": 0.1, "answer_correctness_degraded": True})
+            self.assertIsNone(diagnose._faith(rec))
+            self.assertTrue(diagnose._degraded_near_miss(rec, oracle=False))
+            self.assertFalse(diagnose._f1_ok(rec))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
     def test_no_false_context_noise_on_exact_match(self):
         """probe 전체 흐름: 완전일치 + degrade 여도 성공 처리되어 context_noise_interference
         (유령 실패)가 붙지 않는다 — diagnose 가 곧장 [] 로 종료."""

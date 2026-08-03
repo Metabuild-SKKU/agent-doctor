@@ -82,12 +82,20 @@ def _degraded_near_miss(record: EvalRecord, *, oracle: bool) -> bool:
     비결정성 때문에 같은 답이 반복마다 통과/실패를 오간다(실측: probe_qa_26360 반복2 ❌ vs 반복3 ✅).
     면제선을 통과 문턱(0.5)이 아니라 완전일치로 둔 이유는, 0.5~0.9 대의 애매한 근접 오답은 심판이
     죽었을 때 여전히 보수적으로 강등해야 하기 때문이다(그 경계는 안전망으로 유지). 완전일치만
-    면제하므로 승격이 아니라 'degrade 가 정답을 끌어내리는 것'만 막는다 — 게이트는 안 헐거워진다."""
+    면제하므로 승격이 아니라 'degrade 가 정답을 끌어내리는 것'만 막는다 — 게이트는 안 헐거워진다.
+
+    추가로 '검색 근거에 붙었나(faithfulness)'까지 요구한다 — 완전일치라도 부정문 오답
+    ('X 가 아니다')은 gold 를 글자 그대로 담아 어휘가 1.0 이 되지만 문맥과 충돌해 근거성이 낮다.
+    이 강등이 원래 (심판이 살아있을 때 ANSWER_SEMANTIC_FLOOR 가) 걸러주던 게 바로 그 부정문
+    오답이라, 심판이 degrade 된 실행에서 근거성 가드가 그 몫을 이어받아 면제 구멍을 좁힌다.
+    근거성 미측정(None)이면 면제하지 않아 기존 강등으로 흐른다(보수적)."""
     ragas = record.oracle_ragas if oracle else record.ragas
     if not ragas.get("answer_correctness_degraded"):
         return False
     lexical = record.oracle_f1 if oracle else record.f1_score
-    if lexical is not None and lexical >= F1_EXACT_MATCH:
+    faith = _faith_oracle(record) if oracle else _faith(record)
+    if (lexical is not None and lexical >= F1_EXACT_MATCH
+            and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN):
         return False
     ac = record.oracle_ragas_answer_correctness if oracle else record.ragas_answer_correctness
     return ac is not None and ac < ANSWER_CORRECTNESS_MIN
