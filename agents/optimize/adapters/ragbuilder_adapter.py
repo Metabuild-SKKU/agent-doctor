@@ -339,8 +339,17 @@ class RAGBuilderAdapter:
             "fixed_config": fixed_config,
             "agentdoctor_fixed_config": dict(request.fixed_config),
             "metadata": {
-                "failure_label": request.failure_label,
-                "related_failure_labels": list(request.related_failure_labels),
+                # 이 실행이 무엇을 바꾸려는지는 action 이 말한다. label 은 그 변경을
+                # 지지한 진단 근거일 뿐이므로 대표 하나가 아니라 전체를 싣는다.
+                "action_key": request.action_key,
+                "supporting_labels": list(request.supporting_labels),
+                "supporting_probes": list(request.supporting_probes),
+                # ⚠️ 아래 둘은 외부 호환용 설명 필드다. RAGBuilder payload 는 외부
+                # 계약이라 키를 갑자기 빼면 소비처가 깨진다. 내부에서는 대표 라벨
+                # 개념이 사라졌으므로 지지 라벨에서 파생한다 — 첫 원소가 인과 등급이
+                # 가장 높은 라벨이다.
+                "failure_label": next(iter(request.supporting_labels), ""),
+                "related_failure_labels": list(request.supporting_labels[1:]),
                 "reason": request.reason,
                 "mapping_warnings": list(mapping.warnings),
                 "evaluator_kwargs": dict(

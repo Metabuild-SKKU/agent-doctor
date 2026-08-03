@@ -219,6 +219,24 @@ def build_config_diff(
     )
 
 
+# canonical 스냅샷 -----------------------------------------------------------
+def canonical_config_view(config: dict[str, Any]) -> dict[str, Any]:
+    """Optimize가 실제로 바꿀 수 있는 축만 표준 경로로 읽어 정렬해 돌려준다.
+
+    같은 config를 flat key로 담았는지 표준 경로로 담았는지에 따라 baseline이 달라
+    보이면 fingerprint가 흔들린다. 비교·해시의 기준을 여기 하나로 모은다.
+    미지정 축은 넣지 않는다 — 키 유무 자체가 baseline 정체성의 일부다.
+    """
+
+    view: dict[str, Any] = {}
+    for canonical in sorted(CONFIG_READ_PATHS):
+        sentinel = object()
+        value = get_current_value(config, canonical, sentinel)
+        if value is not sentinel:
+            view[canonical] = value
+    return view
+
+
 # 경로 정규화와 dict path 읽기 ----------------------------------------------
 def canonicalize_path(path: str) -> str:
     """flat key나 alias를 알고 있는 표준 config 경로로 정규화한다."""

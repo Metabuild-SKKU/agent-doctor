@@ -58,6 +58,91 @@ _MAX_UNJUDGEABLE_ATTEMPTS = 1
 _MAX_MEASUREMENT_FAILURE_ATTEMPTS = 2
 _OPTIMIZE_VISIT_LIMIT_REASON = "Optimize 절대 방문 상한 도달"
 
+# ── reranker guardrail 의 대상 action ──────────────────────────────
+# reranker 는 Index 가 실제 모델을 로드·추론해 봐야 쓸 수 있는지 알 수 있는 유일한
+# 축이라, 다른 축에는 없는 특수 처리가 붙는다(실행 검증·deferred·precision floor 완화).
+# 세 지점이 같은 집합을 보므로 상수 하나로 묶는다 — 어긋나면 guardrail 이 반쪽만 걸린다.
+_RERANKER_ACTION_KEYS = frozenset({
+    "reranker.enabled:enable",
+    "reranker.candidate_count:increase",
+})
+# 구버전 이력에는 action_key 가 없다. 저장된 state 를 이어받아도 guardrail 이
+# 그대로 걸리도록 처방 id 도 함께 인식한다(단계 8 에서 제거).
+_LEGACY_RERANKER_PRESCRIPTIONS = frozenset({
+    "enable_reranker",
+    "widen_rerank_candidates",
+})
+
+# planner 의 eligibility 가 "품질 실패가 아닌 이유"로 거른 action 은 차단이 아니라
+# 보류로 보고해야 한다. 실행 판정이 optimizer 에서 planner 앞단으로 옮겨오면서
+# 이 사유들도 함께 앞당겨졌다(구현계획 §8.3).
+#   runtime_capability_unavailable : Index 가 모델을 못 올렸다 → 다음 실행에 풀릴 수 있다
+#   prerequisite_unmet             : 선행 조건 미충족(예: 리랭커가 꺼진 채 후보창 확대)
+#
+# ⚠️ 나머지 사유(catalog_blocked·unsupported_state_mapping·unsupported_backend_path·
+# unsupported_capability·no_candidate_value·multi_axis_search_space)는 **의도적으로
+# 보류에서 뺀다.** 그것들은 "지금은 못 한다"가 아니라 "이 파이프라인에서는 불가능하다"
+# 이므로 매 방문마다 반복 보고하면 소음이 된다. 사용자에게 필요한 형태는 방문 단위
+# 보류가 아니라 catalog 수준의 "차단된 기능 목록"이며, 그건 별도 작업이다.
+# 제외된 사유 전체는 request/decision metadata 의 rejected_actions 에 남는다.
+_DEFERRABLE_ELIGIBILITY_REASONS = {
+    "runtime_capability_unavailable",
+    "prerequisite_unmet",
+}
+
+# 선행 조건별 사유 문구. optimizer 가 실행 직전에 쓰는 어휘와 같은 값을 쓴다 —
+# 두 계층의 보고가 갈리면 사용자가 같은 상황을 다른 이름으로 두 번 본다.
+_PREREQUISITE_REASONS = {
+    "reranker.enabled": "reranker_disabled",
+}
+
+
+def _is_reranker_item(item: OptimizationHistoryItem) -> bool:
+    """이 이력 항목이 reranker guardrail 대상인가."""
+    if item.action_key:
+        return item.action_key in _RERANKER_ACTION_KEYS
+    return item.selected_prescription_id in _LEGACY_RERANKER_PRESCRIPTIONS
+
+
+def _deferred_from_rejected_actions(
+    rejected: list[dict[str, Any]] | None,
+    runtime_capabilities: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """planner 가 실행 불가로 거른 action 중 '보류'로 보고할 것을 뽑는다.
+
+    품질 실패와 구분하는 것이 요점이다. runtime 이 준비되지 않았거나 선행 조건이
+    아직 아닌 것은 처방이 나빴다는 증거가 아니므로 차단 집합에 넣지 않고, 사용자
+    리포트에만 "지금은 못 한다"로 남긴다.
+    """
+    deferred: list[dict[str, Any]] = []
+    capability = (runtime_capabilities or {}).get("reranker") or {}
+    for entry in rejected or []:
+        reason = entry.get("reason")
+        if reason not in _DEFERRABLE_ELIGIBILITY_REASONS:
+            continue
+        if reason == "prerequisite_unmet":
+            # 어느 선행 조건이 막았는지는 eligibility 가 detail 에 채워 준다.
+            # 하드코딩하면 선행 조건 축이 늘어나는 순간 조용히 틀린 사유를 보고한다.
+            unmet = (entry.get("eligibility") or {}).get("unmet_prerequisite", "")
+            detail = _PREREQUISITE_REASONS.get(unmet) or f"prerequisite_unmet:{unmet}"
+            retryable = False
+        else:
+            detail = capability.get("reason", "runtime_capability_unavailable")
+            retryable = bool(capability.get("retryable", True))
+        for prescription_id in entry.get("prescription_ids") or [None]:
+            deferred.append(
+                {
+                    "action_key": entry.get("action_key"),
+                    "failure_label": next(
+                        iter(entry.get("supporting_labels") or []), ""
+                    ),
+                    "prescription_id": prescription_id,
+                    "reason": detail,
+                    "retryable": retryable,
+                }
+            )
+    return deferred
+
 
 def _restore_history_item_baseline(
     state: AgentDoctorState,
@@ -143,31 +228,34 @@ def _stop_at_optimize_visit_limit(
 
 def _unjudgeable_exclusions(
     optimization_history: list[OptimizationHistoryItem],
-) -> set[tuple[str, str]]:
-    """효과를 검증하지 못한 동일 처방의 재선택을 제한한다.
+) -> set[str]:
+    """효과를 검증하지 못한 동일 action 의 재선택을 제한한다. 반환값은 action key.
 
-    품질 악화가 확인된 것은 아니므로 영구 blacklist에는 넣지 않는다. blacklist와
-    optimization_history는 같은 AgentDoctorState 필드라 수명이 같으므로 "새 실행에서
-    재시도"는 양쪽 모두에 해당한다 — 이 구분의 실익은 수명이 아니라 **분류**다.
-    측정 불가를 품질 실패로 기록하면 리포트가 처방을 잘못 비난한다.
+    품질 악화가 확인된 것은 아니므로 blocked_action_attempts 에는 넣지 않는다.
+    두 집합과 optimization_history 는 같은 AgentDoctorState 필드라 수명이 같으므로
+    "새 실행에서 재시도"는 어느 쪽이든 마찬가지다 — 이 구분의 실익은 수명이 아니라
+    **분류**다. 측정 불가를 품질 실패로 기록하면 리포트가 처방을 잘못 비난한다.
+
+    차단 단위가 attempt(정확한 전이)가 아니라 action key 인 것도 그래서다. 측정이
+    성립하지 않은 것은 그 전이의 문제가 아니라 이 방문의 문제라, 같은 축의 다른
+    후보값으로 바꿔 봐야 똑같이 못 잰다.
 
     허용 횟수는 측정이 실패한 이유에 따라 다르다. 리포트 부재는 다음 방문에도 같을
     가능성이 크지만, sweep의 baseline 미측정은 관측값이 갱신되면 풀린다.
     """
-    report_absent: Counter[tuple[str, str]] = Counter()
-    measurement_failure: Counter[tuple[str, str]] = Counter()
+    report_absent: Counter[str] = Counter()
+    measurement_failure: Counter[str] = Counter()
     for item in optimization_history:
         if not item.metadata.get("unjudgeable"):
             continue
-        label = item.failure_labels[0] if item.failure_labels else ""
-        prescription_id = item.selected_prescription_id or ""
-        if not (label and prescription_id):
+        action_key = item.action_key or ""
+        if not action_key:
             continue
         # study_error 는 _fail_active_study 가 남긴다(= sweep 측정 실패).
         if item.metadata.get("study_error"):
-            measurement_failure[(label, prescription_id)] += 1
+            measurement_failure[action_key] += 1
         else:
-            report_absent[(label, prescription_id)] += 1
+            report_absent[action_key] += 1
     excluded = {
         key
         for key, count in report_absent.items()
@@ -179,6 +267,90 @@ def _unjudgeable_exclusions(
         if count >= _MAX_MEASUREMENT_FAILURE_ATTEMPTS
     )
     return excluded
+
+
+def _block_action_study(
+    state: AgentDoctorState,
+    item: OptimizationHistoryItem,
+) -> None:
+    """이 baseline 에서 결론이 난 탐색을 기록한다(같은 study 재시작 방지).
+
+    sweep 정상 완료뿐 아니라 "이 baseline 에서는 적용할 수 없다"는 판정도 여기에
+    들어간다. baseline fingerprint 를 담고 있어 config 가 바뀌면 자동으로 풀린다.
+    """
+    if item.action_study_key is not None:
+        state.completed_action_studies.add(item.action_study_key)
+
+
+def _block_evaluated_sweep_candidates(
+    state: AgentDoctorState,
+    item: OptimizationHistoryItem,
+) -> None:
+    """sweep 이 실제로 측정한 후보들을 **결과 baseline 기준으로도** 차단한다.
+
+    study key 만으로는 부족하다. sweep 승자가 적용되면 baseline 이 그 action
+    자신 때문에 움직여, 다음 방문에서 study fingerprint 가 어긋나 같은 축을 곧바로
+    다시 훑는다(이미 잰 값을 다시 재는 순수 낭비다). 기존
+    ``completed_prescriptions`` 는 baseline 무관 영구 차단이라 이 문제가 없었다.
+
+    후보값을 결과 baseline 에도 기록하면 "후보 소진으로 축이 닫힌다"(구현계획 §5.1)가
+    실제로 성립한다. 다른 축이 baseline 을 바꾸면 fingerprint 가 달라져 다시 열린다 —
+    "상류를 고친 뒤 하류를 재평가한다"는 설계 의도는 그대로다.
+
+    이 기록이 정당한 이유: sweep 후보값은 절대값(top_k=7)이지 baseline 대비 변화량이
+    아니다. 같은 값을 다른 baseline 에서 다시 적용해도 도달하는 config 는 같다.
+    """
+    if not item.action_key:
+        return
+    for trial in item.metadata.get("trial_results") or []:
+        config = (
+            trial.get("config") if isinstance(trial, dict) else getattr(trial, "config", None)
+        )
+        if not isinstance(config, dict) or not config:
+            continue
+        for baseline in (item.before_config, state.index_config):
+            state.blocked_action_attempts.add(
+                history.build_attempt_key(
+                    item.action_key,
+                    baseline,
+                    config,
+                    state.runtime_capabilities,
+                )
+            )
+
+
+def _block_action_attempt(
+    state: AgentDoctorState,
+    item: OptimizationHistoryItem,
+) -> None:
+    """품질이 나빠진 **정확한 전이** 하나를 차단한다.
+
+    같은 action 의 다른 후보값과 다른 baseline 에서의 재시도는 열어 둔다(§5.1).
+    """
+    if item.action_attempt_key is not None:
+        state.blocked_action_attempts.add(item.action_attempt_key)
+
+
+def _record_legacy_block(
+    state: AgentDoctorState,
+    item: OptimizationHistoryItem,
+    *,
+    completed: bool = False,
+) -> None:
+    """구버전 (label, prescription_id) 집합을 계속 채운다.
+
+    ⚠️ 실행 제어는 더 이상 이 값을 읽지 않는다(planner 에 넘기는 제외 목록은 action
+    식별자뿐이다). 저장된 이력을 읽는 구버전 리포트 경로와의 호환을 위해 기록만 한다.
+    단계 8 에서 소비처를 걷어낸 뒤 제거한다.
+    """
+    label = item.failure_labels[0] if item.failure_labels else ""
+    prescription_id = item.selected_prescription_id
+    if not (label and prescription_id):
+        return
+    if completed:
+        state.completed_prescriptions.add((label, prescription_id))
+    else:
+        state.blacklist.add((label, prescription_id))
 
 
 def _fmt_bool(value: bool) -> str:
@@ -252,68 +424,75 @@ def _log_eval_line(report: DiagnosticReport | None) -> None:
 
 
 def _log_optimize_input(state: AgentDoctorState) -> None:
-    """이번 Optimize 방문의 진단 입력과 이미 소진된 처방을 출력한다."""
+    """이번 Optimize 방문의 진단 입력과 이미 소진된 action 을 출력한다."""
     print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations} (진단 입력)")
     _log_eval_line(state.report)
     print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(state.report)}")
-    if state.blacklist:
-        blocked = ", ".join(
-            f"{label}/{prescription_id}"
-            for label, prescription_id in sorted(state.blacklist)
-        )
-        print(f"[Optimize] 제외된 처방: [{blocked}]")
+    # 차단은 (action, baseline, 후보값) 단위라 baseline 이 바뀌면 풀린다. 로그에는
+    # 사람이 읽을 수 있는 action key 만 중복 없이 보여준다.
+    blocked_keys = sorted(
+        {key.action_key for key in state.blocked_action_attempts}
+        | {key.action_key for key in state.completed_action_studies}
+    )
+    if blocked_keys:
+        print(f"[Optimize] 제외된 action: [{', '.join(blocked_keys)}]")
 
 
-def _log_candidate_list(request: OptimizationRequest) -> None:
-    """Planner가 만든 처방 후보와 후보별 근거·탐색 범위를 출력한다."""
+def _log_selected_action(request: OptimizationRequest) -> None:
+    """Planner 가 고른 action 과 그 근거·탐색 범위를 출력한다.
+
+    "후보 목록 N개 중 하나"가 아니라 **이미 정해진 변경 하나**를 보고한다. 경쟁은
+    planner 안에서 끝났고, 밀린 후보는 runner-up 으로 따로 남긴다.
+    """
+    breakdown = request.action_score_breakdown
     print(
-        f"[Optimize] 후보 생성: {len(request.candidates)}개 "
-        f"(label={request.failure_label}, optimizer={request.optimizer})"
+        f"[Optimize] 선택된 action: {request.action_key or '-'} "
+        f"(지지 라벨 {len(request.supporting_labels)}개, "
+        f"probe {len(request.supporting_probes)}개, "
+        f"optimizer={request.optimizer})"
     )
-    distinct_reasons = list(
-        dict.fromkeys(
-            candidate.reason
-            for candidate in request.candidates
-            if candidate.reason
-        )
-    )
-    shared_reason = distinct_reasons[0] if len(distinct_reasons) == 1 else None
-    if shared_reason:
-        print(f"[Optimize] 후보 제안 근거: {shared_reason}")
-    for index, candidate in enumerate(request.candidates, 1):
-        reindex = bool(candidate.patch and candidate.patch.reindex_required)
-        patch = candidate.patch.changes if candidate.patch else {}
+    if breakdown:
         print(
-            f"[Optimize] 후보 {index}/{len(request.candidates)}: "
-            f"id={candidate.id}, status={candidate.status}, "
-            f"cost={candidate.cost!r}, "
-            f"patch={_fmt_mapping(patch)}, "
-            f"search_space={_fmt_mapping(candidate.search_space)}, "
-            f"reindex={_fmt_bool(reindex)}"
+            f"[Optimize] 선택 점수: {request.action_score:.3f} "
+            f"(가중 지지 {breakdown.get('weighted_probe_support')}, "
+            f"비용 {breakdown.get('base_cost')}, "
+            f"출처 {breakdown.get('cost_source')}/{breakdown.get('confidence_source')})"
         )
-        if candidate.reason and candidate.reason != shared_reason:
-            print(f"[Optimize]   제안 근거: {candidate.reason}")
+    print(
+        f"[Optimize] 탐색 범위: {_fmt_mapping(request.search_space)}, "
+        f"후보 {request.max_trials}개"
+    )
+    for runner_up in request.metadata.get("runner_up_actions", []):
+        print(
+            f"[Optimize]   밀린 action: {runner_up['action_key']} "
+            f"(점수 {runner_up['score']})"
+        )
+    for deferred in request.metadata.get("deferred_axes", []):
+        print(
+            f"[Optimize]   보류된 축: {deferred.get('axis')} "
+            f"({deferred.get('reason')})"
+        )
 
 
-def _log_candidate_review(result: OptimizationResult) -> None:
-    """Optimizer가 후보를 거르거나 선택한 결과와 이유를 출력한다."""
+def _log_action_review(result: OptimizationResult) -> None:
+    """Optimizer 의 실행 직전 재검증 결과를 출력한다."""
     for skipped in result.metadata.get("skipped_candidates", []):
         if not isinstance(skipped, dict):
             continue
         print(
-            f"[Optimize] 후보 SKIP: "
-            f"id={skipped.get('prescription_id') or '-'}, "
+            f"[Optimize] action SKIP: "
+            f"{skipped.get('action_key') or skipped.get('prescription_id') or '-'}, "
             f"reason={skipped.get('reason') or 'unknown'}"
         )
 
-    selected = result.selected_candidate
+    selected = result.selected_action
     if result.status == "failed":
         reason = result.metadata.get("error_code") or result.error or result.message
         if selected is None:
             print(f"[Optimize] 요청 FAIL: reason={reason or 'unknown'}")
         else:
             print(
-                f"[Optimize] 후보 FAIL: id={selected.id}, "
+                f"[Optimize] action FAIL: {selected.action_key or '-'}, "
                 f"reason={reason or 'unknown'}"
             )
         return
@@ -323,20 +502,20 @@ def _log_candidate_review(result: OptimizationResult) -> None:
         if selected is None:
             print(f"[Optimize] 요청 SKIP: reason={reason or 'unknown'}")
             return
-        prescription_id = selected.id
         print(
-            f"[Optimize] 후보 SKIP: id={prescription_id}, "
+            f"[Optimize] action SKIP: {selected.action_key or '-'}, "
             f"reason={reason or 'unknown'}"
         )
         return
 
     if selected is not None:
-        print(f"[Optimize] 후보 SELECT: id={selected.id}")
+        print(f"[Optimize] action SELECT: {selected.action_key or '-'}")
 
 
 def _log_optimize_transition(
     *,
-    label: str | None,
+    action_key: str | None,
+    supporting_labels: list[str] | None,
     prescription_id: str | None,
     before_config: dict[str, Any],
     after_config: dict[str, Any],
@@ -346,8 +525,11 @@ def _log_optimize_transition(
     include_reindex: bool = True,
     include_next_step: bool = True,
 ) -> None:
-    print(f"[Optimize] 선택한 라벨: {label or '-'}")
-    print(f"[Optimize] 선택한 처방: {prescription_id or '-'}")
+    # 선택 단위는 action 이다. 라벨은 "왜 이 변경이 지지받았는가"를 설명할 뿐이라
+    # 하나만 뽑지 않고 전부 보여준다. 처방 id 는 rules.py 선언으로 되짚기 위한 표시다.
+    origin = f" (처방 {prescription_id})" if prescription_id else ""
+    print(f"[Optimize] 선택한 action: {action_key or '-'}{origin}")
+    print(f"[Optimize] 지지 라벨: {', '.join(supporting_labels or []) or '-'}")
     print(f"[Optimize] 변경 전 config: {_fmt_config_values(before_config, changed_keys)}")
     print(f"[Optimize] 변경 후 config: {_fmt_config_values(after_config, changed_keys)}")
     if include_reindex:
@@ -365,18 +547,19 @@ def _log_optimize_application(
     changed_keys: list[str],
     prescription_id: str | None,
 ) -> None:
-    selected = result.selected_candidate
+    selected = result.selected_action
     print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations} (처방 적용 후)")
     print(
-        f"[Optimize] 처방 적용: id={prescription_id or '-'}, "
-        f"label={request.failure_label}"
+        f"[Optimize] action 적용: {request.action_key or '-'}, "
+        f"처방={prescription_id or '-'}"
     )
     if selected is not None:
-        reason = result.message or selected.reason or request.reason
+        reason = result.message or selected.description or request.reason
         if reason:
             print(f"[Optimize] 선택 근거: {reason}")
     _log_optimize_transition(
-        label=request.failure_label,
+        action_key=request.action_key,
+        supporting_labels=list(request.supporting_labels),
         prescription_id=prescription_id,
         before_config=before_config,
         after_config=after_config,
@@ -402,16 +585,17 @@ def _log_optimize_verdict(
         after_config = dict(state.index_config)
         reindex_required = bool(state.reindex_required)
     diff = config_mapper.build_config_diff(before_config, after_config)
-    action = "KEEP" if verdict.keep else "ROLLBACK"
+    verdict_label = "KEEP" if verdict.keep else "ROLLBACK"
     print(
-        f"[Optimize] 이전 처방 판정: {action}, "
-        f"prescription={item.selected_prescription_id or '-'}, "
+        f"[Optimize] 이전 처방 판정: {verdict_label}, "
+        f"action={item.action_key or '-'}, "
         f"before={_fmt_score(verdict.before_score)}, "
         f"after={_fmt_score(verdict.after_score)}"
     )
     print(f"[Optimize] 판정 근거: {verdict.reason or '-'}")
     _log_optimize_transition(
-        label=item.failure_labels[0] if item.failure_labels else None,
+        action_key=item.action_key,
+        supporting_labels=list(item.supporting_labels or item.failure_labels),
         prescription_id=item.selected_prescription_id,
         before_config=before_config,
         after_config=after_config,
@@ -453,7 +637,8 @@ def _log_optimize_decision(
     _log_manual_prescriptions(decision)
 
     _log_optimize_transition(
-        label=None,
+        action_key=None,
+        supporting_labels=[],
         prescription_id=None,
         before_config={},
         after_config={},
@@ -462,6 +647,26 @@ def _log_optimize_decision(
         next_step=f"{next_step} ({decision.status})",
         include_reindex=False,
     )
+
+
+def _extend_deferred(
+    deferred: list[dict[str, Any]],
+    entries: list[dict[str, Any]],
+) -> None:
+    """보류 목록에 새 항목만 더한다.
+
+    한 방문 안에서 planner 를 여러 번 호출하므로(적용 불가 action 을 건너뛰며),
+    같은 보류가 매번 다시 나온다. 중복을 그대로 실으면 리포트가 같은 말을 반복한다.
+    """
+    seen = {
+        (item.get("action_key"), item.get("prescription_id"), item.get("reason"))
+        for item in deferred
+    }
+    for entry in entries:
+        key = (entry.get("action_key"), entry.get("prescription_id"), entry.get("reason"))
+        if key not in seen:
+            seen.add(key)
+            deferred.append(entry)
 
 
 def _attach_runtime_deferred(
@@ -477,13 +682,39 @@ def _attach_runtime_deferred(
 
 
 def run(state: AgentDoctorState) -> AgentDoctorState:
-    """Optimize 노드 진입점. 성공·스킵·수동·오류 어느 경로든 같은 state 를 반환한다."""
+    """Optimize 노드 진입점. 성공·스킵·수동·오류 어느 경로든 같은 state 를 반환한다.
+
+    ── 종료 불변조건 ─────────────────────────────────────────────────
+    iteration 은 "새 ActionStudy 를 적용한 횟수"라 **소비하지 않는 경로가 여럿**이다.
+
+      1. sweep 중간 후보 진행 (_continue_internal_study)   → status=applied
+      2. sweep 종료 (_finish_internal_study)               → applied/verified/rolled_back
+      3. study 오류 복원 (_fail_active_study)              → rolled_back/error
+      4. 자동 처방 대상 없음 (decision != apply_optimize)  → skipped/manual_required/…
+      5. 예산 소진 후 판정만                                → verified/rolled_back
+      6. 적용 가능한 action 소진                            → skipped/rolled_back
+      7. optimizer 가 patch 를 못 만듦                      → skipped/failed/rolled_back
+      8. 품질 통과 + 유지 판정                              → verified
+
+    그래서 실제 종료를 보장하는 것은 iteration 이 아니라 **optimize_visit_count** 다.
+    아래 증가는 위 어떤 분기보다도 먼저, 조건 없이 실행된다 — 즉 방문이 한 번이라도
+    본문에 들어오면 반드시 소비된다. 유일하게 증가하지 않는 경로는 상한 도달
+    (_stop_at_optimize_visit_limit)이며, 그 경로는 진행 중 설정을 복원하고 종료한다.
+    복원이 config 를 바꿔 status=rolled_back 이 되면 Index→Eval 을 한 바퀴 더 도는데,
+    그때는 복원할 pending 이 없어 status=verified 로 Serve 에 도달한다(수렴 1회).
+
+    최악 방문 수는 max_optimize_visits(20) + 상한 처리 1회다. graph.py 는 이 값을
+    읽지 않지만 그래서 오히려 안전하다 — 라우팅을 고치지 않아도 무조건 닫힌다.
+    """
     state.current_agent = "optimize"
     try:
-        _log_optimize_input(state)
+        # ⚠️ 로깅보다 **먼저** 소비한다. 콘솔 인코딩 오류 같은 표시 계층 예외가
+        # 방문을 공짜로 만들면 안 된다 — 그 순간 이 불변조건이 무너진다.
         if state.optimize_visit_count >= state.max_optimize_visits:
+            _log_optimize_input(state)
             return _stop_at_optimize_visit_limit(state)
         state.optimize_visit_count += 1
+        _log_optimize_input(state)
         if state.optimize_visit_count >= state.max_optimize_visits:
             return _stop_at_optimize_visit_limit(state)
 
@@ -496,8 +727,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # (1) 지난 처방 판정 + (나빴으면) 롤백/블랙리스트
         judged_item, verdict, rollback_baseline_report = _judge_pending_trial(state)
         rolled_back = judged_item is not None and not verdict.keep
-        visit_exclusions = set(state.blacklist)
-        visit_exclusions.update(state.completed_prescriptions)
+        # planner 에 넘기는 제외 목록은 action 식별자뿐이다. 구버전 (label,
+        # prescription_id) 튜플은 실행 제어에 쓰지 않는다(구현계획 §8.2 완료 조건).
+        #   ActionAttemptKey  → 정확한 전이만 차단(후보값 단위)
+        #   ActionStudyKey    → 그 baseline 에서 결론이 난 탐색을 차단
+        #   action key 문자열 → 이번 방문에서만 막는 visit-local 제외
+        visit_exclusions: set[Any] = set(state.blocked_action_attempts)
+        visit_exclusions.update(state.completed_action_studies)
         visit_exclusions.update(
             _unjudgeable_exclusions(state.optimization_history)
         )
@@ -506,14 +742,20 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             judged_item is not None
             and judged_item.metadata.get("reranker_execution_incomplete")
         ):
-            label = judged_item.failure_labels[0] if judged_item.failure_labels else ""
-            prescription_id = judged_item.selected_prescription_id
-            if label and prescription_id:
-                visit_exclusions.add((label, prescription_id))
+            action_key = judged_item.action_key
+            if action_key:
+                # runtime 이 못 돌아 효과를 못 잰 것이라 품질 실패가 아니다.
+                # 이번 방문에서만 막고 다음 파이프라인 실행에서는 다시 시도한다.
+                visit_exclusions.add(action_key)
                 deferred_runtime.append(
                     {
-                        "failure_label": label,
-                        "prescription_id": prescription_id,
+                        "action_key": action_key,
+                        "failure_label": (
+                            judged_item.failure_labels[0]
+                            if judged_item.failure_labels
+                            else ""
+                        ),
+                        "prescription_id": judged_item.selected_prescription_id,
                         "reason": "reranker_execution_incomplete",
                         "retryable": True,
                     }
@@ -543,6 +785,16 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
         while True:
             request, decision = planner.plan(state, blacklist=visit_exclusions)
+            # planner 가 실행 불가로 거른 것 중 runtime·선행조건 사유는 보류로 보고한다.
+            # 요청이 만들어졌든 아니든 사유가 나오는 곳이 다를 뿐 보고 책임은 같다.
+            _extend_deferred(
+                deferred_runtime,
+                _deferred_from_rejected_actions(
+                    (request.metadata if request is not None else decision.metadata)
+                    .get("rejected_actions"),
+                    state.runtime_capabilities,
+                ),
+            )
             if decision.mode != "apply_optimize" or request is None:
                 state.status = "rolled_back" if rolled_back else decision.status
                 if judged_item is not None:
@@ -560,13 +812,25 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     deferred_runtime,
                 )
                 return state
-            _log_candidate_list(request)
+            _log_selected_action(request)
 
-            previous_label = history.last_failure_label(state.optimization_history)
-            starts_new_label = (
-                previous_label is None or previous_label != request.failure_label
+            # iteration 은 "새 ActionStudy 를 적용한 횟수"다(구현계획 §5.3).
+            # study key 는 baseline fingerprint 를 담고 있으므로
+            #   - 같은 action 의 내부 sweep → _continue_internal_study 가 이 경로를
+            #     타지 않아 iteration 하나로 묶인다
+            #   - rollback 후 다른 action  → 새 study → 새 iteration
+            #   - 같은 action 이라도 새 baseline → 새 study → 새 iteration
+            # 이 셋이 모두 자동으로 성립한다. 라벨 비교를 쓰던 예전에는 같은 라벨의
+            # 다른 처방이 예산을 소비하지 않아, 라벨 하나가 예산 밖에서 무한히
+            # 처방을 갈아 끼울 수 있었다.
+            previous_study = history.last_action_study_key(state.optimization_history)
+            new_study = history.study_key_for_request(
+                request, state.runtime_capabilities
             )
-            if starts_new_label and state.iteration >= state.max_iterations:
+            starts_new_action_study = (
+                new_study is None or previous_study != new_study
+            )
+            if starts_new_action_study and state.iteration >= state.max_iterations:
                 state.status = "rolled_back" if rolled_back else "verified"
                 if judged_item is not None:
                     verdict_next_step = (
@@ -598,21 +862,17 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 return state
 
             result = optimizer.run(request)
-            _log_candidate_review(result)
-            # skipped 처방(baseline 무개선·적용 불가 경로·빈 search space)이면 포기하지 않고
-            # 그 처방을 블랙리스트에 넣어 다음 우선순위 처방으로 넘어간다. 한 라벨의 처방이
-            # 막혀도(예: enable_hybrid 는 pipeline capability 미지원) 다른 actionable
-            # finding 이 처방받을 기회를 준다. (issue #26)
+            _log_action_review(result)
+            # skipped action(baseline 무개선·적용 불가 경로·빈 search space)이면 포기하지
+            # 않고 그 탐색을 소진 처리한 뒤 다음 순위 action 으로 넘어간다. 한 축이
+            # 막혀도(예: enable_hybrid 는 이미 hybrid 라 no-op) 다른 actionable finding 이
+            # 처방받을 기회를 준다. (issue #26)
             if result.status != "skipped":
                 break
 
-            prescription_id = (
-                result.selected_candidate.id
-                if result.selected_candidate
-                else (request.candidates[0].id if request.candidates else None)
-            )
-            rejection = (request.failure_label, prescription_id)
-            if not prescription_id or rejection in visit_exclusions:
+            prescription_id = request.prescription_id
+            rejected_action = request.action_key
+            if not rejected_action or rejected_action in visit_exclusions:
                 state.status = "rolled_back" if rolled_back else "skipped"
                 if judged_item is not None:
                     _log_optimize_verdict(state, judged_item, verdict)
@@ -633,7 +893,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     )
                 return state
             error_code = str(result.metadata.get("error_code") or "")
-            visit_exclusions.add(rejection)
+            visit_exclusions.add(rejected_action)
             if error_code in {
                 "runtime_capability_unavailable",
                 "reranker_disabled",
@@ -644,7 +904,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 )
                 deferred_runtime.append(
                     {
-                        "failure_label": request.failure_label,
+                        "action_key": rejected_action,
+                        "failure_label": next(iter(request.supporting_labels), ""),
                         "prescription_id": prescription_id,
                         "reason": (
                             error_code
@@ -662,7 +923,18 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     }
                 )
             else:
-                state.blacklist.add(rejection)
+                # optimizer 가 "이 baseline 에서는 이 탐색을 적용할 수 없다"고 판정한
+                # 것이므로 방문을 넘어 남긴다. baseline fingerprint 를 담고 있어
+                # config 가 바뀌면 같은 축을 다시 볼 수 있다(§5.1).
+                rejected_study = history.study_key_for_request(
+                    request, state.runtime_capabilities
+                )
+                if rejected_study is not None:
+                    state.completed_action_studies.add(rejected_study)
+                if prescription_id:
+                    label = next(iter(request.supporting_labels), "")
+                    if label:
+                        state.blacklist.add((label, prescription_id))
 
         if result.status != "proposed" or result.config_patch is None:
             # optimizer 가 적용 가능한 patch 를 못 만듦(skipped/failed)
@@ -710,17 +982,19 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.reindex_required = bool(result.needs_reindex) or rollback_reindex_required
 
         # pending 이력 생성(다음 방문에서 finalize) + iteration 1회 증가
-        prescription_id = (
-            result.selected_candidate.id if result.selected_candidate else None
-        )
+        prescription_id = request.prescription_id
         item = history.create_pending_item(
-            state, request, prescription_id, before_config, before_report
+            state,
+            request,
+            prescription_id,
+            before_config,
+            before_report,
+            # attempt fingerprint 는 '이번에 적용한 값'으로 만든다. 탐색 범위 전체를
+            # 넣으면 sweep 중간 후보가 서로를 차단한다.
+            applied_changes=dict(result.config_patch.changes),
         )
         item.metadata["reindex_required"] = bool(result.needs_reindex)
-        if prescription_id in {
-            "enable_reranker",
-            "widen_rerank_candidates",
-        }:
+        if request.action_key in _RERANKER_ACTION_KEYS:
             item.metadata["runtime_capability"] = dict(
                 request.metadata.get("runtime_capabilities", {}).get(
                     "reranker",
@@ -738,7 +1012,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             item.metadata["before_index_key"] = state.active_index_key
             item.metadata["before_eval_key"] = state.active_eval_key
         state.optimization_history.append(item)
-        if starts_new_label:
+        if starts_new_action_study:
             state.iteration += 1
 
         _log_optimize_application(
@@ -774,15 +1048,15 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         )
         state.optimization_report.metadata.update(
             {
-                "failure_label": request.failure_label,
+                "action_key": request.action_key,
+                "supporting_labels": list(request.supporting_labels),
+                # 구버전 리포트 소비처 호환. 단계 7 에서 action 표시로 전환한다.
+                "failure_label": next(iter(request.supporting_labels), ""),
                 "selected_prescription": prescription_id,
                 "reindex_required": bool(result.needs_reindex),
             }
         )
-        if prescription_id in {
-            "enable_reranker",
-            "widen_rerank_candidates",
-        }:
+        if request.action_key in _RERANKER_ACTION_KEYS:
             state.optimization_report.metadata["runtime_capability"] = dict(
                 request.metadata.get("runtime_capabilities", {}).get(
                     "reranker",
@@ -805,7 +1079,13 @@ def _continue_internal_study(
     state: AgentDoctorState,
     item: OptimizationHistoryItem,
 ) -> AgentDoctorState:
-    """직전 top_k 후보 결과를 기록하고 같은 라벨의 다음 후보를 진행한다."""
+    """직전 후보 결과를 기록하고 같은 action 의 다음 후보를 진행한다.
+
+    축을 가리지 않는다 — study 는 단일 canonical 축 하나를 sweep 하며, 어느 축인지는
+    item.action_key 가 말해 준다. 이 경로 전체가 iteration 하나에 속하므로(§5.3)
+    여기서는 예산을 소비하지 않는다. 대신 방문마다 optimize_visit_count 는 run() 진입부
+    에서 이미 증가했다 — 그것이 이 루프의 종료를 보장하는 절대 안전선이다.
+    """
     request = item.metadata.get("study_request")
     if not isinstance(request, OptimizationRequest):
         return _fail_active_study(
@@ -846,7 +1126,7 @@ def _continue_internal_study(
         },
     )
     result = optimizer.run(resumed_request)
-    _log_candidate_review(result)
+    _log_action_review(result)
     item.metadata["trial_results"] = list(
         result.metadata.get("trial_results", observed_trials)
     )
@@ -861,6 +1141,7 @@ def _continue_internal_study(
         config_diff = config_mapper.apply_config_patch(state.index_config, result.config_patch)
         state.reindex_required = bool(result.needs_reindex)
         item.metadata["current_candidate"] = dict(result.config_patch.changes)
+        item.metadata["applied_changes"] = dict(result.config_patch.changes)
         item.after_config = dict(state.index_config)
         state.status = "applied"
         _log_optimize_application(
@@ -919,11 +1200,13 @@ def _finish_internal_study(
             keep=False,
             before_score=before_score,
             after_score=after_score,
-            reason="모든 top_k 후보 평가 후 baseline이 가장 좋아 원래 설정을 유지",
+            reason="모든 후보 평가 후 baseline이 가장 좋아 원래 설정을 유지",
         )
-        label = item.failure_labels[0] if item.failure_labels else ""
-        if label and item.selected_prescription_id:
-            state.blacklist.add((label, item.selected_prescription_id))
+        # 탐색은 정상적으로 끝났다(결론이 baseline 이었을 뿐) → study 로 기록한다.
+        # 개별 후보를 attempt 로 막지 않는 이유: baseline 이 달라지면 같은 후보가
+        # 다시 이길 수 있고, 이 study key 자체가 그 baseline 에서의 재시작을 막는다.
+        _block_action_study(state, item)
+        _record_legacy_block(state, item)
         state.status = "rolled_back" if changed else "verified"
         state.reindex_required = bool(item.metadata.get("reindex_required", True))
     elif result.status == "proposed" and result.config_patch is not None:
@@ -937,9 +1220,19 @@ def _finish_internal_study(
                 floor_violations=floor_violations,
                 reason=f"sweep 최적 후보가 하한선을 위반함 {floor_violations} → baseline 복원",
             )
-            label = item.failure_labels[0] if item.failure_labels else ""
-            if label and item.selected_prescription_id:
-                state.blacklist.add((label, item.selected_prescription_id))
+            # 하한선 위반은 품질 실패다 — 승자 전이를 attempt 로 막고, 같은 탐색을
+            # 이 baseline 에서 다시 돌리지도 않는다.
+            if item.action_key:
+                state.blocked_action_attempts.add(
+                    history.build_attempt_key(
+                        item.action_key,
+                        item.before_config,
+                        dict(result.config_patch.changes),
+                        state.runtime_capabilities,
+                    )
+                )
+            _block_action_study(state, item)
+            _record_legacy_block(state, item)
             state.status = "rolled_back" if changed else "verified"
             state.reindex_required = bool(item.metadata.get("reindex_required", True))
         else:
@@ -961,11 +1254,9 @@ def _finish_internal_study(
                 else "verified"
             )
             state.reindex_required = bool(result.needs_reindex)
-            label = item.failure_labels[0] if item.failure_labels else ""
-            if label and item.selected_prescription_id:
-                state.completed_prescriptions.add(
-                    (label, item.selected_prescription_id)
-                )
+            # 이 baseline 에서 탐색이 정상 종료됐다 → 같은 study 를 다시 시작하지 않는다.
+            _block_action_study(state, item)
+            _record_legacy_block(state, item, completed=True)
     else:
         return _fail_active_study(
             state,
@@ -974,6 +1265,9 @@ def _finish_internal_study(
         )
 
     item.after_config = dict(state.index_config)
+    # 세 종료 분기(baseline 승·하한선 위반·정상 승자) 모두 "이 탐색은 끝났다"이므로
+    # 측정한 후보를 여기 한 곳에서 소진 처리한다.
+    _block_evaluated_sweep_candidates(state, item)
     if baseline_selected:
         baseline_report = item.metadata.get("before_report")
         item.after_metrics = dict(getattr(baseline_report, "ragas_scores", {}) or {})
@@ -1012,7 +1306,8 @@ def _finish_internal_study(
         else f"Serve 이동 ({state.status})"
     )
     _log_optimize_transition(
-        label=item.failure_labels[0] if item.failure_labels else None,
+        action_key=item.action_key,
+        supporting_labels=list(item.supporting_labels or item.failure_labels),
         prescription_id=item.selected_prescription_id,
         before_config=before_config_for_log,
         after_config=dict(state.index_config),
@@ -1034,7 +1329,7 @@ def _fail_active_study(
     """study 오류 시 baseline으로 복원하고 재시도 가능 여부를 구분한다.
 
     ``unjudgeable``은 '측정 자체가 성립하지 않음'(예: min_delta 비교에 필요한
-    scorable baseline 부재)이다. 처방이 나빴다는 증거가 아니므로 영구 blacklist에
+    scorable baseline 부재)이다. 처방이 나빴다는 증거가 아니므로 차단 집합에
     넣지 않고, 같은 실행 안에서만 _unjudgeable_exclusions로 재선택을 제한한다.
     """
     before_config_for_log, _before_report, changed = _restore_history_item_baseline(
@@ -1047,27 +1342,27 @@ def _fail_active_study(
             "unjudgeable": unjudgeable,
         },
     )
-    label = item.failure_labels[0] if item.failure_labels else ""
-    prescription_id = item.selected_prescription_id
+    action_key = item.action_key or ""
     previous_same_errors = sum(
         1
         for previous in state.optimization_history
         if previous is not item
-        and previous.selected_prescription_id == prescription_id
-        and (previous.failure_labels[0] if previous.failure_labels else "") == label
+        and previous.action_key == action_key
         and previous.metadata.get("study_error")
     )
-    # 상태 계약 손상은 같은 처방으로 회복되지 않으므로 즉시 차단한다. 일시적인
+    # 상태 계약 손상은 같은 탐색으로 회복되지 않으므로 즉시 차단한다. 일시적인
     # adapter 오류는 한 번 재시도하되 반복되면 무한 루프 방지를 위해 차단한다.
-    # 측정 불가(unjudgeable)는 품질 증거가 없으므로 blacklist 대신 실행 범위
+    # 측정 불가(unjudgeable)는 품질 증거가 없으므로 차단 대신 실행 범위
     # 제한(_unjudgeable_exclusions)에 맡긴다.
+    # 차단 단위가 attempt 가 아니라 study 인 이유: 실패한 것은 후보값 하나가 아니라
+    # 탐색 자체이며, 같은 baseline 에서 후보만 바꿔도 같은 오류가 재현된다.
     if (
-        label
-        and prescription_id
+        action_key
         and not unjudgeable
         and (not retryable or previous_same_errors >= 1)
     ):
-        state.blacklist.add((label, prescription_id))
+        _block_action_study(state, item)
+        _record_legacy_block(state, item)
     state.status = "rolled_back" if changed else "error"
     state.error = None if changed else reason
     diff = config_mapper.build_config_diff(before_config_for_log, state.index_config)
@@ -1077,8 +1372,9 @@ def _fail_active_study(
         else f"Serve 이동 ({state.status})"
     )
     _log_optimize_transition(
-        label=label,
-        prescription_id=prescription_id,
+        action_key=item.action_key,
+        supporting_labels=list(item.supporting_labels or item.failure_labels),
+        prescription_id=item.selected_prescription_id,
         before_config=before_config_for_log,
         after_config=dict(state.index_config),
         changed_keys=_diff_visible_keys(diff),
@@ -1207,12 +1503,15 @@ def _judge_pending_trial(
             restored["recreate_collection_on_dimension_mismatch"] = True
         state.index_config = restored
         state.reindex_required = bool(pending.metadata.get("reindex_required", True))
-        # 측정이 없어(unjudgeable) 롤백한 경우는 '나빴다는 증거'가 아니므로 블랙리스트
-        # 등록을 건너뛴다. 영구 차단하면 리포트 부재만으로 처방이 소진되고, before_report
+        # 측정이 없어(unjudgeable) 롤백한 경우는 '나빴다는 증거'가 아니므로 차단
+        # 등록을 건너뛴다. 차단하면 리포트 부재만으로 action 이 소진되고, before_report
         # None 이 다음 방문으로 전파돼 판정 불가→롤백→차단이 연쇄될 수 있다(리뷰 #36).
-        label = pending.failure_labels[0] if pending.failure_labels else ""
-        if label and pending.selected_prescription_id and not verdict.unjudgeable:
-            state.blacklist.add((label, pending.selected_prescription_id))
+        #
+        # 품질 악화가 확인된 경우에만 **정확한 전이 하나**를 막는다. 같은 축의 다른
+        # 후보값과, config 가 바뀐 뒤의 같은 값은 다시 시도할 수 있다(§5.1).
+        if not verdict.unjudgeable:
+            _block_action_attempt(state, pending)
+            _record_legacy_block(state, pending)
 
     history.finalize_item(pending, verdict, after_config, after_report)
     rollback_baseline_report = before_report if not verdict.keep else None
@@ -1233,10 +1532,7 @@ def _relax_reranker_precision_floor(
     """
     if verdict.keep:
         return verdict
-    if pending.selected_prescription_id not in {
-        "enable_reranker",
-        "widen_rerank_candidates",
-    }:
+    if not _is_reranker_item(pending):
         return verdict
     if verdict.floor_violations != ["context_precision"]:
         return verdict
@@ -1284,10 +1580,7 @@ def _reranker_execution_incomplete(
     after_report: DiagnosticReport,
 ) -> bool:
     """reranker 처방 후 Eval이 일부라도 실제 CrossEncoder 점수를 못 만들었는지 본다."""
-    if pending.selected_prescription_id not in {
-        "enable_reranker",
-        "widen_rerank_candidates",
-    }:
+    if not _is_reranker_item(pending):
         return False
     runtime = (after_report.runtime_summary or {}).get("reranker")
     if not isinstance(runtime, dict) or not runtime.get("enabled"):

@@ -266,11 +266,19 @@ class ChunkOverlapGroundingTest(unittest.TestCase):
         result = optimizer.run(request)
 
         self.assertEqual(decision.mode, "apply_optimize")
+        # overlap 축은 복구 가능한 경계 교차가 없어 후보값이 만들어지지 않는다.
+        # 이제 그 판정이 **점수 경쟁 전**에 이뤄지므로, 근거는 선택된 요청이 아니라
+        # 제외된 action 목록에 남는다(구현계획 §4.6).
+        rejected = {
+            entry["action_key"]: entry
+            for entry in request.metadata["rejected_actions"]
+        }
         self.assertEqual(
-            request.metadata["candidate_grounding"]["status"],
+            rejected["chunker.chunk_overlap:increase"]["candidate_grounding"]["status"],
             "no_recoverable_crossings",
         )
-        self.assertEqual(result.selected_candidate.id, "increase_chunk_size")
+        self.assertEqual(request.action_key, "chunker.chunk_size:increase")
+        self.assertEqual(result.selected_action.prescription_id, "increase_chunk_size")
         self.assertEqual(result.config_patch.changes, {"chunker.chunk_size": 800})
 
 

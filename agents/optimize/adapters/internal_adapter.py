@@ -997,6 +997,16 @@ class InternalAdapter:
         warnings: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> InternalAdapterResult:
+        # sweep 하나는 ActionStudy 하나다. 어느 study 의 관측인지 결과 자체가 말하게
+        # 해 두면, 이력·리포트가 대표 라벨을 되짚어 추측하지 않아도 된다.
+        # 지지 라벨은 설명용으로 전부 싣는다 — 하나만 남기면 "왜 이 축을 건드렸나"가
+        # 실제보다 좁게 보고된다.
+        study_metadata = dict(metadata or {})
+        if request.action_key:
+            study_metadata.setdefault("action_key", request.action_key)
+            study_metadata.setdefault(
+                "supporting_labels", list(request.supporting_labels)
+            )
         return InternalAdapterResult(
             request_id=request.request_id,
             status=status,  # type: ignore[arg-type]
@@ -1009,7 +1019,7 @@ class InternalAdapter:
             search_space=deepcopy(search_space or {}),
             error=error,
             warnings=list(warnings or []),
-            metadata=dict(metadata or {}),
+            metadata=study_metadata,
         )
 
 
