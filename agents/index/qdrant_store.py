@@ -920,7 +920,7 @@ def _get_embedding_model(model_name: str) -> Any | None:
             except Exception as exc:
                 _failed_models[model_name] = time.monotonic()
                 print(
-                    f"[Index] 임베딩 모델 '{model_name}' 로드 실패 — deterministic "
+                    f"[Index] 임베딩 모델 '{model_name}' 로드 실패, deterministic "
                     f"fallback 사용, {_FAILED_MODEL_RETRY_SEC:.0f}초 후 재시도: {exc}"
                 )
     return _models.get(model_name)
