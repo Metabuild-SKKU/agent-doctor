@@ -229,8 +229,156 @@ def plan(
         state,
         evidence_analysis=evidence_analysis,
     )
+    # legacy 가 이미 계산한 evidence 분석을 shadow 가 재사용하도록 캐시로 넘긴다.
+    # 관측 때문에 비싼 청크 경계 분석을 두 번 돌리면 안 된다.
+    evidence_cache: dict[str, Any] = {}
+    if evidence_analysis is not None:
+        evidence_cache[label] = evidence_analysis
+    request.metadata["shadow_action_selection"] = _shadow_action_selection(
+        state,
+        actionable,
+        label,
+        candidates[0].id if candidates else None,
+        evidence_cache,
+    )
     decision.request_id = request.request_id
     return request, decision
+
+
+# ── shadow mode: action 선택을 함께 계산해 비교만 한다 ─────────────
+# 실제 적용은 위의 legacy 경로가 그대로 한다. 여기서는 "action 중심으로 골랐다면
+# 무엇을 골랐을까" 를 계산해 request metadata 에 남긴다.
+#
+# 목적은 전환 전에 **실익을 관측**하는 것이다. 선택이 전혀 달라지지 않거나 tie-break
+# 차이뿐이라면 선택 로직 전환을 보류한다(계획서 §8 단계 3 중단 기준). 구조(catalog·
+# eligibility·aggregator)는 중복 선언 제거와 정책 단일화만으로도 유지 가치가 있다.
+
+def _shadow_action_selection(
+    state: AgentDoctorState,
+    actionable: list[Finding],
+    legacy_label: str,
+    legacy_prescription_id: str | None,
+    evidence_cache: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """legacy 선택과 action 선택을 비교한다.
+
+    **실패해도 legacy 경로를 깨지 않는다.** shadow 는 관측용이므로 어떤 예외도
+    최적화 자체를 막아서는 안 된다.
+    """
+    try:
+        return _compute_shadow_selection(
+            state,
+            actionable,
+            legacy_label,
+            legacy_prescription_id,
+            evidence_cache if evidence_cache is not None else {},
+        )
+    except Exception as exc:  # noqa: BLE001 - 관측 실패가 최적화를 막으면 안 된다
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _compute_shadow_selection(
+    state: AgentDoctorState,
+    actionable: list[Finding],
+    legacy_label: str,
+    legacy_prescription_id: str | None,
+    evidence_cache: dict[str, Any],
+) -> dict[str, Any]:
+    from agents.optimize import action_aggregator, action_catalog
+
+    grouped = _group_by_label(actionable)
+
+    def search_space_for(label, findings, changes):
+        # 청크 경계 분석은 비싸다. 라벨 단위로 캐시해 legacy 가 이미 계산한 것을
+        # 재사용하고, shadow 때문에 같은 분석이 두 번 돌지 않게 한다.
+        analysis = None
+        if any(canonicalize_path(path) == "chunker.chunk_size" for path in changes):
+            if label not in evidence_cache:
+                evidence_cache[label] = _evidence_windows(state, findings)
+            analysis = evidence_cache[label]
+        return _finding_search_space(findings, changes, state, analysis)
+
+    supports = action_aggregator.build_action_supports(
+        grouped, state, search_space_for=search_space_for
+    )
+    candidates = action_aggregator.aggregate_action_candidates(supports, state)
+    eligible, rejected = action_aggregator.filter_ineligible_actions(
+        candidates,
+        state,
+        backend="rules",
+        runtime_capabilities=state.runtime_capabilities,
+    )
+    kept, deferred = action_aggregator.resolve_action_conflicts(eligible)
+    selected = action_aggregator.select_action(kept)
+
+    legacy_key = _legacy_action_key(legacy_label, legacy_prescription_id)
+    shadow_key = selected.action_key if selected else None
+
+    return {
+        "status": "ok",
+        "legacy_label": legacy_label,
+        "legacy_prescription_id": legacy_prescription_id,
+        "legacy_action_key": legacy_key,
+        "shadow_action_key": shadow_key,
+        "agrees": bool(legacy_key) and legacy_key == shadow_key,
+        "divergence_reason": _divergence_reason(legacy_key, shadow_key, selected),
+        "shadow_score": round(selected.score, 6) if selected else None,
+        "shadow_supporting_labels": (
+            list(selected.supporting_labels) if selected else []
+        ),
+        "shadow_supporting_probe_count": (
+            len(selected.supporting_probes) if selected else 0
+        ),
+        "shadow_score_breakdown": (
+            dict(selected.score_breakdown) if selected else {}
+        ),
+        # 여러 label 이 같은 변경을 지지해 하나로 합쳐진 사례. 전환의 실익이 여기서
+        # 관측된다 — 0 건이면 통합할 것이 없었다는 뜻이다.
+        "merged_action_count": sum(
+            1 for c in candidates if len(c.supporting_labels) > 1
+        ),
+        "eligible_action_count": len(kept),
+        "rejected_actions": [
+            {"action_key": c.action_key, "reason": c.reason} for c in rejected
+        ],
+        "deferred_axes": deferred,
+        "catalog_size": len(action_catalog.ACTION_CATALOG),
+    }
+
+
+def _legacy_action_key(label: str, prescription_id: str | None) -> str | None:
+    """legacy 가 고른 처방을 action key 로 환산한다(같은 잣대로 비교하기 위해)."""
+    from agents.optimize import action_catalog
+
+    rule = rules.get_rule(label)
+    if not rule or not prescription_id:
+        return None
+    for prescription in rule.get("prescriptions") or []:
+        if prescription.get("id") != prescription_id:
+            continue
+        for raw_path, value in (prescription.get("patch") or {}).items():
+            return action_catalog.build_action_key(raw_path, value)
+    return None
+
+
+def _divergence_reason(
+    legacy_key: str | None,
+    shadow_key: str | None,
+    selected: Any,
+) -> str | None:
+    """선택이 갈린 이유를 거칠게 분류한다(중단 기준 판정용)."""
+    if legacy_key == shadow_key:
+        return None
+    if shadow_key is None:
+        return "shadow_found_no_eligible_action"
+    if legacy_key is None:
+        return "legacy_prescription_not_in_catalog"
+    if selected is not None and len(selected.supporting_labels) > 1:
+        # 여러 label 이 지지해 통합된 action 이 이긴 경우 — 전환의 진짜 실익이다.
+        return "shared_support_won"
+    if legacy_key.split(":")[0] != shadow_key.split(":")[0]:
+        return "different_axis"
+    return "different_operation"
 
 
 def _rule_uses_chunk_size(rule: dict[str, Any]) -> bool:
