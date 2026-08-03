@@ -688,6 +688,9 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
     result = topic_cluster.classify_detail(failed_vecs, corpus_vecs)
     # 버킷뿐 아니라 판정 근거 수치도 metadata 에 남긴다 — 소비 유예(관측용) 동안
     # 임계값을 실측 분산에 맞춰 재보정할 근거가 finding 에 쌓이게 한다(캘리브레이션 과제).
+    # 경계는 동적(1.0 ± k·C/sqrt(N)) 이라 이번 판정에 실제로 쓰인 값을 남긴다 —
+    # 고정 상수를 남기면 후속 재보정 때 어떤 경계로 갈렸는지 근거가 사라진다.
+    spread_ratio, concentrated_ratio = topic_cluster.dynamic_bounds(result.failed_sample_size)
     for f in sem_findings:
         f.metadata["topic_cluster"] = result.bucket
         f.metadata["topic_cluster_detail"] = {
@@ -696,8 +699,8 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
             "baseline": result.baseline,
             "failed_sample_size": result.failed_sample_size,
             "corpus_sample_size": result.corpus_sample_size,
-            "concentrated_ratio": topic_cluster.TOPIC_CLUSTER_CONCENTRATED_RATIO,
-            "spread_ratio": topic_cluster.TOPIC_CLUSTER_SPREAD_RATIO,
+            "concentrated_ratio": concentrated_ratio,
+            "spread_ratio": spread_ratio,
         }
     ratio_str = f"{result.ratio:.3f}" if result.ratio is not None else "n/a"
     print(

@@ -32,11 +32,13 @@ from __future__ import annotations
 
 from typing import NamedTuple, Optional, Sequence
 
+import math
+
 from agents.eval.knowledge_graph import cosine
 from agents.eval.types import (
     TOPIC_CLUSTER_BASELINE_SAMPLE,
-    TOPIC_CLUSTER_CONCENTRATED_RATIO,
-    TOPIC_CLUSTER_SPREAD_RATIO,
+    TOPIC_CLUSTER_BOUNDARY_K,
+    TOPIC_CLUSTER_NULL_C,
 )
 
 Vector = Sequence[float]
@@ -52,6 +54,21 @@ UNMEASURED = "unmeasured"
 def _valid(vec: Optional[Vector]) -> bool:
     """실측 임베딩인가 — None·빈 벡터(임베딩 미부착/fallback 흔적)를 거른다."""
     return bool(vec) and any(vec)
+
+
+def dynamic_bounds(failed_n: int) -> tuple[float, float]:
+    """실패 gold 수 N 에 맞춘 (spread 상한, concentrated 하한) 경계를 돌려준다.
+
+    none 대 = 1.0 ± k·C/sqrt(N). null(주제 신호 없음) ratio 분포는 중앙값이 N 무관하게
+    1.0 에 붙고 stdev 가 C/sqrt(N) 로 줄어들어(types.py 캘리브레이션 주석), 폭을 이
+    분산에 맞춰 좁히면 오분류율이 표본 수와 무관하게 일정해진다. N<=0 이면(방어) 폭 0.
+
+    반환 (low, high): ratio<=low → spread, ratio>=high → concentrated, 그 사이 none.
+    """
+    if failed_n <= 0:
+        return 1.0, 1.0
+    half = TOPIC_CLUSTER_BOUNDARY_K * TOPIC_CLUSTER_NULL_C / math.sqrt(failed_n)
+    return 1.0 - half, 1.0 + half
 
 
 def _mean_pairwise_cosine(vectors: list[Vector]) -> Optional[float]:
@@ -140,9 +157,12 @@ def classify_detail(
     if baseline is None or baseline <= 0:
         return TopicClusterResult(UNMEASURED, None, failed_cohesion, baseline, failed_n, corpus_n)
     ratio = failed_cohesion / baseline
-    if ratio >= TOPIC_CLUSTER_CONCENTRATED_RATIO:
+    # 경계는 실패 gold 수 N 에 따라 동적(1.0 ± k·C/sqrt(N)) — types.py 캘리브레이션 주석.
+    # failed_n 은 stride 절단 후 실입력 수라, 추정량 분산과 짝이 맞는 값이다.
+    spread_hi, concentrated_lo = dynamic_bounds(failed_n)
+    if ratio >= concentrated_lo:
         bucket = CONCENTRATED
-    elif ratio <= TOPIC_CLUSTER_SPREAD_RATIO:
+    elif ratio <= spread_hi:
         bucket = SPREAD
     else:
         bucket = NONE

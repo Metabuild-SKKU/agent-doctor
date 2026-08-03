@@ -51,11 +51,12 @@ class TopicClusterClassifyTest(unittest.TestCase):
         self.assertEqual(tc.classify(failed, corpus), tc.UNMEASURED)
 
     def test_none_when_ratio_between_thresholds(self):
-        # 쟀는데 코퍼스와 비슷한 수준(ratio ≈ 1.2) → none(임베딩 문제 아님 → 청킹 조정).
-        # 판정 불가(unmeasured)와 구분돼야 한다.
+        # 쟀는데 코퍼스와 비슷한 수준(ratio ≈ 1.07) → none(임베딩 문제 아님 → 청킹 조정).
+        # 판정 불가(unmeasured)와 구분돼야 한다. 경계는 동적이라(N=2 → 약 [0.81, 1.19])
+        # ratio 가 그 안에 들도록 실패 각도를 잡는다.
         base = [1.0, 0.0]
         corpus = [base, [math.cos(0.9), math.sin(0.9)], [math.cos(1.8), math.sin(1.8)]]
-        failed = [base, [math.cos(1.15), math.sin(1.15)]]     # ratio ≈ 1.21
+        failed = [base, [math.cos(1.20), math.sin(1.20)]]     # ratio ≈ 1.07, N=2 none 대 안
         self.assertEqual(tc.classify(failed, corpus), tc.NONE)
 
     def test_baseline_sample_is_unbiased_by_document_order(self):
@@ -147,8 +148,10 @@ class TopicClusterClassifyDetailTest(unittest.TestCase):
         self.assertIsNotNone(r.ratio)
         self.assertIsNotNone(r.baseline)
         self.assertIsNotNone(r.failed_cohesion)
-        # ratio 가 임계값과 정합해야 한다(판정 근거 재현성).
-        self.assertGreaterEqual(r.ratio, tc.TOPIC_CLUSTER_CONCENTRATED_RATIO)
+        # ratio 가 (동적) 임계값과 정합해야 한다(판정 근거 재현성). 경계는 실패 gold
+        # 수 N 에 따라 1.0 ± k·C/sqrt(N) 로 잡힌다(types.py 캘리브레이션).
+        _spread_hi, concentrated_lo = tc.dynamic_bounds(r.failed_sample_size)
+        self.assertGreaterEqual(r.ratio, concentrated_lo)
         self.assertAlmostEqual(r.ratio, r.failed_cohesion / r.baseline)
         self.assertEqual(r.failed_sample_size, 3)
         self.assertEqual(r.corpus_sample_size, 5)
