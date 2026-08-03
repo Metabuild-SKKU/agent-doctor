@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from core.schema import DiagnosticReport, Document, Finding, Probe
 from core.state import AgentDoctorState
-from agents.optimize import planner
+from agents.optimize import candidate_values, planner
 from agents.optimize.planner import _knee, _knee_candidates
 
 
@@ -1177,10 +1177,13 @@ class PlannerCandidateListTest(unittest.TestCase):
             index_config={"chunk_size": 800, "chunk_overlap": 50},
         )
 
+        # 후보값 계산이 candidate_values 로 분리되면서 실제 호출 위치가 그쪽으로
+        # 옮겨졌다. planner 에 패치를 걸면 감지되지 않으므로 호출 모듈을 직접 잡는다.
+        # (memoization 동작 자체는 그대로다 — 한 번만 계산해 재사용한다.)
         with patch.object(
-            planner,
+            candidate_values,
             "build_evidence_windows",
-            wraps=planner.build_evidence_windows,
+            wraps=candidate_values.build_evidence_windows,
         ) as build_windows:
             planner.plan(state, blacklist=self._chunk_blacklist())
 
