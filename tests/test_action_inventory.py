@@ -248,5 +248,47 @@ class FlatKeyNormalizationTest(unittest.TestCase):
         )
 
 
+class InventoryFollowsCatalogTest(unittest.TestCase):
+    """집계 스크립트가 catalog 와 어긋날 자리를 만들지 않는지.
+
+    표가 낡는 문제를 고치려고 만든 스크립트가 action key 조립·operation 유도·차단
+    사유를 따로 구현하면, 정확히 그 문제를 다른 곳에 옮겨 놓는 셈이다
+    (PR #75 리뷰 지적). catalog 를 정본으로 읽는지 여기서 고정한다.
+    """
+
+    def test_every_catalog_action_appears_exactly_once(self):
+        from agents.optimize import action_catalog
+
+        snapshot = collect()
+        listed = [a["action_key"] for a in snapshot["executable"] + snapshot["blocked"]]
+
+        self.assertEqual(sorted(listed), sorted(a.key for a in action_catalog.all_actions()))
+        self.assertEqual(len(listed), len(set(listed)))
+
+    def test_definitional_facts_come_from_the_catalog(self):
+        from agents.optimize import action_catalog
+
+        snapshot = collect()
+        for record in snapshot["executable"] + snapshot["blocked"]:
+            action = action_catalog.get_action(record["action_key"])
+            with self.subTest(action=record["action_key"]):
+                self.assertEqual(record["operation"], action.operation)
+                self.assertEqual(record["canonical_path"], action.canonical_path)
+                self.assertEqual(record["reindex_required"], action.reindex_required)
+                self.assertEqual("blocked_reason" in record, action.is_blocked)
+
+    def test_backend_matches_catalog_sweepability(self):
+        from agents.optimize import action_catalog
+
+        for record in collect()["executable"]:
+            with self.subTest(action=record["action_key"]):
+                expected = (
+                    "internal"
+                    if action_catalog.is_sweepable(record["action_key"])
+                    else "rules"
+                )
+                self.assertEqual(record["backend"], expected)
+
+
 if __name__ == "__main__":
     unittest.main()

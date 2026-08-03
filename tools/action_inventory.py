@@ -17,13 +17,14 @@ rules.py 선언을 실제 실행 가능한 canonical action으로 집계한다.
   python3 tools/action_inventory.py            # 사람이 읽는 표
   python3 tools/action_inventory.py --json     # 기계가 읽는 스냅샷(테스트 fixture 비교용)
 
-[판정 기준]  optimizer.py가 실행 직전에 쓰는 것과 같은 정책을 그대로 사용한다.
-  1. canonicalize_path 로 정규화
-  2. STATE_MAPPABLE_PATHS 통과      (config_mapper가 state로 바꿀 수 있는가)
-  3. PATH_CAPABILITIES → DEFAULT_CAPABILITIES 통과  (파이프라인이 실제로 소비하는가)
-  둘 중 하나라도 막히면 blocked이며, 사유를 구분해 기록한다.
-    not_state_mappable : mapper 계약 부재      → 영구적, mapper+소비 노드 추가 필요
-    capability_off     : 소비 경로는 있으나 미검증 → 조건부, capability 값만 바꾸면 열림
+[판정 기준]  **action_catalog 를 그대로 읽는다.**
+  action key 조립·operation 유도·차단 사유·재색인·sweep 가능 여부는 전부 catalog 가
+  단일 진실 원천이다. 이 스크립트가 같은 규칙을 다시 구현하면, 표가 낡는 문제를
+  고치려다 **catalog 와 어긋날 자리를 새로 만든다**(PR #75 리뷰 지적).
+
+  여기서 더하는 것은 catalog 가 들고 있지 않은 집계뿐이다 —
+  어떤 라벨이 그 action 을 지지하는가, tier 는 무엇인가, 후보값이 몇 개인가,
+  rules.py 가 flat 키로 선언했는가.
 """
 from __future__ import annotations
 
@@ -40,62 +41,25 @@ from core.console import force_utf8_stdio
 
 force_utf8_stdio()
 
+from agents.optimize import action_catalog
 from agents.optimize import optimizer as _optimizer
-from agents.optimize.config_mapper import canonicalize_path
 from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
 
 
-# patch 값 → action operation. 계획서 §3.2의 action key 규칙과 같은 분류다.
-#   방향(increase/decrease)  : key에 방향을 담는다
-#   boolean(enable/disable)  : 값은 현재 상태가 결정하므로 key에 담지 않는다
-#   replace                  : 고정값 교체. 값은 후보로 넘긴다(같은 축의 여러 값이
-#                              경쟁하면 지지 집합이 같아 영구 교착이 생긴다)
-#   adjust                   : 방향·폭이 진단 실측으로 정해진다(shift_to_favored_channel)
-_SYMBOLIC_ADJUST_PREFIX = "shift_to"
-
-
-def _operation(value) -> str:
-    if value in ("increase", "decrease"):
-        return value
-    if value is True:
-        return "enable"
-    if value is False:
-        return "disable"
-    if isinstance(value, str) and value.startswith(_SYMBOLIC_ADJUST_PREFIX):
-        return "adjust"
-    return "replace"
-
-
-def _blocked_reason(path: str) -> str | None:
-    """실행을 막는 사유. 없으면 None(=실행 가능)."""
-    if path not in _optimizer.STATE_MAPPABLE_PATHS:
-        return "not_state_mappable"
-    capability = _optimizer.PATH_CAPABILITIES.get(path)
-    if capability and not _optimizer.DEFAULT_CAPABILITIES.get(capability, False):
-        return f"capability_off({capability})"
-    return None
-
-
 def collect() -> dict:
-    """ready 라벨의 처방을 canonical action으로 집계한다."""
-    actions: dict[str, dict] = {}
-
+    """catalog 의 action 정의에 rules 쪽 지지 집계를 붙인다."""
+    # 지지 라벨·tier·후보값·flat 키는 catalog 에 없다 — rules 선언에서 모은다.
+    support: dict[str, dict] = {}
     for label, rule in LABEL_TO_PRESCRIPTIONS.items():
         if rule.get("status") != "ready":
             continue
         group = rule.get("group")
         for prescription in rule.get("prescriptions") or []:
-            reindex = bool(prescription.get("reindex"))
             for raw_path, value in (prescription.get("patch") or {}).items():
-                path = canonicalize_path(raw_path)
-                key = f"{path}:{_operation(value)}"
-                entry = actions.setdefault(key, {
-                    "action_key": key,
-                    "canonical_path": path,
-                    "operation": _operation(value),
+                key = action_catalog.build_action_key(raw_path, value)
+                entry = support.setdefault(key, {
                     "supporters": [],       # (group, label)
                     "values": set(),
-                    "reindex_required": reindex,
                     "raw_paths": set(),
                 })
                 if (group, label) not in entry["supporters"]:
@@ -105,29 +69,30 @@ def collect() -> dict:
 
     executable: list[dict] = []
     blocked: list[dict] = []
-    for key in sorted(actions):
-        entry = actions[key]
-        path = entry["canonical_path"]
-        reason = _blocked_reason(path)
+    for action in action_catalog.all_actions():
+        entry = support.get(action.key, {"supporters": [], "values": set(), "raw_paths": set()})
         record = {
-            "action_key": key,
-            "canonical_path": path,
-            "operation": entry["operation"],
+            "action_key": action.key,
+            "canonical_path": action.canonical_path,
+            "operation": action.operation,
             "tiers": sorted({g for g, _ in entry["supporters"] if g}),
             "supporting_labels": sorted(label for _, label in entry["supporters"]),
             "support_count": len(entry["supporters"]),
             "candidate_value_count": len(entry["values"]),
-            "reindex_required": entry["reindex_required"],
+            "reindex_required": action.reindex_required,
             "flat_keys": sorted(p for p in entry["raw_paths"] if "." not in p),
         }
-        if reason:
-            record["blocked_reason"] = reason
+        if action.is_blocked:
+            # catalog 는 사유와 상세를 나눠 들고 있다. 표시는 계획서 §2 형식을 따른다.
+            record["blocked_reason"] = (
+                f"{action.blocked_reason}({action.blocked_detail})"
+                if action.blocked_reason == "capability_off"
+                else action.blocked_reason
+            )
             blocked.append(record)
         else:
             record["backend"] = (
-                "internal"
-                if path in _optimizer.BACKEND_SUPPORTED_PATHS.get("internal", set())
-                else "rules"
+                "internal" if action_catalog.is_sweepable(action.key) else "rules"
             )
             executable.append(record)
 
