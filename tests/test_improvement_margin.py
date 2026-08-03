@@ -417,13 +417,16 @@ class UnjudgeableAttemptBudgetTest(unittest.TestCase):
             optimizer="internal",
             status="failed",
             selected_prescription_id="increase_top_k",
+            action_key="retriever.top_k:increase",
         )
         item.metadata["unjudgeable"] = True
         if study_error:
             item.metadata["study_error"] = "scorable baseline 없음"
         return item
 
-    KEY = ("retrieval_missing_gold", "increase_top_k")
+    # 실행 제어 단위가 (label, prescription_id) 에서 action key 로 옮겨졌다.
+    # 측정 불가는 정확한 전이가 아니라 축 전체를 방문 범위에서 제한한다.
+    KEY = "retriever.top_k:increase"
 
     def test_report_absent_is_excluded_after_one_attempt(self):
         excluded = agent._unjudgeable_exclusions([self._item(study_error=False)])

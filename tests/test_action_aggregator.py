@@ -14,7 +14,7 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from agents.optimize import action_aggregator as aggregator
-from agents.optimize import action_catalog, candidate_values
+from agents.optimize import action_catalog, candidate_values, history
 from agents.optimize.schemas import ActionCandidate, ActionSupport
 from tests.test_planner import make_finding, make_state
 
@@ -404,6 +404,109 @@ class SupportConstructionTest(unittest.TestCase):
         for support in supports:
             with self.subTest(action=support.action_key):
                 self.assertEqual(support.affected_probes, {"p0"})
+
+
+class BlockedAttemptFilterTest(unittest.TestCase):
+    """품질 실패는 **정확한 전이 하나**만 막는다 (계획서 §5.1).
+
+    action 통째로 막으면 "top_k 7 이 나빴다"가 "top_k 축을 영원히 닫는다"가 되고,
+    상류를 고친 뒤 하류를 재평가한다는 A>C>B 설계 의도와 충돌한다.
+    """
+
+    def _candidates(self, findings, state):
+        def space_for(label, group, changes):
+            return candidate_values._finding_search_space(group, changes, state, None)
+
+        supports = aggregator.build_action_supports(
+            _grouped(findings), state, search_space_for=space_for
+        )
+        return aggregator.aggregate_action_candidates(supports, state)
+
+    def _top_k_action(self, candidates):
+        return next(
+            candidate
+            for candidate in candidates
+            if candidate.action_key == "retriever.top_k:increase"
+        )
+
+    def test_only_the_blocked_value_is_removed(self):
+        findings = [
+            make_finding(
+                "p1",
+                "retrieval_missing_gold",
+                candidates={"top_k": [7, 9]},
+            )
+        ]
+        state = make_state(findings, top_k=5)
+        blocked = {
+            history.build_attempt_key(
+                "retriever.top_k:increase", state.index_config, {"retriever.top_k": 7}
+            )
+        }
+
+        eligible, _rejected = aggregator.filter_ineligible_actions(
+            self._candidates(findings, state), state, blocked_attempts=blocked
+        )
+
+        self.assertEqual(
+            self._top_k_action(eligible).search_space,
+            {"retriever.top_k": [9]},
+        )
+
+    def test_action_is_dropped_only_when_every_value_is_blocked(self):
+        findings = [
+            make_finding(
+                "p1",
+                "retrieval_missing_gold",
+                candidates={"top_k": [7, 9]},
+            )
+        ]
+        state = make_state(findings, top_k=5)
+        blocked = {
+            history.build_attempt_key(
+                "retriever.top_k:increase", state.index_config, {"retriever.top_k": value}
+            )
+            for value in (7, 9)
+        }
+
+        eligible, rejected = aggregator.filter_ineligible_actions(
+            self._candidates(findings, state), state, blocked_attempts=blocked
+        )
+
+        self.assertNotIn(
+            "retriever.top_k:increase",
+            {candidate.action_key for candidate in eligible},
+        )
+        self.assertEqual(
+            self._top_k_action(rejected).reason,
+            aggregator.REASON_BLOCKED_ATTEMPT,
+        )
+
+    def test_a_block_from_another_baseline_does_not_apply(self):
+        findings = [
+            make_finding(
+                "p1",
+                "retrieval_missing_gold",
+                candidates={"top_k": [7, 9]},
+            )
+        ]
+        state = make_state(findings, top_k=5)
+        blocked = {
+            history.build_attempt_key(
+                "retriever.top_k:increase",
+                {"top_k": 5, "chunk_size": 256, "chunk_overlap": 50},   # 다른 baseline
+                {"retriever.top_k": 7},
+            )
+        }
+
+        eligible, _rejected = aggregator.filter_ineligible_actions(
+            self._candidates(findings, state), state, blocked_attempts=blocked
+        )
+
+        self.assertEqual(
+            self._top_k_action(eligible).search_space,
+            {"retriever.top_k": [7, 9]},
+        )
 
 
 if __name__ == "__main__":

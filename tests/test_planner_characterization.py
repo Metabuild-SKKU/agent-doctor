@@ -114,26 +114,78 @@ class ScoreOrderCharacterizationTest(unittest.TestCase):
         self.assertEqual(label, "retrieval_incomplete_enumeration")
 
 
-class PrescriptionOrderCharacterizationTest(unittest.TestCase):
-    """라벨이 선택되면 그 라벨의 처방을 선언 순서대로 시도한다.
+class LabelNoLongerOwnsExecutionOrderTest(unittest.TestCase):
+    """라벨이 처방 실행 순서를 소유하지 않는다 — 전환의 목표 자체다.
 
-    **이 성질은 전환으로 사라진다.** label 이 실행 순서를 소유하지 않게 되기 때문이다
-    (계획서 §1). 여기 박제하는 이유는 "사라졌다"는 것을 단계 4 에서 명시적으로
-    확인하기 위해서다. 단계 4 에서 이 클래스는 action 기준 테스트로 교체된다.
+    이 클래스는 `PrescriptionOrderCharacterizationTest` 를 대체한다. 그쪽은
+    "라벨이 선택되면 그 라벨의 처방을 **선언 순서대로** 시도한다"를 박제했는데,
+    그 성질이 사라지는 것이 이 작업의 목적이었다(계획서 §1). 박제를 그대로 두면
+    "전환이 일어났다"와 "테스트가 깨졌다"를 구분할 수 없으므로, 같은 입력에 대해
+    **새 규칙**을 못박아 둔다.
+
+    새 규칙(계획서 §4.2): causal tier → 점수 → grounded → 비용 → action_key 사전순.
+    rules.py 의 선언 순서는 어디에도 들어가지 않는다.
     """
 
-    def test_first_declared_prescription_is_chosen(self):
-        findings = [make_finding("p1", "retrieval_missing_gold", gold_n=3)]
-        _label, prescription, _space, _decision = _select(findings)
-        self.assertEqual(prescription, "increase_top_k")
+    def test_declaration_order_does_not_decide_the_winner(self):
+        """`increase_top_k` 가 먼저 선언됐다는 사실은 선택에 관여하지 않는다.
 
-    def test_blacklisted_prescription_falls_through_to_next(self):
-        findings = [make_finding("p1", "retrieval_missing_gold", gold_n=3)]
-        _label, prescription, _space, _decision = _select(
-            findings, blacklist={("retrieval_missing_gold", "increase_top_k")}
+        같은 라벨의 세 축(top_k·chunk_overlap·chunk_size)이 모두 probe 1개 지지다.
+        재색인 두 축은 비용 3 으로 밀리고 남은 top_k 가 이긴다 — 선언 순서가 아니라
+        **비용**이 갈랐다. (gold 근거가 있으면 top_k 축은 방향 충돌로 아예 제외돼
+        비용 비교까지 가지도 않는다. 여기서는 비용 규칙만 보려고 근거를 비운다.)
+        """
+        findings = [make_finding("p1", "retrieval_missing_gold")]
+        request, _decision = planner.plan(make_state(findings))
+
+        self.assertEqual(request.action_key, "retriever.top_k:increase")
+        self.assertEqual(request.action_score_breakdown["base_cost"], 1.0)
+        runner_ups = {
+            entry["action_key"] for entry in request.metadata["runner_up_actions"]
+        }
+        self.assertTrue(
+            runner_ups <= {
+                "chunker.chunk_overlap:increase",
+                "chunker.chunk_size:increase",
+            },
+            f"예상 밖의 경쟁 action: {runner_ups}",
         )
-        self.assertIsNotNone(prescription)
-        self.assertNotEqual(prescription, "increase_top_k")
+
+    def test_same_cost_ties_break_on_action_key_not_declaration(self):
+        """비용까지 같으면 action_key 사전순이다(결정성 보장).
+
+        `retrieval_incomplete_enumeration` 은 top_k 확대(1번 선언)와 MMR(2번 선언)을
+        같은 비용으로 지지한다. 선언 순서를 따르면 top_k 인데, 사전순은 MMR 이다.
+        """
+        findings = [make_finding("p1", "retrieval_incomplete_enumeration", gold_n=3)]
+        request, _decision = planner.plan(make_state(findings))
+
+        self.assertEqual(request.action_key, "retriever.mmr:enable")
+
+    def test_selection_is_deterministic_across_finding_order(self):
+        """입력 순서가 바뀌어도 같은 선택이 나온다.
+
+        예전 `_group_by_label` 은 dict 삽입 순서에 의존해 동점에서 결과가 흔들렸다.
+        """
+        findings = [
+            make_finding("p1", "retrieval_missing_gold", gold_n=3),
+            make_finding("p2", "retrieval_incomplete_enumeration", gold_n=3),
+        ]
+        forward, _ = planner.plan(make_state(findings))
+        backward, _ = planner.plan(make_state(list(reversed(findings))))
+
+        self.assertEqual(forward.action_key, backward.action_key)
+
+    def test_blocked_action_falls_through_to_the_next_axis(self):
+        """차단된 축이 있으면 다음 순위 축으로 넘어간다(라벨을 통째로 건너뛰지 않는다)."""
+        findings = [make_finding("p1", "retrieval_missing_gold", gold_n=3)]
+        request, _decision = planner.plan(
+            make_state(findings), blacklist={"retriever.top_k:increase"}
+        )
+
+        self.assertIsNotNone(request)
+        self.assertNotEqual(request.action_key, "retriever.top_k:increase")
+        self.assertEqual(request.supporting_labels, ["retrieval_missing_gold"])
 
 
 class SearchSpaceCharacterizationTest(unittest.TestCase):

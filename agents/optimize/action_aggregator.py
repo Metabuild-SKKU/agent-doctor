@@ -29,6 +29,7 @@ from core.schema import Finding
 from core.state import AgentDoctorState
 from agents.optimize import action_catalog, eligibility, rules
 from agents.optimize.schemas import (
+    ActionAttemptKey,
     ActionCandidate,
     ActionDefinition,
     ActionSupport,
@@ -249,6 +250,43 @@ def _annotate_opposition(candidates: list[ActionCandidate]) -> None:
 
 # ── 3. 실행 가능성 필터 ───────────────────────────────────────────
 
+REASON_BLOCKED_ATTEMPT = "blocked_action_attempt"
+
+
+def _drop_blocked_attempts(
+    candidate: ActionCandidate,
+    baseline_config: dict[str, Any],
+    runtime_capabilities: dict[str, Any] | None,
+    blocked_attempts: set[Any] | None,
+) -> list[Any]:
+    """이미 품질 실패로 확인된 **정확한 전이**만 후보값에서 뺀다 (계획서 §5.1).
+
+    action 통째로 막지 않는 것이 핵심이다. top_k 7 이 나빴다는 사실은 top_k 9 에 대해
+    아무것도 말해주지 않고, baseline 이 바뀌면 7 조차 다시 볼 가치가 있다. 축을 닫으면
+    "상류를 고친 뒤 하류를 다시 본다"는 A>C>B 설계 의도와 충돌한다.
+    """
+    from agents.optimize import history
+
+    path = candidate.definition.canonical_path
+    values = list(candidate.search_space.get(path, []))
+    if not blocked_attempts or not values:
+        return values
+
+    baseline = history.baseline_fingerprint(
+        baseline_config, candidate.action_key, runtime_capabilities
+    )
+    kept: list[Any] = []
+    for value in values:
+        attempt = ActionAttemptKey(
+            action_key=candidate.action_key,
+            baseline_fingerprint=baseline,
+            candidate_fingerprint=history.candidate_fingerprint({path: value}),
+        )
+        if attempt not in blocked_attempts:
+            kept.append(value)
+    return kept
+
+
 def filter_ineligible_actions(
     candidates: list[ActionCandidate],
     state: AgentDoctorState,
@@ -257,11 +295,15 @@ def filter_ineligible_actions(
     capabilities: dict[str, Any] | None = None,
     runtime_capabilities: dict[str, Any] | None = None,
     constraints: dict[str, Any] | None = None,
+    blocked_attempts: set[Any] | None = None,
 ) -> tuple[list[ActionCandidate], list[ActionCandidate]]:
     """실행 가능한 후보와 제외된 후보를 나눠 반환한다.
 
     **점수 계산 전이 아니라 정렬 전에 호출한다.** 점수는 이미 계산돼 있어도 되지만,
     실행 불가 action 이 정렬에 들어가면 실행 가능한 action 을 밀어낸다.
+
+    ``blocked_attempts`` 는 품질 실패로 확인된 ActionAttemptKey 집합이다. 후보값
+    단위로만 걸러내고, 남는 값이 없을 때에 한해 action 을 제외한다.
     """
     eligible: list[ActionCandidate] = []
     rejected: list[ActionCandidate] = []
@@ -281,15 +323,31 @@ def filter_ineligible_actions(
             runtime_capabilities=runtime_capabilities,
             constraints=constraints,
         )
-        if verdict.eligible:
-            candidate.search_space = verdict.search_space
-            candidate.metadata["eligibility"] = verdict.detail
-            eligible.append(candidate)
-        else:
+        if not verdict.eligible:
             candidate.status = "blocked"
             candidate.reason = verdict.reason or "ineligible"
             candidate.metadata["eligibility"] = verdict.detail
             rejected.append(candidate)
+            continue
+
+        candidate.search_space = verdict.search_space
+        candidate.metadata["eligibility"] = verdict.detail
+
+        # eligibility 를 통과한 최종 후보값에서 차단된 전이를 뺀다. 순서가 중요하다 —
+        # constraint·no-op 필터 전 값으로 fingerprint 를 만들면 실제 적용된 값과
+        # 어긋나 차단이 빗나간다.
+        path = candidate.definition.canonical_path
+        remaining = _drop_blocked_attempts(
+            candidate, state.index_config, runtime_capabilities, blocked_attempts
+        )
+        if not remaining:
+            candidate.status = "blocked"
+            candidate.reason = REASON_BLOCKED_ATTEMPT
+            candidate.metadata["eligibility"] = verdict.detail
+            rejected.append(candidate)
+            continue
+        candidate.search_space = {path: remaining}
+        eligible.append(candidate)
 
     return eligible, rejected
 

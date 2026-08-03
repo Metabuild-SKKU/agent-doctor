@@ -50,6 +50,8 @@ from agents.optimize import history
 from agents.optimize.config_mapper import canonicalize_path, get_current_value
 from agents.optimize.evidence_window import build_evidence_windows
 from agents.optimize.schemas import (
+    ActionAttemptKey,
+    ActionStudyKey,
     ConfigPatch,
     OptimizationRequest,
     OptimizeDecision,
@@ -197,6 +199,9 @@ def plan(
 
     selection = _select_action(state, actionable, blacklist)
     if selection is None or selection.selected is None:
+        # 실을 request 가 없으므로 "왜 아무것도 못 했는지"를 decision 에 담는다.
+        # 후보값 근거 계산 실패(direction_conflict·insufficient_spans 등)도 여기로
+        # 흘러오며, 이게 없으면 사용자에게는 "처방 없음"만 남는다.
         return None, OptimizeDecision(
             mode="use_current",
             status="skipped",
@@ -204,6 +209,7 @@ def plan(
             next_route="serve",
             reason="적용 가능한 action 이 없음",
             manual_labels=decision.manual_labels,
+            metadata=_selection_diagnostics(selection),
         )
 
     request = _build_action_request(selection, state)
@@ -254,17 +260,20 @@ def _select_action(
             analysis = evidence_cache[label]
         return _finding_search_space(findings, changes, state, analysis)
 
+    blocked_keys, blocked_attempts = _normalize_exclusions(exclusions, state)
     supports = action_aggregator.build_action_supports(
         grouped, state, search_space_for=search_space_for
     )
     candidates = action_aggregator.aggregate_action_candidates(
-        supports, state, exclusions=_normalize_exclusions(exclusions)
+        supports, state, exclusions=blocked_keys
     )
     eligible, rejected = action_aggregator.filter_ineligible_actions(
         candidates,
         state,
         backend="rules",
         runtime_capabilities=state.runtime_capabilities,
+        constraints=_policy_constraints(state),
+        blocked_attempts=blocked_attempts,
     )
     kept, deferred = action_aggregator.resolve_action_conflicts(eligible)
     ranked = action_aggregator.rank_action_candidates(kept)
@@ -279,28 +288,93 @@ def _select_action(
     )
 
 
-def _normalize_exclusions(exclusions: set[str] | None) -> set[str]:
-    """호출자가 넘긴 제외 목록을 action key 집합으로 정규화한다.
+def _policy_constraints(state: AgentDoctorState) -> dict[str, Any]:
+    """config 정책에서 나오는 후보값 제약. optimizer 의 정적 제약 위에 얹는다.
 
-    전환 과도기에는 agent 가 아직 (label, prescription_id) 튜플을 넘길 수 있다.
-    그 형태도 action key 로 환산해 받아준다(단계 5 에서 호출부가 정리된다).
+    후보창 상한은 사용자 config(rerank_candidate_policy)의 값이라 optimizer 의
+    DEFAULT_CONSTRAINTS 로는 표현할 수 없다. **선택 전 eligibility 와 실행 직전
+    optimizer 가 같은 값을 봐야 한다** — 한쪽만 보면 근거값 계산은 상한을 지키는데
+    방향 폴백(현재값×2)이 상한을 넘겨 그대로 config 에 박힌다(30×2=60 > 50).
+    """
+    policy = state.index_config.get("rerank_candidate_policy") or {}
+    return {
+        "reranker.candidate_count": {
+            "max": int(policy.get("max_candidates", _DEFAULT_MAX_RERANK_CANDIDATES)),
+        },
+    }
+
+
+def _rejected_action_entries(selection: _ActionSelection) -> list[dict[str, Any]]:
+    """제외된 action 과 사유. 후보값 근거(grounding)까지 함께 남긴다."""
+    entries: list[dict[str, Any]] = []
+    for candidate in selection.rejected:
+        entry: dict[str, Any] = {
+            "action_key": candidate.action_key,
+            "reason": candidate.reason,
+        }
+        grounding = _selected_grounding(candidate, candidate.definition.canonical_path)
+        if grounding:
+            entry["candidate_grounding"] = grounding
+        entries.append(entry)
+    return entries
+
+
+def _selection_diagnostics(
+    selection: _ActionSelection | None,
+) -> dict[str, Any]:
+    """선택이 비었을 때 사용자에게 남길 근거."""
+    if selection is None:
+        return {}
+    return {
+        "rejected_actions": _rejected_action_entries(selection),
+        "deferred_axes": list(selection.deferred),
+    }
+
+
+def _normalize_exclusions(
+    exclusions: set[Any] | None,
+    state: AgentDoctorState,
+) -> tuple[set[str], set[Any]]:
+    """호출자가 넘긴 제외 목록을 (차단 action key, 차단 전이) 로 가른다.
+
+    받는 형태는 네 가지다.
+      - ``str``              : action key. 이번 방문에서만 막는 visit-local 제외
+      - ``ActionStudyKey``   : 그 baseline 에서 결론이 난 탐색 → action 통째로 차단
+      - ``ActionAttemptKey`` : **정확한 전이 하나만** 차단 → 후보값 단위로 거른다
+      - ``(label, id)`` 튜플 : 구버전 blacklist. action key 로 환산해 받아준다
+
+    ⚠️ study/attempt key 는 baseline fingerprint 를 담고 있어, baseline 이 달라지면
+    자동으로 풀린다(구현계획 §5.1). 여기서 baseline 이 다른 study key 를 action 차단으로
+    올리면 그 완화가 무너지므로 현재 baseline 과 일치할 때만 차단한다.
     """
     from agents.optimize import action_catalog
 
-    normalized: set[str] = set()
+    blocked_keys: set[str] = set()
+    blocked_attempts: set[Any] = set()
+
     for item in exclusions or set():
         if isinstance(item, str):
-            normalized.add(item)
-            continue
-        if isinstance(item, tuple) and len(item) == 2:
+            blocked_keys.add(item)
+        elif isinstance(item, ActionAttemptKey):
+            blocked_attempts.add(item)
+        elif isinstance(item, ActionStudyKey):
+            current = history.baseline_fingerprint(
+                state.index_config,
+                item.action_key,
+                state.runtime_capabilities,
+            )
+            if item.baseline_fingerprint == current:
+                blocked_keys.add(item.action_key)
+        elif isinstance(item, tuple) and len(item) == 2:
             label, prescription_id = item
             rule = rules.get_rule(label)
             for prescription in (rule or {}).get("prescriptions") or []:
                 if prescription.get("id") != prescription_id:
                     continue
                 for raw_path, value in (prescription.get("patch") or {}).items():
-                    normalized.add(action_catalog.build_action_key(raw_path, value))
-    return normalized
+                    blocked_keys.add(action_catalog.build_action_key(raw_path, value))
+
+    return blocked_keys, blocked_attempts
 
 
 def _build_action_request(
@@ -381,13 +455,13 @@ def _build_action_request(
             for name, capability in state.runtime_capabilities.items()
             if isinstance(capability, dict)
         },
+        # 후보창 상한 같은 config 정책 제약. planner 의 eligibility 와 optimizer 의
+        # 실행 직전 재검증이 같은 값을 봐야 한다(_policy_constraints 주석 참고).
+        "constraints": _policy_constraints(state),
         "action_key": action.action_key,
         "action_score_breakdown": dict(action.score_breakdown),
         "candidate_support": dict(action.metadata.get("candidate_support", {})),
-        "rejected_actions": [
-            {"action_key": c.action_key, "reason": c.reason}
-            for c in selection.rejected
-        ],
+        "rejected_actions": _rejected_action_entries(selection),
         "deferred_axes": list(selection.deferred),
         "runner_up_actions": [
             {"action_key": c.action_key, "score": round(c.score, 6)}

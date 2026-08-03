@@ -30,12 +30,18 @@ Optimize 모듈의 "판정·기록" 계층.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import uuid
+from typing import Any
 
 from core.schema import DiagnosticReport
 from core.state import AgentDoctorState
+from agents.optimize.config_mapper import canonical_config_view, canonicalize_path
 from agents.optimize.schemas import (
+    ActionAttemptKey,
+    ActionStudyKey,
     OptimizationHistoryItem,
     OptimizationRequest,
     Verdict,
@@ -99,6 +105,138 @@ def meets_improvement_margin(
     return improvement > 0 and (
         improvement > margin
         or math.isclose(improvement, margin, rel_tol=1e-12, abs_tol=1e-12)
+    )
+
+
+# ── 0. action 식별자 (구현계획 §5.1 / §8.2) ───────────────────────
+# 실행 이력과 차단의 단위를 (label, prescription_id) 에서 "실제 config 전이" 로 옮긴다.
+#
+#   ActionAttemptKey = (action_key, baseline_fingerprint, candidate_fingerprint)
+#   ActionStudyKey   = (action_key, baseline_fingerprint, search_space_fingerprint)
+#
+# ⚠️ 이 전환은 차단 **강화가 아니라 baseline 별 완화**다. 기존 튜플은 baseline 과
+# 무관한 영구 차단이라 "top_k 를 고쳐 검색을 개선한 뒤 리랭커를 다시 본다" 같은
+# 정당한 재평가까지 막았다. fingerprint 에 baseline 을 넣으면 config 가 바뀐 뒤의
+# 같은 action 은 새 시도가 된다. 무한 반복은 정확 전이 차단 + 후보 소진 +
+# 예산(iteration/visit) + 개선 마진이 막는다.
+_FINGERPRINT_LENGTH = 16
+
+
+def _digest(payload: Any) -> str:
+    """비교 가능한 payload 를 결정적 짧은 해시로 만든다.
+
+    set 이나 dict 순서 때문에 같은 입력이 다른 해시를 내면 차단이 무력화되므로
+    sort_keys 로 정렬하고, 직렬화 불가 타입은 repr 로 고정한다.
+    """
+    encoded = json.dumps(payload, sort_keys=True, default=repr, ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:_FINGERPRINT_LENGTH]
+
+
+def _capability_identity(
+    action_key: str,
+    runtime_capabilities: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """이 action 의 실행 가능 여부를 좌우하는 runtime 관측만 뽑는다.
+
+    reranker 처럼 Index 가 실제 로드해 봐야 아는 optional 모델이 대상이다. 모델이
+    바뀌거나 verified 로 승격되면 같은 config 전이라도 결과가 달라지므로 baseline
+    정체성에 포함한다. 무관한 capability 까지 넣으면 관계없는 변화에 차단이 풀린다.
+    """
+    if not action_key.startswith("reranker.") or not isinstance(
+        runtime_capabilities, dict
+    ):
+        return {}
+    capability = runtime_capabilities.get("reranker")
+    if not isinstance(capability, dict):
+        return {}
+    return {
+        "reranker": {
+            "status": capability.get("status"),
+            "model": capability.get("model"),
+        }
+    }
+
+
+def baseline_fingerprint(
+    baseline_config: dict[str, Any],
+    action_key: str = "",
+    runtime_capabilities: dict[str, Any] | None = None,
+) -> str:
+    """"지금 어느 baseline 위에 서 있는가" 의 지문."""
+    return _digest(
+        {
+            "config": canonical_config_view(baseline_config or {}),
+            "capability": _capability_identity(action_key, runtime_capabilities),
+        }
+    )
+
+
+def candidate_fingerprint(changes: dict[str, Any] | None) -> str:
+    """적용하려는(또는 적용한) 구체 config 변경의 지문."""
+    return _digest(
+        {
+            canonicalize_path(path): value
+            for path, value in sorted((changes or {}).items())
+        }
+    )
+
+
+def search_space_fingerprint(search_space: dict[str, Any] | None) -> str:
+    """탐색 범위 전체의 지문. 후보 하나가 아니라 묶음을 식별한다."""
+    return _digest(
+        {
+            canonicalize_path(path): list(values)
+            if isinstance(values, (list, tuple))
+            else [values]
+            for path, values in sorted((search_space or {}).items())
+        }
+    )
+
+
+def build_attempt_key(
+    action_key: str,
+    baseline_config: dict[str, Any],
+    changes: dict[str, Any] | None,
+    runtime_capabilities: dict[str, Any] | None = None,
+) -> ActionAttemptKey:
+    """품질 실패로 차단할 '정확한 전이' 하나."""
+    return ActionAttemptKey(
+        action_key=action_key,
+        baseline_fingerprint=baseline_fingerprint(
+            baseline_config, action_key, runtime_capabilities
+        ),
+        candidate_fingerprint=candidate_fingerprint(changes),
+    )
+
+
+def build_study_key(
+    action_key: str,
+    baseline_config: dict[str, Any],
+    search_space: dict[str, Any] | None,
+    runtime_capabilities: dict[str, Any] | None = None,
+) -> ActionStudyKey:
+    """한 baseline 에서 결론이 난 탐색 하나."""
+    return ActionStudyKey(
+        action_key=action_key,
+        baseline_fingerprint=baseline_fingerprint(
+            baseline_config, action_key, runtime_capabilities
+        ),
+        search_space_fingerprint=search_space_fingerprint(search_space),
+    )
+
+
+def study_key_for_request(
+    request: OptimizationRequest,
+    runtime_capabilities: dict[str, Any] | None = None,
+) -> ActionStudyKey | None:
+    """요청 하나가 시작하려는 study 의 식별자. action 이 없으면 None."""
+    if not request.action_key:
+        return None
+    return build_study_key(
+        request.action_key,
+        request.baseline_config,
+        request.search_space,
+        runtime_capabilities,
     )
 
 
@@ -242,11 +380,38 @@ def create_pending_item(
     prescription_id: str,
     before_config: dict,
     before_report: DiagnosticReport | None,
+    *,
+    applied_changes: dict[str, Any] | None = None,
 ) -> OptimizationHistoryItem:
     """처방 적용 시점의 'pending' 이력 항목을 만든다.
     after/verdict 는 아직 없다 — 다음 방문에서 finalize_item 으로 채운다.
-    before_report 는 다음 방문의 judge 에 쓰려고 metadata 에 잠시 보관한다."""
+    before_report 는 다음 방문의 judge 에 쓰려고 metadata 에 잠시 보관한다.
+
+    ``applied_changes`` 는 실제로 적용한 config 변경이다. attempt fingerprint 의
+    입력이라 반드시 '이번에 적용한 값'이어야 한다 — 탐색 범위 전체를 넣으면 sweep
+    중간 후보가 서로를 차단한다.
+
+    action 스냅샷(지지 라벨·probe)을 함께 남기는 이유는 구현계획 §5.4 다. "이 action 이
+    지지받았다"와 "그 라벨이 실제로 해결됐다"는 다른 사실이라, 다음 Eval 의 남은
+    라벨과 비교하려면 적용 당시 지지 집합이 이력에 있어야 한다.
+    """
     before_scores = dict(before_report.ragas_scores) if before_report else {}
+    runtime_capabilities = request.metadata.get("runtime_capabilities")
+    attempt_key = None
+    study_key = None
+    if request.action_key:
+        attempt_key = build_attempt_key(
+            request.action_key,
+            before_config,
+            applied_changes,
+            runtime_capabilities,
+        )
+        study_key = build_study_key(
+            request.action_key,
+            before_config,
+            request.search_space,
+            runtime_capabilities,
+        )
     return OptimizationHistoryItem(
         trial_id=str(uuid.uuid4()),
         request_id=request.request_id,
@@ -262,10 +427,16 @@ def create_pending_item(
         target_metrics=list(request.target_metrics),
         reason=request.reason,
         rollback_reason=None,
+        action_key=request.action_key,
+        supporting_labels=list(request.supporting_labels),
+        supporting_probes=list(request.supporting_probes),
+        action_attempt_key=attempt_key,
+        action_study_key=study_key,
         metadata={
             "pending": True,               # 아직 판정되지 않음
             "before_report": before_report,  # judge 용(MVP: 객체 참조 보관)
             "before_composite": _read_composite(before_report),  # 표시용 baseline 종합점수
+            "applied_changes": dict(applied_changes or {}),
         },
     )
 
@@ -296,14 +467,82 @@ def find_active_study(
     return None
 
 
+def last_action_key(
+    history: list[OptimizationHistoryItem],
+) -> str | None:
+    """가장 최근에 실제 적용을 시작한 action key. 구버전 이력이면 None."""
+    for item in reversed(history):
+        if item.action_key:
+            return item.action_key
+    return None
+
+
+def last_action_study_key(
+    history: list[OptimizationHistoryItem],
+) -> ActionStudyKey | None:
+    """가장 최근에 시작한 ActionStudy 의 식별자.
+
+    iteration 은 "새 ActionStudy 를 적용한 횟수"이므로(구현계획 §5.3) 증가 판정은
+    이 값과 새 요청의 study key 를 비교해 한다. action key 만 비교하면 같은 action 을
+    **다른 baseline 에서** 다시 탐색하는 경우가 예산을 소비하지 않아, 롤백↔재적용
+    왕복이 무한히 예산을 피해 간다.
+    """
+    for item in reversed(history):
+        if item.action_study_key is not None:
+            return item.action_study_key
+    return None
+
+
 def last_failure_label(
     history: list[OptimizationHistoryItem],
 ) -> str | None:
-    """가장 최근에 실제 적용을 시작한 라벨을 반환한다."""
+    """가장 최근에 실제 적용을 시작한 대표 라벨.
+
+    ⚠️ DEPRECATED — 실행 제어는 last_action_key/last_action_study_key 가 한다.
+    구버전 이력을 읽는 리포트 경로만 이 함수를 쓴다.
+    """
     for item in reversed(history):
         if item.failure_labels:
             return item.failure_labels[0]
     return None
+
+
+def _confirmed_labels(report: DiagnosticReport | None) -> set[str]:
+    """리포트에서 확정(confirmed) 라벨 집합을 뽑는다."""
+    if report is None:
+        return set()
+    return {
+        finding.label
+        for finding in report.findings
+        if finding.confirmed and finding.label
+    }
+
+
+def attribute_result(
+    item: OptimizationHistoryItem,
+    before_report: DiagnosticReport | None,
+    after_report: DiagnosticReport | None,
+) -> dict[str, list[str]]:
+    """지지받은 라벨 중 실제로 사라진 것과 남은 것을 가른다 (구현계획 §5.4).
+
+    "이 action 이 지지받았다"와 "그 라벨이 해결됐다"는 다른 사실이다. 지지 라벨을
+    그대로 성과로 보고하면 리포트가 실제보다 좋게 읽힌다. before/after 의 확정
+    Finding 차집합으로만 resolved 를 계산한다 — 리포트가 없으면 계산하지 않는다
+    (측정 없이 해결을 주장하지 않는다).
+    """
+    supporting = list(item.supporting_labels)
+    if not supporting or before_report is None or after_report is None:
+        return {"resolved_labels": [], "remaining_labels": list(supporting)}
+
+    before_labels = _confirmed_labels(before_report)
+    after_labels = _confirmed_labels(after_report)
+    resolved = [
+        label
+        for label in supporting
+        if label in before_labels and label not in after_labels
+    ]
+    remaining = [label for label in supporting if label not in resolved]
+    return {"resolved_labels": resolved, "remaining_labels": remaining}
 
 
 def finalize_item(
@@ -343,4 +582,8 @@ def finalize_item(
         else _read_composite(after_report)
     )
     item.metadata["floor_violations"] = verdict.floor_violations
+    # 지지 라벨과 실제 해결 라벨을 구분해 남긴다(§5.4). before_report 를 지우기 전에.
+    item.metadata.update(
+        attribute_result(item, before_report, after_report)
+    )
     item.metadata.pop("before_report", None)   # 판정 끝 — 무거운 참조 제거

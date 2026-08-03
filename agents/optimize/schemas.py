@@ -612,6 +612,11 @@ class OptimizeDecision:
         manual_labels: 이번 진단에서 함께 발견된 D그룹(manual) 라벨들.
             apply_optimize로 자동 처방이 진행되는 경우에도, 별도로 사람이
             확인해야 할 문제가 있으면 여기 담아 reporter가 사용자에게 알린다.
+        metadata: 결정의 부가 근거. 특히 실행 가능한 action이 하나도 남지 않아
+            request가 None인 경우, 어떤 action이 왜 제외됐는지(rejected_actions)와
+            어떤 축이 충돌로 보류됐는지(deferred_axes)를 여기 담는다. request가
+            없으면 그 설명을 실을 곳이 여기뿐이다 — 없으면 "처방 없음"만 남고
+            사용자는 이유를 알 수 없다.
     """
 
     mode: DecisionMode
@@ -621,6 +626,7 @@ class OptimizeDecision:
     next_route: NextRoute = "serve"
     reason: str = ""
     manual_labels: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -733,9 +739,13 @@ class OptimizationHistoryItem:
     trial_id: str
     request_id: str
     iteration: int
+    # DEPRECATED: 선택 단위가 action 으로 옮겨졌다. 이 목록의 첫 원소를 "대표 라벨"로
+    #   읽던 실행 제어는 action_key 로 대체됐고, 여기는 설명·구버전 호환용으로 남는다.
+    #   지지 라벨 전체는 supporting_labels 를 읽어야 한다.
     failure_labels: list[str]
     optimizer: OptimizerBackend
     status: OptimizationStatus
+    # DEPRECATED: 실행 제어는 action_key/attempt·study key 가 소유한다(구현계획 §8.2).
     selected_prescription_id: str | None = None
     before_config: dict[str, Any] = field(default_factory=dict)
     after_config: dict[str, Any] = field(default_factory=dict)
@@ -746,3 +756,14 @@ class OptimizationHistoryItem:
     rollback_reason: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    # ── action 중심 필드 (구현계획 §5.4 결과 귀속) ────────────────────
+    # 이 시도가 실제로 바꾼 config 변경. 실행·이력·차단 identity 의 정본이다.
+    action_key: str | None = None
+    # 적용 당시 이 action 을 지지한 라벨과 고유 probe 스냅샷. 다음 Eval 의 남은
+    # 라벨과 비교해 "지지받았다"와 "실제로 해결됐다"를 구분한다.
+    supporting_labels: list[str] = field(default_factory=list)
+    supporting_probes: list[str] = field(default_factory=list)
+    # 정확한 config 전이와 탐색 범위의 식별자. 재선택 차단에 쓴다.
+    action_attempt_key: ActionAttemptKey | None = None
+    action_study_key: ActionStudyKey | None = None
