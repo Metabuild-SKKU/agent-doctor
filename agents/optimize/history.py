@@ -30,6 +30,7 @@ Optimize 모듈의 "판정·기록" 계층.
 """
 from __future__ import annotations
 
+import math
 import uuid
 
 from core.schema import DiagnosticReport
@@ -56,6 +57,49 @@ _FLOORS: dict[str, float] = {
     "context_utilization": 0.40,
     "noise_sensitivity": 0.60,   # 낮을수록 좋음 → 0.60 초과면 위반
 }
+
+
+# ── 개선 판정 최소 마진 ───────────────────────────────────────────
+# 개선으로 인정할 최소 상승폭(정규화 composite 0~1 기준).
+# 표시 점수 2점 = 0.02. Eval 노이즈(LLM judge 편차·표본 오차) 안에 묻히는 상승을
+# "개선"으로 확정하지 않기 위한 값이다.
+#
+# ⚠️ 이 값은 **잠정치다. 노이즈 분포를 측정해서 나온 값이 아니다.**
+#    유일한 관측 근거는 같은 config 재평가가 82↔78(표시 4점 폭)로 흔들린 사례
+#    하나뿐이고(PR #66 리뷰), 그게 사실이면 2점은 노이즈보다 작아 제 역할을 못 한다.
+#    같은 config 반복 Eval 로 σ 를 재고 마진을 k·σ 로 다시 정해야 한다.
+#    보정에 쓸 관측값은 finalize_item 이 이력에 남긴다
+#    (margin_rejected·score_delta·improvement_margin).
+#
+# ⚠️ 스케일 주의: judge 도 sweep objective 도 정규화 composite(0~1)를 쓴다.
+#    표시용 composite_total(0~100)과 혼동하면 마진이 100배 어긋난다.
+#
+# judge(유지/롤백)와 internal sweep(best 후보 선정)이 같은 값을 써야 한다. 두 경로는
+# 각각 독립적으로 "개선했는가"를 판정하고 둘 다 사용자 리포트로 나가므로, 임계가
+# 다르면 같은 점수 변화가 경로에 따라 다르게 보고된다.
+# internal_adapter 는 history 를 import 하지 않으므로 planner 가 이 값을
+# OptimizationRequest.metadata["min_delta"] 로 중계한다(planner._build_request).
+MIN_IMPROVEMENT_MARGIN: float = 0.02
+
+
+def meets_improvement_margin(
+    improvement: float,
+    margin: float = MIN_IMPROVEMENT_MARGIN,
+) -> bool:
+    """상승폭이 마진을 만족하는가. (경계값 포함)
+
+    internal_adapter._meets_min_delta 와 **동작이 같아야** 한다. 두 모듈은 각각
+    독립적으로 "개선했는가"를 판정하며(judge 는 rules 처방을, sweep 은 후보 묶음을),
+    둘 다 사용자 리포트로 나간다. 임계가 다르면 같은 점수 변화가 어느 경로를 탔는지에
+    따라 다르게 보고된다. 그래서 비교식(`> margin` 또는 math.isclose)까지 맞춘다.
+
+    agent._relax_reranker_precision_floor 도 이 함수를 쓴다 — floor 위반 경로는
+    judge 가 먼저 반환해 마진을 안 거치므로, 그쪽 점수 관문을 여기에 맞춰야 한다.
+    """
+    return improvement > 0 and (
+        improvement > margin
+        or math.isclose(improvement, margin, rel_tol=1e-12, abs_tol=1e-12)
+    )
 
 
 # ── 1. 하한선 검사 ────────────────────────────────────────────────
@@ -106,8 +150,15 @@ def judge(
     """
     처방 전후 Eval 리포트를 비교해 유지/롤백을 판정한다. (CONTEXT.md 5번)
       ① after 가 하한선을 위반하면 → 무조건 롤백 (지표별 원값으로 검사)
-      ② Eval 단일 점수가 올랐으면 → 유지, 아니면 → 롤백
+      ② Eval 단일 점수가 MIN_IMPROVEMENT_MARGIN 이상 올랐으면 → 유지, 아니면 → 롤백
     단일 점수는 정규화 composite(품질×신뢰도, 0~1)를 쓴다(_read_score, 여기서 재계산 안 함).
+    하한선 검사가 마진보다 **먼저**다 — 하한선 위반은 점수가 얼마나 올랐든 무조건 롤백이다.
+
+    ── 왜 마진이 필요한가 ────────────────────────────────────────────
+    Eval 점수에는 LLM judge 편차·표본 노이즈가 섞여 있다. "0.0001 상승도 개선"으로
+    보면 노이즈로 우연히 오른 config 가 롤백 안전망을 통과해 유지되고, 같은 축을
+    늘렸다 줄였다 하는 왕복까지 양쪽 다 "개선"이 된다. max_iterations 가 몇 회뿐인
+    예산을 노이즈 추적에 태우지 않도록 최소 상승폭을 요구한다.
 
     ── 탐색 신호를 composite 으로 통일한다 (과거엔 overall 이었음) ──────────────
     표시·게이트(gate.py)도, 탐색(이 judge)도 이제 같은 composite 을 쓴다.
@@ -140,14 +191,33 @@ def judge(
             reason=f"하한선 위반 {violations} → 무조건 롤백",
         )
 
-    if after_score > before_score:
+    improvement = after_score - before_score
+    if meets_improvement_margin(improvement):
         return Verdict(
             keep=True,
             before_score=before_score,
             after_score=after_score,
             before_composite=before_composite,
             after_composite=after_composite,
-            reason=f"종합점수 상승 {before_score:.3f}→{after_score:.3f} → 유지",
+            reason=(
+                f"종합점수 상승 {before_score:.3f}→{after_score:.3f} "
+                f"(+{improvement:.3f} ≥ 마진 {MIN_IMPROVEMENT_MARGIN:.3f}) → 유지"
+            ),
+        )
+
+    # 올랐지만 마진 미만이면 '노이즈로 오른 것'과 구분되지 않는다 → 개선으로 보지 않는다.
+    if improvement > 0:
+        return Verdict(
+            keep=False,
+            before_score=before_score,
+            after_score=after_score,
+            before_composite=before_composite,
+            after_composite=after_composite,
+            margin_rejected=True,
+            reason=(
+                f"종합점수 상승폭 부족 {before_score:.3f}→{after_score:.3f} "
+                f"(+{improvement:.3f}, 필요 +{MIN_IMPROVEMENT_MARGIN:.3f}) → 롤백"
+            ),
         )
 
     return Verdict(
@@ -256,6 +326,12 @@ def finalize_item(
     # Optimize Agent가 이 값을 사용해 같은 실행 안에서 동일 no-progress 전이를
     # 다시 열지 않으며, 새 파이프라인 실행에서는 이력이 초기화되어 재시도할 수 있다.
     item.metadata["unjudgeable"] = bool(verdict.unjudgeable)
+    # 마진 사후 조정용 기록. 마진이 노이즈보다 작으면 제 역할을 못 하고, 과도하게 크면
+    # 진짜 작은 개선까지 버린다. 어느 쪽인지 판단하려면 탈락한 시도뿐 아니라 **유지된
+    # 시도의 상승폭 분포**도 필요하므로 세 값을 모든 확정 항목에 남긴다.
+    item.metadata["score_delta"] = verdict.after_score - verdict.before_score
+    item.metadata["margin_rejected"] = bool(verdict.margin_rejected)
+    item.metadata["improvement_margin"] = MIN_IMPROVEMENT_MARGIN
     # 표시·게이트용 종합점수(0~100). verdict 가 실어줬으면 그걸, 아니면 리포트에서 직접.
     before_report = item.metadata.get("before_report")
     item.metadata["before_composite"] = (

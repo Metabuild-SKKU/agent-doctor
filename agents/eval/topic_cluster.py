@@ -32,11 +32,13 @@ from __future__ import annotations
 
 from typing import NamedTuple, Optional, Sequence
 
+import math
+
 from agents.eval.knowledge_graph import cosine
 from agents.eval.types import (
     TOPIC_CLUSTER_BASELINE_SAMPLE,
-    TOPIC_CLUSTER_CONCENTRATED_RATIO,
-    TOPIC_CLUSTER_SPREAD_RATIO,
+    TOPIC_CLUSTER_BOUNDARY_K,
+    TOPIC_CLUSTER_NULL_C,
 )
 
 Vector = Sequence[float]
@@ -52,6 +54,21 @@ UNMEASURED = "unmeasured"
 def _valid(vec: Optional[Vector]) -> bool:
     """실측 임베딩인가 — None·빈 벡터(임베딩 미부착/fallback 흔적)를 거른다."""
     return bool(vec) and any(vec)
+
+
+def dynamic_bounds(failed_n: int) -> tuple[float, float]:
+    """실패 gold 수 N 에 맞춘 (spread 상한, concentrated 하한) 경계를 돌려준다.
+
+    none 대 = 1.0 ± k·C/sqrt(N). null(주제 신호 없음) ratio 분포는 중앙값이 N 무관하게
+    1.0 에 붙고 stdev 가 C/sqrt(N) 로 줄어들어(types.py 캘리브레이션 주석), 폭을 이
+    분산에 맞춰 좁히면 오분류율이 표본 수와 무관하게 일정해진다. N<=0 이면(방어) 폭 0.
+
+    반환 (low, high): ratio<=low → spread, ratio>=high → concentrated, 그 사이 none.
+    """
+    if failed_n <= 0:
+        return 1.0, 1.0
+    half = TOPIC_CLUSTER_BOUNDARY_K * TOPIC_CLUSTER_NULL_C / math.sqrt(failed_n)
+    return 1.0 - half, 1.0 + half
 
 
 def _mean_pairwise_cosine(vectors: list[Vector]) -> Optional[float]:
@@ -96,10 +113,10 @@ def stride_sample(vectors: list[Vector], limit: int = TOPIC_CLUSTER_BASELINE_SAM
 
 
 class TopicClusterResult(NamedTuple):
-    """classify 의 판정 + 그 근거 수치. 버킷만으로는 캘리브레이션을 못 하므로 함께 남긴다.
+    """classify 의 판정 + 그 근거 수치. 버킷만으로는 판정 근거를 못 남기므로 함께 돌려준다.
 
-    소비 유예(관측용) 동안에도 이 수치가 finding.metadata 에 쌓여야, 임계값
-    (CONCENTRATED/SPREAD_RATIO)을 실측 분산에 맞춰 재보정할 근거가 된다.
+    경계는 dynamic_bounds(N) 로 동적이라, 소비 유예(관측용) 동안 이 수치(ratio·N)가
+    finding.metadata 에 쌓여야 이번 회차가 어떤 동적 경계로 갈렸는지 재현·관측된다.
     unmeasured 면 ratio·baseline·failed_cohesion 은 None 이고, 표본 수만 남는다.
     """
     bucket: str
@@ -140,9 +157,12 @@ def classify_detail(
     if baseline is None or baseline <= 0:
         return TopicClusterResult(UNMEASURED, None, failed_cohesion, baseline, failed_n, corpus_n)
     ratio = failed_cohesion / baseline
-    if ratio >= TOPIC_CLUSTER_CONCENTRATED_RATIO:
+    # 경계는 실패 gold 수 N 에 따라 동적(1.0 ± k·C/sqrt(N)) — types.py 캘리브레이션 주석.
+    # failed_n 은 stride 절단 후 실입력 수라, 추정량 분산과 짝이 맞는 값이다.
+    spread_hi, concentrated_lo = dynamic_bounds(failed_n)
+    if ratio >= concentrated_lo:
         bucket = CONCENTRATED
-    elif ratio <= TOPIC_CLUSTER_SPREAD_RATIO:
+    elif ratio <= spread_hi:
         bucket = SPREAD
     else:
         bucket = NONE
@@ -157,10 +177,11 @@ def classify(
 
     반환: "concentrated" | "spread" | "none" | "unmeasured".
     - 실패 gold 가 2개 미만이거나 baseline 을 못 재면 "unmeasured"(판정 불가 → fallback).
-    - ratio = 실패 gold 응집도 / baseline.
-        ratio >= CONCENTRATED_RATIO → "concentrated"
-        ratio <= SPREAD_RATIO       → "spread"
-        그 사이                     → "none"
+    - ratio = 실패 gold 응집도 / baseline. 경계는 고정이 아니라 실패 gold 수 N 에 따라
+      동적(1.0 ± k·C/sqrt(N)) — dynamic_bounds(N) 이 (spread 상한, concentrated 하한)을 준다.
+        ratio >= concentrated 하한 → "concentrated"
+        ratio <= spread 상한       → "spread"
+        그 사이                    → "none"
 
     근거 수치(ratio·표본 수 등)가 필요하면 classify_detail 을 쓴다 — 이 함수는 그
     버킷 문자열만 노출하는 얇은 래퍼다(기존 호출부·계약 유지).
