@@ -104,13 +104,17 @@ def _new_cross_encoder(cross_encoder_cls, model_name: str):
 
     상한 인자를 못 받는 구현이면 상한 없이 만들되 조용히 넘어가지 않는다 — 상한이 빠지면
     리랭크 비용이 다시 chunk_size 에 비례해 열리므로, 로그로 드러내야 원인을 찾을 수 있다.
+
+    경고 문구에 ASCII 밖 기호(em-dash·이모지 등)를 쓰지 않는다 — 호출부(_load_reranker)의
+    try 안에서 출력되므로, cp949 콘솔에서 UnicodeEncodeError 가 나면 바깥 except 가 그걸
+    로드 실패로 삼켜 이 폴백 자체가 무력화된다(쿨다운까지 등록된다).
     """
     if _RERANKER_MAX_LENGTH <= 0:
         return cross_encoder_cls(model_name)
     try:
         return cross_encoder_cls(model_name, max_length=_RERANKER_MAX_LENGTH)
     except TypeError:
-        print("[Index] reranker 구현이 max_length 를 받지 않는다 — 입력 길이 상한 없이 로드한다 "
+        print("[Index] reranker 구현이 max_length 를 받지 않아 입력 길이 상한 없이 로드한다 "
               "(청크가 크면 리랭크 비용이 그만큼 커진다)")
         return cross_encoder_cls(model_name)
 

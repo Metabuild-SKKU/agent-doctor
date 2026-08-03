@@ -499,10 +499,12 @@ class Retriever:
         # 리랭크 실측 시간·쌍 수를 결과에 싣는다 — 검색 시간의 대부분이 여기서 나오는데
         # (쌍 수 × 쌍당 텍스트 길이), 지금까지 리포트에는 실행 여부만 있고 비용이 없었다.
         # chunk_size 처방으로 쌍당 비용이 뛰어도 Optimize 가 그걸 못 보고 품질만 비교한다.
+        # 쌍 수는 리랭크가 실제로 돈 경우(applied)만 센다 — 로드 실패·쿨다운이면 predict 가
+        # 아예 안 돌아서 시간은 0 인데 쌍만 잡히고, 리포트의 ms_per_pair 가 그만큼 희석된다.
         rerank_seconds = 0.0
         rerank_pairs = 0
         if reranker_attempted:
-            rerank_pairs = len(results)
+            attempted_pairs = len(results)
             rerank_started = time.monotonic()
             results, reranker_status = rerank_with_status(
                 query,
@@ -512,6 +514,7 @@ class Retriever:
             )
             rerank_seconds = time.monotonic() - rerank_started
             reranked = reranker_status == "applied"
+            rerank_pairs = attempted_pairs if reranked else 0
 
         mmr_applied = False
         if self.settings.use_mmr and len(results) > requested_top_k:

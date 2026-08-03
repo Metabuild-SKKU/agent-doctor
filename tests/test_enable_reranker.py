@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import sys
 import threading
 import time
@@ -125,6 +126,23 @@ class RerankerExecutionTest(unittest.TestCase):
         self.assertEqual(status, "ready")
         self.assertEqual(model.kwargs, {})
 
+    def test_fallback_survives_cp949_console(self):
+        """폴백 경고가 cp949 로 인코딩 안 되는 문자를 쓰면, 그 UnicodeEncodeError 를
+        _load_reranker 의 except 가 '로드 실패'로 삼켜 폴백 자체가 무력화된다(+쿨다운 등록).
+        pytest 는 stdout 을 utf-8 로 캡처해 이 경로를 못 잡으므로 여기서 직접 cp949 로 건다."""
+        model_name = "test/cp949-console-reranker"
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = lambda _name: _FakeCrossEncoder([0.1])
+        cp949_stdout = io.TextIOWrapper(io.BytesIO(), encoding="cp949", errors="strict")
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+            with patch("sys.stdout", cp949_stdout):
+                model, status = qdrant_store._load_reranker(model_name)
+
+        self.assertEqual(status, "ready")
+        self.assertIsNotNone(model)
+        self.assertNotIn(model_name, qdrant_store._failed_rerankers)
+
     def test_search_reports_rerank_cost(self):
         """리랭크 소요 시간·쌍 수를 검색 결과에 실어 리포트가 비용을 집계할 수 있게 한다."""
         chunks = [
@@ -145,6 +163,28 @@ class RerankerExecutionTest(unittest.TestCase):
 
         self.assertEqual(result["rerank_pairs"], 3)
         self.assertGreaterEqual(result["rerank_seconds"], 0.0)
+
+    def test_rerank_pairs_not_counted_when_rerank_did_not_run(self):
+        """로드 실패·쿨다운이면 predict 가 안 돌아 시간은 0 인데 쌍만 잡힌다 —
+        ms_per_pair 가 희석되지 않게 applied 일 때만 센다."""
+        chunks = [
+            {"chunk_id": f"c{i}", "doc_id": "d1", "text": f"alpha 문서 {i}", "metadata": {}}
+            for i in range(3)
+        ]
+        model_name = "test/failing-cost-reranker"
+        qdrant_store._rerankers[model_name] = _FakeCrossEncoder([])   # 점수 개수 불일치 → 실패
+        retriever = Retriever(
+            chunks,
+            RetrievalSettings(
+                use_reranker=True, reranker_model=model_name, rerank_candidates=3
+            ),
+            client=None,
+        )
+
+        result = retriever.search_with_details("alpha", top_k=2)
+
+        self.assertEqual(result["reranker_status"], "inference_failed")
+        self.assertEqual(result["rerank_pairs"], 0)
 
     def test_search_reports_zero_rerank_cost_when_disabled(self):
         chunks = [{"chunk_id": "c1", "doc_id": "d1", "text": "alpha", "metadata": {}}]
