@@ -124,6 +124,10 @@ def _answer_ok(record: EvalRecord, *, oracle: bool) -> bool:
 
     비용: 두 트랙 모두 record dict 만 읽는다(LLM 트리거 없음). _oracle_ok 은
     report._oracle_accuracy 가 성공 probe 에도 부르므로 이 성질이 지켜져야 한다.
+    이 성질은 _degraded_near_miss 의 검사 순서가 지탱한다 — 그 안의 면제선이 _faith 를
+    보지만, 그 전에 answer_correctness_degraded 가 아니면 곧장 False 로 빠진다. degrade
+    는 이미 끝난 RAGAS 실행의 플래그라 여기서 새 호출이 나지 않는다. 순서를 바꾸거나
+    면제선을 앞으로 옮기면 이 계약이 깨진다.
     """
     if _degraded_near_miss(record, oracle=oracle):
         return False

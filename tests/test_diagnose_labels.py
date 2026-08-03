@@ -2007,12 +2007,61 @@ class AbstentionFlagWiringTest(unittest.TestCase):
         self.assertEqual(served.get("abstention_relaxed"), True)
 
 
-class AbstentionPromptExclusivityTest(unittest.TestCase):
-    """기권 성향은 한 축의 양방향이라 프롬프트에 동시에 실리지 않는다 (리뷰 High 3).
+class AbstentionFlagExclusivityTest(unittest.TestCase):
+    """상호배제는 처방 적용 시점에 풀린다 — 마지막에 쓴 쪽이 이긴다 (리뷰 High).
 
-    index_config 는 회차 간 누적되므로 strict(환각 대응)와 relaxed(과다 기권 대응)가 함께
-    True 로 남을 수 있다. relaxed 를 우선한다 — 그러지 않으면 relax_abstention 이 no-op 이 돼
-    롤백·blacklist 로 빠지고 과다 기권을 고칠 수단이 사라진다.
+    index_config 는 회차 간 누적되므로 켜는 쪽만 쓰면 반대쪽 True 가 남는다. 그러면 나중
+    처방이 플래그는 바꿔도(optimizer 는 baseline 과 다르기만 하면 통과) 프롬프트가 안 변해
+    점수가 그대로고, 롤백 + blacklist 로 빠져 **그 라벨의 레버가 영구히 죽는다**.
+    우선순위로 풀면 진 쪽이 항상 죽으므로, 어느 쪽도 특별대우하지 않는다.
+    """
+
+    def _apply(self, config, *changes):
+        from agents.optimize.config_mapper import apply_best_config
+        for change in changes:
+            apply_best_config(config, change)
+        return config
+
+    def _prompt_mode(self, config):
+        from agents.rag.generator import _build_prompt
+        system, _user = _build_prompt("질문", ["컨텍스트"],
+                                      max_context_chars=1000, config=config)
+        if "최대한 답하라" in system:
+            return "relaxed"
+        return "strict" if "확신이 없으면" in system else "기본"
+
+    def test_later_prescription_wins_both_directions(self):
+        config = {"abstention_strict": False, "abstention_relaxed": False}
+        self._apply(config, {"generation.abstention_relaxed": True})
+        self.assertEqual(self._prompt_mode(config), "relaxed")
+
+        # 과다 기권을 고친 뒤 환각이 나오면 strict 가 실제로 프롬프트를 바꿔야 한다.
+        self._apply(config, {"generation.abstention_strict": True})
+        self.assertFalse(config["abstention_relaxed"])
+        self.assertEqual(self._prompt_mode(config), "strict")
+
+        # 반대 방향도 대칭이어야 한 축을 계속 왕복할 수 있다.
+        self._apply(config, {"generation.abstention_relaxed": True})
+        self.assertFalse(config["abstention_strict"])
+        self.assertEqual(self._prompt_mode(config), "relaxed")
+
+    def test_turning_a_flag_off_leaves_the_opposite_alone(self):
+        """끄는 변경까지 반대쪽을 켜면 안 된다 — 롤백이 의도치 않은 축을 세운다."""
+        config = {"abstention_strict": True, "abstention_relaxed": False}
+        self._apply(config, {"generation.abstention_strict": False})
+        self.assertFalse(config["abstention_relaxed"])
+        self.assertEqual(self._prompt_mode(config), "기본")
+
+    def test_unrelated_prescription_does_not_touch_the_pair(self):
+        config = {"abstention_relaxed": True, "abstention_strict": False, "top_k": 5}
+        self._apply(config, {"retriever.top_k": 8})
+        self.assertEqual(config["top_k"], 8)
+        self.assertTrue(config["abstention_relaxed"])
+
+
+class AbstentionPromptExclusivityTest(unittest.TestCase):
+    """소비처 백스톱 — config_mapper 를 안 거친 입력(손으로 고친 config 등)에도 모순
+    문구가 동시에 실리지 않는다. 정상 경로의 승자 결정은 AbstentionFlagExclusivityTest.
     """
 
     def _system(self, **flags):

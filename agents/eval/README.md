@@ -174,11 +174,16 @@ answer_score = 0.4·lexical + 0.6·semantic                          # ANSWER_SE
 무응답 기대 probe(`answer_exists=False`)에는 D도 붙지 않는다(채울 자료가 없으므로) —
 남는 건 B의 `generation_abstention_failure` 하나다.
 
-기권(답을 안 냄)은 C 슬롯 전제(`_context_failed`)에서 배제된다(`not _abstained`) — C 라벨들은
+기권(답을 안 냄)은 C 슬롯 전제(`_context_failed`)에서 배제된다 — C 라벨들은
 전부 "틀린 답을 냈다"를 전제로 인과를 세우는데(노이즈에 이끌림·리랭커가 무관한 청크를 올림·
 청크가 커서 노이즈) 기권에는 그 서사가 성립하지 않는다. 유효 근거를 두고 기권한 경우
-(recall=1·oracle 통과) `_generation_failed`가 B 슬롯을 열어 `generation_wrongful_abstention`이
+(recall=1) `_generation_failed`가 B 슬롯을 열어 `generation_wrongful_abstention`이
 그 자리를 가져간다 — `generation_abstention_failure`의 정반대 짝이다.
+
+B/C 배타는 두 슬롯이 `_wrongful_abstention_premise` 하나를 공유해서 보장된다(함수 호출
+순서가 아니라). 그 전제는 오라클 통과를 요구하지 않는다 — 오라클 답변도 같은 generator 가
+만들므로 과다 기권이 심할수록 오라클도 함께 기권해, `_oracle_ok` 를 걸면 "가끔 기권"만
+잡히고 "항상 기권"이라는 더 심한 케이스가 빠져나간다.
 
 ---
 
@@ -306,7 +311,7 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `generation_hop_binding_error` | B 생성 | 3 | RAGAS faithfulness(+추론검증) |
 | `generation_contradiction` / `numerical_error` / `misinterpretation` | B 생성 | 3 | 추론 실패 모드 단일분류(LLM 1회) |
 | `generation_abstention_failure` | B 생성 | 2~3 | 기권했어야 하는데 지어냄(두 갈래는 `metadata.trigger`로 구분 — `no_answer_expected` / `corpus_gap`) |
-| `generation_wrongful_abstention` | B 생성 | 1~3 | 근거는 검색됐는데(recall=1·oracle 통과) 기권 — C 전제를 닫고 자리를 가져간다. 처방 `relax_abstention` |
+| `generation_wrongful_abstention` | B 생성 | 1~3 | 근거는 검색됐는데(recall=1) 기권 — C 전제를 닫고 자리를 가져간다. 처방 `relax_abstention` |
 | `generation_parametric_overreliance` | B 생성 | 3 | 정답이지만 real faithfulness 낮음 |
 | `generation_failure` (롤업) | B 생성 | 3 | DEEP에서 세분화 (항상 예비) |
 | `too_long_context` | C context | 3 | context 길이 + 근거 없음, gold 는 양끝 |

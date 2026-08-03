@@ -287,6 +287,24 @@ class TestDegradeDoesNotFlipExactMatch(unittest.TestCase):
         finally:
             metrics_common.set_mode(Mode.FAST)
 
+    def test_short_gold_negation_reaches_exact_match_score(self):
+        """F1_EXACT_MATCH(1.0)는 문자열 완전일치가 아니다 — gold 가 10자 이하면 answer_match
+        가 char-recall 경로라 부정문 오답도 1.0 이 된다. 즉 면제선을 어휘 단독으로 두면
+        _degraded_near_miss 가 원래 잡으려던 바로 그 오답이 통과한다. 이 사실을 못 박아
+        두어야 면제 조건에서 faithfulness 를 떼는 변경이 조용히 지나가지 않는다."""
+        from agents.eval.metrics_basic import answer_match
+        self.assertEqual(answer_match("사망하지 않았다", "사망"), F1_EXACT_MATCH)
+
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            # 그래서 강등을 막아 세우는 건 어휘가 아니라 근거성 축이다.
+            rec = self._record(f1=F1_EXACT_MATCH, ragas={
+                "faithfulness": 0.1, "answer_correctness": 0.1,
+                "answer_correctness_degraded": True})
+            self.assertTrue(diagnose._degraded_near_miss(rec, oracle=False))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
     def test_exact_match_faith_unmeasured_still_demotes(self):
         """근거성 미측정(faithfulness None)이면 면제하지 않고 기존 강등으로 흐른다(보수적)."""
         metrics_common.set_mode(Mode.DEEP)

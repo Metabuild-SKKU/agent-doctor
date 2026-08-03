@@ -580,12 +580,13 @@ def _build_prompt(
         )
     else:
         clauses.append("한국어로 답하라.")
-    # 기권 성향은 한 축의 양방향이라 둘을 동시에 싣지 않는다 — index_config 는 회차 간
-    # 누적되므로(iteration 1 에 환각으로 strict, iteration 3 에 과다 기권으로 relaxed)
-    # 그대로 두면 "확신 없으면 반드시 기권" 과 "근거 있으면 최대한 답하라" 가 함께 들어간다.
-    # relaxed 를 우선한다: wrongful_abstention 진단은 '현재 설정이 과하게 보수적'이라는
-    # 실측이라 더 최신 근거이고, strict 를 이기지 못하면 relax_abstention 처방이 no-op 이
-    # 되어 롤백·blacklist 로 빠져 과다 기권을 고칠 수단 자체가 사라진다(리뷰 High).
+    # 기권 성향은 한 축의 양방향이라 둘을 동시에 싣지 않는다.
+    #
+    # 어느 쪽이 이길지는 여기서 정하지 않는다 — 처방 적용 시점에 config_mapper 의
+    # EXCLUSIVE_FLAG_PAIRS 가 반대쪽을 내려서(마지막에 쓴 쪽이 이긴다) 정상 경로에서는
+    # 애초에 한쪽만 True 로 들어온다. 아래 elif 는 손으로 고친 config 등 그 경로를 안 거친
+    # 입력에 대한 백스톱일 뿐이다. 여기서 우선순위로 푸는 건 안 된다: 진 쪽 처방이 영구히
+    # no-op 이 되어 롤백 + blacklist 로 사라지고, 그 라벨의 레버가 죽는다.
     if _gen_flag(config, "abstention_relaxed", False):
         clauses.append(
             "컨텍스트에 질문과 관련된 근거가 조금이라도 있으면 그것을 바탕으로 최대한 답하라. "
