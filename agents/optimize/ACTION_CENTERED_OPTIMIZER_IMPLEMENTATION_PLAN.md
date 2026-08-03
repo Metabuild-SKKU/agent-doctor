@@ -612,18 +612,153 @@ rollback cache·reindex 요구, `graph.py` route 무변경.
 
 > 각 단계의 상세 작업은 **PR #75 본문의 task list**로 관리한다.
 
-| 단계 | 내용 | 완료 조건 |
+| 단계 | 내용 | 상태 |
 | --- | --- | --- |
-| ~~**0-A**~~ | ~~선행 PR ①② 병합~~ | ✅ **완료** — #76(마진), #73(sweep 축) 병합 |
-| ~~**0**~~ | ~~Baseline 고정~~ | ✅ **완료** — 아래 결과 |
-| **1** | schema + action catalog + label rule이 action key 참조 | 기존 동작 변화 없음, catalog 무결성 통과 |
-| **2** | candidate value 로직 분리 | 기존 planner/chunk 테스트 동일 결과 |
-| **3** | aggregation shadow mode (선택은 legacy 유지, 비교 로그) | 결정적 ranking, probe dedupe, **중단 기준 판정** |
-| **4** | planner 선택 중심 전환 | label 우선 선택 함수가 실행 경로에서 제거 |
-| **5** | history·blacklist·iteration 전환 | label/prescription pair가 실행 제어에 미사용 |
-| **6** | reranker·adapter guardrail 이관 | 기존 guardrail 테스트 통과 |
-| **7** | reporter·serve 전환 | CLI/report/웹이 같은 action 표시 |
-| **8** | compatibility 제거·문서 갱신 | 실행 코드에 prescription pair 제어 참조 없음 |
+| ~~**0-A**~~ | ~~선행 PR ①② 병합~~ | ✅ #76(마진), #73(sweep 축) |
+| ~~**0**~~ | ~~Baseline 고정~~ | ✅ 아래 결과 |
+| ~~**1**~~ | ~~schema + action catalog~~ | ✅ `action_catalog.py`, 27 tests |
+| ~~**2**~~ | ~~candidate value 분리~~ | ✅ planner 1839 → 791줄 |
+| ~~**3**~~ | ~~aggregation shadow mode~~ | ✅ 중단 기준 판정 통과(§8.1) |
+| ~~**4**~~ | ~~planner 선택 중심 전환~~ | ✅ 알려진 실패 21건은 5~7에서 해소 |
+| **5** | history·blacklist·iteration 전환 | §8.2 |
+| **6** | reranker·adapter guardrail 이관 | §8.3 |
+| **7** | reporter·serve 전환 | §8.4 |
+| **8** | compatibility 제거·문서 갱신 | §8.5 |
+
+### 8.1 중단 기준 판정 결과 (단계 3)
+
+시나리오 5개로 legacy 와 action 선택을 비교했다. **5건 중 2건에서 선택이 갈렸고,
+그중 1건이 `shared_support_won`** 이라 진행 조건(공유 합산으로 달라진 사례 1건 이상)을
+충족했다.
+
+```text
+공유<단독 케이스
+  legacy : retrieval_low_rank 가 probe 6개로 단독 최고 → 리랭커를 켠다
+  action : 두 라벨이 함께 지지하는 top_k 증가를 고른다(probe 합산)
+```
+
+함께 관측된 것: 같은 비용 안에서는 `action_key` 사전순으로 갈리므로 **`rules.py` 의
+"가벼운 것 먼저" 선언 순서 의도가 사라진다.** 그대로 두기로 했다 — 최종 판정은 Eval
+실측이 하고 예산이 5회라 밀린 후보도 결국 시도된다. 선언 순서를 tie-break 에 넣으면
+"label 이 실행 순서를 소유하지 않는다"는 전환 목적과 어긋난다.
+
+### 8.2 단계 5 — history·blacklist·iteration 전환
+
+**실패 중인 테스트 9건**(`test_optimize_agent`)이 이 단계의 완료 지표다.
+
+#### 고칠 지점 (`agents/optimize/agent.py`)
+
+| 위치 | 현재 | 바꿀 것 |
+| --- | --- | --- |
+| `agent.py:565-569` | `last_failure_label` 비교로 `starts_new_label` 판정 | `last_action_key` 비교로 `starts_new_action_study` |
+| `agent.py:741` | `starts_new_label` 이면 iteration 증가 | 새 ActionStudy 적용 시 증가 |
+| `agent.py:665` | `state.blacklist.add((label, prescription_id))` | `blocked_action_attempts.add(ActionAttemptKey)` |
+| `agent.py:162,414,509,924` | `item.failure_labels[0]` / `selected_prescription_id` 로 로그·판정 | `item.action_key` |
+| `agent.py:873` | 완료 sweep 을 `(label, prescription_id)` 로 기록 | `completed_action_studies.add(ActionStudyKey)` |
+
+#### `agents/optimize/history.py`
+
+```text
+254  failure_labels=[request.failure_label]      → action_key, supporting_labels 스냅샷
+257  selected_prescription_id=prescription_id    → action_attempt_key / action_study_key
+299  last_failure_label()                        → last_action_key()
+```
+
+`create_pending_item` 이 support 스냅샷(지지 label·probe)을 받아야 §5.4 결과 귀속이
+가능하다. 판정 수학(`judge`, `check_floor`, 개선 마진)은 **건드리지 않는다.**
+
+#### `core/state.py`
+
+```python
+blocked_action_attempts: set = field(default_factory=set)
+completed_action_studies: set = field(default_factory=set)
+```
+
+기존 `blacklist` / `completed_prescriptions` 와 병행한다. planner 의
+`_normalize_exclusions` 가 이미 두 형태를 모두 받으므로, agent 가 새 필드를 채우기
+시작해도 선택 경로는 깨지지 않는다.
+
+#### fingerprint
+
+```text
+ActionAttemptKey  = (action_key, baseline_fingerprint, candidate_fingerprint)
+ActionStudyKey    = (action_key, baseline_fingerprint, search_space_fingerprint)
+입력: action key + baseline canonical effective config + candidate config
+      + 관련 runtime capability identity
+```
+
+**정확 전이만 차단한다**(§5.1). 축 단위 방문 이력은 두지 않는다.
+
+#### 완료 조건
+
+- `test_optimize_agent` 9건 통과
+- `test_planner` 7건을 action 기준으로 재작성 (선택 결과 변화는 의도된 것)
+- `(label, prescription_id)` 튜플이 실행 제어에 쓰이지 않음
+- rollback 후 재색인 요구·visit limit·pending finalize 동작 불변
+
+### 8.3 단계 6 — reranker·adapter guardrail 이관
+
+**실패 중인 테스트 3건**(`test_enable_reranker`)이 완료 지표다.
+
+#### prescription id 분기를 action key 로 (`agent.py:720, 782, 1237`)
+
+```python
+{"enable_reranker", "widen_rerank_candidates"}
+→ {"reranker.enabled:enable", "reranker.candidate_count:increase"}
+```
+
+세 곳 모두 같은 집합을 쓰므로 상수 하나로 묶는다.
+
+#### 보존해야 하는 동작
+
+- runtime unknown/unavailable 은 **품질 blacklist 로 분류하지 않는다**(deferred 기록)
+- reranker 가 꺼진 상태에서 candidate count 확대 금지 (`optimizer` 의 `reranker_disabled`)
+- reranker 적용이 불완전하면 `unjudgeable` rollback
+- low-rank 감소 + composite 상승 시 precision floor 완화
+- 같은 runtime 오류 무한 반복 방지
+
+> ⚠️ 단계 4 에서 planner 의 runtime 판정을 "정보 부재는 통과" 로 바꿨다. 최종 판정이
+> optimizer 에 있다는 전제이므로, 이 단계에서 optimizer 의 deferred 경로가 실제로
+> 동작하는지 반드시 확인한다.
+
+#### adapter (`internal_adapter`, `ragbuilder_adapter`, `chunk_prescreener`)
+
+- 대표 label 의존 제거 → action key + supporting labels 를 trial metadata 로
+- RAGBuilder payload: `failure_label`/`related_failure_labels` → action 중심.
+  외부 호환이 필요하면 대표 label 은 설명용 compatibility field 로만 유지
+- chunk prescreener: 여러 support 의 span/document 통합, 동일 span dedupe
+
+### 8.4 단계 7 — reporter·serve 전환
+
+소비처는 7군데다(`reporter.py`, `serve/report_view.py`, `serve/api.py`).
+
+- 대표 label 하나가 아니라 **action + supporting labels** 로 설명
+- opposing labels 와 충돌 보류 이유 노출(`request.metadata["deferred_axes"]`)
+- score breakdown drill-down (`supporting_probe_count`, `weighted_probe_support`,
+  `cost_source`, `confidence_source`)
+- resolved / remaining label 구분
+- **구버전 history fallback 유지** — 이전 실행의 `selected_prescription_id` 기록도 읽어야 한다
+- reporter 는 실제 selected action 을 읽는다. 첫 candidate 로 추측하지 않는다
+
+### 8.5 단계 8 — compatibility 제거
+
+`PrescriptionCandidate` 참조가 남은 곳:
+
+```text
+agents/optimize/planner.py      (legacy 파생 생성)
+agents/optimize/optimizer.py    (소비)
+agents/optimize/schemas.py      (정의)
+tests/test_optimizer.py, test_optimize_agent.py, test_ragbuilder_adapter.py
+문서 3개 (README / PROGRESS / 이 파일)
+```
+
+순서: 소비처 전환 확인 → `OptimizationRequest.candidates` 파생 중단 →
+`PrescriptionCandidate` 제거 → `failure_label`·`related_failure_labels` 제거 →
+문서 갱신(`AGENTS.md`, `README.md`, `CONTEXT.md`, `PROGRESS.md`,
+`OPTIMIZER_IMPLEMENTATION_PLAN.md` 에 superseded 표시).
+
+**저장 state 호환 요구를 먼저 확인한다.** 이전 실행의 `optimization_history` 를 읽어야
+하면 구버전 필드 reader 를 남긴다.
 
 ### 단계 0 결과 (완료)
 
