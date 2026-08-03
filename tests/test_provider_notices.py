@@ -153,18 +153,29 @@ class IndexGraphNoticeTest(unittest.TestCase):
     def test_no_key_is_silent(self):
         buf = io.StringIO()
         with patch.dict(os.environ, {}, clear=False), redirect_stdout(buf):
-            # auto 는 OPENAI_API_KEY 다음으로 OPENROUTER_API_KEY 도 본다 — 둘 다 없어야
-            # keyword 로 떨어진다.
             os.environ.pop("OPENAI_API_KEY", None)
             os.environ.pop("OPENROUTER_API_KEY", None)
             graph_index._extract(_chunk(), {})
         self.assertEqual(buf.getvalue(), "")
 
-    def test_openrouter_auto_notice_names_openrouter_key(self):
-        # OpenAI 키 없이 OpenRouter 키만 있는 실행에서 "OPENAI_API_KEY 감지" 라고
-        # 찍으면 어느 키를 빼야 청크당 유료 호출이 멈추는지 알 수 없다.
+    def test_openrouter_key_alone_does_not_trigger_auto(self):
+        # auto 는 OPENROUTER_API_KEY 로 켜지지 않는다 — Eval/RAG 용으로 넣은 키가
+        # 검색 품질과 무관한 이 단계의 청크당 유료 호출을 켜면 안 된다.
         buf = io.StringIO()
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-dummy"}, clear=False), \
+                patch.object(graph_index, "_llm_entities", return_value=([], [])), \
+                redirect_stdout(buf):
+            os.environ.pop("OPENAI_API_KEY", None)
+            _e, _r, mode = graph_index._extract(_chunk(), {})
+        self.assertEqual(mode, "keyword")
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_explicit_openrouter_notice_names_openrouter_key(self):
+        # 명시적으로 켠 경우엔 "OPENAI_API_KEY 감지" 라고 찍으면 어느 키를 빼야
+        # 청크당 유료 호출이 멈추는지 알 수 없다.
+        buf = io.StringIO()
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-dummy",
+                                     "INDEX_LLM_PROVIDER": "openrouter"}, clear=False), \
                 patch.object(graph_index, "_llm_entities", return_value=([], [])), \
                 redirect_stdout(buf):
             os.environ.pop("OPENAI_API_KEY", None)
@@ -224,6 +235,52 @@ class GraphExtractionDefaultOffTest(unittest.TestCase):
 
         config = AgentDoctorState().index_config
         self.assertFalse(config.get("graph_enabled", True))
+
+
+class GraphAutoExcludesOpenRouterTest(unittest.TestCase):
+    """auto 는 OpenRouter 키로 켜지지 않는다(명시적 opt-in 필요).
+
+    Eval/RAG 용으로 넣은 키 하나가 청크당 1회 호출을 켜는 것을 막는다."""
+
+    _ONLY_OR = {"OPENAI_API_KEY": "", "OPENROUTER_API_KEY": "sk-or-test",
+                "INDEX_LLM_PROVIDER": ""}
+
+    def test_auto_does_not_use_openrouter(self):
+        with patch.dict(os.environ, self._ONLY_OR, clear=False):
+            self.assertIsNone(graph_index._graph_llm_target({}))
+
+    def test_explicit_openrouter_still_works(self):
+        env = dict(self._ONLY_OR, INDEX_LLM_PROVIDER="openrouter")
+        with patch.dict(os.environ, env, clear=False):
+            target = graph_index._graph_llm_target({})
+        self.assertIsNotNone(target)
+        self.assertEqual(target[1], "https://openrouter.ai/api/v1")
+
+    def test_config_key_also_opts_in(self):
+        with patch.dict(os.environ, self._ONLY_OR, clear=False):
+            target = graph_index._graph_llm_target({"graph_llm_provider": "openrouter"})
+        self.assertIsNotNone(target)
+
+    def test_auto_still_uses_openai_key(self):
+        env = {"OPENAI_API_KEY": "sk-test", "OPENROUTER_API_KEY": "",
+               "INDEX_LLM_PROVIDER": ""}
+        with patch.dict(os.environ, env, clear=False):
+            target = graph_index._graph_llm_target({})
+        self.assertIsNotNone(target)
+        self.assertIsNone(target[1])       # base_url 없음 = 순정 OpenAI
+
+    def test_cache_signature_tracks_actual_provider(self):
+        # keyword 로 만든 캐시가 openrouter 로 켠 실행에 재사용되면 안 된다.
+        from agents.index.agent import _graph_cache_signature
+
+        config = {"graph_extraction": "auto"}
+        with patch.dict(os.environ, self._ONLY_OR, clear=False):
+            off = _graph_cache_signature(config)
+        with patch.dict(os.environ, dict(self._ONLY_OR,
+                                         INDEX_LLM_PROVIDER="openrouter"), clear=False):
+            on = _graph_cache_signature(config)
+        self.assertFalse(off["llm_available"])
+        self.assertTrue(on["llm_available"])
 
 
 class EmbeddingFallbackTest(unittest.TestCase):

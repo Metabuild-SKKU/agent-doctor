@@ -42,8 +42,11 @@ def _graph_llm_target(config: dict) -> tuple[str, str | None, str] | None:
     """(api_key, base_url, model) 또는 None.
 
     provider 는 config["graph_llm_provider"] > env INDEX_LLM_PROVIDER > "auto" 순.
-    auto 는 OPENAI_API_KEY 를 먼저 보므로, OpenRouter 키를 넣지 않은 기존 사용자에겐
-    동작이 그대로다."""
+
+    auto 는 OPENAI_API_KEY 만 본다 — OpenRouter 는 반드시 명시해야 켜진다. auto 가
+    OPENROUTER_API_KEY 도 받아주던 때, Eval/RAG 용으로 넣은 키 하나가 검색 품질과
+    무관한 이 단계까지 켜서 청크당 1회 호출이 조용히 과금됐다. 그래프 산출물은
+    시각화용이라 그 대가를 치를 이유가 없고, 켜는 쪽이 의도를 밝히는 게 맞다."""
     provider = str(
         config.get("graph_llm_provider")
         or os.getenv("INDEX_LLM_PROVIDER")
@@ -54,7 +57,7 @@ def _graph_llm_target(config: dict) -> tuple[str, str | None, str] | None:
 
     if provider in {"openai", "auto"} and openai_key:
         return openai_key, None, str(config.get("graph_llm_model") or DEFAULT_GRAPH_LLM_MODEL)
-    if provider in {"openrouter", "auto"} and openrouter_key:
+    if provider == "openrouter" and openrouter_key:
         model = str(
             config.get("graph_llm_model_openrouter")
             or os.getenv("INDEX_GRAPH_MODEL_OPENROUTER")

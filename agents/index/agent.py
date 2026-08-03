@@ -521,10 +521,14 @@ def _graph_cache_signature(config: dict) -> dict:
         for key, value in config.items()
         if key.startswith("graph_")
     }
+    # LLM 추출 가능 여부는 provider 해석 결과로 판정한다 — 예전엔 OPENAI_API_KEY 만 봐서,
+    # INDEX_LLM_PROVIDER=openrouter 로 켠 실행이 "LLM 없음" 으로 서명돼 keyword 로 만든
+    # 캐시를 그대로 재사용했다(추출 방식이 바뀌었는데 캐시가 안 깨짐).
+    from agents.index.graph_index import _graph_llm_target
+
     extraction = str(config.get("graph_extraction", "auto"))
-    graph_config["llm_available"] = bool(
-        extraction in {"auto", "llm"} and os.getenv("OPENAI_API_KEY")
-    )
+    target = _graph_llm_target(config) if extraction in {"auto", "llm"} else None
+    graph_config["llm_available"] = target is not None
     return graph_config
 
 
