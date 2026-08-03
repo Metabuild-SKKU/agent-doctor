@@ -22,6 +22,36 @@ FailureGroup = Literal["A", "B", "C", "D"]
 # 처방 규칙의 실행 가능 상태. ready만 자동 적용 대상이다.
 PrescriptionStatus = Literal["ready", "draft", "unassigned", "manual"]
 
+# action이 config 축에 가하는 변경의 종류.
+#   increase/decrease : 방향이 고정. action key에 방향을 담는다.
+#   enable/disable    : boolean 축. 현재 상태가 한쪽을 no-op으로 만들어 자동 배타된다.
+#   replace           : 고정값 교체. 값은 key가 아니라 후보값으로 넘긴다 —
+#                       같은 축의 여러 값을 key로 쪼개면 지지 label 집합이 같아져
+#                       점수가 영원히 동률이 되고 그 축이 선택되지 않는다(starvation).
+#   adjust            : 방향과 폭이 진단 실측으로 정해진다(예: shift_to_favored_channel).
+ActionOperation = Literal[
+    "increase",
+    "decrease",
+    "enable",
+    "disable",
+    "replace",
+    "adjust",
+]
+
+# action이 실행되지 못하는 사유. 해제 조건이 다르므로 구분해 기록한다.
+#   not_state_mappable : config_mapper 계약 부재. mapper와 소비 노드가 함께 필요하다.
+#   capability_off     : 소비 경로는 있으나 검증된 후보/구현이 없다. capability 값만
+#                        바꾸면 열린다.
+#   runtime_unavailable: 이번 실행의 runtime capability 미검증. 품질 실패와 구분한다.
+ActionBlockedReason = Literal[
+    "not_state_mappable",
+    "capability_off",
+    "runtime_unavailable",
+]
+
+# aggregate 단계에서 action이 놓인 상태.
+ActionCandidateStatus = Literal["ready", "blocked", "conflicted"]
+
 # 사용자가 어떤 최적화 성향을 우선하는지 나타낸다.
 TargetProfile = Literal["accuracy", "speed", "cost", "balanced"]
 
@@ -140,6 +170,160 @@ class PrescriptionCandidate:
     applies_when: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
     tradeoffs: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+# ── Action 중심 모델 ──────────────────────────────────────────────
+# 선택 단위를 failure label에서 실제 config action으로 옮기기 위한 모델이다.
+# label은 진단 근거·영향 probe·목표 metric을 제공하고, action이 우선순위 경쟁·
+# 후보값·적용·이력·차단의 중심이 된다.
+# (설계: agents/optimize/ACTION_CENTERED_OPTIMIZER_IMPLEMENTATION_PLAN.md)
+
+
+@dataclass(frozen=True)
+class ActionDefinition:
+    """실제 config 변경 하나의 정적 정의. label과 독립적으로 한 번만 선언한다.
+
+    같은 config 변경이 여러 label에서 다른 이름으로 선언되던 것을 여기로 모은다.
+    reindex/cost/capability/conflict family의 단일 진실 원천이다.
+
+    key 규칙은 ``<canonical_path>:<operation>``이며 label이나 기존 prescription id를
+    넣지 않는다. 고정값도 넣지 않는다(replace 주석 참고).
+    """
+
+    key: str
+    canonical_path: str
+    operation: ActionOperation
+    description: str
+    # 재색인 필요 여부. base_cost의 판정 근거이며 optimizer.REINDEX_PATHS와 일치해야 한다.
+    reindex_required: bool = False
+    # 우선순위 점수의 분모. 현재는 재색인 여부로만 유도한다(재색인 3 / 런타임 1).
+    # rules.py의 cost가 전부 None이라 실측 근거가 없기 때문이며, 근거 없는 숫자를
+    # 새로 만들지 않는다. 실측 기반 세분화는 confidence 생산과 함께 별도 작업이다.
+    base_cost: float = 1.0
+    # 이 경로가 요구하는 pipeline capability(optimizer.PATH_CAPABILITIES 기준).
+    capability: str | None = None
+    # 같은 축을 공유해 서로 경쟁할 수 있는 action 묶음. 보통 canonical_path와 같다.
+    conflict_family: str = ""
+    # 실행 전에 만족해야 하는 조건(예: candidate_count는 reranker가 켜져 있어야 한다).
+    prerequisites: tuple[str, ...] = ()
+    # 실행 불가 사유. None이면 실행 가능하다.
+    blocked_reason: ActionBlockedReason | None = None
+    # 차단 사유의 상세(어느 capability인지 등). 리포트와 catalog 검증에 쓴다.
+    blocked_detail: str = ""
+    tradeoffs: tuple[str, ...] = ()
+
+    @property
+    def is_blocked(self) -> bool:
+        return self.blocked_reason is not None
+
+
+@dataclass
+class ActionSupport:
+    """한 label 묶음이 특정 action에 제공하는 런타임 근거.
+
+    Eval은 Finding을 probe마다 따로 만든다(affected_probes는 항상 1개). 같은 label의
+    Finding 여러 개를 먼저 support 하나로 묶은 뒤, 같은 action을 지지하는 support들을
+    ActionCandidate로 통합한다.
+    """
+
+    action_key: str
+    label: str
+    group: FailureGroup | None = None
+    finding_ids: list[str] = field(default_factory=list)
+    # 이 label이 영향을 준 고유 probe. 점수는 label 수가 아니라 이 집합으로 센다.
+    affected_probes: set[str] = field(default_factory=set)
+    # rules.py diagnosis_confidence. 현재 전부 None이라 1.0으로 채워진다.
+    confidence: float = 1.0
+    # confidence의 출처. 나중에 실측 confidence가 생산되면 이력에서 구분할 수 있다.
+    confidence_source: str = "default"
+    target_metrics: list[str] = field(default_factory=list)
+    # 이 support가 제안하는 구체 후보값. 근거값 계산 결과이거나 방향 키워드 폴백이다.
+    candidate_values: list[Any] = field(default_factory=list)
+    applies_when: dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+    # 후보값이 어떻게 나왔는지(status, source, 분포 등). 리포트와 디버깅용.
+    grounding_metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_grounded(self) -> bool:
+        """측정값에 근거한 후보인지(방향 키워드 추측이 아닌지)."""
+        return self.grounding_metadata.get("status") in {
+            "grounded",
+            "explicit_candidates",
+        }
+
+
+@dataclass
+class ActionCandidate:
+    """같은 action key를 지지하는 support를 통합한 실제 선택 단위."""
+
+    action_key: str
+    definition: ActionDefinition
+    supports: list[ActionSupport] = field(default_factory=list)
+    # 이 action을 지지하는 label과 고유 probe. 점수와 설명의 근거다.
+    supporting_labels: list[str] = field(default_factory=list)
+    supporting_probes: set[str] = field(default_factory=set)
+    # 같은 축에서 반대 방향을 지지하는 action과 그 label.
+    opposing_action_keys: list[str] = field(default_factory=list)
+    opposing_labels: list[str] = field(default_factory=list)
+    # {canonical_path: [후보값...]}. 단일 축만 담는다.
+    search_space: dict[str, list[Any]] = field(default_factory=dict)
+    target_metrics: list[str] = field(default_factory=list)
+    score: float = 0.0
+    # 점수 구성 요소. 사용자에게 선택 이유를 설명하는 데 쓴다.
+    score_breakdown: dict[str, Any] = field(default_factory=dict)
+    status: ActionCandidateStatus = "ready"
+    reason: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def causal_rank_group(self) -> FailureGroup | None:
+        """이 action을 지지하는 label 중 가장 높은 우선순위 그룹.
+
+        A > C > B 인과는 점수보다 먼저 적용되는 1차 정렬 키다. 검색이 새는 상태에서
+        생성 처방을 먼저 적용하면 garbage-in tuning이 되기 때문이다.
+        """
+        order: dict[str, int] = {"A": 0, "C": 1, "B": 2, "D": 3}
+        groups = [s.group for s in self.supports if s.group]
+        if not groups:
+            return None
+        return min(groups, key=lambda g: order.get(g, 99))
+
+
+@dataclass(frozen=True)
+class ActionAttemptKey:
+    """정확한 config 전이 하나. 품질 실패로 차단할 단위다.
+
+    ``(label, prescription_id)``와 달리 baseline과 candidate를 포함하므로, 같은
+    action이라도 다른 baseline에서는 다시 시도할 수 있다. 즉 차단을 강화하는 것이
+    아니라 baseline별로 완화하는 식별자다.
+    """
+
+    action_key: str
+    baseline_fingerprint: str
+    candidate_fingerprint: str
+
+
+@dataclass(frozen=True)
+class ActionStudyKey:
+    """한 baseline에서 특정 search space를 이미 탐색했음을 나타낸다.
+
+    sweep을 정상 완료한 뒤 같은 탐색을 다시 시작하지 않기 위한 식별자다.
+    """
+
+    action_key: str
+    baseline_fingerprint: str
+    search_space_fingerprint: str
+
+
+@dataclass
+class SkippedAction:
+    """실행 단계에서 제외된 action과 그 사유."""
+
+    action_key: str
+    reason: str
+    target: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
