@@ -552,13 +552,22 @@ def _response_relevancy(judge, question: str, answer: str):
             gen_qs.append(q)
             noncommittal.append(1 if _truthy(d.get("noncommittal")) else 0)
     if not gen_qs:
+        # 질문 생성이 한 번도 성공 못 함(무응답·파싱 실패) — 답변이 무관해서 나온 0 이 아니다.
+        print(f"[Eval] response_relevancy 0 — 질문 생성 {RELEVANCY_STRICTNESS}회 모두 실패")
         return 0.0
     all_noncommittal = all(n == 1 for n in noncommittal) # noncommittal: 답변이 회피형(잘모르겠다.)인지 판별
     vecs = _embed(judge, [question] + gen_qs)  # Embedding
     if not vecs or len(vecs) < 2:
         return None
     sims = [_cosine(vecs[0], v) for v in vecs[1:]] # Cosine Similarity
-    return (sum(sims) / len(sims)) * (0 if all_noncommittal else 1) # 모든 답변이 회피형이면 0 출력
+    if all_noncommittal:
+        # 0 은 코사인이 낮아서가 아니라 회피 판정이 전부 1 이라 곱해진 결과다. 판정기가
+        # 단정형 답변을 회피형으로 오분류해도 같은 0 이 나오므로(실측), 실제 코사인과
+        # 표본 수를 남겨 '진짜 회피'와 '판정기 오분류'를 사후에 가를 수 있게 한다.
+        print(f"[Eval] response_relevancy 0 — 생성 질문 {len(gen_qs)}개가 모두 noncommittal "
+              f"판정(코사인 평균 {sum(sims) / len(sims):.2f}, strictness={RELEVANCY_STRICTNESS})")
+        return 0.0
+    return sum(sims) / len(sims)
 
 
 def _context_precision(judge, question: str, reference: str, contexts: list[str]):
