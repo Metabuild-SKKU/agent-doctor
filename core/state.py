@@ -131,12 +131,13 @@ class AgentDoctorState:
             "max_ratio": 0.40,
             "max_overlap": 300,
         },
-        "graph_enabled": True,
-        # keyword 고정 — "auto" 는 OPENAI/OPENROUTER 키가 있기만 하면 LLM 추출을 켜서
-        # 청크당 1회(직렬) 호출을 붙인다. 키를 Eval provider 용으로만 넣어도 걸리고,
-        # 그래프는 시각화·구조 확인용이라 진단 점수엔 쓰이지 않는다. LLM 추출이
-        # 필요하면 index_config["graph_extraction"] = "llm" 로 명시적으로 켠다.
-        "graph_extraction": "keyword",
+        # 지식그래프 산출물(graphml/mermaid/pyvis)은 시각화·구조 확인용이고 검색 품질에
+        # 관여하지 않는데, graph_extraction="auto" 가 API 키만 있으면 청크마다 LLM 을
+        # 1회씩 부른다 — 코퍼스가 크면 조용히 가장 비싼 단계가 된다(실제로 Eval/RAG 용으로
+        # 넣은 OpenRouter 키가 이 단계까지 켜서 gpt-4.1-mini 호출이 대량 발생했다).
+        # 필요할 때만 명시적으로 켜도록 기본을 끔으로 둔다.
+        "graph_enabled": False,
+        "graph_extraction": "auto",
         "graph_llm_model": DEFAULT_GRAPH_LLM_MODEL,
         "graph_similarity_threshold": 0.9,
         "graph_output_dir": "output/index_graph",

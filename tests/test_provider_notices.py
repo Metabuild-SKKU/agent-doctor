@@ -134,26 +134,14 @@ class IndexGraphNoticeTest(unittest.TestCase):
             graph_index._extract(_chunk(), config)
         return buf.getvalue()
 
-    # auto 는 이제 기본값이 아니다(기본 keyword) — 명시해야 LLM 추출이 켜진다.
     def test_auto_mode_notifies_once(self):
-        first = self._extract({"graph_extraction": "auto"})
+        first = self._extract({})
         self.assertIn("OPENAI_API_KEY 감지", first)
         self.assertIn("graph_extraction=keyword", first)
-        self.assertEqual(self._extract({"graph_extraction": "auto"}), "")
+        self.assertEqual(self._extract({}), "")
 
     def test_notice_names_the_configured_model(self):
-        self.assertIn("gpt-4.1-nano", self._extract(
-            {"graph_extraction": "auto", "graph_llm_model": "gpt-4.1-nano"}
-        ))
-
-    def test_default_config_skips_llm_extraction(self):
-        # 설정을 안 주면 키가 있어도 LLM 을 부르지 않는다 — 청크당 유료 호출이
-        # 키 존재만으로 붙던 동작을 막는다.
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-dummy"}, clear=False), \
-                patch.object(graph_index, "_llm_entities",
-                             side_effect=AssertionError("LLM 추출이 호출되면 안 된다")):
-            _entities, _relations, used_mode = graph_index._extract(_chunk(), {})
-        self.assertEqual(used_mode, "keyword")
+        self.assertIn("gpt-4.1-nano", self._extract({"graph_llm_model": "gpt-4.1-nano"}))
 
     def test_explicit_llm_mode_is_silent(self):
         # 명시적으로 켠 경우는 놀랄 일이 아니라 알리지 않는다.
@@ -165,22 +153,33 @@ class IndexGraphNoticeTest(unittest.TestCase):
     def test_no_key_is_silent(self):
         buf = io.StringIO()
         with patch.dict(os.environ, {}, clear=False), redirect_stdout(buf):
-            # auto 는 OPENAI_API_KEY 다음으로 OPENROUTER_API_KEY 도 본다 — 둘 다 없어야
-            # keyword 로 떨어진다.
             os.environ.pop("OPENAI_API_KEY", None)
             os.environ.pop("OPENROUTER_API_KEY", None)
             graph_index._extract(_chunk(), {})
         self.assertEqual(buf.getvalue(), "")
 
-    def test_openrouter_auto_notice_names_openrouter_key(self):
-        # OpenAI 키 없이 OpenRouter 키만 있는 실행에서 "OPENAI_API_KEY 감지" 라고
-        # 찍으면 어느 키를 빼야 청크당 유료 호출이 멈추는지 알 수 없다.
+    def test_openrouter_key_alone_does_not_trigger_auto(self):
+        # auto 는 OPENROUTER_API_KEY 로 켜지지 않는다 — Eval/RAG 용으로 넣은 키가
+        # 검색 품질과 무관한 이 단계의 청크당 유료 호출을 켜면 안 된다.
         buf = io.StringIO()
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-dummy"}, clear=False), \
                 patch.object(graph_index, "_llm_entities", return_value=([], [])), \
                 redirect_stdout(buf):
             os.environ.pop("OPENAI_API_KEY", None)
-            graph_index._extract(_chunk(), {"graph_extraction": "auto"})
+            _e, _r, mode = graph_index._extract(_chunk(), {})
+        self.assertEqual(mode, "keyword")
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_explicit_openrouter_notice_names_openrouter_key(self):
+        # 명시적으로 켠 경우엔 "OPENAI_API_KEY 감지" 라고 찍으면 어느 키를 빼야
+        # 청크당 유료 호출이 멈추는지 알 수 없다.
+        buf = io.StringIO()
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-dummy",
+                                     "INDEX_LLM_PROVIDER": "openrouter"}, clear=False), \
+                patch.object(graph_index, "_llm_entities", return_value=([], [])), \
+                redirect_stdout(buf):
+            os.environ.pop("OPENAI_API_KEY", None)
+            graph_index._extract(_chunk(), {})
         log = buf.getvalue()
         self.assertIn("OPENROUTER_API_KEY 감지", log)
         self.assertNotIn("OPENAI_API_KEY 감지", log)
@@ -216,6 +215,180 @@ class RagAutoNoticeTest(unittest.TestCase):
         answer, log = self._generate(None)
         self.assertEqual(answer, "gemini 답변")
         self.assertNotIn("auto → OpenAI", log)
+
+
+class GraphExtractionDefaultOffTest(unittest.TestCase):
+    """지식그래프 단계가 기본으로 꺼져 있는지(회귀).
+
+    켜져 있으면 graph_extraction="auto" 가 API 키만 있으면 청크마다 LLM 을 부른다 —
+    Eval/RAG 용으로 넣은 키가 검색 품질과 무관한 단계까지 켜서 과금이 발생했다."""
+
+    def test_graph_disabled_by_default(self):
+        from core.state import AgentDoctorState
+
+        self.assertFalse(AgentDoctorState().index_config["graph_enabled"])
+
+    def test_llm_extraction_is_unreachable_while_disabled(self):
+        # graph_enabled=False 면 build_graph_artifacts 자체를 안 부르므로
+        # graph_extraction 값과 무관하게 LLM 호출 경로에 도달하지 않는다.
+        from core.state import AgentDoctorState
+
+        config = AgentDoctorState().index_config
+        self.assertFalse(config.get("graph_enabled", True))
+
+
+class GraphAutoExcludesOpenRouterTest(unittest.TestCase):
+    """auto 는 OpenRouter 키로 켜지지 않는다(명시적 opt-in 필요).
+
+    Eval/RAG 용으로 넣은 키 하나가 청크당 1회 호출을 켜는 것을 막는다."""
+
+    _ONLY_OR = {"OPENAI_API_KEY": "", "OPENROUTER_API_KEY": "sk-or-test",
+                "INDEX_LLM_PROVIDER": ""}
+
+    def test_auto_does_not_use_openrouter(self):
+        with patch.dict(os.environ, self._ONLY_OR, clear=False):
+            self.assertIsNone(graph_index._graph_llm_target({}))
+
+    def test_explicit_openrouter_still_works(self):
+        env = dict(self._ONLY_OR, INDEX_LLM_PROVIDER="openrouter")
+        with patch.dict(os.environ, env, clear=False):
+            target = graph_index._graph_llm_target({})
+        self.assertIsNotNone(target)
+        self.assertEqual(target[1], "https://openrouter.ai/api/v1")
+
+    def test_config_key_also_opts_in(self):
+        with patch.dict(os.environ, self._ONLY_OR, clear=False):
+            target = graph_index._graph_llm_target({"graph_llm_provider": "openrouter"})
+        self.assertIsNotNone(target)
+
+    def test_auto_still_uses_openai_key(self):
+        env = {"OPENAI_API_KEY": "sk-test", "OPENROUTER_API_KEY": "",
+               "INDEX_LLM_PROVIDER": ""}
+        with patch.dict(os.environ, env, clear=False):
+            target = graph_index._graph_llm_target({})
+        self.assertIsNotNone(target)
+        self.assertIsNone(target[1])       # base_url 없음 = 순정 OpenAI
+
+    def test_cache_signature_tracks_actual_provider(self):
+        # keyword 로 만든 캐시가 openrouter 로 켠 실행에 재사용되면 안 된다.
+        from agents.index.agent import _graph_cache_signature
+
+        config = {"graph_extraction": "auto"}
+        with patch.dict(os.environ, self._ONLY_OR, clear=False):
+            off = _graph_cache_signature(config)
+        with patch.dict(os.environ, dict(self._ONLY_OR,
+                                         INDEX_LLM_PROVIDER="openrouter"), clear=False):
+            on = _graph_cache_signature(config)
+        self.assertFalse(off["llm_available"])
+        self.assertTrue(on["llm_available"])
+
+
+class EmbeddingFallbackTest(unittest.TestCase):
+    """임베딩 API 가 없는 provider 조합의 폴백 사슬: API > 로컬 BGE-M3 > 결측."""
+
+    def setUp(self):
+        llm_provider._embed_notified = False
+
+    def _embed(self, env, local_ok):
+        buf = io.StringIO()
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(llm_provider, "_local_embeddings_available",
+                         return_value=local_ok),
+            patch("agents.index.qdrant_store.embed_batch",
+                  return_value=[[0.1, 0.2], [0.3, 0.4]]),
+            redirect_stdout(buf),
+        ):
+            vecs = llm_provider.embed_texts(["가", "나"])
+        return vecs, buf.getvalue()
+
+    _OR = {"EVAL_LLM_PROVIDER": "openrouter", "OPENAI_API_KEY": ""}
+
+    def test_falls_back_to_local_embeddings(self):
+        vecs, log = self._embed(self._OR, local_ok=True)
+        self.assertEqual(vecs, [[0.1, 0.2], [0.3, 0.4]])
+        self.assertIn("로컬 임베딩", log)
+
+    def test_missing_only_when_local_also_unavailable(self):
+        # 로컬 모델이 해시 폴백 상태면 쓰지 않는다 — 무의미한 코사인이 정상 점수처럼
+        # 리포트에 박히는 것이 결측보다 나쁘다.
+        vecs, log = self._embed(self._OR, local_ok=False)
+        self.assertEqual(vecs, [])
+        self.assertIn("건너뜁니다", log)
+
+    def test_notice_is_printed_once_per_run(self):
+        self._embed(self._OR, local_ok=True)
+        _, second = self._embed(self._OR, local_ok=True)
+        self.assertEqual(second, "")        # probe 마다 반복되면 다른 로그를 덮는다
+
+    def test_api_key_still_wins_over_local(self):
+        # 기존 사용자 동작 보존 — 키가 있으면 예전처럼 API 임베딩을 쓴다.
+        called = {}
+
+        def _fake_openai_embed(texts, model):
+            called["model"] = model
+            return [[1.0]]
+
+        with (
+            patch.dict(os.environ, {"EVAL_LLM_PROVIDER": "openai",
+                                    "OPENAI_API_KEY": "sk-test"}, clear=False),
+            patch.object(llm_provider, "_openai_embed", _fake_openai_embed),
+            patch.object(llm_provider, "_local_embeddings_available",
+                         return_value=True),
+        ):
+            vecs = llm_provider.embed_texts(["가"])
+        self.assertEqual(vecs, [[1.0]])
+        self.assertEqual(called["model"], "text-embedding-3-small")
+
+    def test_embeddings_available_covers_local_path(self):
+        with (
+            patch.dict(os.environ, self._OR, clear=False),
+            patch.object(llm_provider, "_local_embeddings_available", return_value=True),
+        ):
+            self.assertTrue(llm_provider.embeddings_available())
+        with (
+            patch.dict(os.environ, self._OR, clear=False),
+            patch.object(llm_provider, "_local_embeddings_available", return_value=False),
+        ):
+            self.assertFalse(llm_provider.embeddings_available())
+
+
+class RagasTrackSurvivesMissingEmbeddingTest(unittest.TestCase):
+    """임베딩이 없어도 RAGAS 트랙 전체가 날아가지 않는지(회귀).
+
+    예전엔 _response_relevancy 의 임베딩 예외가 parallel_map → evaluate_real_track →
+    _ragas_track 으로 전파돼 트랙이 통째로 {} 가 됐다. 심판 호출 비용은 이미 쓴 뒤라
+    faithfulness·context_* 까지 잃고 진단 라벨이 안 붙었다."""
+
+    def test_embedding_failure_yields_none_not_exception(self):
+        from agents.eval import metrics_ragas
+
+        with (
+            patch.object(metrics_ragas, "_chat",
+                         return_value={"question": "재생성 질문", "noncommittal": 0}),
+            patch.object(metrics_ragas, "_embed",
+                         side_effect=RuntimeError("Missing credentials")),
+        ):
+            score = metrics_ragas._response_relevancy(
+                object(), "질문?", "답변입니다.")
+        self.assertIsNone(score)   # 예외 전파가 아니라 결측(None)
+
+    def test_sibling_metrics_still_computed(self):
+        """같은 트랙의 다른 지표는 임베딩과 무관하게 계산돼야 한다."""
+        from agents.eval import metrics_ragas
+
+        # faithfulness 는 chat 2회(문장 분해 → NLI 판정)를 쓰고 임베딩은 안 쓴다.
+        with (
+            patch.object(metrics_ragas, "_chat", side_effect=[
+                {"statements": ["주장 하나"]},          # 1) 분해
+                {"statements": [{"verdict": 1}]},       # 2) NLI 판정
+            ]),
+            patch.object(metrics_ragas, "_embed",
+                         side_effect=RuntimeError("Missing credentials")),
+        ):
+            faith = metrics_ragas._faithfulness(
+                object(), "질문?", "답변입니다.", ["근거 문장."])
+        self.assertEqual(faith, 1.0)
 
 
 if __name__ == "__main__":

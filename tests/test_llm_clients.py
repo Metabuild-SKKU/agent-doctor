@@ -22,10 +22,16 @@ from core.llm_clients import _is_reasoning_model, openai_chat
 
 
 class FakeOpenAI:
-    """마지막 create() 인자를 클래스 변수에 남기는 목 클라이언트."""
+    """create() 호출을 기록하는 목 클라이언트.
+
+    last_kwargs 는 마지막 호출, calls 는 전체 호출 이력(재시도 검증용).
+    script 를 주면 호출 순서대로 (content, finish_reason) 을 소비한다."""
 
     last_kwargs: dict = {}
+    calls: list = []
     finish_reason: str | None = "stop"
+    content: str = "응답"
+    script: list | None = None
 
     def __init__(self, **_):
         self.chat = types.SimpleNamespace(
@@ -33,9 +39,14 @@ class FakeOpenAI:
 
     def _create(self, **kwargs):
         FakeOpenAI.last_kwargs = kwargs
+        FakeOpenAI.calls.append(kwargs)
+        if FakeOpenAI.script:
+            content, finish = FakeOpenAI.script.pop(0)
+        else:
+            content, finish = FakeOpenAI.content, FakeOpenAI.finish_reason
         choice = types.SimpleNamespace(
-            message=types.SimpleNamespace(content="응답"),
-            finish_reason=FakeOpenAI.finish_reason,
+            message=types.SimpleNamespace(content=content),
+            finish_reason=finish,
         )
         return types.SimpleNamespace(choices=[choice], usage=None)
 
@@ -67,10 +78,31 @@ class IsReasoningModelTest(unittest.TestCase):
         self.assertFalse(_is_reasoning_model("gpt-5-chat-latest"))
 
 
+class NeedsLargeOutputTest(unittest.TestCase):
+    """추론 토큰을 뱉지만 API 규약은 일반 모델과 같은 계열(_LARGE_OUTPUT_PREFIXES)."""
+
+    def test_deepseek_needs_large_output(self):
+        for model in ("deepseek-v4-flash-0731", "deepseek/deepseek-v4-flash-0731",
+                      "deepseek/deepseek-chat"):
+            self.assertTrue(llm_clients._needs_large_output(model), model)
+
+    def test_deepseek_is_not_openai_style_reasoning_model(self):
+        # temperature/max_tokens 규약은 일반 모델과 같다 — 여기에 걸리면 temperature 가
+        # 버려져 Optimize 의 generation.temperature 스윕이 no-op 이 된다.
+        self.assertFalse(_is_reasoning_model("deepseek/deepseek-v4-flash-0731"))
+
+    def test_ordinary_models_do_not_need_large_output(self):
+        for model in ("gpt-4o", "upstage/solar-pro-3", "google/gemini-3.1-flash-lite"):
+            self.assertFalse(llm_clients._needs_large_output(model), model)
+
+
 class OpenAiChatParamsTest(unittest.TestCase):
     def setUp(self):
         FakeOpenAI.last_kwargs = {}
+        FakeOpenAI.calls = []
         FakeOpenAI.finish_reason = "stop"
+        FakeOpenAI.content = "응답"
+        FakeOpenAI.script = None
         llm_clients._warned_ignored_temperature.clear()
 
     def test_standard_model_uses_max_tokens_and_temperature(self):
@@ -112,6 +144,81 @@ class OpenAiChatParamsTest(unittest.TestCase):
         FakeOpenAI.finish_reason = "length"
         _, out = call("gpt-4o")
         self.assertIn("finish_reason=length", out)
+
+    def test_deepseek_gets_large_cap_but_keeps_temperature(self):
+        # 회귀: 2048 이면 추론 토큰이 상한을 다 써 JSON 본문이 안 나온다.
+        call("deepseek/deepseek-v4-flash-0731", max_output_tokens=2048, temperature=0.3)
+        kwargs = FakeOpenAI.last_kwargs
+        self.assertEqual(kwargs["max_tokens"], llm_clients._REASONING_MIN_OUTPUT_TOKENS)
+        self.assertEqual(kwargs["temperature"], 0.3)
+        self.assertNotIn("max_completion_tokens", kwargs)
+
+
+class TruncationRetryTest(unittest.TestCase):
+    """접두사 목록이 못 잡은 모델의 최종 안전망 — 잘리면 상한을 올려 1회만 재시도."""
+
+    def setUp(self):
+        FakeOpenAI.last_kwargs = {}
+        FakeOpenAI.calls = []
+        FakeOpenAI.finish_reason = "stop"
+        FakeOpenAI.content = "응답"
+        FakeOpenAI.script = None
+        llm_clients._warned_ignored_temperature.clear()
+
+    def test_json_mode_truncation_retries_once_with_larger_cap(self):
+        FakeOpenAI.script = [("", "length"), ('{"ok": 1}', "stop")]
+        text, out = call("some-new-model", json_mode=True, max_output_tokens=2048)
+        self.assertEqual(text, '{"ok": 1}')
+        self.assertEqual(len(FakeOpenAI.calls), 2)
+        self.assertEqual(FakeOpenAI.calls[0]["max_tokens"], 2048)
+        self.assertGreater(FakeOpenAI.calls[1]["max_tokens"], 2048)
+        self.assertIn("재시도", out)
+
+    def test_empty_content_truncation_retries(self):
+        FakeOpenAI.script = [("", "length"), ("본문", "stop")]
+        text, _ = call("some-new-model", max_output_tokens=2048)
+        self.assertEqual(text, "본문")
+        self.assertEqual(len(FakeOpenAI.calls), 2)
+
+    def test_usable_prose_truncation_does_not_retry(self):
+        # 산문이 길어 잘린 건 부분 답변이라도 쓸모가 있다. 무조건 재시도하면 비용이 두 배.
+        FakeOpenAI.script = [("긴 답변인데 잘림", "length")]
+        text, out = call("some-new-model", max_output_tokens=2048)
+        self.assertEqual(text, "긴 답변인데 잘림")
+        self.assertEqual(len(FakeOpenAI.calls), 1)
+        self.assertIn("finish_reason=length", out)
+
+    def test_retry_happens_at_most_once(self):
+        # 재시도 후에도 잘리면 포기한다 — 비용 상한이 예측 가능해야 한다.
+        FakeOpenAI.script = [("", "length"), ("", "length")]
+        text, out = call("some-new-model", json_mode=True, max_output_tokens=2048)
+        self.assertEqual(text, "")
+        self.assertEqual(len(FakeOpenAI.calls), 2)
+        self.assertIn("finish_reason=length", out)
+
+    def test_no_retry_when_cap_already_at_ceiling(self):
+        # 이미 상한이 재시도 목표치 이상이면 같은 값으로 다시 부를 이유가 없다.
+        FakeOpenAI.script = [("", "length")]
+        call("o3-mini", json_mode=True,
+             max_output_tokens=llm_clients._REASONING_MIN_OUTPUT_TOKENS * 4)
+        self.assertEqual(len(FakeOpenAI.calls), 1)
+
+    def test_reasoning_model_starts_at_target_so_never_retries(self):
+        # 추론 모델은 첫 호출부터 25K 를 받으므로 올릴 여지가 없다 —
+        # 잘렸다고 같은 상한으로 다시 부르면 비용만 두 배가 된다.
+        FakeOpenAI.script = [("", "length")]
+        call("o3-mini", json_mode=True, max_output_tokens=2048)
+        self.assertEqual(len(FakeOpenAI.calls), 1)
+        self.assertEqual(FakeOpenAI.calls[0]["max_completion_tokens"],
+                         llm_clients._REASONING_MIN_OUTPUT_TOKENS)
+
+    def test_large_output_model_also_starts_at_target(self):
+        # deepseek 도 목록에 잡히면 첫 호출부터 25K → 재시도 불필요.
+        FakeOpenAI.script = [("", "length")]
+        call("deepseek/deepseek-v4-flash-0731", json_mode=True, max_output_tokens=2048)
+        self.assertEqual(len(FakeOpenAI.calls), 1)
+        self.assertEqual(FakeOpenAI.calls[0]["max_tokens"],
+                         llm_clients._REASONING_MIN_OUTPUT_TOKENS)
 
 
 if __name__ == "__main__":

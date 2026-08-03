@@ -26,17 +26,24 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # 만들어냈다. 상한은 비용 방어이자 "잘림"을 조기에 드러내는 장치다.
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
 
-# o-series/gpt-5 계열은 max_tokens 를 400 으로 거부하고(max_completion_tokens 만 허용),
-# temperature 도 1 외의 값을 받지 않는다. 모델명으로 갈라 파라미터를 맞춘다.
-# 새 추론 모델 계열이 나오면 이 두 목록에 추가할 것.
+# 두 가지를 구분한다 — 예전엔 한 목록이 둘을 겸해서, 한쪽만 해당하는 모델을 넣으면
+# 나머지 하나가 잘못 적용됐다.
+#   (1) API 규약이 다른 계열: max_tokens 를 400 으로 거부하고(max_completion_tokens 만
+#       허용), temperature 도 1 외의 값을 받지 않는다. OpenAI o-series/gpt-5 가 여기.
+#   (2) 규약은 같지만 추론 토큰을 뱉어 출력 예산만 크게 필요한 계열: DeepSeek 등.
+#       여기에 (1)을 적용하면 temperature 가 버려져 Optimize 의 generation.temperature
+#       스윕이 조용히 no-op 이 된다 — 실제로 지원하는 모델인데도.
 # 미확인: GitHub Models 엔드포인트가 max_completion_tokens 를 받는지는 검증하지 못했다.
 _REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 # gpt-5-chat-* 은 접두사만 같고 추론 모델이 아니다 — temperature 를 그대로 받는다.
 _NON_REASONING_PREFIXES = ("gpt-5-chat",)
+# (2) 계열. 목록은 필연적으로 밀리므로 아래 finish_reason=length 재시도가 최종 안전망이다.
+_LARGE_OUTPUT_PREFIXES = ("deepseek",)
 
-# 추론 모델 출력 상한의 하한선. 내부 추론 토큰이 이 상한을 함께 소진하고 output 으로
-# 과금되므로, 2048 이면 추론에서 다 쓰고 본문이 빈 채로 돌아올 수 있다(비용은 그대로).
-# OpenAI 문서 권장 예약량 25K 를 하한으로 둔다 — 상한일 뿐 실사용분만 과금된다.
+# 추론 토큰을 뱉는 모델의 출력 상한 하한선. 내부 추론 토큰이 이 상한을 함께 소진하고
+# output 으로 과금되므로, 2048 이면 추론에서 다 쓰고 본문이 빈 채로 돌아올 수 있다
+# (비용은 그대로). OpenAI 문서 권장 예약량 25K 를 하한으로 둔다 — 상한일 뿐 실사용분만
+# 과금된다.
 _REASONING_MIN_OUTPUT_TOKENS = 25_000
 
 # 추론 모델에서 temperature 가 버려졌다는 사실을 모델당 한 번 알린다.
@@ -45,12 +52,22 @@ _warned_ignored_temperature: set[str] = set()
 _warn_lock = threading.Lock()
 
 
+def _bare_model_name(model: str) -> str:
+    """'publisher/model' 형식에서 모델명만. GitHub Models·OpenRouter 가 이 형식을 쓴다."""
+    return model.rsplit("/", 1)[-1].strip().lower()
+
+
 def _is_reasoning_model(model: str) -> bool:
-    """o-series/gpt-5 계열인지. GitHub Models 의 'publisher/model' 형식도 처리."""
-    name = model.rsplit("/", 1)[-1].strip().lower()
+    """max_completion_tokens 만 받고 temperature 를 거부하는 계열인지(OpenAI o-series/gpt-5)."""
+    name = _bare_model_name(model)
     if name.startswith(_NON_REASONING_PREFIXES):
         return False
     return name.startswith(_REASONING_MODEL_PREFIXES)
+
+
+def _needs_large_output(model: str) -> bool:
+    """API 규약은 일반 모델과 같지만 추론 토큰 때문에 출력 예산이 크게 필요한 계열인지."""
+    return _bare_model_name(model).startswith(_LARGE_OUTPUT_PREFIXES)
 
 
 def _warn_temperature_ignored_once(model: str, temperature: float, tag: str) -> None:
@@ -119,36 +136,67 @@ def openai_chat(
     if api_key:
         client_kwargs["api_key"] = api_key
     client = OpenAI(**client_kwargs)
-    kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
+    base_kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
     if base_url == OPENROUTER_BASE_URL:
         # 응답 usage 에 실제 과금액(cost)을 함께 받는다 — 추가 비용·지연 없음.
-        kwargs["extra_body"] = {"usage": {"include": True}}
-    if _is_reasoning_model(model):
-        kwargs["max_completion_tokens"] = max(max_output_tokens, _REASONING_MIN_OUTPUT_TOKENS)
-        if temperature != 1.0:
-            _warn_temperature_ignored_once(model, temperature, tag)
-    else:
-        kwargs["max_tokens"] = max_output_tokens
-        kwargs["temperature"] = temperature
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        **kwargs,
-    )
-    choice = resp.choices[0]
-    # 상한에 걸린 응답은 JSON 파싱에 실패해 호출부가 "빈 응답"으로 흡수한다 —
-    # 사유가 잘림이라는 걸 여기서 드러내지 않으면 원인 추적이 불가능하다.
-    if getattr(choice, "finish_reason", None) == "length":
-        print(f"[{tag}] {model} 응답이 출력 상한에서 잘렸습니다(finish_reason=length).")
-    if resp.usage:
-        log_usage(
-            model, resp.usage.prompt_tokens, resp.usage.completion_tokens, tag=tag,
-            cost_usd=_known_cost_usd(base_url, resp.usage),
+        base_kwargs["extra_body"] = {"usage": {"include": True}}
+
+    reasoning = _is_reasoning_model(model)
+    if reasoning and temperature != 1.0:
+        _warn_temperature_ignored_once(model, temperature, tag)
+
+    cap = max_output_tokens
+    if reasoning or _needs_large_output(model):
+        cap = max(cap, _REASONING_MIN_OUTPUT_TOKENS)
+
+    def _call(limit: int):
+        kwargs = dict(base_kwargs)
+        if reasoning:
+            kwargs["max_completion_tokens"] = limit
+        else:
+            kwargs["max_tokens"] = limit
+            kwargs["temperature"] = temperature
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            **kwargs,
         )
-    return choice.message.content or ""
+        if resp.usage:
+            log_usage(
+                model, resp.usage.prompt_tokens, resp.usage.completion_tokens, tag=tag,
+                cost_usd=_known_cost_usd(base_url, resp.usage),
+            )
+        choice = resp.choices[0]
+        return choice, (choice.message.content or "")
+
+    choice, content = _call(cap)
+    truncated = getattr(choice, "finish_reason", None) == "length"
+
+    # 상한에 걸려 쓸 수 없는 응답이면 상한을 올려 딱 1회만 다시 부른다.
+    # 접두사 목록(_LARGE_OUTPUT_PREFIXES)은 새 모델이 나올 때마다 밀리므로, 목록이 못
+    # 잡은 경우의 최종 안전망이다. "쓸 수 없다"는 본문이 비었거나 JSON 을 기대한 경우로
+    # 한정한다 — 산문이 길어서 잘린 건 부분 답변이라도 쓸모가 있고, 무조건 재시도하면
+    # 긴 답변마다 비용이 두 배가 된다. 재시도는 1회 고정이라 비용 상한이 예측 가능하다.
+    if truncated and (json_mode or not content.strip()):
+        # 재시도 목표치는 추론 몫까지 감안한 고정값. 배수(cap×N)로 늘리면 상한이 없어져,
+        # 같은 문장을 반복 생성하는 모델에 훨씬 큰 예산을 태우게 된다(파일 상단 주석의
+        # 65,521 토큰 사고가 그 사례). 이미 이 값 이상이면 다시 불러도 의미가 없다.
+        retry_cap = _REASONING_MIN_OUTPUT_TOKENS
+        if retry_cap > cap:
+            print(f"[{tag}] {model} 응답이 출력 상한({cap})에서 잘렸습니다 "
+                  f"— 상한 {retry_cap} 으로 1회 재시도합니다.")
+            choice, content = _call(retry_cap)
+            truncated = getattr(choice, "finish_reason", None) == "length"
+            cap = retry_cap
+
+    # 재시도 후에도 잘렸으면(또는 재시도 대상이 아니면) 사유를 드러낸다 — 여기서 안 찍으면
+    # 호출부가 "빈 응답"으로 흡수해 원인 추적이 불가능하다.
+    if truncated:
+        print(f"[{tag}] {model} 응답이 출력 상한({cap})에서 잘렸습니다(finish_reason=length).")
+    return content
 
 
 def gemini_chat(

@@ -42,8 +42,11 @@ def _graph_llm_target(config: dict) -> tuple[str, str | None, str] | None:
     """(api_key, base_url, model) 또는 None.
 
     provider 는 config["graph_llm_provider"] > env INDEX_LLM_PROVIDER > "auto" 순.
-    auto 는 OPENAI_API_KEY 를 먼저 보므로, OpenRouter 키를 넣지 않은 기존 사용자에겐
-    동작이 그대로다."""
+
+    auto 는 OPENAI_API_KEY 만 본다 — OpenRouter 는 반드시 명시해야 켜진다. auto 가
+    OPENROUTER_API_KEY 도 받아주던 때, Eval/RAG 용으로 넣은 키 하나가 검색 품질과
+    무관한 이 단계까지 켜서 청크당 1회 호출이 조용히 과금됐다. 그래프 산출물은
+    시각화용이라 그 대가를 치를 이유가 없고, 켜는 쪽이 의도를 밝히는 게 맞다."""
     provider = str(
         config.get("graph_llm_provider")
         or os.getenv("INDEX_LLM_PROVIDER")
@@ -54,7 +57,7 @@ def _graph_llm_target(config: dict) -> tuple[str, str | None, str] | None:
 
     if provider in {"openai", "auto"} and openai_key:
         return openai_key, None, str(config.get("graph_llm_model") or DEFAULT_GRAPH_LLM_MODEL)
-    if provider in {"openrouter", "auto"} and openrouter_key:
+    if provider == "openrouter" and openrouter_key:
         model = str(
             config.get("graph_llm_model_openrouter")
             or os.getenv("INDEX_GRAPH_MODEL_OPENROUTER")
@@ -124,7 +127,7 @@ def _notify_llm_extraction_once(model: str, key_name: str) -> None:
 
 # 설정과 API key 상태에 따라 LLM/keyword 추출을 고른다.
 def _extract(chunk: Chunk, config: dict) -> tuple[list[str], list[dict], str]:
-    mode = config.get("graph_extraction", "keyword")
+    mode = config.get("graph_extraction", "auto")
     target = _graph_llm_target(config) if mode in {"auto", "llm"} else None
     if target is not None:
         api_key, base_url, model = target
@@ -150,7 +153,7 @@ def _extraction_ctx(config: dict) -> str:
     # entity 추출 결과에 영향을 주는 조건: 요청 모드, 실제로 쓰일 모델, 키 존재 여부.
     # provider 는 따로 넣지 않는다 — OpenRouter 모델명은 "publisher/model" 이라 모델
     # 문자열만으로 이미 구분되고, OpenAI 경로는 기존 캐시 키를 그대로 유지한다.
-    mode = config.get("graph_extraction", "keyword")
+    mode = config.get("graph_extraction", "auto")
     target = _graph_llm_target(config) if mode in {"auto", "llm"} else None
     if target is None:
         return f"{mode}:{config.get('graph_llm_model', DEFAULT_GRAPH_LLM_MODEL)}:0"
