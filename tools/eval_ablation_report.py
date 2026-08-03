@@ -33,14 +33,41 @@ KNOWN_LABELS = {
 }
 PRESCRIPTION_ACTIONS = {
     "context_compression": "context_compression:enable",
+    "checklist_review_step": "answer_checklist_review:enable",
+    "completeness_prompt": "generation.completeness_mode:enable",
+    "decrease_chunk_size": "chunk_size:decrease",
     "decrease_top_k": "top_k:decrease",
-    "disable_reranker": "use_reranker:disable",
+    "dynamic_top_k": "top_k:increase",
+    "enable_adaptive_retrieval": "adaptive_retrieval:enable",
+    "enable_bridge_entity_verifier": "bridge_entity_verifier:enable",
+    "enable_calculation_check": "calculation_check:enable",
+    "enable_hybrid": "use_hybrid:enable",
     "enable_mmr": "mmr:enable",
+    "enable_noise_filter": "noise_filter:enable",
+    "enable_query_decomposition": "query_rewrite:decompose",
     "enable_reranker": "use_reranker:enable",
+    "expand_bridge_entity_query": "bridge_entity_expansion:enable",
+    "expand_query": "query_rewrite:expand",
+    "force_hop_evidence_binding": "answer_format:cot_chained",
     "increase_chunk_overlap": "chunk_overlap:increase",
     "increase_chunk_size": "chunk_size:increase",
     "increase_top_k": "top_k:increase",
+    "llm_verification_pass": "verifier_on:enable",
+    "lower_temperature": "generation.temperature:decrease",
+    "relax_reranker_threshold": "reranker_threshold:decrease",
+    "reorder_context_edges": "context_ordering:most_relevant_edges",
+    "require_citation": "generation.require_citation:enable",
+    "require_numeric_citation": "numeric_citation_required:enable",
+    "restate_question": "generation.restate_question:enable",
     "shrink_chunk_size": "chunk_size:decrease",
+    "strengthen_abstention": "generation.abstention_strict:enable",
+    "strict_conflict_prompt": "conflict_resolution_prompt:prefer_high_confidence_evidence",
+    "swap_embedding_model": "embedding_model:change",
+    "swap_reranker_model": "reranker_model:change",
+    "switch_to_markdown_recursive": "chunk_strategy:markdown_recursive",
+    "switch_to_recursive_sentence": "chunk_strategy:recursive_sentence",
+    "tighten_reranker_threshold": "reranker_threshold:increase",
+    "upgrade_generation_model": "generation.model:upgrade",
     "widen_rerank_candidates": "rerank_candidates:increase",
 }
 
@@ -51,13 +78,9 @@ SCORE_LINE_RE = re.compile(
     r"overall\s*(?P<overall>-?\d+(?:\.\d+)?).*?"
     r"pass\s*(?P<passed>True|False|true|false|[^\s]+)"
 )
-LEGACY_STEP5_RE = re.compile(
-    r"STEP5:.*?probe\s*(?P<probes>\d+).*?"
-    r"overall=(?P<overall>-?\d+(?:\.\d+)?),\s*pass=(?P<passed>True|False|true|false)"
-)
 CONFIG_RE = re.compile(r"config:\s*(?P<config>.+)")
 ACTION_RE = re.compile(r"id=(?P<id>[^,\s]+),\s*label=(?P<label>[^,\s]+)")
-SELECTED_LABEL_RE = re.compile(r"label:\s*(?P<label>[^,\s]+)")
+SELECTED_LABEL_RE = re.compile(r"(?:label|선택한 라벨):\s*(?P<label>[^,\s]+)")
 VERDICT_RE = re.compile(
     r"(?P<decision>KEEP|ROLLBACK).*?"
     r"prescription=(?P<prescription>[^,\s]+).*?"
@@ -101,13 +124,15 @@ class OptimizeAction:
     def canonical_action(self) -> str:
         if self.prescription in PRESCRIPTION_ACTIONS:
             return PRESCRIPTION_ACTIONS[self.prescription]
-        before = _parse_config_assignment(self.before_config)
-        after = _parse_config_assignment(self.after_config)
-        if before and after and before[0] == after[0]:
-            direction = _direction(before[1], after[1])
-            return f"{before[0]}:{direction}"
-        if after:
-            return f"{after[0]}:set"
+        before_items = _parse_config_assignments(self.before_config)
+        after_items = _parse_config_assignments(self.after_config)
+        after_by_key = dict(after_items)
+        for key, before_value in before_items:
+            if key in after_by_key:
+                direction = _direction(before_value, after_by_key[key])
+                return f"{key}:{direction}"
+        if after_items:
+            return f"{after_items[0][0]}:set"
         return self.prescription
 
 
@@ -123,7 +148,6 @@ def parse_log_text(text: str, source: str = "<memory>") -> ParsedLog:
     parsed = ParsedLog(source=source)
     current_eval: EvalSnapshot | None = None
     current_action: OptimizeAction | None = None
-    pending_step5: dict[str, object] = {}
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -143,30 +167,18 @@ def parse_log_text(text: str, source: str = "<memory>") -> ParsedLog:
             parsed.evals[-1].passed = _parse_pass(final_gate.group("passed"))
             continue
 
-        step5 = LEGACY_STEP5_RE.search(line)
-        if step5:
-            pending_step5 = {
-                "overall": _to_float(step5.group("overall")),
-                "passed": _parse_pass(step5.group("passed")),
-                "probes": int(step5.group("probes")),
-            }
-            continue
-
         score = SCORE_LINE_RE.search(line)
         if score:
+            overall = _to_float(score.group("overall"))
             current_eval = EvalSnapshot(
                 index=len(parsed.evals) + 1,
                 composite=_to_float(score.group("composite")),
                 quality=_to_float(score.group("quality")),
                 reliability=_to_float(score.group("reliability")),
-                overall=_to_float(score.group("overall")) or pending_step5.get("overall"),
-                passed=_parse_pass(score.group("passed"))
-                if score.group("passed")
-                else pending_step5.get("passed"),
-                probes=pending_step5.get("probes"),
+                overall=overall,
+                passed=_parse_pass(score.group("passed")),
             )
             parsed.evals.append(current_eval)
-            pending_step5 = {}
             continue
 
         distribution = _distribution_from_line(line)
@@ -295,7 +307,14 @@ def build_markdown(logs: Iterable[ParsedLog]) -> str:
 
 
 def write_csv(logs: Iterable[ParsedLog], output: Path) -> None:
+    logs = list(logs)
     output.parent.mkdir(parents=True, exist_ok=True)
+    label_keys = sorted({
+        key
+        for log in logs
+        for snapshot in log.evals
+        for key in snapshot.label_distribution
+    })
     fields = [
         "log_file",
         "eval_index",
@@ -304,10 +323,7 @@ def write_csv(logs: Iterable[ParsedLog], output: Path) -> None:
         "reliability",
         "overall",
         "gate_pass",
-        "retrieval_low_rank_weight",
-        "context_noise_interference_weight",
-        "bad_gold_answer_weight",
-        "generation_misinterpretation_weight",
+        *[f"{key}_weight" for key in label_keys],
         "top_labels",
     ]
     with output.open("w", newline="", encoding="utf-8") as handle:
@@ -316,22 +332,19 @@ def write_csv(logs: Iterable[ParsedLog], output: Path) -> None:
         for log in logs:
             for snapshot in log.evals:
                 labels = snapshot.label_distribution
-                writer.writerow(
-                    {
-                        "log_file": log.source,
-                        "eval_index": snapshot.index,
-                        "score": _fmt(snapshot.composite),
-                        "quality": _fmt(snapshot.quality),
-                        "reliability": _fmt(snapshot.reliability),
-                        "overall": _fmt(snapshot.overall),
-                        "gate_pass": _fmt_bool(snapshot.passed),
-                        "retrieval_low_rank_weight": labels.get("retrieval_low_rank", 0),
-                        "context_noise_interference_weight": labels.get("context_noise_interference", 0),
-                        "bad_gold_answer_weight": labels.get("bad_gold_answer", 0),
-                        "generation_misinterpretation_weight": labels.get("generation_misinterpretation", 0),
-                        "top_labels": _top_distribution(labels, limit=5),
-                    }
-                )
+                row = {
+                    "log_file": log.source,
+                    "eval_index": snapshot.index,
+                    "score": _fmt(snapshot.composite),
+                    "quality": _fmt(snapshot.quality),
+                    "reliability": _fmt(snapshot.reliability),
+                    "overall": _fmt(snapshot.overall),
+                    "gate_pass": _fmt_bool(snapshot.passed),
+                    "top_labels": _top_distribution(labels, limit=5),
+                }
+                for key in label_keys:
+                    row[f"{key}_weight"] = labels.get(key, 0)
+                writer.writerow(row)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -417,13 +430,7 @@ def _update_eval_gate(
 ) -> None:
     if passed is None:
         return
-    target = evals[-1]
-    if composite is not None:
-        for snapshot in reversed(evals):
-            if snapshot.composite is not None and abs(snapshot.composite - composite) < 1e-6:
-                target = snapshot
-                break
-    target.passed = passed
+    evals[-1].passed = passed
 
 
 def _attach_verdict(
@@ -475,16 +482,56 @@ def _looks_like_label_distribution(data: dict[str, float]) -> bool:
 
 
 def _parse_config_assignment(raw: str) -> tuple[str, str] | None:
+    items = _parse_config_assignments(raw)
+    return items[0] if items else None
+
+
+def _parse_config_assignments(raw: str) -> list[tuple[str, str]]:
     if not raw or raw == "-":
-        return None
+        return []
     if "=" not in raw:
-        return None
-    key, value = raw.split("=", 1)
-    key = key.strip().strip("{}")
-    value = value.strip().strip("{}")
-    if not key:
-        return None
-    return key, value
+        return []
+
+    assignments: list[tuple[str, str]] = []
+    for part in _split_config_assignments(raw):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = _clean_config_token(key)
+        value = _clean_config_token(value)
+        if key:
+            assignments.append((key, value))
+    return assignments
+
+
+def _split_config_assignments(raw: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    for index, char in enumerate(raw):
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char in "([{":
+            depth += 1
+            continue
+        if char in ")]}" and depth > 0:
+            depth -= 1
+            continue
+        if char == "," and depth == 0:
+            parts.append(raw[start:index].strip())
+            start = index + 1
+    parts.append(raw[start:].strip())
+    return [part for part in parts if part]
+
+
+def _clean_config_token(value: str) -> str:
+    return value.strip().strip("{}").strip().strip("'\"")
 
 
 def _direction(before: str, after: str) -> str:
@@ -504,6 +551,8 @@ def _direction(before: str, after: str) -> str:
 
 
 def _update_global_counts(counter: Counter[str], line: str) -> None:
+    if _is_distribution_line(line):
+        return
     patterns = {
         "retrieval_low_rank": "retrieval_low_rank",
         "context_noise_interference": "context_noise_interference",
@@ -519,6 +568,18 @@ def _update_global_counts(counter: Counter[str], line: str) -> None:
     for key, needle in patterns.items():
         if needle in line:
             counter[key] += line.count(needle)
+
+
+def _is_distribution_line(line: str) -> bool:
+    return any(
+        marker in line
+        for marker in (
+            "label distribution",
+            "type distribution",
+            "라벨분포",
+            "타입분포",
+        )
+    )
 
 
 def _suggestions(logs: list[ParsedLog]) -> list[str]:
