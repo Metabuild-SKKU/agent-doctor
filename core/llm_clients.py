@@ -1,11 +1,14 @@
 """
 core/llm_clients.py
-LLM provider transport 공용 구현 (OpenAI / GitHub Models / Gemini).
+LLM provider transport 공용 구현 (OpenAI / GitHub Models / OpenRouter / Gemini).
 
 agents/eval/llm_provider.py 와 agents/rag/generator.py 에 복붙돼 있던
 "클라이언트 생성 → 호출 → usage 로깅" 계층만 모은다. provider 선택·폴백 체인,
 env 규약(EVAL_LLM_PROVIDER vs RAG_LLM_PROVIDER), 키 부재 처리, 재시도 래핑은
 호출하는 쪽 모듈이 그대로 가진다 — 여기는 "키가 이미 준비된 1회 호출"만 담당.
+
+GitHub Models 와 OpenRouter 는 둘 다 OpenAI 호환이라 openai_chat 의 base_url/api_key
+인자만으로 붙는다. 전용 transport 함수는 없다.
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ import threading
 from core.llm_usage import log_usage
 
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # 출력 토큰 기본 상한. 상한이 없으면 모델이 같은 문장을 반복 생성하며 최대치(64K)까지
 # 달려도 아무도 막지 않는다 — 실제로 한 번 일어났고(응답 65,521 토큰, 그 1회로 $0.10),
@@ -58,6 +62,37 @@ def _warn_temperature_ignored_once(model: str, temperature: float, tag: str) -> 
           f"— Optimize 의 generation.temperature 조정도 이 모델에선 no-op 입니다.")
 
 
+def _openrouter_reported_cost(usage) -> float | None:
+    """OpenRouter 응답 usage 에서 실제 과금액(USD)을 꺼낸다. 없으면 None.
+
+    OpenRouter 는 요청에 usage.include 를 주면 응답 usage 에 cost 를 실어 보낸다.
+    단가표 추정과 달리 모델을 바꿔도 표를 고칠 필요가 없고 값이 틀릴 일도 없다.
+    OpenAI SDK 의 CompletionUsage 는 스키마에 없는 필드를 model_extra 로 흘리므로
+    속성 접근과 model_extra 를 모두 시도한다."""
+    cost = getattr(usage, "cost", None)
+    if cost is None:
+        extra = getattr(usage, "model_extra", None) or {}
+        cost = extra.get("cost")
+    try:
+        return float(cost) if cost is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _known_cost_usd(base_url: str | None, usage) -> float | None:
+    """transport 가 아는 실제 비용(USD). 모르면 None → 호출부가 단가표로 추정한다.
+
+    "publisher/model" 형식을 무료로 단정하던 예전 규칙을 대체한다 — GitHub Models(무료)와
+    OpenRouter(유료)가 같은 형식이라, 그 규칙 아래서는 OpenRouter 유료 호출이 전부
+    $0 으로 조용히 기록됐다. 엔드포인트를 아는 여기서 판정하는 게 안전하다."""
+    if base_url == GITHUB_MODELS_BASE_URL:
+        return 0.0   # GitHub Models 무료 티어
+    if base_url == OPENROUTER_BASE_URL:
+        # 못 읽으면 None → "단가 미등록"으로 드러난다. $0 으로 뭉개지 않는다.
+        return _openrouter_reported_cost(usage)
+    return None
+
+
 def openai_chat(
     system: str,
     user: str,
@@ -75,7 +110,7 @@ def openai_chat(
     temperature 기본 0(결정적). RAG 답변 생성만 호출부에서 조정하고, 판정·합성 등
     구조가 중요한 호출은 기본 0을 유지한다. 추론 모델(o-series/gpt-5)은 temperature 를
     받지 않아 무시되고(1회 경고), 출력 상한은 추론 토큰 몫까지 25K 로 올려 잡는다.
-    base_url/api_key 를 주면 GitHub Models 등 OpenAI 호환 엔드포인트 겸용."""
+    base_url/api_key 를 주면 GitHub Models·OpenRouter 등 OpenAI 호환 엔드포인트 겸용."""
     from openai import OpenAI
 
     client_kwargs = {}
@@ -85,6 +120,9 @@ def openai_chat(
         client_kwargs["api_key"] = api_key
     client = OpenAI(**client_kwargs)
     kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
+    if base_url == OPENROUTER_BASE_URL:
+        # 응답 usage 에 실제 과금액(cost)을 함께 받는다 — 추가 비용·지연 없음.
+        kwargs["extra_body"] = {"usage": {"include": True}}
     if _is_reasoning_model(model):
         kwargs["max_completion_tokens"] = max(max_output_tokens, _REASONING_MIN_OUTPUT_TOKENS)
         if temperature != 1.0:
@@ -106,7 +144,10 @@ def openai_chat(
     if getattr(choice, "finish_reason", None) == "length":
         print(f"[{tag}] {model} 응답이 출력 상한에서 잘렸습니다(finish_reason=length).")
     if resp.usage:
-        log_usage(model, resp.usage.prompt_tokens, resp.usage.completion_tokens, tag=tag)
+        log_usage(
+            model, resp.usage.prompt_tokens, resp.usage.completion_tokens, tag=tag,
+            cost_usd=_known_cost_usd(base_url, resp.usage),
+        )
     return choice.message.content or ""
 
 

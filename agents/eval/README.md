@@ -209,22 +209,22 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, confirmed
 |------|------|------|
 | `EVAL_MODE` | `fast` | **진단 깊이(비용 tier)**: `fast`/`standard`/`deep` 또는 `1`~`3`. `full`/`4` 는 `deep` 으로 접힌다. 아래 표 참고 |
 | `EVAL_ENABLE_LLM` | off | `1/true` 면 RAGAS(LLM-as-Judge) 진단 허용 (**+ `EVAL_MODE≥deep` 이어야 실제 실행**) |
-| `EVAL_LLM_PROVIDER` | `openai` | LLM 호출 provider 선택: `openai` / `gemini` / `github` (아래 참고) |
+| `EVAL_LLM_PROVIDER` | `openai` | LLM 호출 provider 선택: `openai` / `gemini` / `github` / `openrouter` (아래 참고) |
 | `OPENAI_API_KEY` | — | provider=openai 일 때 필요 |
 | `GEMINI_API_KEY` | — | provider=gemini 일 때 필요(Google AI Studio 무료 티어) |
 | `GITHUB_TOKEN` | — | provider=github 일 때 필요(`models:read` 권한 포함된 PAT) |
-| `EVAL_GEN_MODEL` / `EVAL_GEN_MODEL_GEMINI` / `EVAL_GEN_MODEL_GITHUB` | `gpt-4o-mini` / `gemini-flash-latest` / `openai/gpt-4o-mini` | 답변·Probe 질문 생성 모델(응답용) |
-| `EVAL_JUDGE_MODEL` / `EVAL_JUDGE_MODEL_GEMINI` / `EVAL_JUDGE_MODEL_GITHUB` | `gpt-4o` / `gemini-flash-latest` / `openai/gpt-4o` | RAGAS 평가(심판) 모델(설계 원칙: 응답≠평가) |
-| `EVAL_EMBED_MODEL` / `EVAL_EMBED_MODEL_GEMINI` | `text-embedding-3-small` / `gemini-embedding-001` | Response Relevancy 코사인용 임베딩(github provider는 임베딩 미지원 → OpenAI 키로 폴백) |
+| `OPENROUTER_API_KEY` | — | provider=openrouter 일 때 필요(유료) |
+| `EVAL_JUDGE_MODEL` / `..._GEMINI` / `..._GITHUB` / `..._OPENROUTER` | `gpt-4o` / `gemini-flash-latest` / `openai/gpt-4o` / `openai/gpt-4o` | Probe 질문 생성 + RAGAS 평가(심판) 모델(설계 원칙: 응답≠평가). 답변 생성 모델은 `RAG_*`(→ `agents/rag/generator.py`)가 담당 |
+| `EVAL_EMBED_MODEL` / `EVAL_EMBED_MODEL_GEMINI` | `text-embedding-3-small` / `gemini-embedding-001` | Response Relevancy 코사인용 임베딩(github·openrouter provider는 임베딩 미지원 → OpenAI 키로 폴백) |
 | `QDRANT_URL` / `QDRANT_API_KEY` | `:memory:` | 검색 인덱스 대상 |
 
 > 기본값만으로도(위 키 전부 미설정) **외부 API 없이** 규칙 지표 기반 진단이 동작합니다(폴백 설계).
 
 ### LLM Provider — `agents/eval/llm_provider.py`
 
-OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)·STEP2(답변 생성)·STEP3-2(RAGAS
-심판·임베딩)를 실제 LLM으로 돌릴 수 있게 하는 브릿지 계층. `generate_text`/`chat_json`/`embed_texts`
-세 함수로 provider 차이를 감추고, `probe_gen.py`/`metrics_ragas.py`가 전부
+OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)·STEP3-2(RAGAS
+심판·임베딩)를 실제 LLM으로 돌릴 수 있게 하는 브릿지 계층. `chat_json`/`embed_texts`
+두 함수로 provider 차이를 감추고, `probe_gen.py`/`metrics_ragas.py`가 전부
 이 계층만 호출한다(직접 `from openai import OpenAI` 하지 않음). STEP2 답변 생성은
 `agents/rag/generator.py`가 담당하며, 그쪽은 자체 provider 선택 로직(`RAG_LLM_PROVIDER`)을 쓴다.
 
@@ -237,6 +237,16 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
   `base_url=https://models.github.ai/inference` 로 그대로 재사용. GitHub 개인 액세스 토큰에
   **`models:read` 권한이 반드시 있어야 함**(없으면 401/403). 임베딩 엔드포인트는 제공하지
   않아 `embed_texts`는 provider 무관하게 OpenAI 키로만 동작(없으면 해당 RAGAS 지표만 스킵).
+- **openrouter**: [OpenRouter](https://openrouter.ai) — 키 하나로 여러 publisher 모델
+  (`openai/…`, `anthropic/…`, `google/…`)을 호출. OpenAI 호환 API를
+  `base_url=https://openrouter.ai/api/v1` 로 재사용한다. 다른 셋과 달리 **무료 브릿지가 아니라
+  유료**이며, 상시 사용을 전제한 provider 다.
+  - 모델명은 반드시 `publisher/model` 형식. 형식이 틀리면 404 → 폴백으로 조용히 강등된다.
+  - **심판 모델은 `response_format=json_object` 지원 모델로 고를 것.** 미지원이면 `chat_json`
+    파싱이 실패해 `{}` 로 폴백하고, 해당 점수가 결측 처리된다.
+  - 임베딩 엔드포인트가 없어 `embed_texts`는 github 와 마찬가지로 OpenAI 키로 폴백한다.
+  - 비용은 단가표 추정이 아니라 **응답이 알려준 실제 과금액**으로 집계된다
+    (`core/llm_clients.py` 가 요청에 `usage.include` 를 붙인다).
 
 모델명·무료 티어 한도는 시점에 따라 바뀔 수 있다 — 401/403/404 가 나면 해당 콘솔에서 현재
 사용 가능한 모델명을 다시 확인할 것.
@@ -503,8 +513,8 @@ agents/eval/
      채우며, evidence가 없으면 source chunk 좌표로 폴백한다.
    - 남은 일: `state.user_questions` 없이 taxonomy(사람 작성) 소스 자체를 만드는 부분은 미착수.
 2. **LLM Provider** (`llm_provider.py`) — ✅ 구현됨. OpenAI 토큰 승인 전 무료 대체용 브릿지.
-   `EVAL_LLM_PROVIDER=openai|gemini|github` 로 전환, `probe_gen.py`/`retrieval_temp.py`/
-   `metrics_ragas.py` 전부 이 계층만 통해 LLM을 호출한다. 자세한 내용은 위 "LLM Provider" 절 참고.
+   `EVAL_LLM_PROVIDER=openai|gemini|github|openrouter` 로 전환, `probe_gen.py`/`metrics_ragas.py`
+   가 전부 이 계층만 통해 LLM을 호출한다. 자세한 내용은 위 "LLM Provider" 절 참고.
 3. **RAGAS 지표** (`metrics_ragas.py`) — ✅ 구현됨. RAGAS 0.4.3 소스의 프롬프트·예시·조립
    형식을 그대로 옮겨 LLM-as-Judge로 직접 계산(Faithfulness/ContextPrecision/ContextRecall/
    ResponseRelevancy + contradiction AspectCritic). `EVAL_ENABLE_LLM=1`+`EVAL_MODE≥deep`로

@@ -543,7 +543,7 @@ def _heuristic_evidence_of(text: str) -> str:
 
 def _llm_generate_single_hop(chunk_text: str) -> tuple[str, str] | None:
     """
-    LLM(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택)으로 Single-Hop Specific (질문, 정답)
+    LLM(OpenAI/Gemini/GitHub Models/OpenRouter, EVAL_LLM_PROVIDER로 선택)으로 Single-Hop Specific (질문, 정답)
     쌍을 생성한다. 청크 문장을 그대로 베끼지 않도록 질문·정답 모두 새로 구성하게 지시한다.
     키 없거나 호출·파싱 실패 시 None(호출부가 휴리스틱으로 대체).
     """
@@ -1464,7 +1464,7 @@ def _generate_false_premise_probes(graph: knowledge_graph.KGraph, n: int, start_
 
 def _false_premise_question(chunk_text: str) -> str | None:
     """
-    LLM(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택)으로 잘못된 전제가 담긴 질문을
+    LLM(OpenAI/Gemini/GitHub Models/OpenRouter, EVAL_LLM_PROVIDER로 선택)으로 잘못된 전제가 담긴 질문을
     만든다. 키 없거나 실패 시 휴리스틱(고정 템플릿)으로 대체 — LLM 없이도
     answer_exists=False probe가 최소 동작하도록 폴백을 항상 값 있게 유지한다
     (_llm_synthesize_query 와의 차이).
@@ -1641,7 +1641,7 @@ def _llm_synthesize_query(
 ) -> _SynthesizedProbe | None:
     """
     RAGAS 시나리오(quadrant/subtype/persona/style/length/evol_direction)를
-    LLM(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택) 호출 1번으로 합성한다. 기존
+    LLM(OpenAI/Gemini/GitHub Models/OpenRouter, EVAL_LLM_PROVIDER로 선택) 호출 1번으로 합성한다. 기존
     _llm_generate_single_hop과 동일한 폴백 규칙: 키 없거나 호출·파싱 실패 시
     None(호출부가 휴리스틱으로 대체).
     """
