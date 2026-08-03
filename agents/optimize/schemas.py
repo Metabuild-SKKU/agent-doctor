@@ -108,8 +108,21 @@ class PrescriptionCandidate:
         target_metrics: 이 처방으로 개선하려는 주요 지표 목록.
         applies_when: 이 처방이 적용되는 조건(신호 기반 택1).
             예: {"topic_cluster": ["spread", "concentrated"]}.
-            Eval이 finding.metadata로 주는 신호와 optimizer가 대조해 후보를
-            거른다. 비어있으면 신호 판단 없이 순서대로 순차 시도(fallback).
+            ⚠️ 현재 이 태그의 소비는 꺼져 있다(planner._CONSUME_TOPIC_CLUSTER_SIGNAL=False)
+            — 관측용 신호로만 유지. Eval 은 finding.metadata 에 신호를 계속 기록하지만
+            planner 는 아직 그 값으로 후보를 거르지 않는다(전 처방 순차 시도). 소비를
+            유예한 이유: 신호가 고르는 swap_embedding_model 이 optimizer capability
+            (embedding_model=False)로 항상 거절되고, 임계값도 캘리브레이션 전이라
+            노이즈로 비싼 재색인을 잘못 발동시킬 위험이 있기 때문. 자세한 배경은
+            planner 의 _CONSUME_TOPIC_CLUSTER_SIGNAL 정의부 주석 참고.
+
+            (소비 ON 일 때의 계약) Eval이 finding.metadata로 주는 신호와 planner가
+            대조해 후보를 거른다(planner._prescription_applies). 비어있으면(또는 신호
+            미측정이면) 신호 판단 없이 순서대로 순차 시도(fallback). optimizer 는 걸러진
+            뒤의 search_space 만 소비하며 applies_when 을 직접 보지 않는다.
+            신호는 '선호'이지 '차단'이 아니다 — 걸러서 후보가 0개가 되면 planner 가
+            조건을 완화해 블랙리스트만 적용한다. 신호 때문에 라벨이 통째로 스킵돼
+            고칠 기회를 잃는 일을 막기 위해서다(planner._available_prescriptions).
         reason: 이 처방을 제안한 이유.
         tradeoffs: latency, cost, precision 하락 등 예상되는 부작용.
         metadata: 실험적 신호나 원본 rule dict 같은 확장 정보.
@@ -429,6 +442,10 @@ class Verdict:
         unjudgeable: 리포트 부재로 '측정 자체가 없어' 롤백한 경우 True.
             처방이 나빴다는 증거가 아니라 판정이 불가했다는 뜻이므로, config 복원은
             하되 블랙리스트 등록은 건너뛴다(무죄추정). 정상 판정(유지/롤백)은 False.
+        margin_rejected: 점수가 오르긴 했으나 상승폭이
+            history.MIN_IMPROVEMENT_MARGIN 미만이라 롤백한 경우 True. 마진 값이
+            노이즈보다 과도하게 큰지 사후 검증하기 위한 기록이며, 판정 자체는
+            일반 롤백과 같다(하락으로 롤백한 경우는 False).
     """
 
     keep: bool
@@ -439,6 +456,7 @@ class Verdict:
     floor_violations: list[str] = field(default_factory=list)
     reason: str = ""
     unjudgeable: bool = False
+    margin_rejected: bool = False
 
 
 @dataclass

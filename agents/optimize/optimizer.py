@@ -44,6 +44,8 @@ BackendRunner = Callable[[OptimizationRequest], Any]
 # optimizer가 후보값을 실험하기 전에 적용하는 안전 범위다.
 DEFAULT_CONSTRAINTS: dict[str, dict[str, Any]] = {
     "retriever.top_k": {"min": 1, "max": 20},
+    # 한쪽 채널을 0 으로 죽이면 하이브리드가 아니게 된다 — 양끝을 남긴다.
+    "retriever.hybrid_dense_weight": {"min": 0.1, "max": 0.9},
     "reranker.candidate_count": {"min": 4, "max": 100},
     "chunker.chunk_size": {"min": 200, "max": 1500},
     "chunker.chunk_overlap": {"min": 0, "max": 300},
@@ -66,13 +68,16 @@ DEFAULT_CAPABILITIES: dict[str, bool] = {
     # 소비한다(Qdrant sparse+dense RRF). config_mapper가 retriever.search_type을
     # use_hybrid로 매핑하고 STATE_MAPPABLE에도 있어 소비처가 확인됨 → 허용으로 전환.
     "hybrid_search": True,
+    # 공통 Retriever가 hybrid_dense_weight를 융합 가중치로 그대로 쓴다
+    # (agents/rag/retriever.py). use_hybrid 가 꺼져 있으면 값이 안 읽힐 뿐이라 안전하다.
+    "hybrid_fusion_weight": True,
     # 공통 Retriever가 use_mmr 로 후보풀을 MMR 재정렬한다(임베딩 코사인, 질의벡터 불필요).
     "mmr": True,
     "chunking": True,
     "embedding_model": False,
     # 공통 Retriever가 Eval과 Serve에서 같은 설정으로 CrossEncoder를 실행한다.
     "reranker": True,
-    "context_compression": False,
+    "context_compression": True,
     # Index(agent.py)가 CHUNK_STRATEGIES 레지스트리에 recursive_sentence 를 등록해
     # config["chunk_strategy"] 로 실제 소비한다. config_mapper 가 chunker.strategy 를
     # chunk_strategy 로 매핑하고 제약(allowed=recursive_sentence·markdown_recursive)·REINDEX 경로도
@@ -92,6 +97,7 @@ PATH_CAPABILITIES: dict[str, str] = {
     "retriever.top_k": "retriever.top_k",
     "retriever.mmr": "mmr",
     "retriever.search_type": "hybrid_search",
+    "retriever.hybrid_dense_weight": "hybrid_fusion_weight",
     "reranker.enabled": "reranker",
     "reranker.candidate_count": "reranker",
     "context.compression.enabled": "context_compression",
@@ -115,8 +121,10 @@ STATE_MAPPABLE_PATHS: set[str] = {
     "retriever.top_k",
     "retriever.mmr",
     "retriever.search_type",
+    "retriever.hybrid_dense_weight",
     "reranker.enabled",
     "reranker.candidate_count",
+    "context.compression.enabled",
     "chunker.chunk_size",
     "chunker.chunk_overlap",
     "chunker.strategy",
@@ -139,8 +147,17 @@ BACKEND_SUPPORTED_PATHS: dict[str, set[str]] = {
     "rules": set(STATE_MAPPABLE_PATHS),
     "internal": {
         "retriever.top_k",
+        # 융합 가중치도 후보 여러 개를 훑는 수치 축이라 internal sweep 대상이다.
+        "retriever.hybrid_dense_weight",
         "chunker.chunk_size",
         "chunker.chunk_overlap",
+        # rules가 청킹 교체를 2-후보(recursive_sentence·markdown_recursive)로 등록하고
+        # 제약(allowed)도 두 값을 허용하므로, 실제 비교는 sweep이 해야 등록 의도가 실현된다.
+        # 여기서 빠져 있으면 planner가 internal을 요청한 회차에 이 축이
+        # unsupported_backend_path로 걸러져, 실행 가능한 처방이 통째로 스킵된다.
+        # internal_adapter는 후보값 타입에 무관하다(동등 비교·dedupe만 하고 산술은
+        # 점수 쪽에서만 쓴다) — 범주형 축을 위한 타입 분기가 필요 없다.
+        "chunker.strategy",
     },
     "ragbuilder": {
         "retriever.top_k",

@@ -49,7 +49,13 @@ from agents.optimize.schemas import (
 )
 
 
+# 리포트 부재로 판정 자체가 없었던 경우. 다음 방문에도 리포트가 없을 가능성이 커
+# 재시도 여지가 없다고 보고 1회로 제한한다.
 _MAX_UNJUDGEABLE_ATTEMPTS = 1
+# sweep이 baseline을 측정하지 못해 study가 끝난 경우(missing_scorable_baseline).
+# baseline 관측값은 방문마다 갱신되므로 다음 Eval에서 성립할 수 있다. min_delta 도입
+# 전 이 실패는 retryable 경로로 2회까지 허용됐고, 그 예산을 그대로 유지한다.
+_MAX_MEASUREMENT_FAILURE_ATTEMPTS = 2
 _OPTIMIZE_VISIT_LIMIT_REASON = "Optimize 절대 방문 상한 도달"
 
 
@@ -140,23 +146,39 @@ def _unjudgeable_exclusions(
 ) -> set[tuple[str, str]]:
     """효과를 검증하지 못한 동일 처방의 재선택을 제한한다.
 
-    품질 악화가 확인된 것은 아니므로 영구 blacklist에는 넣지 않는다. 대신 현재
-    파이프라인 실행의 이력에서 같은 처방이 이미 측정 불가로 끝났다면 이후 Optimize
-    방문에서 제외한다. 새 파이프라인 실행은 이력이 비어 있으므로 다시 시도할 수 있다.
+    품질 악화가 확인된 것은 아니므로 영구 blacklist에는 넣지 않는다. blacklist와
+    optimization_history는 같은 AgentDoctorState 필드라 수명이 같으므로 "새 실행에서
+    재시도"는 양쪽 모두에 해당한다 — 이 구분의 실익은 수명이 아니라 **분류**다.
+    측정 불가를 품질 실패로 기록하면 리포트가 처방을 잘못 비난한다.
+
+    허용 횟수는 측정이 실패한 이유에 따라 다르다. 리포트 부재는 다음 방문에도 같을
+    가능성이 크지만, sweep의 baseline 미측정은 관측값이 갱신되면 풀린다.
     """
-    attempts: Counter[tuple[str, str]] = Counter()
+    report_absent: Counter[tuple[str, str]] = Counter()
+    measurement_failure: Counter[tuple[str, str]] = Counter()
     for item in optimization_history:
         if not item.metadata.get("unjudgeable"):
             continue
         label = item.failure_labels[0] if item.failure_labels else ""
         prescription_id = item.selected_prescription_id or ""
-        if label and prescription_id:
-            attempts[(label, prescription_id)] += 1
-    return {
+        if not (label and prescription_id):
+            continue
+        # study_error 는 _fail_active_study 가 남긴다(= sweep 측정 실패).
+        if item.metadata.get("study_error"):
+            measurement_failure[(label, prescription_id)] += 1
+        else:
+            report_absent[(label, prescription_id)] += 1
+    excluded = {
         key
-        for key, count in attempts.items()
+        for key, count in report_absent.items()
         if count >= _MAX_UNJUDGEABLE_ATTEMPTS
     }
+    excluded.update(
+        key
+        for key, count in measurement_failure.items()
+        if count >= _MAX_MEASUREMENT_FAILURE_ATTEMPTS
+    )
+    return excluded
 
 
 def _fmt_bool(value: bool) -> str:
@@ -858,11 +880,18 @@ def _continue_internal_study(
     if result.metadata.get("adapter_status") == "completed":
         return _finish_internal_study(state, item, result)
 
+    # min_delta 비교에 쓸 scorable baseline 이 없어 sweep 이 끝나지 못한 경우는
+    # '처방이 나빴다'가 아니라 '측정이 성립하지 않았다'이다. 품질 blacklist 대신
+    # unjudgeable 로 기록해 다음 파이프라인 실행에서 재시도할 수 있게 한다.
+    unjudgeable = (
+        result.metadata.get("stop_reason") == "missing_scorable_baseline"
+    )
     return _fail_active_study(
         state,
         item,
         result.error or result.message or "internal study를 완료하지 못했습니다.",
         retryable=True,
+        unjudgeable=unjudgeable,
     )
 
 
@@ -1000,8 +1029,14 @@ def _fail_active_study(
     reason: str,
     *,
     retryable: bool = False,
+    unjudgeable: bool = False,
 ) -> AgentDoctorState:
-    """study 오류 시 baseline으로 복원하고 재시도 가능 여부를 구분한다."""
+    """study 오류 시 baseline으로 복원하고 재시도 가능 여부를 구분한다.
+
+    ``unjudgeable``은 '측정 자체가 성립하지 않음'(예: min_delta 비교에 필요한
+    scorable baseline 부재)이다. 처방이 나빴다는 증거가 아니므로 영구 blacklist에
+    넣지 않고, 같은 실행 안에서만 _unjudgeable_exclusions로 재선택을 제한한다.
+    """
     before_config_for_log, _before_report, changed = _restore_history_item_baseline(
         state,
         item,
@@ -1009,6 +1044,7 @@ def _fail_active_study(
         metadata={
             "study_error": reason,
             "study_retryable": retryable,
+            "unjudgeable": unjudgeable,
         },
     )
     label = item.failure_labels[0] if item.failure_labels else ""
@@ -1023,9 +1059,12 @@ def _fail_active_study(
     )
     # 상태 계약 손상은 같은 처방으로 회복되지 않으므로 즉시 차단한다. 일시적인
     # adapter 오류는 한 번 재시도하되 반복되면 무한 루프 방지를 위해 차단한다.
+    # 측정 불가(unjudgeable)는 품질 증거가 없으므로 blacklist 대신 실행 범위
+    # 제한(_unjudgeable_exclusions)에 맡긴다.
     if (
         label
         and prescription_id
+        and not unjudgeable
         and (not retryable or previous_same_errors >= 1)
     ):
         state.blacklist.add((label, prescription_id))
@@ -1201,7 +1240,12 @@ def _relax_reranker_precision_floor(
         return verdict
     if verdict.floor_violations != ["context_precision"]:
         return verdict
-    if verdict.after_score <= verdict.before_score:
+    # 하한선 위반이 있으면 judge가 floor 판정으로 먼저 반환하므로, 여기가 이 경로의
+    # 유일한 점수 관문이다. "종합점수가 올랐다"를 judge와 같은 기준으로 재야 한다 —
+    # 아니면 노이즈 수준의 상승(+0.001)이 하한선 위반 처방을 되살린다.
+    if not history.meets_improvement_margin(
+        verdict.after_score - verdict.before_score
+    ):
         return verdict
 
     before_low_rank = _label_count(before_report, "retrieval_low_rank")
@@ -1218,7 +1262,8 @@ def _relax_reranker_precision_floor(
         floor_violations=[],
         reason=(
             "reranker 적용 후 context_precision 단독 하한선 위반이 있었지만 "
-            f"종합점수 상승 {verdict.before_score:.3f}→{verdict.after_score:.3f}, "
+            f"종합점수 상승 {verdict.before_score:.3f}→{verdict.after_score:.3f}"
+            f"(마진 {history.MIN_IMPROVEMENT_MARGIN:.3f} 충족), "
             f"retrieval_low_rank 감소 {before_low_rank}→{after_low_rank}로 유지"
         ),
         unjudgeable=verdict.unjudgeable,

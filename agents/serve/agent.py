@@ -57,9 +57,52 @@ def _serialize_chunks(state: AgentDoctorState) -> str:
     data = []
     for chunk in state.chunks:
         d = dataclasses.asdict(chunk)
+        _apply_generation_metadata(d, state.index_config)
         d.pop("sparse_vector", None)   # embedding은 벡터 검색에 필요하므로 유지
         data.append(d)
     return json.dumps(data, ensure_ascii=False, default=str, indent=2)
+
+
+def _apply_generation_metadata(chunk: dict, config: dict) -> None:
+    """Persist runtime generation settings so Serve reload sees Optimize changes."""
+    metadata = chunk.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+        chunk["metadata"] = metadata
+
+    enabled = config.get("context_compression")
+    if enabled is None:
+        enabled = config.get("context.compression.enabled")
+    if enabled is not None:
+        enabled_value = _as_bool(enabled)
+        metadata["context_compression"] = enabled_value
+        metadata["context.compression.enabled"] = enabled_value
+
+    aliases = (
+        ("context_compression_max_contexts", "context_filter_max_contexts"),
+        ("context_compression_min_contexts", "context_filter_min_contexts"),
+        ("context_compression_max_sentences", "context_filter_max_sentences"),
+    )
+    for canonical, legacy in aliases:
+        value = config.get(canonical)
+        if value is None:
+            value = config.get(legacy)
+        if value is None:
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed <= 0:
+            continue
+        metadata[canonical] = parsed
+        metadata[legacy] = parsed
+
+
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _start_api_server(expected_fingerprint: str | None = None) -> bool:

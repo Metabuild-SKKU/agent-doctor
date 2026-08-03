@@ -17,6 +17,11 @@ from core.schema import (
 )
 
 
+# 그래프 entity 추출 기본 모델. graph_index 가 config 미지정 시 폴백으로 같이 쓴다
+# (안내 로그가 실제 모델과 어긋나지 않도록 기본값 출처를 하나로 둔다).
+DEFAULT_GRAPH_LLM_MODEL = "gpt-4.1-mini"
+
+
 @dataclass
 class AgentDoctorState:
     """
@@ -56,6 +61,13 @@ class AgentDoctorState:
         "use_reranker": False,
         "reranker_model": "BAAI/bge-reranker-v2-m3",
         "rerank_candidates": 20,
+        # 후보창을 넓히는 처방(retrieval_rerank_candidate_miss)의 상한 정책.
+        # 후보 1개 = cross-encoder 추론 1쌍이라 검색 지연에 선형으로 실린다.
+        # Eval 은 이 값을 '순위 문제로 다룰 순위의 상한'으로도 읽는다 — 그보다 뒤 순위의
+        # gold 는 창을 넓혀도 리랭커에 닿지 않아 표현 문제(semantic/lexical)로 넘긴다.
+        "rerank_candidate_policy": {
+            "max_candidates": 50,
+        },
         # MMR 다양성 재정렬. 공통 Retriever가 소비한다(retriever.py). 기본 off로 두어
         # 동작을 바꾸지 않으면서 Optimize(enable_mmr)가 조정할 baseline을 드러낸다.
         "use_mmr": False,
@@ -67,6 +79,8 @@ class AgentDoctorState:
         # metadata 기록에 소비한다. 둘 다 미지정 시 5를 폴백으로 쓰고 있어 같은 값을
         # 명시해 동작을 바꾸지 않으면서 Optimize가 조정할 baseline을 드러낸다.
         "top_k": 5,
+        # Optional context filtering before answer generation. Off by default.
+        "context_compression": False,
         "chunk_strategy": "fixed",
         "embedding_dimension": 1024,
         "deduplicate": True,
@@ -111,7 +125,7 @@ class AgentDoctorState:
         },
         "graph_enabled": True,
         "graph_extraction": "auto",
-        "graph_llm_model": "gpt-4.1-mini",
+        "graph_llm_model": DEFAULT_GRAPH_LLM_MODEL,
         "graph_similarity_threshold": 0.9,
         "graph_output_dir": "output/index_graph",
         "corpus_visualization_enabled": True,

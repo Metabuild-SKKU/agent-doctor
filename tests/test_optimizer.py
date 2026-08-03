@@ -216,6 +216,26 @@ class OptimizerExecutionTest(unittest.TestCase):
         )
         self.assertFalse(result.needs_reindex)
 
+    def test_context_compression_is_mappable_and_does_not_reindex(self):
+        candidate = self.make_candidate(
+            prescription_id="context_compression",
+            search_space={"context.compression.enabled": [True]},
+            reindex=False,
+        )
+        request = self.make_request(
+            baseline_config={"context_compression": False},
+            candidates=[candidate],
+        )
+
+        result = run(request)
+
+        self.assertEqual(result.status, "proposed")
+        self.assertEqual(
+            result.config_patch.changes,
+            {"context.compression.enabled": True},
+        )
+        self.assertFalse(result.needs_reindex)
+
     def test_unavailable_runtime_reranker_is_skipped(self):
         candidate = self.make_candidate(
             prescription_id="enable_reranker",
@@ -553,6 +573,113 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertEqual(result.status, "proposed")
         self.assertEqual(result.optimizer, "rules")
         self.assertEqual(result.metadata["fallback_reason"], "external_failure")
+
+    # internal × chunker.strategy (범주형 축) ------------------------------
+    def make_strategy_request(self, *, values=None, **overrides):
+        candidate = self.make_candidate(
+            prescription_id="switch_to_recursive_sentence",
+            search_space={
+                "chunker.strategy": list(
+                    values or ["recursive_sentence", "markdown_recursive"]
+                )
+            },
+            reindex=True,
+        )
+        values_ = {
+            "optimizer": "internal",
+            "baseline_config": {
+                "chunk_size": 512,
+                "chunk_overlap": 50,
+                "chunk_strategy": "fixed",
+            },
+            "candidates": [candidate],
+            "max_trials": 2,
+        }
+        values_.update(overrides)
+        return self.make_request(**values_)
+
+    def test_internal_accepts_chunker_strategy(self):
+        # 회귀 테스트: 범주형 축이 실행 전에 unsupported_backend_path 로 걸리면
+        # rules 가 등록한 2-후보 스윕이 실제 비교 없이 통째로 스킵된다.
+        result = run(self.make_strategy_request())
+
+        self.assertEqual(result.status, "proposed")
+        self.assertEqual(result.optimizer, "internal")
+        self.assertNotEqual(result.metadata.get("error_code"), "unsupported_backend_path")
+        self.assertEqual(result.metadata["parameter_path"], "chunker.strategy")
+        self.assertEqual(
+            result.metadata["filtered_search_space"],
+            {"chunker.strategy": ["recursive_sentence", "markdown_recursive"]},
+        )
+        self.assertEqual(
+            result.config_patch.changes,
+            {"chunker.strategy": "recursive_sentence"},
+        )
+
+    def test_internal_strategy_requires_reindex(self):
+        result = run(self.make_strategy_request())
+
+        self.assertTrue(result.needs_reindex)
+        self.assertTrue(result.config_patch.reindex_required)
+
+    def test_internal_strategy_drops_values_outside_allowed(self):
+        result = run(
+            self.make_strategy_request(
+                values=["semantic_split", "markdown_recursive"],
+            )
+        )
+
+        self.assertEqual(
+            result.metadata["filtered_search_space"],
+            {"chunker.strategy": ["markdown_recursive"]},
+        )
+        self.assertEqual(
+            result.config_patch.changes,
+            {"chunker.strategy": "markdown_recursive"},
+        )
+
+    def test_internal_strategy_is_blocked_when_capability_is_off(self):
+        result = run(
+            self.make_strategy_request(
+                metadata={"capabilities": {"chunking_strategy": False}},
+            )
+        )
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(result.metadata["error_code"], "unsupported_capability")
+
+    def test_internal_strategy_keeps_single_axis_guarantee(self):
+        candidate = self.make_candidate(
+            prescription_id="switch_to_recursive_sentence",
+            search_space={
+                "chunker.strategy": ["recursive_sentence"],
+                "chunker.chunk_size": [600],
+            },
+        )
+        request = self.make_request(
+            optimizer="internal",
+            baseline_config={"chunk_size": 512, "chunk_strategy": "fixed"},
+            candidates=[candidate],
+            max_trials=2,
+        )
+
+        result = run(request)
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(result.metadata["error_code"], "multi_axis_search_space")
+
+    def test_internal_strategy_skips_candidate_equal_to_current_value(self):
+        # 현재값 재적용은 no-op 이라 정규화 단계에서 제외된다. 후보가 그것뿐이면
+        # 실행 가능한 후보가 없다는 뜻이다.
+        result = run(
+            self.make_strategy_request(
+                values=["markdown_recursive"],
+                baseline_config={"chunk_strategy": "markdown_recursive"},
+            )
+        )
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(result.metadata["error_code"], "no_valid_candidate_values")
 
     def test_request_and_search_space_are_not_mutated(self):
         request = self.make_request(optimizer="ragbuilder")

@@ -718,6 +718,12 @@ def _positive_int(
     return min(parsed, maximum) if maximum is not None else parsed
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 def _refresh_runtime_capabilities(
     state: AgentDoctorState,
     config: dict,
@@ -773,6 +779,7 @@ def _refresh_runtime_metadata(
     for chunk in chunks:
         metadata = {
             **(chunk.metadata or {}),
+            **_generation_runtime_metadata(config),
             "hybrid_dense_weight": float(
                 config.get("hybrid_dense_weight", 0.7)
             ),
@@ -792,6 +799,36 @@ def _refresh_runtime_metadata(
         }
         refreshed.append(replace(chunk, metadata=metadata))
     return refreshed
+
+
+def _generation_runtime_metadata(config: dict) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+
+    enabled = config.get("context_compression")
+    if enabled is None:
+        enabled = config.get("context.compression.enabled")
+    if enabled is not None:
+        enabled_value = _as_bool(enabled)
+        metadata["context_compression"] = enabled_value
+        metadata["context.compression.enabled"] = enabled_value
+
+    aliases = (
+        ("context_compression_max_contexts", "context_filter_max_contexts"),
+        ("context_compression_min_contexts", "context_filter_min_contexts"),
+        ("context_compression_max_sentences", "context_filter_max_sentences"),
+    )
+    for canonical, legacy in aliases:
+        value = config.get(canonical)
+        if value is None:
+            value = config.get(legacy)
+        if value is None:
+            continue
+        parsed = _positive_int(value, 0)
+        if parsed > 0:
+            metadata[canonical] = parsed
+            metadata[legacy] = parsed
+
+    return metadata
 
 
 def _validate_config(config: dict) -> None:
@@ -864,6 +901,7 @@ def _chunk_metadata(
     # Serve는 Qdrant payload만 보고 검색 옵션을 복원하므로 retrieval 설정도 같이 저장한다.
     return {
         **doc_metadata,
+        **_generation_runtime_metadata(config),
         "chunk_index": chunk_index,
         "source": document.source,
         "document_hash": document_hash,

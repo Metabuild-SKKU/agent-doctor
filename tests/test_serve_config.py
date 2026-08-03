@@ -45,6 +45,31 @@ class ServeConfigRoundTripTest(unittest.TestCase):
         gen = sc.generation_subset({"top_k": 3, "temperature": 0.1, "abstention_strict": True})
         self.assertEqual(gen, {"temperature": 0.1, "abstention_strict": True})
 
+    def test_generation_subset_includes_context_compression_keys(self):
+        gen = sc.generation_subset({
+            "temperature": 0.1,
+            "context_compression": True,
+            "context_compression_max_contexts": 2,
+            "context_compression_min_contexts": 1,
+            "context_compression_max_sentences": 3,
+        })
+        self.assertEqual(
+            gen,
+            {
+                "temperature": 0.1,
+                "context_compression": True,
+                "context_compression_max_contexts": 2,
+                "context_compression_min_contexts": 1,
+                "context_compression_max_sentences": 3,
+            },
+        )
+
+    def test_fingerprint_changes_when_context_compression_changes(self):
+        chunks = [{"chunk_id": "a", "hash": "h1"}]
+        fp_off = sc.serving_fingerprint(chunks, {"context_compression": False})
+        fp_on = sc.serving_fingerprint(chunks, {"context_compression": True})
+        self.assertNotEqual(fp_off, fp_on)
+
 
 class ApiInitAppliesServeConfigTest(unittest.TestCase):
     """init_qdrant 가 사이드카 설정을 retriever·generation 에 실제 주입하는지 end-to-end."""
@@ -65,6 +90,8 @@ class ApiInitAppliesServeConfigTest(unittest.TestCase):
                 "top_k": 1, "use_mmr": True, "mmr_lambda": 0.3,
                 "embedding_model": "test-model", "embedding_dimension": 2,
                 "abstention_strict": True, "temperature": 0.15,
+                "context_compression": True,
+                "context_compression_max_contexts": 2,
                 "chunk_size": 999,  # 재색인 키 → 사이드카에서 제외돼야
             }
             served = sc.write_serve_config(chunks_file, index_config)
@@ -78,6 +105,8 @@ class ApiInitAppliesServeConfigTest(unittest.TestCase):
             # 생성 설정이 generator 로 주입됨(재색인 키는 제외)
             self.assertTrue(api._generation_config.get("abstention_strict"))
             self.assertAlmostEqual(api._generation_config.get("temperature"), 0.15)
+            self.assertTrue(api._generation_config.get("context_compression"))
+            self.assertEqual(api._generation_config.get("context_compression_max_contexts"), 2)
             self.assertNotIn("chunk_size", api._generation_config)
             # 지문은 코퍼스+설정 결합 → Serve agent 계산과 일치
             self.assertEqual(api._fingerprint, sc.serving_fingerprint(chunks, served))
