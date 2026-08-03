@@ -378,15 +378,31 @@ def _config_value(config: dict | None, *names: str) -> Any:
     return None
 
 
+# 같은 문자열을 RAG_LLM_PROVIDER 와 EVAL_LLM_PROVIDER 어느 쪽에 넣어도 동작하도록 맞춘
+# 철자표. agents/eval/llm_provider.py 의 _PROVIDER_ALIASES 와 항상 같은 값을 유지할 것
+# (tests/test_provider_notices.py 가 두 표의 일치를 핀으로 잡는다).
+# 한쪽만 받아주면 "OpenRouter 로 다 바꿨다"고 믿은 실행에서 심판은 OpenRouter 로 돌고
+# 답변 생성만 extractive 로 저하돼, 평가가 저하된 RAG 를 재는 상태가 된다.
+_PROVIDER_ALIASES = {
+    "github_models": "github",
+    "open_router": "openrouter",
+    "open-router": "openrouter",
+    "openrouter_ai": "openrouter",
+    "openrouter.ai": "openrouter",
+}
+
+
 # LLM provider 결정
 # 우선순위: provider > config 값 > 환경변수 > auto
+# 여기서 철자를 정규화하므로 아래 _has_provider()/_llm_generate() 는 정규형만 본다.
 def _selected_provider(provider: str | None = None, config: dict | None = None) -> str:
-    return str(
+    selected = str(
         provider
         or _config_value(config, "rag_llm_provider", "llm_provider", "response_provider")
         or os.getenv("RAG_LLM_PROVIDER")
         or "auto"
-    ).lower()
+    ).strip().lower()
+    return _PROVIDER_ALIASES.get(selected, selected)
 
 
 # LLM model 결정

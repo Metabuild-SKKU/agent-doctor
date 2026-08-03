@@ -62,6 +62,65 @@ class EvalProviderFallbackTest(unittest.TestCase):
         # RAG(_llm_generate)가 받아주는 철자라 여기서도 같은 값을 받는다.
         self.assertEqual(self._provider("github_models"), ("github", ""))
 
+    def test_openrouter_is_known_and_silent(self):
+        # OpenRouter transport 를 추가하면서 _KNOWN_PROVIDERS 갱신을 빠뜨리면
+        # openrouter 가 "미지원 값"으로 openai 에 폴백해 유료 호출이 엉뚱한 곳으로
+        # 청구된다. 파일 내 위치가 달라 git 이 충돌로 잡아주지 않으므로 핀으로 고정한다.
+        self.assertEqual(self._provider("openrouter"), ("openrouter", ""))
+
+    def test_openrouter_spelling_variants_are_accepted(self):
+        for value in ("open_router", "open-router", "openrouter_ai", "openrouter.ai"):
+            with self.subTest(value=value):
+                self.assertEqual(self._provider(value), ("openrouter", ""))
+
+    def test_openrouter_is_case_insensitive(self):
+        self.assertEqual(self._provider("OpenRouter"), ("openrouter", ""))
+
+    def test_every_transport_has_a_known_provider(self):
+        # 위 핀들의 일반형 — 새 provider transport(_<name>_generate)를 추가하고
+        # _KNOWN_PROVIDERS 갱신을 잊으면 그 transport 는 도달 불가 코드가 된다.
+        transports = {
+            name[1:-len("_generate")]
+            for name in vars(llm_provider)
+            if name.startswith("_") and name.endswith("_generate")
+        }
+        self.assertEqual(transports - llm_provider._KNOWN_PROVIDERS, set())
+
+
+class ProviderSpellingSymmetryTest(unittest.TestCase):
+    """EVAL_LLM_PROVIDER 와 RAG_LLM_PROVIDER 는 같은 철자를 받아야 한다.
+
+    한쪽만 받아주면 심판(Eval)은 지정한 provider 로 돌고 답변 생성(RAG)만 extractive 로
+    저하돼, 평가가 저하된 RAG 를 재는 상태가 된다. 두 표가 갈라지는 걸 여기서 막는다."""
+
+    def setUp(self):
+        generator._warned_providers.clear()
+
+    def test_alias_tables_are_in_sync(self):
+        self.assertEqual(llm_provider._PROVIDER_ALIASES, generator._PROVIDER_ALIASES)
+
+    def test_rag_accepts_every_eval_alias(self):
+        for spelling, canonical in llm_provider._PROVIDER_ALIASES.items():
+            with self.subTest(spelling=spelling):
+                self.assertEqual(generator._selected_provider(spelling), canonical)
+
+    def test_rag_normalizes_case_and_whitespace(self):
+        self.assertEqual(generator._selected_provider("  OpenRouter "), "openrouter")
+
+    def test_rag_alias_reaches_openrouter_transport(self):
+        # 정규화가 _has_provider()/_llm_generate() 양쪽에 모두 걸리는지 —
+        # 한쪽만 걸리면 generation_mode 표기와 실제 호출이 어긋난다.
+        env = {"OPENROUTER_API_KEY": "or-dummy", "RAG_LLM_PROVIDER": "open_router"}
+        buf = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), \
+                patch.object(generator, "_openrouter_generate", return_value="OR 답변"), \
+                redirect_stdout(buf):
+            os.environ.pop("OPENAI_API_KEY", None)
+            os.environ.pop("GEMINI_API_KEY", None)
+            self.assertTrue(generator._has_provider())
+            self.assertEqual(generator._llm_generate("질문", ["컨텍스트"]), "OR 답변")
+        self.assertEqual(buf.getvalue(), "")
+
 
 class IndexGraphNoticeTest(unittest.TestCase):
     def setUp(self):
@@ -94,9 +153,25 @@ class IndexGraphNoticeTest(unittest.TestCase):
     def test_no_key_is_silent(self):
         buf = io.StringIO()
         with patch.dict(os.environ, {}, clear=False), redirect_stdout(buf):
+            # auto 는 OPENAI_API_KEY 다음으로 OPENROUTER_API_KEY 도 본다 — 둘 다 없어야
+            # keyword 로 떨어진다.
             os.environ.pop("OPENAI_API_KEY", None)
+            os.environ.pop("OPENROUTER_API_KEY", None)
             graph_index._extract(_chunk(), {})
         self.assertEqual(buf.getvalue(), "")
+
+    def test_openrouter_auto_notice_names_openrouter_key(self):
+        # OpenAI 키 없이 OpenRouter 키만 있는 실행에서 "OPENAI_API_KEY 감지" 라고
+        # 찍으면 어느 키를 빼야 청크당 유료 호출이 멈추는지 알 수 없다.
+        buf = io.StringIO()
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-dummy"}, clear=False), \
+                patch.object(graph_index, "_llm_entities", return_value=([], [])), \
+                redirect_stdout(buf):
+            os.environ.pop("OPENAI_API_KEY", None)
+            graph_index._extract(_chunk(), {})
+        log = buf.getvalue()
+        self.assertIn("OPENROUTER_API_KEY 감지", log)
+        self.assertNotIn("OPENAI_API_KEY 감지", log)
 
 
 class RagAutoNoticeTest(unittest.TestCase):

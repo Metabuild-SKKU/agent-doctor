@@ -38,7 +38,7 @@ from agents.eval import llm_provider  # noqa: E402
 
 if not llm_provider.has_key():
     print("[Gate] 활성 provider 의 API 키가 없어 실행 불가 — .env 에 키를 넣고 재실행하세요.")
-    print("       (EVAL_LLM_PROVIDER=openai|gemini|github 에 맞는 키 필요)")
+    print("       (EVAL_LLM_PROVIDER=openai|gemini|github|openrouter 에 맞는 키 필요)")
     sys.exit(1)
 
 from core import llm_usage  # noqa: E402
