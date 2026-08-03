@@ -214,8 +214,7 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, confirmed
 | `GEMINI_API_KEY` | — | provider=gemini 일 때 필요(Google AI Studio 무료 티어) |
 | `GITHUB_TOKEN` | — | provider=github 일 때 필요(`models:read` 권한 포함된 PAT) |
 | `OPENROUTER_API_KEY` | — | provider=openrouter 일 때 필요(유료) |
-| `EVAL_GEN_MODEL` / `..._GEMINI` / `..._GITHUB` / `..._OPENROUTER` | `gpt-4o-mini` / `gemini-flash-latest` / `openai/gpt-4o-mini` / `openai/gpt-4o-mini` | 답변·Probe 질문 생성 모델(응답용) |
-| `EVAL_JUDGE_MODEL` / `..._GEMINI` / `..._GITHUB` / `..._OPENROUTER` | `gpt-4o` / `gemini-flash-latest` / `openai/gpt-4o` / `openai/gpt-4o` | RAGAS 평가(심판) 모델(설계 원칙: 응답≠평가) |
+| `EVAL_JUDGE_MODEL` / `..._GEMINI` / `..._GITHUB` / `..._OPENROUTER` | `gpt-4o` / `gemini-flash-latest` / `openai/gpt-4o` / `openai/gpt-4o` | Probe 질문 생성 + RAGAS 평가(심판) 모델(설계 원칙: 응답≠평가). 답변 생성 모델은 `RAG_*`(→ `agents/rag/generator.py`)가 담당 |
 | `EVAL_EMBED_MODEL` / `EVAL_EMBED_MODEL_GEMINI` | `text-embedding-3-small` / `gemini-embedding-001` | Response Relevancy 코사인용 임베딩(github·openrouter provider는 임베딩 미지원 → OpenAI 키로 폴백) |
 | `QDRANT_URL` / `QDRANT_API_KEY` | `:memory:` | 검색 인덱스 대상 |
 
@@ -223,9 +222,9 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, confirmed
 
 ### LLM Provider — `agents/eval/llm_provider.py`
 
-OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)·STEP2(답변 생성)·STEP3-2(RAGAS
-심판·임베딩)를 실제 LLM으로 돌릴 수 있게 하는 브릿지 계층. `generate_text`/`chat_json`/`embed_texts`
-세 함수로 provider 차이를 감추고, `probe_gen.py`/`metrics_ragas.py`가 전부
+OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)·STEP3-2(RAGAS
+심판·임베딩)를 실제 LLM으로 돌릴 수 있게 하는 브릿지 계층. `chat_json`/`embed_texts`
+두 함수로 provider 차이를 감추고, `probe_gen.py`/`metrics_ragas.py`가 전부
 이 계층만 호출한다(직접 `from openai import OpenAI` 하지 않음). STEP2 답변 생성은
 `agents/rag/generator.py`가 담당하며, 그쪽은 자체 provider 선택 로직(`RAG_LLM_PROVIDER`)을 쓴다.
 
@@ -514,8 +513,8 @@ agents/eval/
      채우며, evidence가 없으면 source chunk 좌표로 폴백한다.
    - 남은 일: `state.user_questions` 없이 taxonomy(사람 작성) 소스 자체를 만드는 부분은 미착수.
 2. **LLM Provider** (`llm_provider.py`) — ✅ 구현됨. OpenAI 토큰 승인 전 무료 대체용 브릿지.
-   `EVAL_LLM_PROVIDER=openai|gemini|github` 로 전환, `probe_gen.py`/`retrieval_temp.py`/
-   `metrics_ragas.py` 전부 이 계층만 통해 LLM을 호출한다. 자세한 내용은 위 "LLM Provider" 절 참고.
+   `EVAL_LLM_PROVIDER=openai|gemini|github|openrouter` 로 전환, `probe_gen.py`/`metrics_ragas.py`
+   가 전부 이 계층만 통해 LLM을 호출한다. 자세한 내용은 위 "LLM Provider" 절 참고.
 3. **RAGAS 지표** (`metrics_ragas.py`) — ✅ 구현됨. RAGAS 0.4.3 소스의 프롬프트·예시·조립
    형식을 그대로 옮겨 LLM-as-Judge로 직접 계산(Faithfulness/ContextPrecision/ContextRecall/
    ResponseRelevancy + contradiction AspectCritic). `EVAL_ENABLE_LLM=1`+`EVAL_MODE≥deep`로

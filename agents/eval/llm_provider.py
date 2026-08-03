@@ -81,39 +81,9 @@ def _run_with_retry(fn, label: str = "LLM"):
     return run_with_retry(fn, label, tag="Eval")
 
 
-# ── 답변 생성 (retrieval_temp.py 가 사용) ─────────────────────────
-
-def generate_text(system: str, user: str, model: str | None = None) -> str | None:
-    """일반 텍스트 응답 생성. 키/라이브러리 없거나 호출 실패 시 None."""
-    if not has_key():
-        return None
-
-    def _do():
-        provider = _provider()
-        if provider == "gemini":
-            return _gemini_generate(
-                system, user, model or os.getenv("EVAL_GEN_MODEL_GEMINI", "gemini-flash-latest"))
-        elif provider == "github":
-            return _github_generate(
-                system, user, model or os.getenv("EVAL_GEN_MODEL_GITHUB", "openai/gpt-4o-mini"))
-        elif provider == "openrouter":
-            return _openrouter_generate(
-                system, user,
-                model or os.getenv("EVAL_GEN_MODEL_OPENROUTER", "openai/gpt-4o-mini"))
-        return _openai_generate(
-            system, user, model or os.getenv("EVAL_GEN_MODEL", "gpt-4o-mini"))
-
-    try:
-        text = _run_with_retry(_do, "생성")
-        return (text or "").strip()
-    except ImportError:
-        return None
-    except Exception as e:
-        print(f"[Eval] LLM 생성 실패({e}) → 추출식 폴백")
-        return None
-
-
-# ── JSON 강제 채점 호출 (ragas_eval.py 가 사용) ───────────────────
+# ── JSON 강제 채점 호출 (probe_gen.py / metrics_ragas.py 가 사용) ─
+# 참고: STEP2 답변 생성은 이 모듈이 아니라 agents/rag/generator.py 가 담당한다
+# (그쪽은 RAG_LLM_PROVIDER / RAG_*_MODEL 계열 env 를 쓴다).
 
 def chat_json(
     system: str,
@@ -175,7 +145,7 @@ def chat_json(
     return {}
 
 
-# ── 임베딩 (ragas_eval.py 가 사용) ────────────────────────────────
+# ── 임베딩 (metrics_ragas.py 가 사용) ─────────────────────────────
 # GitHub Models 와 OpenRouter 는 embeddings 엔드포인트를 제공하지 않아, 두 provider 에서도
 # 임베딩만은 OpenAI 클라이언트(OPENAI_API_KEY)로 폴백한다 — 없으면 호출부가
 # except 로 잡아 스킵(response_relevancy 등 임베딩 의존 지표만 빠짐).
