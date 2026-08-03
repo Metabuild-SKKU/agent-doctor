@@ -385,6 +385,7 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
         # 골랐나"의 핵심(여러 문제가 같은 변경을 원했다)이 사라진다.
         # 구버전 이력에는 supporting_labels 가 없어 failure_labels 로 폴백한다.
         supporting = list(getattr(item, "supporting_labels", None) or item.failure_labels)
+        resolved, remaining = _attribution(item, kept, study_error, supporting)
 
         out.append({
             "state": state_key,
@@ -392,8 +393,8 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             "change": change,
             "action": getattr(item, "action_key", None) or "",
             "target": ", ".join(supporting),
-            "resolved": list(item.metadata.get("resolved_labels") or []),
-            "remaining": list(item.metadata.get("remaining_labels") or []),
+            "resolved": resolved,
+            "remaining": remaining,
             "reason": ["처방 근거", item.reason or ""],
             "score": score,
             "verdict": (
@@ -407,7 +408,7 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
                 # rows 는 sweep 후보 실측 막대그래프 전용이다(report.html rxCard).
                 # 선택 근거는 모양이 달라 notes 로 따로 싣는다 — 섞으면 렌더가 깨진다.
                 "rows": [],
-                "notes": _selection_notes(item, supporting),
+                "notes": _selection_notes(item, supporting, resolved, remaining),
                 "caption": (
                     str(item.metadata.get("study_error", ""))
                     if study_error else
@@ -418,11 +419,43 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
     return out
 
 
-def _selection_notes(item, supporting: list[str]) -> list[list[str]]:
+def _attribution(
+    item,
+    kept: bool,
+    study_error: bool,
+    supporting: list[str],
+) -> tuple[list[str], list[str]]:
+    """이 시도가 실제로 해결한 라벨과 남은 라벨.
+
+    ⚠️ **유지된 처방만 해결을 주장할 수 있다.** 롤백은 config 를 되돌렸으므로 그
+    개선이 지금 설정에 남아 있지 않다. `history.finalize_item` 이 저장 시점에 이미
+    같은 판정을 적용하지만, 여기서 한 번 더 막는다 — 이 함수는 `OptimizationReport`
+    가 아니라 raw 이력 metadata 를 직접 읽으므로 reporter 의 가드가 걸리지 않는
+    경로다(웹 리포트만 "되돌렸는데 해결됨"으로 보이던 원인).
+
+    study 오류는 해결도 잔존도 주장하지 않는다 — 전후 측정 자체가 성립하지 않았다.
+    """
+    if study_error:
+        return [], []
+    if not kept:
+        return [], list(supporting)
+    return (
+        list(item.metadata.get("resolved_labels") or []),
+        list(item.metadata.get("remaining_labels") or []),
+    )
+
+
+def _selection_notes(
+    item,
+    supporting: list[str],
+    resolved: list[str],
+    remaining: list[str],
+) -> list[list[str]]:
     """선택 근거 drill-down: 무엇이 지지했고 무엇이 실제로 해결됐는지.
 
     "지지받았다"와 "해결됐다"를 나란히 보여주는 것이 핵심이다. 지지 라벨을 그대로
-    성과로 읽으면 리포트가 실제보다 좋게 보인다.
+    성과로 읽으면 리포트가 실제보다 좋게 보인다. resolved/remaining 은 호출부가
+    _attribution 으로 이미 판정한 값을 받는다(카드 본문과 어긋나지 않도록).
 
     구버전 이력에는 이 정보가 없어 빈 목록이 되고, 그때는 카드가 caption 만
     보여주던 이전 모습 그대로다.
@@ -433,8 +466,6 @@ def _selection_notes(item, supporting: list[str]) -> list[list[str]]:
     probes = list(getattr(item, "supporting_probes", None) or [])
     if probes:
         notes.append(["영향 질문", f"{len(probes)}건"])
-    resolved = item.metadata.get("resolved_labels") or []
-    remaining = item.metadata.get("remaining_labels") or []
     if resolved:
         notes.append(["해결됨", ", ".join(resolved)])
     if remaining:

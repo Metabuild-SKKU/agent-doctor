@@ -462,6 +462,28 @@ class ActionCenteredRxCardTest(unittest.TestCase):
 
         self.assertEqual(card["drill"]["rows"], [])
 
+    def test_rolled_back_card_claims_nothing_resolved(self):
+        """웹 카드가 CLI 리포트와 같은 판정을 보여야 한다.
+
+        `_build_rxs` 는 `OptimizationReport` 가 아니라 raw 이력 metadata 를 직접
+        읽으므로 reporter 의 `verdict.keep` 가드가 걸리지 않는 경로다. 실제로 이
+        경로만 "롤백"이라고 표시하면서 동시에 "해결됨"을 출력했다.
+        """
+        item = self._item(status="failed")
+        item.rollback_reason = "종합점수 상승폭 부족"
+        # 저장 시점 가드를 우회한 구버전 이력이 섞여 들어와도 표시가 새면 안 된다.
+        item.metadata["resolved_labels"] = ["retrieval_missing_gold"]
+
+        card = self._rxs(item)[0]
+
+        self.assertEqual(card["verdict"], ["roll", "롤백"])
+        self.assertEqual(card["resolved"], [])
+        self.assertEqual(
+            card["remaining"],
+            ["retrieval_missing_gold", "retrieval_incomplete_enumeration"],
+        )
+        self.assertNotIn("해결됨", dict(card["drill"]["notes"]))
+
     def test_course_point_uses_a_human_action_name(self):
         state = make_state(make_report())
         state.optimization_history = [self._item()]

@@ -283,6 +283,32 @@ class ResultAttributionTest(unittest.TestCase):
         self.assertEqual(result["resolved_labels"], [])
         self.assertEqual(result["remaining_labels"], ["retrieval_missing_gold"])
 
+    def test_rollback_never_stores_resolved_labels(self):
+        """롤백은 config 를 되돌렸다 — 사라진 라벨을 성과로 기록하면 안 된다.
+
+        `margin_rejected` 롤백(점수는 올랐지만 상승폭이 마진 미달)에서는 확정
+        Finding 이 실제로 줄어 차집합이 채워진다. 그 값을 그대로 저장하면 raw
+        metadata 를 읽는 소비처(report_view·web_api)가 reporter 의 가드를 우회해
+        "되돌렸는데 해결됨"을 표시한다 — 그래서 **저장 시점에** 막는다.
+        """
+        item = self._item(["retrieval_missing_gold", "retrieval_low_rank"])
+        before = _report(["retrieval_missing_gold", "retrieval_low_rank"])
+        item.metadata["before_report"] = before
+        after = _report(["retrieval_low_rank"])          # 라벨 하나가 실제로 사라짐
+        verdict = Verdict(
+            keep=False, before_score=0.60, after_score=0.605,
+            margin_rejected=True, reason="상승폭 부족",
+        )
+
+        history.finalize_item(item, verdict, {"top_k": 5}, after)
+
+        self.assertEqual(item.status, "failed")
+        self.assertEqual(item.metadata["resolved_labels"], [])
+        self.assertEqual(
+            item.metadata["remaining_labels"],
+            ["retrieval_missing_gold", "retrieval_low_rank"],
+        )
+
     def test_finalize_item_records_attribution(self):
         item = self._item(["retrieval_missing_gold", "retrieval_low_rank"])
         item.metadata["before_report"] = _report(

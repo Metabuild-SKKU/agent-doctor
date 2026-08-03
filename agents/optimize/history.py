@@ -583,7 +583,20 @@ def finalize_item(
     )
     item.metadata["floor_violations"] = verdict.floor_violations
     # 지지 라벨과 실제 해결 라벨을 구분해 남긴다(§5.4). before_report 를 지우기 전에.
-    item.metadata.update(
-        attribute_result(item, before_report, after_report)
-    )
+    #
+    # ⚠️ **롤백이면 해결을 주장하지 않는다.** config 를 되돌렸으므로 사라졌던 라벨의
+    # 개선은 지금 설정에 남아 있지 않다. 특히 margin_rejected 롤백(점수는 올랐지만
+    # 상승폭이 마진 미달)에서는 확정 Finding 이 실제로 줄어 차집합이 채워지는데,
+    # 그 값을 그대로 저장하면 "되돌렸는데 해결됨"이라는 리포트가 나온다.
+    #
+    # 판정을 **저장 시점에** 적용하는 이유: 소비처(reporter·report_view·web_api)가
+    # 여럿이고 각자 raw metadata 를 읽으므로, 표시 계층마다 같은 가드를 반복하면
+    # 하나만 빠져도 경로별로 다른 값이 보인다(실제로 그렇게 새어 나갔다).
+    attribution = attribute_result(item, before_report, after_report)
+    if not verdict.keep:
+        attribution = {
+            "resolved_labels": [],
+            "remaining_labels": list(item.supporting_labels or item.failure_labels),
+        }
+    item.metadata.update(attribution)
     item.metadata.pop("before_report", None)   # 판정 끝 — 무거운 참조 제거
