@@ -157,52 +157,88 @@ def chat_json(
 
 
 # ── 임베딩 (metrics_ragas.py 가 사용) ─────────────────────────────
-# GitHub Models 와 OpenRouter 는 embeddings 엔드포인트를 제공하지 않아, 두 provider 에서도
-# 임베딩만은 OpenAI 클라이언트(OPENAI_API_KEY)로 폴백한다 — 없으면 호출부가
-# except 로 잡아 스킵(response_relevancy 등 임베딩 의존 지표만 빠짐).
-# 즉 EVAL_LLM_PROVIDER=openrouter 로 RAGAS 전량(response_relevancy 포함)을 돌리려면
-# OPENAI_API_KEY 가 별도로 필요하다.
+# GitHub Models 와 OpenRouter 는 embeddings 엔드포인트를 제공하지 않는다(OpenRouter 는
+# 카탈로그 337개 중 임베딩 모델 0개 — 붙일 대상 자체가 없다). 그 조합에서는
+# OPENAI_API_KEY 로 폴백하고, 그것도 없으면 Index 가 이미 쓰는 로컬 BGE-M3 로 계산한다.
+# 셋 다 불가할 때만 결측이 된다.
 
-# 임베딩 불가 조합을 실행당 한 번만 알린다. 안 그러면 probe·트랙마다 같은 실패 줄이 찍혀
+# 임베딩 경로 전환/불가를 실행당 한 번만 알린다. 안 그러면 probe·트랙마다 같은 줄이 찍혀
 # 정작 봐야 할 로그를 덮는다(agents/index/graph_index.py 의 _notify_llm_extraction_once 와 같은 패턴).
-_embed_unavailable_notified = False
+_embed_notified = False
 _embed_notice_lock = threading.Lock()
 
 
-def embeddings_available() -> bool:
-    """활성 provider 조합으로 임베딩을 호출할 수 있는지. 키 유무만 본다(호출은 안 한다)."""
+def _notify_embed_once(message: str) -> None:
+    global _embed_notified
+    with _embed_notice_lock:
+        if _embed_notified:
+            return
+        _embed_notified = True
+    print(message)
+
+
+def _api_embeddings_available() -> bool:
+    """활성 provider 로 임베딩 API 를 부를 수 있는지. 키 유무만 본다(호출은 안 한다)."""
     if _provider() == "gemini":
         return bool(os.getenv("GEMINI_API_KEY"))
     return bool(os.getenv("OPENAI_API_KEY"))
 
 
-def _notify_embeddings_unavailable_once() -> None:
-    global _embed_unavailable_notified
-    with _embed_notice_lock:
-        if _embed_unavailable_notified:
-            return
-        _embed_unavailable_notified = True
-    print(f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없고 "
-          f"OPENAI_API_KEY 도 없어 임베딩 의존 지표(response_relevancy 등)를 건너뜁니다. "
-          f"— 나머지 RAGAS 지표는 정상 계산됩니다. 필요하면 OPENAI_API_KEY 를 설정하세요.")
+def _local_embeddings_available() -> bool:
+    """로컬 BGE-M3 로 임베딩할 수 있는지.
+
+    모델 로드에 실패하면 qdrant_store 는 해시 기반 벡터를 돌려준다 — 검색에서는 '품질
+    저하'지만 채점에 쓰면 무의미한 코사인 값이 정상 점수처럼 리포트에 박힌다. 결측보다
+    나쁘므로 그 경우는 쓰지 않는다."""
+    try:
+        from agents.index.qdrant_store import embedding_is_fallback
+        return not embedding_is_fallback()
+    except Exception:
+        return False
+
+
+def embeddings_available() -> bool:
+    """임베딩 의존 지표를 계산할 수 있는지(API 또는 로컬 모델)."""
+    return _api_embeddings_available() or _local_embeddings_available()
 
 
 def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
     """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파; rate limit 은 재시도)
 
-    키가 없어 애초에 불가능한 조합이면 호출을 시도하지 않고 빈 리스트를 돌려준다 —
-    provider 마다 다른 인증 예외 문구가 probe 수만큼 찍히는 것을 막기 위함. 호출부는
-    빈 결과를 '결측'으로 흡수한다."""
-    if not embeddings_available():
-        _notify_embeddings_unavailable_once()
+    우선순위: 활성 provider 의 임베딩 API > 로컬 BGE-M3 > 결측(빈 리스트).
+    API 키가 있으면 기존 동작 그대로다 — 로컬은 임베딩 API 가 없는 조합
+    (OpenRouter·GitHub Models 등)에서만 쓰인다.
+
+    로컬 폴백이 필요한 이유: response_relevancy 가 결측이면 diagnose 의
+    bad_gold_answer / bad_gold_answer_oracle 이 rel 을 AND 조건으로 요구해 영구히
+    침묵하고, 그 라벨에 걸린 probe 자동 재생성 루프까지 멈춘다. 지표 하나가 아니라
+    진단 기능이 빠지는 문제라 무료로 쓸 수 있는 로컬 모델로 메운다."""
+    if not texts:
         return []
 
-    def _do():
-        if _provider() == "gemini":
-            return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
-        return _openai_embed(texts, model or os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small"))
+    if _api_embeddings_available():
+        def _do():
+            if _provider() == "gemini":
+                return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
+            return _openai_embed(texts, model or os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small"))
 
-    return _run_with_retry(_do, "임베딩")
+        return _run_with_retry(_do, "임베딩")
+
+    if _local_embeddings_available():
+        # AGENTS.md 규약대로 공통 모듈을 통해서만 임베딩한다(직접 모델 로드 금지).
+        from agents.index.qdrant_store import embed_batch
+        _notify_embed_once(
+            f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없어 "
+            f"로컬 임베딩(BGE-M3)으로 계산합니다 — 비용 0, 외부 호출 없음. "
+            f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
+            f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요.")
+        return embed_batch(texts)
+
+    _notify_embed_once(
+        f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없고 "
+        f"OPENAI_API_KEY 도, 로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표"
+        f"(response_relevancy)를 건너뜁니다 — bad_gold_answer 라벨도 함께 침묵합니다.")
+    return []
 
 
 # ── provider 별 transport (core/llm_clients.py 공용 구현에 위임) ──

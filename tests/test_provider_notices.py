@@ -206,36 +206,73 @@ class RagAutoNoticeTest(unittest.TestCase):
         self.assertNotIn("auto → OpenAI", log)
 
 
-class EmbeddingUnavailableNoticeTest(unittest.TestCase):
-    """임베딩을 못 쓰는 provider 조합에서 안내가 실행당 1회인지."""
+class EmbeddingFallbackTest(unittest.TestCase):
+    """임베딩 API 가 없는 provider 조합의 폴백 사슬: API > 로컬 BGE-M3 > 결측."""
 
     def setUp(self):
-        llm_provider._embed_unavailable_notified = False
+        llm_provider._embed_notified = False
 
-    def _embed(self, env):
+    def _embed(self, env, local_ok):
         buf = io.StringIO()
-        with patch.dict(os.environ, env, clear=False), redirect_stdout(buf):
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(llm_provider, "_local_embeddings_available",
+                         return_value=local_ok),
+            patch("agents.index.qdrant_store.embed_batch",
+                  return_value=[[0.1, 0.2], [0.3, 0.4]]),
+            redirect_stdout(buf),
+        ):
             vecs = llm_provider.embed_texts(["가", "나"])
         return vecs, buf.getvalue()
 
-    def test_openrouter_without_openai_key_returns_empty_and_notifies(self):
-        env = {"EVAL_LLM_PROVIDER": "openrouter", "OPENAI_API_KEY": ""}
-        vecs, log = self._embed(env)
-        self.assertEqual(vecs, [])          # 예외 대신 빈 결과 → 호출부가 결측으로 흡수
-        self.assertIn("임베딩", log)
+    _OR = {"EVAL_LLM_PROVIDER": "openrouter", "OPENAI_API_KEY": ""}
+
+    def test_falls_back_to_local_embeddings(self):
+        vecs, log = self._embed(self._OR, local_ok=True)
+        self.assertEqual(vecs, [[0.1, 0.2], [0.3, 0.4]])
+        self.assertIn("로컬 임베딩", log)
+
+    def test_missing_only_when_local_also_unavailable(self):
+        # 로컬 모델이 해시 폴백 상태면 쓰지 않는다 — 무의미한 코사인이 정상 점수처럼
+        # 리포트에 박히는 것이 결측보다 나쁘다.
+        vecs, log = self._embed(self._OR, local_ok=False)
+        self.assertEqual(vecs, [])
+        self.assertIn("건너뜁니다", log)
 
     def test_notice_is_printed_once_per_run(self):
-        env = {"EVAL_LLM_PROVIDER": "openrouter", "OPENAI_API_KEY": ""}
-        self._embed(env)
-        _, second = self._embed(env)
+        self._embed(self._OR, local_ok=True)
+        _, second = self._embed(self._OR, local_ok=True)
         self.assertEqual(second, "")        # probe 마다 반복되면 다른 로그를 덮는다
 
-    def test_embeddings_available_reflects_active_provider(self):
-        with patch.dict(os.environ, {"EVAL_LLM_PROVIDER": "gemini",
-                                     "GEMINI_API_KEY": "k"}, clear=False):
+    def test_api_key_still_wins_over_local(self):
+        # 기존 사용자 동작 보존 — 키가 있으면 예전처럼 API 임베딩을 쓴다.
+        called = {}
+
+        def _fake_openai_embed(texts, model):
+            called["model"] = model
+            return [[1.0]]
+
+        with (
+            patch.dict(os.environ, {"EVAL_LLM_PROVIDER": "openai",
+                                    "OPENAI_API_KEY": "sk-test"}, clear=False),
+            patch.object(llm_provider, "_openai_embed", _fake_openai_embed),
+            patch.object(llm_provider, "_local_embeddings_available",
+                         return_value=True),
+        ):
+            vecs = llm_provider.embed_texts(["가"])
+        self.assertEqual(vecs, [[1.0]])
+        self.assertEqual(called["model"], "text-embedding-3-small")
+
+    def test_embeddings_available_covers_local_path(self):
+        with (
+            patch.dict(os.environ, self._OR, clear=False),
+            patch.object(llm_provider, "_local_embeddings_available", return_value=True),
+        ):
             self.assertTrue(llm_provider.embeddings_available())
-        with patch.dict(os.environ, {"EVAL_LLM_PROVIDER": "openrouter",
-                                     "OPENAI_API_KEY": ""}, clear=False):
+        with (
+            patch.dict(os.environ, self._OR, clear=False),
+            patch.object(llm_provider, "_local_embeddings_available", return_value=False),
+        ):
             self.assertFalse(llm_provider.embeddings_available())
 
 
