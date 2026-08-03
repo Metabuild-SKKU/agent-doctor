@@ -31,8 +31,10 @@ results/
 output/
 lib/
 uploads/
-# 테스트 코퍼스 실행 산출물 — 진단서 HTML 은 *.json 규칙에 안 걸려 따로 제외한다
-tests/corpus/out/
+# 테스트 코퍼스 — 원본 문서·QA셋·실행 산출물 모두 로컬 자산이라 추적하지 않는다
+# (data/ 와 같은 취지: 용량이 크고 각자 준비한다). 규약을 적은 README 만 남긴다.
+tests/corpus/*
+!tests/corpus/README.md
 
 # PDF 원본 — 용량이 크고 대개 배포 불가 자료다(테스트 코퍼스 문서 포함)
 *.pdf
