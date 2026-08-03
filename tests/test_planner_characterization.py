@@ -191,6 +191,49 @@ class LabelNoLongerOwnsExecutionOrderTest(unittest.TestCase):
         self.assertEqual(request.supporting_labels, ["retrieval_missing_gold"])
 
 
+class GroundedFlagCharacterizationTest(unittest.TestCase):
+    """실측 근거 플래그가 **동점에서 승자를 바꾼다** — 의도된 동작으로 박제한다.
+
+    ⚠️ 단계 2(`8a15902`)는 "후보값 계산을 옮기면서 수학을 바꾸지 않았다"고 밝혔지만,
+    `_ground_top_k_from_gold` 만은 예외였다. 이전에는 `grounding_metadata=None` 을
+    돌려줬는데 이관하면서 `{"status": "grounded", "source": "gold_rank_knee"}` 를
+    돌려주게 됐다(PR #75 리뷰에서 지적).
+
+    되돌리지 않기로 했다. 그 값은 gold 순위 실측에서 나오므로 **실제로 grounded 이고**,
+    None 을 돌려주면 `is_grounded` 와 리포트의 `grounded_support_count` 가 거짓말을 한다.
+    대신 그로 인해 실제로 달라지는 선택을 여기 못박아 다음 변경 때 드러나게 한다.
+
+    영향 경로는 `rank_action_candidates` 의 tie-break 다(tier → score → **grounded**
+    → cost → key). grounded 가 score **뒤**라 점수가 같을 때만 작동한다 —
+    "probe 지지 수와 무관하게 이긴다"가 아니다. 같은 축의 반대 방향을 가르는
+    `_conflict_sort_key`(grounded 가 score 앞)는 top_k 축에서는 도달하지 않는다:
+    increase 는 A그룹, decrease 는 C그룹이라 tier 에서 먼저 갈리기 때문이다.
+    """
+
+    LABEL = "retrieval_incomplete_enumeration"   # top_k 확대와 MMR 을 같은 비용으로 지지
+
+    def test_without_measurement_the_alphabetical_tie_break_decides(self):
+        findings = [make_finding("p1", self.LABEL, gold_n=3)]
+        request, _decision = planner.plan(make_state(findings, top_k=5))
+
+        self.assertEqual(request.action_key, "retriever.mmr:enable")
+        self.assertEqual(request.action_score_breakdown["grounded_support_count"], 0)
+
+    def test_measurement_flips_the_same_tie(self):
+        """gold 순위가 있으면 같은 점수·같은 비용에서 top_k 가 MMR 을 이긴다."""
+        findings = [make_finding("p1", self.LABEL, gold_n=3, gold_ranks={"g": 12})]
+        request, _decision = planner.plan(make_state(findings, top_k=5))
+
+        self.assertEqual(request.action_key, "retriever.top_k:increase")
+        self.assertEqual(request.action_score_breakdown["grounded_support_count"], 1)
+        # 점수는 같다 — 갈린 것은 grounded 뿐이다.
+        self.assertEqual(request.action_score, 1.0)
+        self.assertEqual(
+            [entry["score"] for entry in request.metadata["runner_up_actions"]],
+            [1.0],
+        )
+
+
 class SearchSpaceCharacterizationTest(unittest.TestCase):
     """근거값 계산 결과를 박제한다.
 

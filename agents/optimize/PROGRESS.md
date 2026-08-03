@@ -556,6 +556,12 @@ legacy 반복 문장도 전체 청크 순서와 cursor로 선택된 위치를 �
 뒤집힌 동작 2건(합의 후 유지): 예산 소진 후 같은 라벨의 다음 처방이 공짜로 적용되던
 경로가 사라졌고, "노이즈가 우세하면 C를 A보다 먼저"라는 예외가 hard tier 에 흡수됐다.
 
+⚠️ 단계 2 가 "수학을 바꾸지 않는다"고 밝혔지만 `_ground_top_k_from_gold` 한 곳이
+어긋났다 — 반환이 `None` 에서 grounded metadata 로 바뀌었고, 그 결과 **동점에서**
+승자가 `retriever.mmr:enable` → `retriever.top_k:increase` 로 역전된다. 값이 실제로
+실측 기반이라 되돌리지 않고 `GroundedFlagCharacterizationTest` 로 박제했다. 자세한
+경로 분석은 구현계획 §8.6.
+
 테스트: 1064개 통과(약 12초). 환경 사유로 분리한 4개 모듈은 제외한다 —
 `test_pipeline`(실데이터) · `test_ragas_eval`(실키) · `test_oauth`(수동 확인) ·
 `test_eval`(외부 상태 의존).

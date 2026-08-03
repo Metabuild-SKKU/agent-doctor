@@ -539,7 +539,7 @@ before/after confirmed Finding 차집합으로 resolved labels를 계산한다.
 | --- | --- | --- |
 | **`action_catalog.py`** (신규) | `ActionDefinition` 레지스트리, key 유일성·계약 검증 | reindex/cost/capability/conflict family의 단일 진실 원천. 차단 action도 blocked reason과 함께 등록 |
 | **`action_aggregator.py`** (신규) | Finding→support→candidate, 점수·충돌·정렬 | Finding을 재진단하지 않는다. 같은 probe 중복 투표 제거. tie에서도 결정적 |
-| **`candidate_values.py`** (신규) | planner의 후보값 수학 이관 | **기존 수학을 그대로 옮긴다.** label 하드코딩을 `candidate_strategy` registry로 교체. evidence analysis는 memoize |
+| **`candidate_values.py`** (신규) | planner의 후보값 수학 이관 | **기존 수학을 그대로 옮긴다.** label 하드코딩을 `candidate_strategy` registry로 교체. evidence analysis는 memoize. ⚠️ 실제로는 한 곳이 어긋났다 — §8.6 |
 | **`eligibility.py`** (신규) | 실행 가능성 정책 공유 | **신설이 아니라 추출.** `optimizer.py`의 `DEFAULT_CONSTRAINTS`/`DEFAULT_CAPABILITIES`/`PATH_CAPABILITIES`/`STATE_MAPPABLE_PATHS`/`BACKEND_SUPPORTED_PATHS`/`REINDEX_PATHS`를 옮긴다. **값을 바꾸지 않는다** |
 | `rules.py` | `LABEL_TO_ACTION_RULES`로 전환, patch/cost 중복 제거 | action key·candidate strategy·`applies_when` 중심. target metrics와 manual action은 label 수준 유지 |
 | `schemas.py` | 새 dataclass 추가, `OptimizationRequest`/`HistoryItem`/`Report`에 action 필드 | `failure_label`·`related_failure_labels`·`candidates`는 deprecated. dual-read 기간 유지 |
@@ -627,6 +627,32 @@ rollback cache·reindex 요구, `graph.py` route 무변경.
 
 **전환 완료.** 알려진 실패 21건은 전부 해소됐고 현재 **1064 tests 전부 통과**
 (환경 사유 4개 모듈 `test_pipeline`·`test_ragas_eval`·`test_oauth`·`test_eval` 제외).
+
+### 8.6 단계 2 의 "무변경"은 한 곳에서 깨졌다
+
+`_ground_top_k_from_gold` 만 이관 과정에서 반환이 달라졌다(PR #75 리뷰 지적).
+
+```text
+전  return _knee_candidates(required), None
+후  return candidates, {"status": "grounded", "source": "gold_rank_knee", ...}
+```
+
+**되돌리지 않는다.** 그 값은 gold 순위 실측에서 나오므로 실제로 grounded 이고,
+`None` 을 돌려주면 `is_grounded` 와 리포트의 `grounded_support_count` 가 거짓말을 한다.
+
+**영향은 실재하지만 리뷰가 지목한 경로는 아니다.** 지적은 `_conflict_sort_key`
+(tier → grounded → score)가 "probe 지지 수와 무관하게" 이기게 만든다고 봤으나,
+`retriever.top_k` 축은 increase 가 A그룹·decrease 가 C그룹이라 **tier 에서 먼저
+갈려** 그 비교까지 도달하지 않는다. 실제 경로는 `rank_action_candidates` 의
+tie-break(tier → score → **grounded** → cost → key)이며, grounded 가 score **뒤**라
+**점수가 같을 때만** 작동한다.
+
+```text
+gold_ranks 없음 → retriever.mmr:enable      (score 1.0, grounded 0)
+gold_ranks 있음 → retriever.top_k:increase  (score 1.0, grounded 1)  ← 동점에서 역전
+```
+
+`GroundedFlagCharacterizationTest` 가 두 경우를 모두 박제한다.
 
 ### 8.1 중단 기준 판정 결과 (단계 3)
 
