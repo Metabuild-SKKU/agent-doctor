@@ -642,5 +642,64 @@ class InternalAdapterCategoricalAxisTest(unittest.TestCase):
         self.assertEqual(result.best_config, {"chunker.strategy": "recursive_sentence"})
 
 
+class InternalStudyIdentityTest(unittest.TestCase):
+    """sweep 하나 = ActionStudy 하나. 결과가 스스로 어느 study 인지 말해야 한다.
+
+    이력·리포트가 대표 라벨을 되짚어 "아마 이 처방이었을 것"이라고 추측하지 않도록
+    관측 결과에 action 정체성을 싣는다.
+    """
+
+    def _request(self, **overrides):
+        values = {
+            "request_id": "study-identity",
+            "iteration": 0,
+            "baseline_config": {"top_k": 5},
+            "failure_label": "retrieval_missing_gold",
+            "search_space": {"retriever.top_k": [7, 9]},
+            "target_metrics": ["context_recall"],
+            "optimizer": "internal",
+            "max_trials": 2,
+            "metadata": {"baseline_metrics": {"mean_recall_at_k": 0.5}},
+            "action_key": "retriever.top_k:increase",
+            "supporting_labels": [
+                "retrieval_missing_gold",
+                "retrieval_incomplete_enumeration",
+            ],
+        }
+        values.update(overrides)
+        return OptimizationRequest(**values)
+
+    def test_completed_result_carries_action_identity(self):
+        scores = {5: 0.5, 7: 0.7, 9: 0.9}
+
+        def evaluator(config, _request):
+            return {"mean_recall_at_k": scores[config["top_k"]]}
+
+        result = run(self._request(), evaluator=evaluator)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.metadata["action_key"], "retriever.top_k:increase")
+        self.assertEqual(
+            result.metadata["supporting_labels"],
+            ["retrieval_missing_gold", "retrieval_incomplete_enumeration"],
+        )
+
+    def test_pending_result_carries_action_identity_too(self):
+        """evaluator 없이 다음 후보만 내놓는 중간 결과에도 실려야 한다.
+
+        study 는 여러 방문에 걸쳐 이어지므로 중간 결과가 오히려 더 자주 기록된다.
+        """
+        result = run(self._request())
+
+        self.assertEqual(result.status, "needs_evaluation")
+        self.assertEqual(result.metadata["action_key"], "retriever.top_k:increase")
+
+    def test_legacy_request_without_action_is_unchanged(self):
+        result = run(self._request(action_key=None, supporting_labels=[]))
+
+        self.assertNotIn("action_key", result.metadata)
+        self.assertNotIn("supporting_labels", result.metadata)
+
+
 if __name__ == "__main__":
     unittest.main()

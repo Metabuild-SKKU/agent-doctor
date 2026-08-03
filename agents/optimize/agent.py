@@ -58,6 +58,82 @@ _MAX_UNJUDGEABLE_ATTEMPTS = 1
 _MAX_MEASUREMENT_FAILURE_ATTEMPTS = 2
 _OPTIMIZE_VISIT_LIMIT_REASON = "Optimize 절대 방문 상한 도달"
 
+# ── reranker guardrail 의 대상 action ──────────────────────────────
+# reranker 는 Index 가 실제 모델을 로드·추론해 봐야 쓸 수 있는지 알 수 있는 유일한
+# 축이라, 다른 축에는 없는 특수 처리가 붙는다(실행 검증·deferred·precision floor 완화).
+# 세 지점이 같은 집합을 보므로 상수 하나로 묶는다 — 어긋나면 guardrail 이 반쪽만 걸린다.
+_RERANKER_ACTION_KEYS = frozenset({
+    "reranker.enabled:enable",
+    "reranker.candidate_count:increase",
+})
+# 구버전 이력에는 action_key 가 없다. 저장된 state 를 이어받아도 guardrail 이
+# 그대로 걸리도록 처방 id 도 함께 인식한다(단계 8 에서 제거).
+_LEGACY_RERANKER_PRESCRIPTIONS = frozenset({
+    "enable_reranker",
+    "widen_rerank_candidates",
+})
+
+# planner 의 eligibility 가 "품질 실패가 아닌 이유"로 거른 action 은 차단이 아니라
+# 보류로 보고해야 한다. 실행 판정이 optimizer 에서 planner 앞단으로 옮겨오면서
+# 이 사유들도 함께 앞당겨졌다(구현계획 §8.3).
+#   runtime_capability_unavailable : Index 가 모델을 못 올렸다 → 다음 실행에 풀릴 수 있다
+#   prerequisite_unmet             : 선행 조건 미충족(예: 리랭커가 꺼진 채 후보창 확대)
+_DEFERRABLE_ELIGIBILITY_REASONS = {
+    "runtime_capability_unavailable",
+    "prerequisite_unmet",
+}
+
+
+def _is_reranker_item(item: OptimizationHistoryItem) -> bool:
+    """이 이력 항목이 reranker guardrail 대상인가."""
+    if item.action_key:
+        return item.action_key in _RERANKER_ACTION_KEYS
+    return item.selected_prescription_id in _LEGACY_RERANKER_PRESCRIPTIONS
+
+
+def _deferred_from_rejected_actions(
+    rejected: list[dict[str, Any]] | None,
+    runtime_capabilities: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """planner 가 실행 불가로 거른 action 중 '보류'로 보고할 것을 뽑는다.
+
+    품질 실패와 구분하는 것이 요점이다. runtime 이 준비되지 않았거나 선행 조건이
+    아직 아닌 것은 처방이 나빴다는 증거가 아니므로 차단 집합에 넣지 않고, 사용자
+    리포트에만 "지금은 못 한다"로 남긴다.
+    """
+    deferred: list[dict[str, Any]] = []
+    capability = (runtime_capabilities or {}).get("reranker") or {}
+    for entry in rejected or []:
+        reason = entry.get("reason")
+        if reason not in _DEFERRABLE_ELIGIBILITY_REASONS:
+            continue
+        prerequisite_unmet = reason == "prerequisite_unmet"
+        for prescription_id in entry.get("prescription_ids") or [None]:
+            deferred.append(
+                {
+                    "action_key": entry.get("action_key"),
+                    "failure_label": next(
+                        iter(entry.get("supporting_labels") or []), ""
+                    ),
+                    "prescription_id": prescription_id,
+                    "reason": (
+                        # 선행 조건 미충족의 유일한 사례가 "리랭커가 꺼져 있다"라,
+                        # optimizer 가 실행 직전에 쓰는 어휘와 같은 값을 쓴다.
+                        "reranker_disabled"
+                        if prerequisite_unmet
+                        else capability.get(
+                            "reason", "runtime_capability_unavailable"
+                        )
+                    ),
+                    "retryable": (
+                        False
+                        if prerequisite_unmet
+                        else bool(capability.get("retryable", True))
+                    ),
+                }
+            )
+    return deferred
+
 
 def _restore_history_item_baseline(
     state: AgentDoctorState,
@@ -560,6 +636,26 @@ def _log_optimize_decision(
     )
 
 
+def _extend_deferred(
+    deferred: list[dict[str, Any]],
+    entries: list[dict[str, Any]],
+) -> None:
+    """보류 목록에 새 항목만 더한다.
+
+    한 방문 안에서 planner 를 여러 번 호출하므로(적용 불가 action 을 건너뛰며),
+    같은 보류가 매번 다시 나온다. 중복을 그대로 실으면 리포트가 같은 말을 반복한다.
+    """
+    seen = {
+        (item.get("action_key"), item.get("prescription_id"), item.get("reason"))
+        for item in deferred
+    }
+    for entry in entries:
+        key = (entry.get("action_key"), entry.get("prescription_id"), entry.get("reason"))
+        if key not in seen:
+            seen.add(key)
+            deferred.append(entry)
+
+
 def _attach_runtime_deferred(
     report: object | None,
     deferred: list[dict[str, Any]],
@@ -673,6 +769,16 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
         while True:
             request, decision = planner.plan(state, blacklist=visit_exclusions)
+            # planner 가 실행 불가로 거른 것 중 runtime·선행조건 사유는 보류로 보고한다.
+            # 요청이 만들어졌든 아니든 사유가 나오는 곳이 다를 뿐 보고 책임은 같다.
+            _extend_deferred(
+                deferred_runtime,
+                _deferred_from_rejected_actions(
+                    (request.metadata if request is not None else decision.metadata)
+                    .get("rejected_actions"),
+                    state.runtime_capabilities,
+                ),
+            )
             if decision.mode != "apply_optimize" or request is None:
                 state.status = "rolled_back" if rolled_back else decision.status
                 if judged_item is not None:
@@ -876,10 +982,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             applied_changes=dict(result.config_patch.changes),
         )
         item.metadata["reindex_required"] = bool(result.needs_reindex)
-        if prescription_id in {
-            "enable_reranker",
-            "widen_rerank_candidates",
-        }:
+        if request.action_key in _RERANKER_ACTION_KEYS:
             item.metadata["runtime_capability"] = dict(
                 request.metadata.get("runtime_capabilities", {}).get(
                     "reranker",
@@ -941,10 +1044,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 "reindex_required": bool(result.needs_reindex),
             }
         )
-        if prescription_id in {
-            "enable_reranker",
-            "widen_rerank_candidates",
-        }:
+        if request.action_key in _RERANKER_ACTION_KEYS:
             state.optimization_report.metadata["runtime_capability"] = dict(
                 request.metadata.get("runtime_capabilities", {}).get(
                     "reranker",
@@ -1420,10 +1520,7 @@ def _relax_reranker_precision_floor(
     """
     if verdict.keep:
         return verdict
-    if pending.selected_prescription_id not in {
-        "enable_reranker",
-        "widen_rerank_candidates",
-    }:
+    if not _is_reranker_item(pending):
         return verdict
     if verdict.floor_violations != ["context_precision"]:
         return verdict
@@ -1471,10 +1568,7 @@ def _reranker_execution_incomplete(
     after_report: DiagnosticReport,
 ) -> bool:
     """reranker 처방 후 Eval이 일부라도 실제 CrossEncoder 점수를 못 만들었는지 본다."""
-    if pending.selected_prescription_id not in {
-        "enable_reranker",
-        "widen_rerank_candidates",
-    }:
+    if not _is_reranker_item(pending):
         return False
     runtime = (after_report.runtime_summary or {}).get("reranker")
     if not isinstance(runtime, dict) or not runtime.get("enabled"):

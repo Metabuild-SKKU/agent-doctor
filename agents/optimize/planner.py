@@ -305,12 +305,27 @@ def _policy_constraints(state: AgentDoctorState) -> dict[str, Any]:
 
 
 def _rejected_action_entries(selection: _ActionSelection) -> list[dict[str, Any]]:
-    """제외된 action 과 사유. 후보값 근거(grounding)까지 함께 남긴다."""
+    """제외된 action 과 사유.
+
+    후보값 근거(grounding)와 함께 **어느 선언에서 왔는지**(지지 라벨·처방 id)도 남긴다.
+    실행 불가 판정이 optimizer 에서 planner 앞단으로 옮겨오면서, 그 사유를 사용자에게
+    설명할 책임도 함께 옮겨왔기 때문이다 — agent 가 이 목록을 읽어 runtime 보류
+    (deferred)를 리포트에 싣는다(구현계획 §8.3).
+    """
     entries: list[dict[str, Any]] = []
     for candidate in selection.rejected:
         entry: dict[str, Any] = {
             "action_key": candidate.action_key,
             "reason": candidate.reason,
+            "supporting_labels": list(candidate.supporting_labels),
+            "prescription_ids": list(
+                dict.fromkeys(
+                    support.prescription_id
+                    for support in candidate.supports
+                    if support.prescription_id
+                )
+            ),
+            "eligibility": dict(candidate.metadata.get("eligibility") or {}),
         }
         grounding = _selected_grounding(candidate, candidate.definition.canonical_path)
         if grounding:
@@ -401,7 +416,10 @@ def _build_action_request(
         ),
     )
     primary_label = primary_support.label
-    findings = selection.findings_by_label.get(primary_label, [])
+    # 사전검증 입력은 **지지 라벨 전체**의 finding 에서 모은다. 대표 라벨 하나만 쓰면
+    # 같은 chunk 축을 함께 지지한 다른 라벨의 gold span 이 측정에서 빠져, 그 라벨이
+    # 요구하는 경계까지 만족하는지 확인하지 못한 채 후보가 통과한다.
+    findings = _supporting_findings(selection, action.supporting_labels)
 
     # 후보가 여러 개면 sweep 이 실측으로 고른다. chunk 축은 사전검증 결과가
     # 있어야 internal 로 넘긴다(기존 정책 유지).
@@ -411,7 +429,9 @@ def _build_action_request(
             state,
             findings,
             path=path,
-            evidence_analysis=selection.evidence_cache.get(primary_label),
+            evidence_analysis=_merged_evidence_analysis(
+                state, selection, action.supporting_labels, findings
+            ),
         )
     grounding = _selected_grounding(action, path)
     use_internal = _should_sweep(
@@ -502,6 +522,46 @@ def _build_action_request(
         action_score=action.score,
         action_score_breakdown=dict(action.score_breakdown),
     )
+
+
+def _supporting_findings(
+    selection: _ActionSelection,
+    labels: list[str],
+) -> list[Finding]:
+    """지지 라벨들의 Finding 을 순서를 지키며 합친다(중복 객체 제거)."""
+    merged: list[Finding] = []
+    seen: set[str] = set()
+    for label in labels:
+        for finding in selection.findings_by_label.get(label, []):
+            if finding.finding_id in seen:
+                continue
+            seen.add(finding.finding_id)
+            merged.append(finding)
+    return merged
+
+
+def _merged_evidence_analysis(
+    state: AgentDoctorState,
+    selection: _ActionSelection,
+    labels: list[str],
+    findings: list[Finding],
+) -> _EvidenceAnalysis | None:
+    """지지 라벨 전체에 대한 evidence window 분석. 라벨 하나면 캐시를 재사용한다.
+
+    청크 경계 분석은 비싸다. 라벨이 하나뿐인 흔한 경우에는 후보값 계산이 이미 만들어
+    둔 결과를 그대로 쓰고, 여러 라벨이 같은 축을 지지할 때만 합친 입력으로 다시 계산해
+    조합 키로 캐시한다.
+    """
+    if not labels:
+        return None
+    if len(labels) == 1:
+        cached = selection.evidence_cache.get(labels[0])
+        if cached is not None:
+            return cached
+    key = "\x00".join(sorted(labels))
+    if key not in selection.evidence_cache:
+        selection.evidence_cache[key] = _evidence_windows(state, findings)
+    return selection.evidence_cache[key]
 
 
 def _selected_grounding(action: Any, path: str) -> dict[str, Any] | None:

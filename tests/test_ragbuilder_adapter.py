@@ -546,6 +546,51 @@ class RAGBuilderAdapterTest(unittest.TestCase):
             [{"search_type": "similarity", "search_kwargs": {"k": 7}}],
         )
 
+    def test_payload_metadata_is_action_centered(self):
+        """payload 는 "무엇을 바꾸는가"(action)를 말하고 label 은 근거로만 싣는다.
+
+        전환 전에는 대표 라벨 하나만 나가서, 여러 라벨이 같은 축을 지지한 경우
+        외부 도구 쪽 기록이 실제보다 좁게 남았다.
+        """
+        adapter = RAGBuilderAdapter()
+        request = self.make_request(
+            action_key="retriever.top_k:increase",
+            supporting_labels=[
+                "retrieval_missing_gold",
+                "retrieval_incomplete_enumeration",
+            ],
+            supporting_probes=["p1", "p2"],
+            related_failure_labels=["retrieval_incomplete_enumeration"],
+        )
+        mapping = adapter.build_mapping(request)
+
+        metadata = adapter.build_payload(request, mapping)["metadata"]
+
+        self.assertEqual(metadata["action_key"], "retriever.top_k:increase")
+        self.assertEqual(
+            metadata["supporting_labels"],
+            ["retrieval_missing_gold", "retrieval_incomplete_enumeration"],
+        )
+        self.assertEqual(metadata["supporting_probes"], ["p1", "p2"])
+        # 외부 계약이라 구버전 키는 유지한다 — 키를 빼면 소비처가 깨진다.
+        self.assertEqual(metadata["failure_label"], "retrieval_missing_gold")
+        self.assertEqual(
+            metadata["related_failure_labels"],
+            ["retrieval_incomplete_enumeration"],
+        )
+
+    def test_payload_metadata_omits_action_fields_for_legacy_requests(self):
+        """action 없이 만들어진 요청도 payload 를 만들 수 있어야 한다."""
+        adapter = RAGBuilderAdapter()
+        request = self.make_request()
+        mapping = adapter.build_mapping(request)
+
+        metadata = adapter.build_payload(request, mapping)["metadata"]
+
+        self.assertIsNone(metadata["action_key"])
+        self.assertEqual(metadata["supporting_labels"], [])
+        self.assertEqual(metadata["failure_label"], "retrieval_missing_gold")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -636,6 +636,58 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertEqual(request.max_trials, 2)
         self.assertNotIn("chunk_precheck_context", request.metadata)
 
+    def test_chunk_precheck_merges_every_supporting_label(self):
+        """사전검증 입력은 지지 라벨 **전체**의 evidence 에서 모은다.
+
+        대표 라벨 하나만 쓰면 같은 chunk 축을 함께 지지한 다른 라벨의 gold span 이
+        측정에서 빠진다. 그러면 그 라벨이 요구하는 경계를 만족하는지 확인하지 못한
+        채 후보가 통과하고, 재청킹 뒤에야 실패가 드러난다.
+        """
+        document = Document("d1", "memory", "txt", "가" * 3000)
+        candidates = {"chunker.chunk_size": [700, 900]}
+        findings = [
+            make_finding("p1", "retrieval_missing_gold", candidates=candidates),
+            make_finding("p2", "chunking_context_mismatch", candidates=candidates),
+        ]
+        state = AgentDoctorState(
+            report=_report(findings),
+            documents=[document],
+            probes=[
+                Probe(
+                    probe_id="p1", question="q1", source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[{"doc_id": "d1", "start": 0, "end": 400}],
+                ),
+                Probe(
+                    probe_id="p2", question="q2", source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[{"doc_id": "d1", "start": 1000, "end": 1500}],
+                ),
+            ],
+            index_config={
+                "top_k": 5, "chunk_size": 512, "chunk_overlap": 50,
+                "chunk_strategy": "fixed",
+            },
+        )
+
+        # 더 싼 축들을 막아 chunk_size 축이 선택되게 한다.
+        request, _decision = planner.plan(
+            state,
+            blacklist={
+                "retriever.top_k:increase",
+                "chunker.chunk_overlap:increase",
+            },
+        )
+
+        self.assertEqual(request.action_key, "chunker.chunk_size:increase")
+        self.assertEqual(
+            request.supporting_labels,
+            ["retrieval_missing_gold", "chunking_context_mismatch"],
+        )
+        spans = request.metadata["chunk_precheck_context"]["evidence_spans"]
+        gold_ranges = {(span["gold_start"], span["gold_end"]) for span in spans}
+        self.assertEqual(gold_ranges, {(0, 400), (1000, 1500)})
+
     @staticmethod
     def _chunk_blacklist():
         """too_long_context의 다른 두 축을 건너뛰고 chunk 축을 선택하게 만든다."""
