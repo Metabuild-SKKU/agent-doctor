@@ -473,7 +473,7 @@ def _notify_auto_openai_once() -> None:
             return
         _notified_auto_openai = True
     print("[RAG] auto → OpenAI 로 답변 생성 중(OPENAI_API_KEY 감지). "
-          "고정하려면 RAG_LLM_PROVIDER=gemini|openai|github")
+          "고정하려면 RAG_LLM_PROVIDER=gemini|openai|github|openrouter")
 
 
 # LLM provider를 선택 -> 실제 provider별 생성 함수를 호출

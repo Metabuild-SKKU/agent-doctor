@@ -31,7 +31,7 @@ from core.llm_clients import (
 from core.llm_retry import run_with_retry
 
 
-_KNOWN_PROVIDERS = {"openai", "gemini", "github"}
+_KNOWN_PROVIDERS = {"openai", "gemini", "github", "openrouter"}
 # RAG 쪽(_llm_generate)이 받아주는 철자 — 같은 값을 여기 옮겨 적어도 동작하게 맞춘다.
 _PROVIDER_ALIASES = {"github_models": "github"}
 # 이미 경고한 미지원 provider 값(Eval 은 스레드로 병렬 호출하므로 lock 으로 보호).
@@ -46,7 +46,7 @@ def _warn_unknown_provider_once(raw: str) -> None:
             return
         _warned_providers.add(raw)
     print(f"[Eval] 알 수 없는 EVAL_LLM_PROVIDER '{raw}' — openai 로 폴백 "
-          f"(openai|gemini|github)")
+          f"(openai|gemini|github|openrouter)")
 
 
 def _provider() -> str:
