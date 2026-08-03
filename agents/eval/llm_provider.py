@@ -1,12 +1,17 @@
 """
 agents/eval/llm_provider.py
-Eval Agent 가 쓰는 LLM 호출(OpenAI/Gemini/GitHub Models)을 provider 하나로 추상화한다.
+Eval Agent 가 쓰는 LLM 호출(OpenAI/Gemini/GitHub Models/OpenRouter)을 provider 하나로 추상화한다.
 
 OpenAI API 토큰 승인 전까지 무료 대체 provider 로 브릿지한다:
     EVAL_LLM_PROVIDER=gemini  → Google AI Studio 무료 Gemini API
     EVAL_LLM_PROVIDER=github  → GitHub Models(무료, GitHub PAT 인증, OpenAI 호환 API)
 토큰 승인 후에는 EVAL_LLM_PROVIDER=openai(기본값)로 되돌리거나 env 변수를
 지우면 원래 동작으로 복귀한다.
+
+    EVAL_LLM_PROVIDER=openrouter → OpenRouter(유료, 다수 모델 단일 키, OpenAI 호환 API)
+OpenRouter 는 브릿지가 아니라 상시 사용을 전제한 provider 다. 모델명은 "publisher/model"
+형식(예: anthropic/claude-sonnet-4.5)을 쓴다. 임베딩 엔드포인트는 제공하지 않는다
+(embed_texts 주석 참고).
 """
 from __future__ import annotations
 
@@ -17,6 +22,7 @@ import threading
 from core.llm_clients import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     GITHUB_MODELS_BASE_URL,
+    OPENROUTER_BASE_URL,
     gemini_chat,
     gemini_embed,
     openai_chat,
@@ -63,6 +69,8 @@ def has_key() -> bool:
         return bool(os.getenv("GEMINI_API_KEY"))
     if provider == "github":
         return bool(os.getenv("GITHUB_TOKEN"))
+    if provider == "openrouter":
+        return bool(os.getenv("OPENROUTER_API_KEY"))
     return bool(os.getenv("OPENAI_API_KEY"))
 
 
@@ -88,6 +96,10 @@ def generate_text(system: str, user: str, model: str | None = None) -> str | Non
         elif provider == "github":
             return _github_generate(
                 system, user, model or os.getenv("EVAL_GEN_MODEL_GITHUB", "openai/gpt-4o-mini"))
+        elif provider == "openrouter":
+            return _openrouter_generate(
+                system, user,
+                model or os.getenv("EVAL_GEN_MODEL_OPENROUTER", "openai/gpt-4o-mini"))
         return _openai_generate(
             system, user, model or os.getenv("EVAL_GEN_MODEL", "gpt-4o-mini"))
 
@@ -126,6 +138,13 @@ def chat_json(
             return _github_generate(
                 system, user, model or os.getenv("EVAL_JUDGE_MODEL_GITHUB", "openai/gpt-4o"),
                 json_mode=True, max_output_tokens=max_output_tokens)
+        elif provider == "openrouter":
+            # 주의: response_format=json_object 지원은 OpenRouter 에서 모델마다 다르다.
+            # 미지원 모델을 쓰면 파싱 실패 → 아래 {} 폴백으로 조용히 흘러가므로,
+            # 심판 모델은 JSON 모드를 지원하는 것으로 고를 것.
+            return _openrouter_generate(
+                system, user, model or os.getenv("EVAL_JUDGE_MODEL_OPENROUTER", "openai/gpt-4o"),
+                json_mode=True, max_output_tokens=max_output_tokens)
         return _openai_generate(
             system, user, model or os.getenv("EVAL_JUDGE_MODEL", "gpt-4o"),
             json_mode=True, max_output_tokens=max_output_tokens)
@@ -157,9 +176,11 @@ def chat_json(
 
 
 # ── 임베딩 (ragas_eval.py 가 사용) ────────────────────────────────
-# GitHub Models 는 embeddings 엔드포인트를 제공하지 않아, github provider 에서도
+# GitHub Models 와 OpenRouter 는 embeddings 엔드포인트를 제공하지 않아, 두 provider 에서도
 # 임베딩만은 OpenAI 클라이언트(OPENAI_API_KEY)로 폴백한다 — 없으면 호출부가
 # except 로 잡아 스킵(response_relevancy 등 임베딩 의존 지표만 빠짐).
+# 즉 EVAL_LLM_PROVIDER=openrouter 로 RAGAS 전량(response_relevancy 포함)을 돌리려면
+# OPENAI_API_KEY 가 별도로 필요하다.
 
 def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
     """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파; rate limit 은 재시도)"""
@@ -172,7 +193,7 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
 
 
 # ── provider 별 transport (core/llm_clients.py 공용 구현에 위임) ──
-# 모델명 규약: GitHub Models 는 "<publisher>/<model>" 형식(예: openai/gpt-4o-mini).
+# 모델명 규약: GitHub Models·OpenRouter 는 "<publisher>/<model>" 형식(예: openai/gpt-4o-mini).
 # Gemini 모델명/무료 티어 한도는 Google AI Studio 콘솔 참고.
 
 def _openai_generate(
@@ -196,6 +217,16 @@ def _github_generate(
     return openai_chat(
         system, user, model, json_mode=json_mode, max_output_tokens=max_output_tokens,
         api_key=os.getenv("GITHUB_TOKEN"), base_url=GITHUB_MODELS_BASE_URL, tag="Eval",
+    )
+
+
+def _openrouter_generate(
+    system: str, user: str, model: str, json_mode: bool = False,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+) -> str:
+    return openai_chat(
+        system, user, model, json_mode=json_mode, max_output_tokens=max_output_tokens,
+        api_key=os.getenv("OPENROUTER_API_KEY"), base_url=OPENROUTER_BASE_URL, tag="Eval",
     )
 
 

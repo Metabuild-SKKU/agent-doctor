@@ -12,7 +12,12 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from agents.rag.retriever import Retriever
-from core.llm_clients import GITHUB_MODELS_BASE_URL, gemini_chat, openai_chat
+from core.llm_clients import (
+    GITHUB_MODELS_BASE_URL,
+    OPENROUTER_BASE_URL,
+    gemini_chat,
+    openai_chat,
+)
 from core.llm_retry import run_with_retry
 
 # 답변, context, citation, 검색 상세 정보 보관
@@ -432,6 +437,8 @@ def _has_provider(provider: str | None = None, config: dict | None = None) -> bo
         return True
     if selected in {"github", "github_models"} and _github_api_key(allow_repo_token=True):
         return True
+    if selected in {"openrouter", "auto"} and os.getenv("OPENROUTER_API_KEY"):
+        return True
     return False
 
 
@@ -447,7 +454,7 @@ def _warn_unknown_provider_once(selected: str) -> None:
             return
         _warned_providers.add(selected)
     print(f"[RAG] 알 수 없는 provider '{selected}' — extractive 답변으로 폴백 "
-          f"(RAG_LLM_PROVIDER: openai|gemini|github|auto)")
+          f"(RAG_LLM_PROVIDER: openai|gemini|github|openrouter|auto)")
 
 
 # auto 는 OpenAI 를 먼저 시도한다 — 다른 용도로 OPENAI_API_KEY 를 넣으면 Gemini 로 돌던
@@ -470,7 +477,9 @@ def _notify_auto_openai_once() -> None:
 
 
 # LLM provider를 선택 -> 실제 provider별 생성 함수를 호출
-# auto 모드에서는 OpenAI -> Gemini -> GitHub 순서로 사용 가능한 provider 시도
+# auto 모드에서는 OpenAI -> Gemini -> GitHub -> OpenRouter 순서로 사용 가능한 provider 시도
+# (OpenRouter를 맨 뒤에 둔 것은 기존 우선순위를 그대로 보존하기 위함 — 키를 안 넣은
+#  사용자에겐 동작이 전혀 바뀌지 않는다. 고정하려면 RAG_LLM_PROVIDER=openrouter)
 # 모두 실패하면 None을 반환해 extractive fallback으로 넘어가기
 def _llm_generate(
     question: str,
@@ -482,14 +491,18 @@ def _llm_generate(
     max_context_chars: int = 12000,
 ) -> str | None:
     selected = _selected_provider(provider, config)
-    if selected != "auto" and selected not in {"openai", "gemini", "github", "github_models"}:
+    if selected != "auto" and selected not in {
+        "openai", "gemini", "github", "github_models", "openrouter",
+    }:
         # 오타 등 미지원 값이면 아래 루프의 어떤 분기에도 안 걸려 로그 없이
         # extractive 로 저하되므로, 원인을 명시하고 바로 폴백한다.
         # 설정값 문제라 질문마다 같은 줄이 반복될 뿐이므로 provider 당 한 번만 —
         # Eval/Optimize 병렬 실행 시 수백 줄이 로그를 덮는 것을 막는다.
         _warn_unknown_provider_once(selected)
         return None
-    providers = ["openai", "gemini", "github"] if selected == "auto" else [selected]
+    providers = (
+        ["openai", "gemini", "github", "openrouter"] if selected == "auto" else [selected]
+    )
     system, user = _build_prompt(
         question, contexts, max_context_chars=max_context_chars, config=config
     )
@@ -529,6 +542,12 @@ def _llm_generate(
                         "생성", tag="RAG")
                     if result:
                         return result
+            if name == "openrouter" and os.getenv("OPENROUTER_API_KEY"):
+                result = run_with_retry(
+                    lambda: _openrouter_generate(system, user, model=selected_model, config=config),
+                    "생성", tag="RAG")
+                if result:
+                    return result
         except Exception as exc:
             print(f"[RAG] {name} generation failed, trying fallback: {exc}")
     return None
@@ -644,6 +663,27 @@ def _github_generate(
     return openai_chat(
         system, user, selected_model,
         api_key=api_key, base_url=GITHUB_MODELS_BASE_URL,
+        temperature=_generation_temperature(config), tag="RAG",
+    ).strip() or None
+
+
+# OpenRouter (OpenAI 호환 API, 단일 키로 다수 publisher 모델)
+def _openrouter_generate(
+    system: str,
+    user: str,
+    *,
+    model: str | None = None,
+    config: dict | None = None,
+) -> str | None:
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return None
+    # 모델명은 "publisher/model" 형식이어야 한다(예: anthropic/claude-sonnet-4.5).
+    # 형식이 틀리면 404가 나고 호출부가 다음 provider로 폴백한다.
+    selected_model = model or os.getenv("RAG_OPENROUTER_MODEL", "openai/gpt-4o")
+    return openai_chat(
+        system, user, selected_model,
+        api_key=api_key, base_url=OPENROUTER_BASE_URL,
         temperature=_generation_temperature(config), tag="RAG",
     ).strip() or None
 

@@ -211,6 +211,12 @@ state.index_config["recreate_collection_on_dimension_mismatch"] = True
 `graph_extraction="auto"`이면 `OPENAI_API_KEY`가 있을 때 LLM JSON extraction을
 사용한다. 키가 없거나 호출에 실패하면 keyword extraction으로 폴백한다.
 
+provider 는 `index_config["graph_llm_provider"]` > `INDEX_LLM_PROVIDER` > `auto` 순으로
+정해진다(`auto` = OpenAI 키 우선, 없으면 OpenRouter 키). OpenRouter 로 보낼 때는 모델명이
+`publisher/model` 형식이어야 하므로 `graph_llm_model`(OpenAI용, 기본 `gpt-4.1-mini`)이 아니라
+`graph_llm_model_openrouter` / `INDEX_GRAPH_MODEL_OPENROUTER`(기본 `openai/gpt-4.1-mini`)를
+쓴다 — 형식이 안 맞으면 404가 나고 keyword 로 조용히 강등되기 때문이다.
+
 생성 관계:
 
 ```text
