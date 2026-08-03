@@ -38,11 +38,13 @@ from __future__ import annotations
 
 import math
 import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 from core.state import AgentDoctorState
 from core.schema import Document, Finding
 from agents.optimize import rules
+from agents.optimize import eligibility
 from agents.optimize import gate
 from agents.optimize import history
 from agents.optimize.config_mapper import canonicalize_path, get_current_value
@@ -193,104 +195,58 @@ def plan(
     if decision.mode != "apply_optimize":
         return None, decision
 
-    ranked = _rank_groups(_group_by_label(actionable))
-    picked = _pick_top(ranked, blacklist)
-    if picked is None:
-        # 점수는 났지만 후보가 전부 블랙리스트 → 처방할 게 없음
+    selection = _select_action(state, actionable, blacklist)
+    if selection is None or selection.selected is None:
         return None, OptimizeDecision(
             mode="use_current",
             status="skipped",
             requires_user_confirmation=False,
             next_route="serve",
-            reason="처방 후보가 모두 블랙리스트에 걸림",
+            reason="적용 가능한 action 이 없음",
             manual_labels=decision.manual_labels,
         )
 
-    label, findings, rule, _score_val = picked
-    evidence_analysis = (
-        _evidence_windows(state, findings)
-        if _rule_uses_chunk_size(rule)
-        else None
-    )
-    candidates = _build_candidates(
-        label,
-        findings,
-        rule,
-        blacklist,
-        state,
-        evidence_analysis=evidence_analysis,
-    )
-    request = _build_request(
-        label,
-        findings,
-        rule,
-        candidates,
-        ranked,
-        state,
-        evidence_analysis=evidence_analysis,
-    )
-    # legacy 가 이미 계산한 evidence 분석을 shadow 가 재사용하도록 캐시로 넘긴다.
-    # 관측 때문에 비싼 청크 경계 분석을 두 번 돌리면 안 된다.
-    evidence_cache: dict[str, Any] = {}
-    if evidence_analysis is not None:
-        evidence_cache[label] = evidence_analysis
-    request.metadata["shadow_action_selection"] = _shadow_action_selection(
-        state,
-        actionable,
-        label,
-        candidates[0].id if candidates else None,
-        evidence_cache,
-    )
+    request = _build_action_request(selection, state)
     decision.request_id = request.request_id
     return request, decision
 
 
-# ── shadow mode: action 선택을 함께 계산해 비교만 한다 ─────────────
-# 실제 적용은 위의 legacy 경로가 그대로 한다. 여기서는 "action 중심으로 골랐다면
-# 무엇을 골랐을까" 를 계산해 request metadata 에 남긴다.
-#
-# 목적은 전환 전에 **실익을 관측**하는 것이다. 선택이 전혀 달라지지 않거나 tie-break
-# 차이뿐이라면 선택 로직 전환을 보류한다(계획서 §8 단계 3 중단 기준). 구조(catalog·
-# eligibility·aggregator)는 중복 선언 제거와 정책 단일화만으로도 유지 가치가 있다.
+# ── action 중심 선택 ──────────────────────────────────────────────
+# label 을 먼저 고르고 그 label 의 처방 순서를 따르던 방식을 대체한다.
+# 모든 활성 label 이 지지하는 action 을 만들고, 같은 실제 config 변경을 하나로 통합한
+# 뒤 action 끼리 경쟁시킨다. label 은 근거·probe·목표 metric 만 제공한다.
 
-def _shadow_action_selection(
+
+@dataclass
+class _ActionSelection:
+    """선택 결과와 그 근거. 요청을 만들고 리포트를 쓰는 데 필요한 것만 담는다."""
+
+    selected: Any = None
+    ranked: list[Any] = field(default_factory=list)
+    rejected: list[Any] = field(default_factory=list)
+    deferred: list[dict[str, Any]] = field(default_factory=list)
+    evidence_cache: dict[str, Any] = field(default_factory=dict)
+    findings_by_label: dict[str, list[Finding]] = field(default_factory=dict)
+
+
+def _select_action(
     state: AgentDoctorState,
     actionable: list[Finding],
-    legacy_label: str,
-    legacy_prescription_id: str | None,
-    evidence_cache: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """legacy 선택과 action 선택을 비교한다.
+    exclusions: set[str] | None,
+) -> _ActionSelection | None:
+    """활성 Finding 에서 적용할 action 하나를 고른다.
 
-    **실패해도 legacy 경로를 깨지 않는다.** shadow 는 관측용이므로 어떤 예외도
-    최적화 자체를 막아서는 안 된다.
+    실행 가능성 판정이 **점수 경쟁보다 먼저**다. 실행할 수 없는 action 이 표를 받으면
+    실행 가능한 action 이 밀려나고, 선택된 뒤 optimizer 에서 탈락하면 그 방문이
+    통째로 낭비된다.
     """
-    try:
-        return _compute_shadow_selection(
-            state,
-            actionable,
-            legacy_label,
-            legacy_prescription_id,
-            evidence_cache if evidence_cache is not None else {},
-        )
-    except Exception as exc:  # noqa: BLE001 - 관측 실패가 최적화를 막으면 안 된다
-        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
-
-
-def _compute_shadow_selection(
-    state: AgentDoctorState,
-    actionable: list[Finding],
-    legacy_label: str,
-    legacy_prescription_id: str | None,
-    evidence_cache: dict[str, Any],
-) -> dict[str, Any]:
-    from agents.optimize import action_aggregator, action_catalog
+    from agents.optimize import action_aggregator
 
     grouped = _group_by_label(actionable)
+    evidence_cache: dict[str, Any] = {}
 
     def search_space_for(label, findings, changes):
-        # 청크 경계 분석은 비싸다. 라벨 단위로 캐시해 legacy 가 이미 계산한 것을
-        # 재사용하고, shadow 때문에 같은 분석이 두 번 돌지 않게 한다.
+        # 청크 경계 분석은 비싸다. 라벨 단위로 캐시해 같은 분석을 반복하지 않는다.
         analysis = None
         if any(canonicalize_path(path) == "chunker.chunk_size" for path in changes):
             if label not in evidence_cache:
@@ -301,7 +257,9 @@ def _compute_shadow_selection(
     supports = action_aggregator.build_action_supports(
         grouped, state, search_space_for=search_space_for
     )
-    candidates = action_aggregator.aggregate_action_candidates(supports, state)
+    candidates = action_aggregator.aggregate_action_candidates(
+        supports, state, exclusions=_normalize_exclusions(exclusions)
+    )
     eligible, rejected = action_aggregator.filter_ineligible_actions(
         candidates,
         state,
@@ -309,76 +267,198 @@ def _compute_shadow_selection(
         runtime_capabilities=state.runtime_capabilities,
     )
     kept, deferred = action_aggregator.resolve_action_conflicts(eligible)
-    selected = action_aggregator.select_action(kept)
+    ranked = action_aggregator.rank_action_candidates(kept)
 
-    legacy_key = _legacy_action_key(legacy_label, legacy_prescription_id)
-    shadow_key = selected.action_key if selected else None
-
-    return {
-        "status": "ok",
-        "legacy_label": legacy_label,
-        "legacy_prescription_id": legacy_prescription_id,
-        "legacy_action_key": legacy_key,
-        "shadow_action_key": shadow_key,
-        "agrees": bool(legacy_key) and legacy_key == shadow_key,
-        "divergence_reason": _divergence_reason(legacy_key, shadow_key, selected),
-        "shadow_score": round(selected.score, 6) if selected else None,
-        "shadow_supporting_labels": (
-            list(selected.supporting_labels) if selected else []
-        ),
-        "shadow_supporting_probe_count": (
-            len(selected.supporting_probes) if selected else 0
-        ),
-        "shadow_score_breakdown": (
-            dict(selected.score_breakdown) if selected else {}
-        ),
-        # 여러 label 이 같은 변경을 지지해 하나로 합쳐진 사례. 전환의 실익이 여기서
-        # 관측된다 — 0 건이면 통합할 것이 없었다는 뜻이다.
-        "merged_action_count": sum(
-            1 for c in candidates if len(c.supporting_labels) > 1
-        ),
-        "eligible_action_count": len(kept),
-        "rejected_actions": [
-            {"action_key": c.action_key, "reason": c.reason} for c in rejected
-        ],
-        "deferred_axes": deferred,
-        "catalog_size": len(action_catalog.ACTION_CATALOG),
-    }
+    return _ActionSelection(
+        selected=ranked[0] if ranked else None,
+        ranked=ranked,
+        rejected=rejected,
+        deferred=deferred,
+        evidence_cache=evidence_cache,
+        findings_by_label=grouped,
+    )
 
 
-def _legacy_action_key(label: str, prescription_id: str | None) -> str | None:
-    """legacy 가 고른 처방을 action key 로 환산한다(같은 잣대로 비교하기 위해)."""
+def _normalize_exclusions(exclusions: set[str] | None) -> set[str]:
+    """호출자가 넘긴 제외 목록을 action key 집합으로 정규화한다.
+
+    전환 과도기에는 agent 가 아직 (label, prescription_id) 튜플을 넘길 수 있다.
+    그 형태도 action key 로 환산해 받아준다(단계 5 에서 호출부가 정리된다).
+    """
     from agents.optimize import action_catalog
 
-    rule = rules.get_rule(label)
-    if not rule or not prescription_id:
-        return None
-    for prescription in rule.get("prescriptions") or []:
-        if prescription.get("id") != prescription_id:
+    normalized: set[str] = set()
+    for item in exclusions or set():
+        if isinstance(item, str):
+            normalized.add(item)
             continue
-        for raw_path, value in (prescription.get("patch") or {}).items():
-            return action_catalog.build_action_key(raw_path, value)
+        if isinstance(item, tuple) and len(item) == 2:
+            label, prescription_id = item
+            rule = rules.get_rule(label)
+            for prescription in (rule or {}).get("prescriptions") or []:
+                if prescription.get("id") != prescription_id:
+                    continue
+                for raw_path, value in (prescription.get("patch") or {}).items():
+                    normalized.add(action_catalog.build_action_key(raw_path, value))
+    return normalized
+
+
+def _build_action_request(
+    selection: _ActionSelection,
+    state: AgentDoctorState,
+) -> OptimizationRequest:
+    """선택된 action 을 OptimizationRequest 로 묶는다.
+
+    action 필드가 정본이고, `failure_label`·`candidates` 같은 기존 필드는 여기서
+    파생해 함께 채운다(dual-read). optimizer·agent·history·reporter 가 아직 그
+    필드들을 읽기 때문이며, 소비처 전환이 끝나면 파생을 걷어낸다.
+    """
+    action = selection.selected
+    definition = action.definition
+    path = definition.canonical_path
+    values = list(action.search_space.get(path, []))
+
+    # 대표 라벨 — 설명용이다. 인과 등급이 가장 높은 support 를 고른다.
+    primary_support = min(
+        action.supports,
+        key=lambda s: (
+            {"A": 0, "C": 1, "B": 2, "D": 3}.get(s.group or "D", 99),
+            s.label,
+        ),
+    )
+    primary_label = primary_support.label
+    findings = selection.findings_by_label.get(primary_label, [])
+
+    # 후보가 여러 개면 sweep 이 실측으로 고른다. chunk 축은 사전검증 결과가
+    # 있어야 internal 로 넘긴다(기존 정책 유지).
+    chunk_precheck_context = None
+    if path in _CHUNK_PRECHECK_PATHS:
+        chunk_precheck_context = _chunk_precheck_context(
+            state,
+            findings,
+            path=path,
+            evidence_analysis=selection.evidence_cache.get(primary_label),
+        )
+    grounding = _selected_grounding(action, path)
+    use_internal = _should_sweep(
+        path, values, grounding, chunk_precheck_context
+    )
+
+    patch = ConfigPatch(
+        changes={path: values[0] if len(values) == 1 else definition.operation},
+        reindex_required=definition.reindex_required,
+        description=f"{action.action_key} ({', '.join(action.supporting_labels)})",
+        metadata={
+            "action_key": action.action_key,
+            "prescription_id": primary_support.prescription_id,
+        },
+    )
+    legacy_candidate = PrescriptionCandidate(
+        id=primary_support.prescription_id or action.action_key,
+        failure_label=primary_label,
+        group=primary_support.group,
+        status="ready",
+        patch=patch,
+        search_space={path: values},
+        cost=definition.base_cost,
+        priority=action.score,
+        target_metrics=list(action.target_metrics),
+        applies_when=dict(primary_support.applies_when),
+        reason=primary_support.reason,
+        metadata=(
+            {"candidate_grounding": grounding} if grounding else {}
+        ),
+    )
+
+    metadata: dict[str, Any] = {
+        "primary_metric": "composite_score",
+        "min_delta": history.MIN_IMPROVEMENT_MARGIN,
+        "study_baseline_config": dict(state.index_config),
+        "baseline_metrics": _report_metrics(state),
+        "trial_results": [],
+        "runtime_capabilities": {
+            name: dict(capability)
+            for name, capability in state.runtime_capabilities.items()
+            if isinstance(capability, dict)
+        },
+        "action_key": action.action_key,
+        "action_score_breakdown": dict(action.score_breakdown),
+        "candidate_support": dict(action.metadata.get("candidate_support", {})),
+        "rejected_actions": [
+            {"action_key": c.action_key, "reason": c.reason}
+            for c in selection.rejected
+        ],
+        "deferred_axes": list(selection.deferred),
+        "runner_up_actions": [
+            {"action_key": c.action_key, "score": round(c.score, 6)}
+            for c in selection.ranked[1:4]
+        ],
+    }
+    if grounding:
+        metadata["candidate_grounding"] = dict(grounding)
+    if use_internal and chunk_precheck_context is not None:
+        metadata["chunk_precheck_context"] = chunk_precheck_context
+
+    return OptimizationRequest(
+        request_id=str(uuid.uuid4()),
+        iteration=state.iteration,
+        baseline_config=dict(state.index_config),
+        failure_label=primary_label,
+        related_failure_labels=[
+            label for label in action.supporting_labels if label != primary_label
+        ],
+        candidates=[legacy_candidate],
+        search_space={path: values},
+        target_metrics=list(action.target_metrics),
+        target_profile="balanced",
+        optimizer="internal" if use_internal else "rules",
+        max_trials=max(len(values), 1),
+        reason=(
+            f"action {action.action_key} "
+            f"(지지 라벨 {len(action.supporting_labels)}개, "
+            f"probe {len(action.supporting_probes)}개)"
+        ),
+        propose_only=False,
+        metadata=metadata,
+        action_key=action.action_key,
+        action=action,
+        supporting_labels=list(action.supporting_labels),
+        supporting_probes=sorted(action.supporting_probes),
+        opposing_labels=list(action.opposing_labels),
+        action_score=action.score,
+        action_score_breakdown=dict(action.score_breakdown),
+    )
+
+
+def _selected_grounding(action: Any, path: str) -> dict[str, Any] | None:
+    """선택된 action 의 후보값이 어떻게 나왔는지(실측 근거 여부)."""
+    for support in action.supports:
+        if support.grounding_metadata:
+            return dict(support.grounding_metadata)
     return None
 
 
-def _divergence_reason(
-    legacy_key: str | None,
-    shadow_key: str | None,
-    selected: Any,
-) -> str | None:
-    """선택이 갈린 이유를 거칠게 분류한다(중단 기준 판정용)."""
-    if legacy_key == shadow_key:
-        return None
-    if shadow_key is None:
-        return "shadow_found_no_eligible_action"
-    if legacy_key is None:
-        return "legacy_prescription_not_in_catalog"
-    if selected is not None and len(selected.supporting_labels) > 1:
-        # 여러 label 이 지지해 통합된 action 이 이긴 경우 — 전환의 진짜 실익이다.
-        return "shared_support_won"
-    if legacy_key.split(":")[0] != shadow_key.split(":")[0]:
-        return "different_axis"
-    return "different_operation"
+def _should_sweep(
+    path: str,
+    values: list[Any],
+    grounding: dict[str, Any] | None,
+    chunk_precheck_context: dict[str, Any] | None,
+) -> bool:
+    """internal sweep 으로 넘길지 판단한다(기존 정책을 그대로 옮긴 것).
+
+    chunk 축은 사전검증 입력이 갖춰졌을 때만 sweep 한다 — prescreener 가 실제 청커를
+    dry-run 해 후보를 거르기 때문이다. 그 외 축은 후보가 여럿이면 sweep 한다.
+    """
+    if not eligibility.is_sweepable(path):
+        return False
+    if path in _CHUNK_PRECHECK_PATHS:
+        return (
+            bool(values)
+            and grounding is not None
+            and grounding.get("status") in _CHUNK_PRECHECK_GROUNDING_STATUSES
+            and _has_chunk_precheck_inputs(chunk_precheck_context)
+        )
+    return len(values) > 1
 
 
 def _rule_uses_chunk_size(rule: dict[str, Any]) -> bool:

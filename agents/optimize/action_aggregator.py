@@ -97,6 +97,7 @@ def build_action_supports(
                         action_key=action_key,
                         label=label,
                         group=rule.get("group"),
+                        prescription_id=str(prescription.get("id") or ""),
                         finding_ids=[f.finding_id for f in findings],
                         affected_probes=set(probes),
                         confidence=float(confidence),

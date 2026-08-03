@@ -197,7 +197,17 @@ def _ground_top_k_from_gold(
     ]
     if not required:
         return None, None  # 측정값 없음 → 방향 키워드 폴백
-    return _knee_candidates(required), None
+    candidates = _knee_candidates(required)
+    # 실측에서 나온 후보임을 밝힌다. action 선택이 "근거 있는 후보"를 방향 키워드
+    # 추측보다 우선하는데, 이 표시가 없으면 무릎 분석 결과가 추측과 동급으로 취급된다.
+    return candidates, {
+        "status": "grounded",
+        "source": "gold_rank_knee",
+        "probe_count": len(required),
+        "required_min": min(required),
+        "required_max": max(required),
+        "generated_candidates": list(candidates),
+    }
 
 
 def _valid_gold_spans(

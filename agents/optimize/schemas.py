@@ -230,6 +230,9 @@ class ActionSupport:
     action_key: str
     label: str
     group: FailureGroup | None = None
+    # 이 support 를 만든 rules.py 처방 id. action 이 선택 단위가 된 뒤에도 리포트와
+    # 하위 호환 필드를 채우려면 "어느 선언에서 왔는지"를 알아야 한다.
+    prescription_id: str = ""
     finding_ids: list[str] = field(default_factory=list)
     # 이 label이 영향을 준 고유 probe. 점수는 label 수가 아니라 이 집합으로 센다.
     affected_probes: set[str] = field(default_factory=set)
@@ -489,8 +492,11 @@ class OptimizationRequest:
     request_id: str
     iteration: int
     baseline_config: dict[str, Any]
+    # DEPRECATED: 선택 단위가 action 으로 옮겨져 "대표 라벨" 개념은 설명용으로만 남는다.
+    #   action_key / supporting_labels 를 읽어야 한다. 소비처 전환이 끝나면 제거한다.
     failure_label: str
     related_failure_labels: list[str] = field(default_factory=list)
+    # DEPRECATED: 실행 선택 단위는 action 하나다. 이 목록은 하위 호환용 파생값이다.
     candidates: list[PrescriptionCandidate] = field(default_factory=list)
     search_space: dict[str, Any] = field(default_factory=dict)
     fixed_config: dict[str, Any] = field(default_factory=dict)
@@ -501,6 +507,19 @@ class OptimizationRequest:
     reason: str = ""
     propose_only: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    # ── action 중심 필드 ──────────────────────────────────────────
+    # 이 요청이 적용하려는 실제 config 변경. 위의 label 필드들은 여기서 파생된다.
+    action_key: str | None = None
+    action: ActionCandidate | None = None
+    # 이 action 을 지지한 라벨과 고유 probe. 대표 라벨 하나가 아니라 전체다.
+    supporting_labels: list[str] = field(default_factory=list)
+    supporting_probes: list[str] = field(default_factory=list)
+    # 같은 config 축에서 반대 방향을 지지한 라벨(있다면). 리포트가 충돌을 설명한다.
+    opposing_labels: list[str] = field(default_factory=list)
+    # 선택 근거. 사용자에게 "왜 이걸 골랐는지" 설명하는 데 쓴다.
+    action_score: float | None = None
+    action_score_breakdown: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -74,17 +74,26 @@ class ActionEligibility:
 
 
 def _runtime_verified(path: str, runtime_capabilities: dict[str, Any] | None) -> bool:
-    """runtime 이 이 경로를 실제로 실행할 수 있다고 확인해 줬는지.
+    """runtime 이 이 경로를 실행할 수 없다고 **명시**했는지 확인한다.
 
     reranker 처럼 Index 가 실제 로드·추론해 봐야 아는 optional 모델이 대상이다.
-    runtime 미확인은 **품질 실패가 아니므로** 호출자가 영구 blacklist 로 다루면 안 된다.
+
+    ⚠️ **정보 부재는 차단이 아니다.** runtime capability 는 Index 가 생산하므로 첫
+    방문에는 비어 있다. 그때 막아 버리면 reranker 계열 action 이 한 번도 선택되지
+    못하고, deferred 기록조차 남지 않아 사용자가 이유를 알 수 없다.
+
+    최종 판정은 optimizer 가 실행 직전에 한다(같은 정책을 재검증한다). 여기서는
+    "이미 못 한다고 밝혀진" 경우만 걸러 헛된 선택을 줄인다. runtime 미확인은
+    품질 실패가 아니므로 호출자가 영구 blacklist 로 다루면 안 된다.
     """
     if not path.startswith("reranker."):
         return True
-    if not isinstance(runtime_capabilities, dict):
-        return False
+    if not isinstance(runtime_capabilities, dict) or not runtime_capabilities:
+        return True                      # 정보 없음 → optimizer 가 판정한다
     capability = runtime_capabilities.get("reranker")
-    return isinstance(capability, dict) and capability.get("status") == "verified"
+    if not isinstance(capability, dict):
+        return True                      # 이 기능에 대한 관측이 없음
+    return capability.get("status") == "verified"
 
 
 def _prerequisites_met(
@@ -150,12 +159,22 @@ def evaluate_action(
     if not met:
         return reject(REASON_PREREQUISITE, unmet_prerequisite=unmet)
 
-    # 7. constraint 적용 + 현재값과 같은 no-op 제거
-    #    filter_candidate_values 가 allowed/min/max 와 no-op 을 함께 처리한다.
+    # 7. constraint 적용 (allowed / min / max)
     filtered = filter_candidate_values(
         path, list(candidate_values), baseline_config, constraints
     )
+
+    # 8. 현재값과 같은 no-op 제거.
+    #    ⚠️ filter_candidate_values 는 constraint 만 본다. no-op 제거는 optimizer 의
+    #    _prepare_search_space 에 있으므로 같은 정책을 여기서도 적용해야 한다.
+    #    이 단계가 빠지면 boolean 축의 자동 배타가 깨진다 — 리랭커가 꺼져 있는데도
+    #    disable 이 후보로 남아 enable 과 경쟁하고, 2:1 지지에서 충돌 보류에 걸려
+    #    그 축이 영구히 닫힌다.
+    current_value = get_current_value(baseline_config, path)
+    filtered = [value for value in filtered if value != current_value]
+
     detail["filtered_from"] = len(candidate_values)
+    detail["current_value"] = current_value
     if not filtered:
         return reject(REASON_NO_CANDIDATE)
 
