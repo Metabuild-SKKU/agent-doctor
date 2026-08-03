@@ -27,6 +27,25 @@ class EstimateCostUsdTest(unittest.TestCase):
     def test_unregistered_model_returns_none(self):
         self.assertIsNone(_estimate_cost_usd("some-unlisted-model", 1_000, 1_000))
 
+    def test_graph_extraction_default_model_is_priced(self):
+        # Index 그래프 기본 모델. 미등록이면 비용이 통째로 집계에서 빠진다.
+        self.assertAlmostEqual(_estimate_cost_usd("gpt-4.1-mini", 1_000_000, 1_000_000),
+                               0.40 + 1.60)
+
+    def test_reasoning_models_are_priced(self):
+        self.assertAlmostEqual(_estimate_cost_usd("gpt-5-mini", 1_000_000, 1_000_000),
+                               0.25 + 2.00)
+        self.assertAlmostEqual(_estimate_cost_usd("o3-mini", 1_000_000, 0), 1.10)
+
+    def test_pro_variants_do_not_inherit_base_price(self):
+        # "o3-pro" 가 "o3" 접두에 걸리면 10배 과소집계된다.
+        self.assertAlmostEqual(_estimate_cost_usd("o3-pro", 1_000_000, 0), 20.00)
+        self.assertAlmostEqual(_estimate_cost_usd("gpt-5-pro", 0, 1_000_000), 120.00)
+
+    def test_gpt5_chat_is_priced_separately_from_gpt5(self):
+        self.assertAlmostEqual(_estimate_cost_usd("gpt-5-chat-latest", 1_000_000, 0), 5.00)
+        self.assertAlmostEqual(_estimate_cost_usd("gpt-5", 1_000_000, 0), 1.25)
+
     def test_zero_tokens_known_model_is_zero_cost(self):
         self.assertEqual(_estimate_cost_usd("gpt-4o", 0, 0), 0.0)
 

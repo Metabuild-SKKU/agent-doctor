@@ -10,6 +10,7 @@ env 규약(EVAL_LLM_PROVIDER vs RAG_LLM_PROVIDER), 키 부재 처리, 재시도 
 from __future__ import annotations
 
 import os
+import threading
 
 from core.llm_usage import log_usage
 
@@ -20,6 +21,41 @@ GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 # 잘린 응답이 JSON 파싱에 실패해 호출부가 조용히 휴리스틱으로 폴백하면서 쓰레기 Probe 를
 # 만들어냈다. 상한은 비용 방어이자 "잘림"을 조기에 드러내는 장치다.
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
+
+# o-series/gpt-5 계열은 max_tokens 를 400 으로 거부하고(max_completion_tokens 만 허용),
+# temperature 도 1 외의 값을 받지 않는다. 모델명으로 갈라 파라미터를 맞춘다.
+# 새 추론 모델 계열이 나오면 이 두 목록에 추가할 것.
+# 미확인: GitHub Models 엔드포인트가 max_completion_tokens 를 받는지는 검증하지 못했다.
+_REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+# gpt-5-chat-* 은 접두사만 같고 추론 모델이 아니다 — temperature 를 그대로 받는다.
+_NON_REASONING_PREFIXES = ("gpt-5-chat",)
+
+# 추론 모델 출력 상한의 하한선. 내부 추론 토큰이 이 상한을 함께 소진하고 output 으로
+# 과금되므로, 2048 이면 추론에서 다 쓰고 본문이 빈 채로 돌아올 수 있다(비용은 그대로).
+# OpenAI 문서 권장 예약량 25K 를 하한으로 둔다 — 상한일 뿐 실사용분만 과금된다.
+_REASONING_MIN_OUTPUT_TOKENS = 25_000
+
+# 추론 모델에서 temperature 가 버려졌다는 사실을 모델당 한 번 알린다.
+# Optimize 의 generation.temperature sweep 이 조용히 no-op 이 되는 걸 드러내기 위함.
+_warned_ignored_temperature: set[str] = set()
+_warn_lock = threading.Lock()
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """o-series/gpt-5 계열인지. GitHub Models 의 'publisher/model' 형식도 처리."""
+    name = model.rsplit("/", 1)[-1].strip().lower()
+    if name.startswith(_NON_REASONING_PREFIXES):
+        return False
+    return name.startswith(_REASONING_MODEL_PREFIXES)
+
+
+def _warn_temperature_ignored_once(model: str, temperature: float, tag: str) -> None:
+    with _warn_lock:
+        if model in _warned_ignored_temperature:
+            return
+        _warned_ignored_temperature.add(model)
+    print(f"[{tag}] {model} 은 temperature 를 받지 않아 요청값({temperature})이 무시됩니다 "
+          f"— Optimize 의 generation.temperature 조정도 이 모델에선 no-op 입니다.")
 
 
 def openai_chat(
@@ -37,7 +73,8 @@ def openai_chat(
     """OpenAI 호환 chat 1회 호출 → 응답 텍스트("" 가능).
 
     temperature 기본 0(결정적). RAG 답변 생성만 호출부에서 조정하고, 판정·합성 등
-    구조가 중요한 호출은 기본 0을 유지한다.
+    구조가 중요한 호출은 기본 0을 유지한다. 추론 모델(o-series/gpt-5)은 temperature 를
+    받지 않아 무시되고(1회 경고), 출력 상한은 추론 토큰 몫까지 25K 로 올려 잡는다.
     base_url/api_key 를 주면 GitHub Models 등 OpenAI 호환 엔드포인트 겸용."""
     from openai import OpenAI
 
@@ -48,19 +85,29 @@ def openai_chat(
         client_kwargs["api_key"] = api_key
     client = OpenAI(**client_kwargs)
     kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
+    if _is_reasoning_model(model):
+        kwargs["max_completion_tokens"] = max(max_output_tokens, _REASONING_MIN_OUTPUT_TOKENS)
+        if temperature != 1.0:
+            _warn_temperature_ignored_once(model, temperature, tag)
+    else:
+        kwargs["max_tokens"] = max_output_tokens
+        kwargs["temperature"] = temperature
     resp = client.chat.completions.create(
         model=model,
-        temperature=temperature,
-        max_tokens=max_output_tokens,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         **kwargs,
     )
+    choice = resp.choices[0]
+    # 상한에 걸린 응답은 JSON 파싱에 실패해 호출부가 "빈 응답"으로 흡수한다 —
+    # 사유가 잘림이라는 걸 여기서 드러내지 않으면 원인 추적이 불가능하다.
+    if getattr(choice, "finish_reason", None) == "length":
+        print(f"[{tag}] {model} 응답이 출력 상한에서 잘렸습니다(finish_reason=length).")
     if resp.usage:
         log_usage(model, resp.usage.prompt_tokens, resp.usage.completion_tokens, tag=tag)
-    return resp.choices[0].message.content or ""
+    return choice.message.content or ""
 
 
 def gemini_chat(
