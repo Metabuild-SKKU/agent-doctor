@@ -122,7 +122,8 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
         failed_questions=_failed_questions(records),
         findings_summary=_findings_summary(records, mode),
         ragas_scores=scores,
-        runtime_summary={"reranker": reranker_runtime},
+        runtime_summary={"reranker": reranker_runtime,
+                         "search": _search_runtime(records)},
         oracle_accuracy=oracle_acc,
         overall_score=overall_val,
         composite_score=compute_composite(scorable).as_dict(),  # 종합점수(0~100) — bad_gold 제외
@@ -260,6 +261,22 @@ def _reranker_runtime(records: list[EvalRecord]) -> dict:
     }
 
 
+def _search_runtime(records: list[EvalRecord]) -> dict:
+    """검색(STEP2 Phase A) 총시간과 그중 리랭크 몫. 느린 구간의 귀속을 한 번에 가른다.
+
+    리랭크 시간만 있으면 분자만 아는 셈이라 '검색이 느렸나, 생성이 느렸나'를 콘솔 로그와
+    눈으로 대조해야 한다. 검색 총시간을 함께 남기면 STEP2 소요에서 빼는 것만으로 생성 몫도
+    나온다(검색 = Σsearch_seconds / 생성 = STEP2 소요 - 검색).
+    """
+    seconds = sum(_num(r.retrieval_details.get("search_seconds")) for r in records)
+    rerank = sum(_num(r.retrieval_details.get("rerank_seconds")) for r in records)
+    return {
+        "seconds": round(seconds, 2),
+        "searches": sum(1 for r in records if r.retrieval_details),
+        "rerank_share": round(rerank / seconds, 3) if seconds > 0 else None,
+    }
+
+
 def _num(value) -> float:
     """retrieval_details 에서 읽은 수치를 float 로. 없거나 형식 불량이면 0.0
     (옛 계약의 retriever·테스트 주입 결과에는 키가 아예 없다)."""
@@ -360,10 +377,16 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     if rs.get("answer_correctness_degraded"):
         print(f"  ⚠ 정답 판정 degrade {rs['answer_correctness_degraded']}건 — "
               f"판정기(TP/FP/FN 분류) 실패로 의미유사도 단독 계산. 근접 오답을 못 걸렀을 수 있음")
-    rerank = (report.runtime_summary or {}).get("reranker") or {}
-    if rerank.get("pairs"):   # 리랭크 비용 — chunk_size 처방이 검색 시간에 준 영향을 드러낸다
-        print(f"  리랭커 {rerank['seconds']}초 · {rerank['pairs']}쌍 "
-              f"(쌍당 {rerank['ms_per_pair']}ms) · applied {rerank['applied']}/{len(records)}")
+    runtime = report.runtime_summary or {}
+    search = runtime.get("search") or {}
+    rerank = runtime.get("reranker") or {}
+    # 검색 비용 — chunk_size 처방이 검색 시간에 준 영향과 그중 리랭크 몫을 한 줄로.
+    if search.get("seconds"):
+        line = f"  검색 {search['seconds']}초 (probe {search['searches']})"
+        if rerank.get("pairs"):
+            line += (f" · 리랭크 {rerank['seconds']}초 {rerank['pairs']}쌍 "
+                     f"(쌍당 {rerank['ms_per_pair']}ms, 검색의 {search['rerank_share']})")
+        print(line)
     if report.findings:
         # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
         # (타입=처방 그룹 4종, 라벨=세분화 진단명. 타입만 보면 gap 처럼 뭉뚱그려져 원인이 안 보인다.)

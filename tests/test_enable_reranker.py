@@ -186,6 +186,8 @@ class RerankerExecutionTest(unittest.TestCase):
 
         self.assertEqual(result["rerank_pairs"], 3)
         self.assertGreaterEqual(result["rerank_seconds"], 0.0)
+        # 검색 총시간도 함께 실린다 — 리랭크 시간만으로는 '느린 게 검색이냐 생성이냐'가 안 갈린다.
+        self.assertGreaterEqual(result["search_seconds"], result["rerank_seconds"])
 
     def test_rerank_cost_not_counted_when_rerank_did_not_run(self):
         """실패한 시도는 시간·쌍 어느 쪽도 세지 않는다. 한쪽만 세면 집계 ms_per_pair 가

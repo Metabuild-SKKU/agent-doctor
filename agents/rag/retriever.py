@@ -31,6 +31,7 @@ from agents.index.qdrant_store import (
     delete_document_chunks,
     embed,
     ensure_collection,
+    ensure_reranker,
     hybrid_search,
     keyword_search,
     rerank_with_status,
@@ -394,6 +395,10 @@ class Retriever:
         top_k: int | None = None,
         apply_rerank: bool | None = None,
     ) -> dict:
+        # 검색 한 건의 총시간. 리랭크 시간(rerank_seconds)과 함께 실어야 '느린 게 검색이냐
+        # 생성이냐, 검색이면 그중 리랭크가 얼마냐'가 한 번의 실행으로 갈린다 — 지금까지는
+        # 분자(리랭크)만 있고 분모(검색 총시간)가 없어 콘솔 로그를 눈으로 대조해야 했다.
+        search_started = time.monotonic()
         use_reranker = (
             self.settings.use_reranker if apply_rerank is None else bool(apply_rerank)
         )
@@ -419,6 +424,7 @@ class Retriever:
                 "pre_rerank_ids": [],
                 "rerank_seconds": 0.0,
                 "rerank_pairs": 0,
+                "search_seconds": round(time.monotonic() - search_started, 3),
                 "results": [],
             }
 
@@ -508,6 +514,9 @@ class Retriever:
         rerank_seconds = 0.0
         rerank_pairs = 0
         if reranker_attempted:
+            # 모델 로드는 타이머 밖에서 끝낸다 — rerank_with_status 가 내부에서 로드까지 하므로,
+            # 쿨다운 만료 직후 첫 쿼리가 2GB 대 재로드를 '쌍당 비용'으로 뒤집어쓴다.
+            ensure_reranker(self.settings.reranker_model)
             attempted_pairs = len(results)
             rerank_started = time.monotonic()
             results, reranker_status = rerank_with_status(
@@ -556,6 +565,7 @@ class Retriever:
             "pre_rerank_ids": pre_rerank_ids,
             "rerank_seconds": round(rerank_seconds, 3),
             "rerank_pairs": rerank_pairs,
+            "search_seconds": round(time.monotonic() - search_started, 3),
             "results": results,
         }
 

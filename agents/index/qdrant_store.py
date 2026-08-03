@@ -179,6 +179,18 @@ def _load_reranker(model_name: str) -> tuple[Any | None, str]:
         return model, "ready"
 
 
+def ensure_reranker(model_name: str = DEFAULT_RERANKER_MODEL) -> bool:
+    """리랭커를 미리 로드해 둔다(이미 캐시돼 있으면 no-op). 준비됐으면 True.
+
+    호출부가 리랭크 시간을 재기 전에 부르라고 있는 함수다 — rerank_with_status 는 내부에서
+    _load_reranker 를 부르므로, 그냥 재면 모델 로드(2GB 대)가 첫 쿼리의 '쌍당 비용'으로
+    귀속된다. 평소엔 Index 의 preflight 가 이미 캐시해 두지만, 추론 실패로 evict + 쿨다운이
+    걸린 뒤 만료되면 임의의 쿼리가 그 재로드를 뒤집어쓴다.
+    """
+    model, _status = _load_reranker(model_name)
+    return model is not None
+
+
 def probe_reranker_capability(
     model_name: str = DEFAULT_RERANKER_MODEL,
     *,
