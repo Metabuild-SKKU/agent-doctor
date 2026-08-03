@@ -13,8 +13,12 @@ STEP4 후처리: retrieval_semantic_mismatch 실패의 토픽 분포 신호(topi
 "none" 과 "unmeasured" 는 다르다 — 전자는 "쟀고, 임베딩 문제가 아니라는 결론"이라 rules.py
 에서 청킹 처방을 고르는 근거가 되고, 후자는 "근거 자체가 없음"이라 신호를 무시하고 기존
 순차 fallback 으로 돌아가야 한다. 둘을 같은 값으로 뭉개면 못 잰 회차가 청킹 처방을 확정
-선택해버린다(rules.py 의 applies_when 은 "unmeasured" 를 어느 허용 리스트에도 담지 않고,
-planner 가 미측정 신호를 fallback 으로 처리한다).
+선택해버린다.
+
+fallback 은 "허용 리스트에 없어서" 되는 게 아니다 — 허용 리스트에 없다는 건 '탈락'이지
+'미측정'이 아니다. 소비부(optimize/action_aggregator._is_unmeasured)가 이 값을 sentinel 로
+알아봐서 조건 자체를 통과시켜야 한다. 그래서 문자열을 여기서 따로 정의하지 않고 계약이
+사는 core.schema.UNMEASURED_SIGNAL 을 쓴다.
 
 판정은 개별 probe 로는 불가능하다 — "실패가 뭉쳤나 흩어졌나"는 여러 실패 probe 의 gold 를
 함께 봐야 나온다. 그래서 diagnose() 밖(agent.py STEP4 직후, 전 record 가 준비된 뒤)에서
@@ -35,6 +39,7 @@ from typing import NamedTuple, Optional, Sequence
 import math
 
 from agents.eval.knowledge_graph import cosine
+from core.schema import UNMEASURED_SIGNAL
 from agents.eval.types import (
     TOPIC_CLUSTER_BASELINE_SAMPLE,
     TOPIC_CLUSTER_BOUNDARY_K,
@@ -47,8 +52,10 @@ Vector = Sequence[float]
 CONCENTRATED = "concentrated"
 SPREAD = "spread"
 NONE = "none"
-# 어느 applies_when 허용 리스트에도 없는 값 — planner 가 '신호 없음'으로 보아 fallback 한다.
-UNMEASURED = "unmeasured"
+# '재려고 했으나 못 냈다'. 소비부(Optimize)가 같은 값을 미측정으로 알아봐야 하므로 계약이
+# 사는 core.schema 의 정본을 그대로 쓴다 — 문자열을 양쪽에 따로 적으면 한쪽만 바뀌어도
+# 조용히 어긋난다(허용 리스트에 없다는 사실만으로는 '미측정'이 되지 않는다. 그건 '탈락'이다).
+UNMEASURED = UNMEASURED_SIGNAL
 
 
 def _valid(vec: Optional[Vector]) -> bool:

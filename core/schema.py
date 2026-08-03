@@ -71,6 +71,19 @@ class Probe:
     # gold_spans 항목 예: {"doc_id": str, "start": int, "end": int}. 멀티홉 probe는 여러 개 가짐.
 
 
+# Finding.metadata 의 신호가 "재려고 했으나 값을 못 냈다"를 말하는 sentinel.
+#
+# 여기 있는 이유: Eval 과 Optimize 는 서로 import 하지 않고 Finding.metadata 로만 대화한다.
+# 그래서 '미측정'의 표현을 한쪽이 문자열로, 다른 쪽이 None 으로 알고 있어도 타입 검사에
+# 안 걸리고 조용히 어긋난다(실제로 어긋나 있었다 — topic_cluster 는 "unmeasured" 를
+# 실어 보내는데 소비부는 None 만 미측정으로 취급했다). 계약이 사는 이 파일에 정본을 둔다.
+#
+# 의미 구분이 중요하다: '못 쟀다'(이 sentinel)는 '쟀는데 해당 없다'와 다르다. 전자는 근거가
+# 없으니 신호를 무시하고 원래 순차 시도로 돌아가야 하고, 후자는 처방을 고르는 근거가 된다.
+# 둘을 뭉개면 못 잰 회차가 오히려 더 단정적으로 처방을 확정한다.
+UNMEASURED_SIGNAL = "unmeasured"
+
+
 @dataclass
 class Finding:
     """

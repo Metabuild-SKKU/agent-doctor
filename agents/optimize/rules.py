@@ -245,9 +245,11 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         #     "none"         → Case1(청크 희석)             → 청킹 조정
 
         #   ⚠️ 현재 이 applies_when 태그의 소비는 꺼져 있다
-        #   (planner._CONSUME_TOPIC_CLUSTER_SIGNAL=False) — 관측용 신호로만 유지한다.
-        #   신호는 finding.metadata 에 계속 기록되지만 planner 는 아직 그 값으로 처방을
-        #   가르지 않고, 이 라벨의 세 처방을 순서대로 순차 시도한다(신호 배선 이전과 동일).
+        #   (action_aggregator.CONSUME_APPLIES_WHEN_SIGNAL=False) — 관측용 신호로만 유지한다.
+        #   신호는 finding.metadata 에 계속 기록되지만 아직 그 값으로 처방을 가르지 않고,
+        #   이 라벨의 세 처방을 순서대로 순차 시도한다(신호 배선 이전과 동일).
+        #   "unmeasured"(판정 불가)는 여기 어느 허용 리스트에도 넣지 않는다 — 소비부가
+        #   sentinel 로 알아보고 조건을 통과시킨다(core.schema.UNMEASURED_SIGNAL).
         #   소비를 유예한 이유(요약): 위 매핑의 1순위 swap_embedding_model 이 optimizer
         #   capability(embedding_model=False)로 항상 거절돼 분기가 config 적용까지 이어지지
         #   않고, 임계값(TOPIC_CLUSTER_*_RATIO)도 캘리브레이션 전 임의값이라 추정량 노이즈가
