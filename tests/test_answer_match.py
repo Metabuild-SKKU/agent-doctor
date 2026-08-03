@@ -12,6 +12,7 @@ import itertools
 import os
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -21,7 +22,7 @@ from agents.eval.metrics_basic import answer_match, best_window_char_f1, char_f1
 from agents.eval.scoring import reliability_score
 from agents.eval.types import (
     ANSWER_CORRECTNESS_MIN, ANSWER_PASS_THRESHOLD, ANSWER_SEMANTIC_WEIGHT,
-    EvalRecord, F1_PASS_THRESHOLD, Mode, blend_answer_score,
+    EvalRecord, F1_EXACT_MATCH, F1_PASS_THRESHOLD, Mode, blend_answer_score,
 )
 
 
@@ -231,6 +232,142 @@ class TestGateMonotonicity(unittest.TestCase):
             self.assertFalse(diagnose._f1_ok(rec))
         finally:
             metrics_common.set_mode(Mode.FAST)
+
+
+class TestDegradeDoesNotFlipExactMatch(unittest.TestCase):
+    """버그1(probe_qa_26360): degrade 된 심판이 어휘 완전일치(정답)를 오답으로 뒤집으면
+    recall=1·oracle 통과와 겹쳐 context_noise_interference 로 오진되고, degrade 비결정성
+    때문에 같은 답이 반복마다 통과/실패를 오간다. 완전일치는 강등 면제, 애매한 근접 오답은 강등 유지."""
+
+    def _record(self, *, f1, ragas, recall=1.0, oracle_f1=1.0):
+        probe = Probe(probe_id="p1", question="질문", source="taxonomy",
+                      gold_chunk_ids=["g_a"], ground_truth="세종대왕")
+        rec = EvalRecord(probe=probe, generated_answer="세종대왕", oracle_answer="세종대왕")
+        rec.recall_at_k, rec.f1_score, rec.oracle_f1 = recall, f1, oracle_f1
+        rec.ragas = dict(ragas)
+        rec.ragas_done = True
+        rec.oracle_ragas = {}
+        rec.oracle_ragas_done = True
+        return rec
+
+    def test_exact_match_exempt_from_degrade_demotion(self):
+        """어휘 완전일치(f1=1.0) + degrade 낮은 ac → 강등 면제 → 정답 판정 유지."""
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            rec = self._record(f1=F1_EXACT_MATCH, ragas={
+                "faithfulness": 1.0, "answer_correctness": 0.1,
+                "answer_correctness_degraded": True})
+            self.assertFalse(diagnose._degraded_near_miss(rec, oracle=False))
+            self.assertTrue(diagnose._f1_ok(rec))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
+    def test_near_miss_below_exact_still_demotes(self):
+        """완전일치 미만(f1=0.6)은 degrade 시 여전히 강등 — 안전망 유지(경계 케이스)."""
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            rec = self._record(f1=0.6, ragas={
+                "faithfulness": 1.0, "answer_correctness": 0.1,
+                "answer_correctness_degraded": True})
+            self.assertTrue(diagnose._degraded_near_miss(rec, oracle=False))
+            self.assertFalse(diagnose._f1_ok(rec))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
+    def test_exact_match_ungrounded_still_demotes(self):
+        """부정문 오답('X 가 아니다'): 완전일치라도 문맥과 충돌해 근거성이 낮으면 강등 유지 —
+        면제 조건에 faithfulness 를 걸어 degrade 실행의 면제 구멍을 좁힌다."""
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            rec = self._record(f1=F1_EXACT_MATCH, ragas={
+                "faithfulness": 0.1, "answer_correctness": 0.1,
+                "answer_correctness_degraded": True})
+            self.assertTrue(diagnose._degraded_near_miss(rec, oracle=False))
+            self.assertFalse(diagnose._f1_ok(rec))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
+    def test_short_gold_negation_reaches_exact_match_score(self):
+        """F1_EXACT_MATCH(1.0)는 문자열 완전일치가 아니다 — gold 가 10자 이하면 answer_match
+        가 char-recall 경로라 부정문 오답도 1.0 이 된다. 즉 면제선을 어휘 단독으로 두면
+        _degraded_near_miss 가 원래 잡으려던 바로 그 오답이 통과한다. 이 사실을 못 박아
+        두어야 면제 조건에서 faithfulness 를 떼는 변경이 조용히 지나가지 않는다."""
+        from agents.eval.metrics_basic import answer_match
+        self.assertEqual(answer_match("사망하지 않았다", "사망"), F1_EXACT_MATCH)
+
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            # 그래서 강등을 막아 세우는 건 어휘가 아니라 근거성 축이다.
+            rec = self._record(f1=F1_EXACT_MATCH, ragas={
+                "faithfulness": 0.1, "answer_correctness": 0.1,
+                "answer_correctness_degraded": True})
+            self.assertTrue(diagnose._degraded_near_miss(rec, oracle=False))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
+    def test_exact_match_faith_unmeasured_still_demotes(self):
+        """근거성 미측정(faithfulness None)이면 면제하지 않고 기존 강등으로 흐른다(보수적)."""
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            rec = self._record(f1=F1_EXACT_MATCH, ragas={
+                "answer_correctness": 0.1, "answer_correctness_degraded": True})
+            self.assertIsNone(diagnose._faith(rec))
+            self.assertTrue(diagnose._degraded_near_miss(rec, oracle=False))
+            self.assertFalse(diagnose._f1_ok(rec))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
+    def test_no_false_context_noise_on_exact_match(self):
+        """probe 전체 흐름: 완전일치 + degrade 여도 성공 처리되어 context_noise_interference
+        (유령 실패)가 붙지 않는다 — diagnose 가 곧장 [] 로 종료."""
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            rec = self._record(f1=F1_EXACT_MATCH, ragas={
+                "faithfulness": 1.0, "answer_correctness": 0.1,
+                "answer_correctness_degraded": True})
+            with unittest.mock.patch.object(diagnose, "_compute_metrics"), \
+                 unittest.mock.patch.object(diagnose, "_compute_ragas_real"), \
+                 unittest.mock.patch.object(diagnose, "_compute_ragas_oracle"):
+                findings = diagnose.diagnose(rec, mode=int(Mode.DEEP))
+            self.assertEqual(findings, [])
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
+
+class TestAnswerReasonObservability(unittest.TestCase):
+    """관측성: reason 문자열이 판정을 뒤집은 실제 근거를 드러낸다 — degrade 로 의미축이
+    빠져 오답 처리됐는데 로그엔 'f1=1.00'만 찍혀 'f1 완벽인데 실패'가 설명 안 되던 문제."""
+
+    def _record(self, *, f1, ragas):
+        probe = Probe(probe_id="p1", question="q", source="taxonomy",
+                      gold_chunk_ids=["g_a"], ground_truth="정답")
+        rec = EvalRecord(probe=probe)
+        rec.recall_at_k, rec.f1_score = 1.0, f1
+        rec.ragas, rec.ragas_done = dict(ragas), True
+        return rec
+
+    def test_degrade_surfaces_ac_value(self):
+        # degrade 로 의미축 빠짐 → f1 뿐 아니라 판정을 뒤집은 ac_degraded 를 드러낸다.
+        rec = self._record(f1=1.0, ragas={
+            "faithfulness": 1.0, "answer_correctness": 0.1,
+            "answer_correctness_degraded": True})
+        reason = diagnose._answer_reason(rec)
+        self.assertIn("의미측정실패", reason)
+        self.assertIn("ac_degraded=0.100", reason)
+
+    def test_low_mode_unmeasured_stays_f1_only(self):
+        # degrade 가 아닌 단순 미측정(저모드)은 기존대로 f1 만 — 숨은 신호가 없다.
+        rec = self._record(f1=0.42, ragas={})
+        self.assertEqual(diagnose._answer_reason(rec), "f1=0.420")
+
+    def test_measured_semantic_shows_blend(self):
+        # 의미축이 측정된 정상 경로는 혼합 점수와 두 축을 모두 보인다(기존 형식).
+        rec = self._record(f1=0.49, ragas={
+            "faithfulness": 0.9, "answer_correctness": 0.73})
+        reason = diagnose._answer_reason(rec)
+        self.assertIn("answer=", reason)
+        self.assertIn("f1 0.490", reason)
+        self.assertIn("의미 0.730", reason)
 
 
 if __name__ == "__main__":

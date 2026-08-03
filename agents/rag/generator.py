@@ -580,7 +580,19 @@ def _build_prompt(
         )
     else:
         clauses.append("한국어로 답하라.")
-    if _gen_flag(config, "abstention_strict", False):
+    # 기권 성향은 한 축의 양방향이라 둘을 동시에 싣지 않는다.
+    #
+    # 어느 쪽이 이길지는 여기서 정하지 않는다 — 처방 적용 시점에 config_mapper 의
+    # EXCLUSIVE_FLAG_PAIRS 가 반대쪽을 내려서(마지막에 쓴 쪽이 이긴다) 정상 경로에서는
+    # 애초에 한쪽만 True 로 들어온다. 아래 elif 는 손으로 고친 config 등 그 경로를 안 거친
+    # 입력에 대한 백스톱일 뿐이다. 여기서 우선순위로 푸는 건 안 된다: 진 쪽 처방이 영구히
+    # no-op 이 되어 롤백 + blacklist 로 사라지고, 그 라벨의 레버가 죽는다.
+    if _gen_flag(config, "abstention_relaxed", False):
+        clauses.append(
+            "컨텍스트에 질문과 관련된 근거가 조금이라도 있으면 그것을 바탕으로 최대한 답하라. "
+            "명백히 근거가 전혀 없을 때에만 '제공된 정보로는 알 수 없습니다'라고 답하라."
+        )
+    elif _gen_flag(config, "abstention_strict", False):
         clauses.append(
             "조금이라도 확신이 없으면 지어내지 말고 반드시 "
             "'제공된 정보로는 알 수 없습니다'라고 답하라."

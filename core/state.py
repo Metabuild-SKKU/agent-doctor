@@ -157,6 +157,7 @@ class AgentDoctorState:
         "restate_question": False,   # 답변 전 질문 재진술 강제
         "completeness_mode": False,  # 모든 하위 질문에 빠짐없이 답하도록 유도
         "abstention_strict": False,  # 확신 없으면 반드시 기권하도록 강화
+        "abstention_relaxed": False, # 근거가 있으면 기권 말고 최대한 답하도록 (과다 기권 완화)
         "generation_model": "",      # Tier3(모델 교체)용 자리. 빈값=env/기본 사용
     })
     # 인덱싱 부산물(청크/문서 수, 그래프 파일 경로, failed_documents 등).
