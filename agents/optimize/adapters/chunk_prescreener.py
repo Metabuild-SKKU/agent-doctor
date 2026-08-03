@@ -223,6 +223,10 @@ def _measurement_spans(
     if not isinstance(raw_spans, (list, tuple)):
         raise ValueError("chunk_precheck_context.evidence_spans는 목록이어야 합니다.")
     spans: list[dict[str, Any]] = []
+    # 같은 축을 여러 라벨이 지지하면 그 라벨들의 gold span 이 합쳐져 들어온다.
+    # 같은 좌표가 두 번 세지면 포함률·중복량 통계가 그 span 쪽으로 기울어 후보
+    # 순위가 왜곡되므로 좌표 단위로 중복을 제거한다(입력 순서는 보존).
+    seen: set[tuple[str, int, int]] = set()
     for raw in raw_spans:
         if not isinstance(raw, dict):
             continue
@@ -241,6 +245,10 @@ def _measurement_spans(
             or end > len(document.content)
         ):
             continue
+        key = (doc_id, start, end)
+        if key in seen:
+            continue
+        seen.add(key)
         spans.append({"doc_id": doc_id, "start": start, "end": end})
     if not spans:
         raise ValueError("유효한 evidence_spans가 없어 chunk 자동 사전검증을 건너뜁니다.")

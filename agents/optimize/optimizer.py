@@ -13,9 +13,10 @@ OptimizationRequest를 검증하고 실행 backend를 조율하는 계층이다.
 
 [중요한 입력 계약]
   search space 생성과 applies_when 판정은 Planner 책임이다. 이 모듈은
-  PrescriptionCandidate.search_space 또는 OptimizationRequest.search_space가
-  채워져 있다고 가정하며, "increase", "decrease", "upgrade" 같은 symbolic
-  patch를 임의의 숫자나 모델명으로 해석하지 않는다.
+  OptimizationRequest.search_space 가 채워져 있다고 가정하며, "increase",
+  "decrease", "upgrade" 같은 symbolic patch를 임의의 숫자나 모델명으로 해석하지
+  않는다. **어떤 변경을 고를지도 Planner 가 이미 정했다** — 여기서는 그 하나를
+  실행 직전에 재검증할 뿐, 다른 후보로 갈아타지 않는다.
 
 [상태 계약]
   이 모듈은 AgentDoctorState를 읽거나 수정하지 않는다. 실제 index_config 반영은
@@ -33,7 +34,7 @@ from agents.optimize.schemas import (
     InternalAdapterResult,
     OptimizationRequest,
     OptimizationResult,
-    PrescriptionCandidate,
+    SelectedAction,
     RAGBuilderResult,
 )
 
@@ -111,6 +112,7 @@ PATH_CAPABILITIES: dict[str, str] = {
     "generation.restate_question": "generation_prompt",
     "generation.completeness_mode": "generation_prompt",
     "generation.abstention_strict": "generation_prompt",
+    "generation.abstention_relaxed": "generation_prompt",
     "generation.model": "generation_model",
 }
 
@@ -137,6 +139,11 @@ STATE_MAPPABLE_PATHS: set[str] = {
     "generation.restate_question",
     "generation.completeness_mode",
     "generation.abstention_strict",
+    # 과다 기권 완화(generation_wrongful_abstention 의 relax_abstention). strict 와 같은
+    # generation_prompt capability 를 쓰고 config_mapper 에도 매핑돼 있어 rules 백엔드로
+    # 적용 가능하다. 여기 빠지면 unsupported_backend_path 로 스킵돼 rules.py 의
+    # status="ready" 가 사실과 달라진다(리뷰 Blocker).
+    "generation.abstention_relaxed",
     "generation.model",
 }
 
@@ -204,11 +211,11 @@ def run(
         )
 
     try:
-        prepared = _prepare_candidate(request, backend)
+        prepared = _prepare_action(request, backend)
     except (TypeError, ValueError) as exc:
         return _failed_result(request, "invalid_search_space", str(exc))
 
-    candidate, search_space, skipped, skip_reason = prepared
+    action, search_space, skipped, skip_reason = prepared
     if not search_space:
         return OptimizationResult(
             request_id=request.request_id,
@@ -224,12 +231,12 @@ def run(
         )
 
     if backend == "rules":
-        return _run_rules(request, candidate, search_space, skipped=skipped)
+        return _run_rules(request, action, search_space, skipped=skipped)
 
     if backend == "internal":
         return _run_internal(
             request,
-            candidate,
+            action,
             search_space,
             skipped=skipped,
             backend_runners=backend_runners,
@@ -237,7 +244,7 @@ def run(
 
     return _run_ragbuilder(
         request,
-        candidate,
+        action,
         search_space,
         skipped=skipped,
         backend_runners=backend_runners,
@@ -284,58 +291,33 @@ def is_capability_supported(
 
 
 # search space 준비 ---------------------------------------------------------
-def _prepare_candidate(
+def _prepare_action(
     request: OptimizationRequest,
     backend: str,
 ) -> tuple[
-    PrescriptionCandidate | None,
+    SelectedAction | None,
     dict[str, list[Any]],
     list[dict[str, Any]],
     str | None,
 ]:
-    """Planner가 만든 후보를 순서대로 검사해 첫 실행 가능 후보를 반환한다."""
+    """planner 가 고른 변경 하나를 실행 직전에 재검증한다.
+
+    ⚠️ 여기서 "어떤 처방을 먼저 시도할지"를 다시 정하지 않는다. 그 결정은 planner 의
+    action 경쟁이 이미 내렸고, optimizer 의 책임은 **같은 정책으로 한 번 더 확인해
+    실행 불가를 실제 적용 전에 걸러내는 것**뿐이다. 두 계층이 같은 eligibility 정책을
+    쓰므로(agents/optimize/eligibility.py) 여기서 걸리는 경우는 드물지만, runtime
+    capability 처럼 planner 가 판단을 미룬 축은 여기가 최종 관문이다.
+    """
 
     capabilities = merge_capabilities(request.metadata.get("capabilities"))
     runtime_capabilities = request.metadata.get("runtime_capabilities")
     constraints = request.metadata.get("constraints")
     skipped: list[dict[str, Any]] = []
 
-    if request.candidates:
-        for candidate in request.candidates:
-            if candidate.status != "ready":
-                skipped.append({"prescription_id": candidate.id, "reason": "not_ready"})
-                continue
-
-            # candidate별 search space를 우선한다. request.search_space는 Planner가
-            # 후보 하나를 이미 활성화했거나 후보가 하나뿐일 때의 보조 계약이다.
-            raw_search_space = candidate.search_space
-            if not raw_search_space and len(request.candidates) == 1:
-                raw_search_space = request.search_space
-            if not raw_search_space:
-                skipped.append(
-                    {"prescription_id": candidate.id, "reason": "missing_search_space"}
-                )
-                continue
-
-            prepared, reason = _prepare_search_space(
-                raw_search_space,
-                request.baseline_config,
-                backend,
-                capabilities,
-                runtime_capabilities,
-                constraints,
-            )
-            if prepared:
-                return candidate, prepared, skipped, None
-            skipped.append({"prescription_id": candidate.id, "reason": reason})
-
-        last_reason = skipped[-1]["reason"] if skipped else "missing_search_space"
-        return None, {}, skipped, last_reason
-
     if not request.search_space:
         return None, {}, skipped, "missing_search_space"
 
-    prepared, _reason = _prepare_search_space(
+    prepared, reason = _prepare_search_space(
         request.search_space,
         request.baseline_config,
         backend,
@@ -344,8 +326,29 @@ def _prepare_candidate(
         constraints,
     )
     if not prepared:
-        return None, {}, skipped, _reason
-    return None, prepared, skipped, None
+        skipped.append(
+            {
+                "action_key": request.action_key,
+                "prescription_id": request.prescription_id,
+                "reason": reason,
+            }
+        )
+        return None, {}, skipped, reason
+
+    return (
+        SelectedAction(
+            action_key=request.action_key,
+            prescription_id=request.prescription_id,
+            description=request.reason,
+            reindex_required=any(
+                path in REINDEX_PATHS for path in prepared
+            ),
+            search_space=prepared,
+        ),
+        prepared,
+        skipped,
+        None,
+    )
 
 
 def _prepare_search_space(
@@ -456,7 +459,7 @@ def filter_candidate_values(
 # rules backend -------------------------------------------------------------
 def _run_rules(
     request: OptimizationRequest,
-    candidate: PrescriptionCandidate | None,
+    action: SelectedAction | None,
     search_space: dict[str, list[Any]],
     *,
     skipped: list[dict[str, Any]],
@@ -466,11 +469,11 @@ def _run_rules(
 
     path, values = next(iter(search_space.items()))
     value = values[0]
-    prescription_id = candidate.id if candidate else None
-    description = candidate.patch.description if candidate and candidate.patch else ""
+    prescription_id = action.prescription_id if action else None
+    description = action.description if action else ""
     reindex_required = bool(
         path in REINDEX_PATHS
-        or (candidate and candidate.patch and candidate.patch.reindex_required)
+        or bool(action and action.reindex_required)
     )
     changes: dict[str, Any] = {path: value}
     if path in _RECREATE_ON_MISMATCH_PATHS:
@@ -496,7 +499,7 @@ def _run_rules(
         request_id=request.request_id,
         status="proposed",
         optimizer="rules",
-        selected_candidate=candidate,
+        selected_action=action,
         config_patch=patch,
         improved=None,
         needs_reindex=reindex_required,
@@ -508,7 +511,7 @@ def _run_rules(
 # internal backend ----------------------------------------------------------
 def _run_internal(
     request: OptimizationRequest,
-    candidate: PrescriptionCandidate | None,
+    action: SelectedAction | None,
     search_space: dict[str, list[Any]],
     *,
     skipped: list[dict[str, Any]],
@@ -526,7 +529,6 @@ def _run_internal(
 
     prepared_request = replace(
         request,
-        candidates=[candidate] if candidate else [],
         search_space={key: list(values) for key, values in search_space.items()},
     )
 
@@ -569,7 +571,7 @@ def _run_internal(
             )
         return _internal_proposed_result(
             request=request,
-            candidate=candidate,
+            action=action,
             config=next_config,
             metadata=metadata,
             message="다음 실제 Eval이 필요한 internal 후보를 선택했습니다.",
@@ -595,7 +597,7 @@ def _run_internal(
                 request_id=request.request_id,
                 status="skipped",
                 optimizer="internal",
-                selected_candidate=candidate,
+                selected_action=action,
                 best_config=best_config,
                 improved=False,
                 message="후보가 baseline을 개선하지 못해 현재 설정을 유지합니다.",
@@ -604,7 +606,7 @@ def _run_internal(
 
         return _internal_proposed_result(
             request=request,
-            candidate=candidate,
+            action=action,
             config=best_config,
             metadata=metadata,
             message="internal 평가에서 선택한 best 후보를 제안합니다.",
@@ -624,7 +626,7 @@ def _run_internal(
         ):
             return _run_rules(
                 request,
-                candidate,
+                action,
                 search_space,
                 skipped=skipped,
                 fallback_reason=error_code,
@@ -634,7 +636,7 @@ def _run_internal(
             request_id=request.request_id,
             status="skipped",
             optimizer="internal",
-            selected_candidate=candidate,
+            selected_action=action,
             improved=None,
             message=adapter_result.error or "internal 평가를 건너뜁니다.",
             metadata=metadata,
@@ -644,7 +646,7 @@ def _run_internal(
         request_id=request.request_id,
         status="failed",
         optimizer="internal",
-        selected_candidate=candidate,
+        selected_action=action,
         improved=None,
         message=adapter_result.error or "internal 평가에 실패했습니다.",
         error=adapter_result.error or "internal 평가에 실패했습니다.",
@@ -655,7 +657,7 @@ def _run_internal(
 def _internal_proposed_result(
     *,
     request: OptimizationRequest,
-    candidate: PrescriptionCandidate | None,
+    action: SelectedAction | None,
     config: dict[str, Any],
     metadata: dict[str, Any],
     message: str,
@@ -664,15 +666,15 @@ def _internal_proposed_result(
 
     path, value = next(iter(config.items()))
     needs_reindex = path in REINDEX_PATHS
-    if candidate and candidate.patch and candidate.patch.reindex_required:
+    if action and action.reindex_required:
         needs_reindex = True
-    prescription_id = candidate.id if candidate else None
+    prescription_id = action.prescription_id if action else None
     patch = ConfigPatch(
         changes={path: value},
         reindex_required=needs_reindex,
         description=(
-            candidate.patch.description
-            if candidate and candidate.patch and candidate.patch.description
+            action.description
+            if action and action.description
             else f"{path} 값을 {value!r}(으)로 변경"
         ),
         metadata={"prescription_id": prescription_id} if prescription_id else {},
@@ -681,7 +683,7 @@ def _internal_proposed_result(
         request_id=request.request_id,
         status="proposed",
         optimizer="internal",
-        selected_candidate=candidate,
+        selected_action=action,
         config_patch=patch,
         best_config=dict(config),
         improved=None,
@@ -759,7 +761,7 @@ def _is_baseline_config(
 # RAGBuilder backend --------------------------------------------------------
 def _run_ragbuilder(
     request: OptimizationRequest,
-    candidate: PrescriptionCandidate | None,
+    action: SelectedAction | None,
     search_space: dict[str, list[Any]],
     *,
     skipped: list[dict[str, Any]],
@@ -773,7 +775,6 @@ def _run_ragbuilder(
 
     prepared_request = replace(
         request,
-        candidates=[candidate] if candidate else [],
         search_space={path: list(values) for path, values in search_space.items()},
     )
 
@@ -782,7 +783,7 @@ def _run_ragbuilder(
     except Exception as exc:  # 주입 runner와 외부 adapter 경계의 마지막 안전망
         return _run_rules(
             request,
-            candidate,
+            action,
             search_space,
             skipped=skipped,
             fallback_reason=f"ragbuilder_exception:{exc}",
@@ -791,7 +792,7 @@ def _run_ragbuilder(
     if not isinstance(adapter_result, RAGBuilderResult):
         return _run_rules(
             request,
-            candidate,
+            action,
             search_space,
             skipped=skipped,
             fallback_reason="invalid_ragbuilder_result_type",
@@ -801,7 +802,7 @@ def _run_ragbuilder(
         reason = adapter_result.error or f"ragbuilder_status:{adapter_result.status}"
         return _run_rules(
             request,
-            candidate,
+            action,
             search_space,
             skipped=skipped,
             fallback_reason=reason,
@@ -811,21 +812,21 @@ def _run_ragbuilder(
     if best_config is None:
         return _run_rules(
             request,
-            candidate,
+            action,
             search_space,
             skipped=skipped,
             fallback_reason="best_config_outside_search_space",
         )
 
     needs_reindex = any(path in REINDEX_PATHS for path in best_config)
-    if candidate and candidate.patch and candidate.patch.reindex_required:
+    if action and action.reindex_required:
         needs_reindex = True
 
     return OptimizationResult(
         request_id=request.request_id,
         status="proposed",
         optimizer="ragbuilder",
-        selected_candidate=candidate,
+        selected_action=action,
         best_config=best_config,
         improved=None,
         needs_reindex=needs_reindex,

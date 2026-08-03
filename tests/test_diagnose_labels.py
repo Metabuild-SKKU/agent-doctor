@@ -16,6 +16,7 @@ retrieve_fn/keyword_fn 을 주입해 흉내낸다.
 import os
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -1869,6 +1870,223 @@ class AssemblyTest(_DiagnoseTestBase):
         self.assertEqual(diagnose._group_of("chunking_context_mismatch", "retrieval_failure"), "A")
         self.assertEqual(diagnose._group_of("generation_hallucination", "generation_failure"), "B")
         self.assertEqual(diagnose._group_of("context_failure", "context_failure"), "C")
+
+
+class WrongfulAbstentionTest(_DiagnoseTestBase):
+    """버그2(probe_qa_42204): 유효 근거(recall=1·oracle 통과)를 두고 기권('알 수 없습니다')한
+    경우. 기권 답은 주장이 없어 faithfulness=1 로 C 게이트를 trivially 통과해
+    context_noise_interference·reranker_low_precision 로 오라벨됐다. _context_failed 가 기권을
+    배제하고, 진실한 원인은 B 슬롯 generation_wrongful_abstention 이 짚는다."""
+
+    ABSTAIN = "제공된 정보로는 알 수 없습니다"
+
+    def setUp(self):
+        super().setUp()
+        metrics_common.set_mode(Mode.DEEP)
+
+    def _abstained_rec(self, **kw):
+        # recall=1(gold 검색)·oracle_f1=1(골드로 답 나옴)·f1=0(실제론 기권)·faith 높음.
+        return _record(recall=1.0, f1=0.0, oracle_f1=1.0, answer=self.ABSTAIN,
+                       faith=1.0, rel=1.0, **kw)
+
+    def test_fires_when_valid_evidence_but_abstained(self):
+        rec = self._abstained_rec()
+        finding = diagnose.generation_wrongful_abstention(rec)
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding.label, "generation_wrongful_abstention")
+        self.assertTrue(finding.confirmed)
+
+    def test_silent_when_actually_answered(self):
+        # 기권이 아니라 실제 답을 냈으면(설령 오답이어도) 이 라벨 아님.
+        rec = _record(recall=1.0, f1=0.3, oracle_f1=1.0, answer="세종대왕입니다", faith=1.0)
+        self.assertIsNone(diagnose.generation_wrongful_abstention(rec))
+
+    def test_silent_when_abstention_is_correct(self):
+        # 무응답 기대 probe 는 기권이 옳다 → generation_abstention_failure 의 짝이 아님.
+        rec = _record(answer_exists=False, ground_truth=None, answer=self.ABSTAIN,
+                      recall=1.0, oracle_f1=1.0)
+        self.assertIsNone(diagnose.generation_wrongful_abstention(rec))
+
+    def test_context_failed_excludes_abstention(self):
+        # C 전제가 기권을 배제 → context_noise_interference 침묵(유령 오라벨 방지).
+        rec = self._abstained_rec()
+        self.assertFalse(diagnose._context_failed(rec))
+        self.assertIsNone(diagnose.context_noise_interference(rec))
+
+    def test_reranker_low_precision_excludes_abstention(self):
+        # 같은 배제로 reranker_low_precision 오라벨(반복1 실측)도 사라진다.
+        rec = self._abstained_rec(retrieval_details={"reranked": True})
+        rec.ragas["context_precision"] = 0.4      # 낮은 정밀도여도
+        self.assertIsNone(diagnose.reranker_low_precision(rec))
+
+    def test_full_diagnose_routes_to_generation_not_context(self):
+        rec = self._abstained_rec()
+        with unittest.mock.patch.object(diagnose, "_compute_metrics"), \
+             unittest.mock.patch.object(diagnose, "_compute_ragas_real"), \
+             unittest.mock.patch.object(diagnose, "_compute_ragas_oracle"):
+            labels = [f.label for f in diagnose.diagnose(rec, mode=int(Mode.DEEP))]
+        self.assertIn("generation_wrongful_abstention", labels)
+        self.assertNotIn("context_noise_interference", labels)
+        self.assertNotIn("reranker_low_precision", labels)
+
+    def test_fires_when_oracle_also_abstained(self):
+        """리뷰 High: 오라클도 함께 기권한 '체계적' 과다 기권을 놓치지 않는다.
+
+        오라클 답변도 같은 generator·같은 index_config 로 생성되므로, 과다 기권이 체계적이면
+        오라클도 기권해 oracle_f1 이 낮아진다. 전제가 _oracle_ok 를 요구하면 '가끔 기권'만
+        잡고 더 심한 '항상 기권'을 놓치는 역설이 생긴다."""
+        rec = _record(recall=1.0, f1=0.0, oracle_f1=0.0, answer=self.ABSTAIN,
+                      oracle_answer=self.ABSTAIN, faith=1.0, rel=1.0)
+        self.assertFalse(diagnose._oracle_ok(rec))          # 오라클도 실패
+        finding = diagnose.generation_wrongful_abstention(rec)
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding.label, "generation_wrongful_abstention")
+
+    def test_no_judge_call_on_correct_answer(self):
+        """리뷰 Medium: 정답 probe 에는 AspectCritic(LLM)이 붙지 않는다.
+
+        _generation_failed 가 _context_failed 보다 먼저 평가돼 첫 _abstained 호출이 이 전제에서
+        난다. not _f1_ok + 마커 선필터가 없으면 정답·비기권 경로에도 판정기가 붙는다."""
+        judge = _FakeAbstentionJudge(1)
+        self._with(ragas=judge)
+        correct = _record(recall=1.0, f1=1.0, oracle_f1=1.0, answer="세종대왕",
+                          faith=1.0, rel=1.0)
+        self.assertFalse(diagnose._wrongful_abstention_premise(correct))
+        self.assertEqual(judge.calls, [])                   # LLM 호출 없음
+
+    def test_no_judge_call_without_abstention_marker(self):
+        """마커(is_abstention)가 없으면 판정기까지 가지 않는다 — 실패 probe 전체에 LLM 을
+        물리지 않기 위한 싼 게이트(#81 과 같은 규약)."""
+        judge = _FakeAbstentionJudge(1)
+        self._with(ragas=judge)
+        wrong = _record(recall=1.0, f1=0.0, oracle_f1=1.0, answer="엉뚱한 답",
+                        faith=1.0, rel=1.0)
+        self.assertFalse(diagnose._wrongful_abstention_premise(wrong))
+        self.assertEqual(judge.calls, [])
+
+    def test_context_and_generation_share_one_predicate(self):
+        """B(과다 기권)와 C(컨텍스트 구조)가 같은 술어로 갈린다 — 한쪽이 가져가면 다른 쪽은
+        안 가져간다는 배타가 순서가 아니라 신호로 보장돼야 한다."""
+        rec = self._abstained_rec()
+        self.assertTrue(diagnose._wrongful_abstention_premise(rec))
+        self.assertFalse(diagnose._context_failed(rec))
+        # 기권이 아니면 반대로 C 가 열리고 B(과다 기권)는 침묵한다.
+        answered = _record(recall=1.0, f1=0.0, oracle_f1=1.0, answer="엉뚱한 답",
+                           faith=1.0, rel=1.0)
+        self.assertFalse(diagnose._wrongful_abstention_premise(answered))
+        self.assertTrue(diagnose._context_failed(answered))
+
+
+class AbstentionFlagWiringTest(unittest.TestCase):
+    """relax_abstention 처방이 실제로 적용·전파되는지 (리뷰 Blocker 1·2).
+
+    rules.py 가 status="ready" 라고 선언하려면 optimizer 3관문(backend·state mapping·
+    capability)을 통과하고 serve 까지 전파돼야 한다 — 하나라도 빠지면 처방이 조용히 스킵된다.
+    """
+
+    PATH = "generation.abstention_relaxed"
+
+    def test_optimizer_accepts_relax_abstention_path(self):
+        from agents.optimize.optimizer import _prepare_search_space, DEFAULT_CAPABILITIES
+        space, reason = _prepare_search_space(
+            {self.PATH: [True]},
+            {"abstention_strict": False, "abstention_relaxed": False},
+            "rules", dict(DEFAULT_CAPABILITIES), None, None,
+        )
+        self.assertEqual(reason, "")                        # unsupported_backend_path 아님
+        self.assertEqual(space, {self.PATH: [True]})
+
+    def test_config_mapper_maps_flag(self):
+        from agents.optimize.config_mapper import map_canonical_change
+        self.assertEqual(map_canonical_change(self.PATH, True),
+                         ("abstention_relaxed", True))
+
+    def test_serve_config_propagates_flag(self):
+        from agents.serve.serve_config import extract_serve_config
+        served = extract_serve_config({"abstention_relaxed": True})
+        self.assertEqual(served.get("abstention_relaxed"), True)
+
+
+class AbstentionFlagExclusivityTest(unittest.TestCase):
+    """상호배제는 처방 적용 시점에 풀린다 — 마지막에 쓴 쪽이 이긴다 (리뷰 High).
+
+    index_config 는 회차 간 누적되므로 켜는 쪽만 쓰면 반대쪽 True 가 남는다. 그러면 나중
+    처방이 플래그는 바꿔도(optimizer 는 baseline 과 다르기만 하면 통과) 프롬프트가 안 변해
+    점수가 그대로고, 롤백 + blacklist 로 빠져 **그 라벨의 레버가 영구히 죽는다**.
+    우선순위로 풀면 진 쪽이 항상 죽으므로, 어느 쪽도 특별대우하지 않는다.
+    """
+
+    def _apply(self, config, *changes):
+        from agents.optimize.config_mapper import apply_best_config
+        for change in changes:
+            apply_best_config(config, change)
+        return config
+
+    def _prompt_mode(self, config):
+        from agents.rag.generator import _build_prompt
+        system, _user = _build_prompt("질문", ["컨텍스트"],
+                                      max_context_chars=1000, config=config)
+        if "최대한 답하라" in system:
+            return "relaxed"
+        return "strict" if "확신이 없으면" in system else "기본"
+
+    def test_later_prescription_wins_both_directions(self):
+        config = {"abstention_strict": False, "abstention_relaxed": False}
+        self._apply(config, {"generation.abstention_relaxed": True})
+        self.assertEqual(self._prompt_mode(config), "relaxed")
+
+        # 과다 기권을 고친 뒤 환각이 나오면 strict 가 실제로 프롬프트를 바꿔야 한다.
+        self._apply(config, {"generation.abstention_strict": True})
+        self.assertFalse(config["abstention_relaxed"])
+        self.assertEqual(self._prompt_mode(config), "strict")
+
+        # 반대 방향도 대칭이어야 한 축을 계속 왕복할 수 있다.
+        self._apply(config, {"generation.abstention_relaxed": True})
+        self.assertFalse(config["abstention_strict"])
+        self.assertEqual(self._prompt_mode(config), "relaxed")
+
+    def test_turning_a_flag_off_leaves_the_opposite_alone(self):
+        """끄는 변경까지 반대쪽을 켜면 안 된다 — 롤백이 의도치 않은 축을 세운다."""
+        config = {"abstention_strict": True, "abstention_relaxed": False}
+        self._apply(config, {"generation.abstention_strict": False})
+        self.assertFalse(config["abstention_relaxed"])
+        self.assertEqual(self._prompt_mode(config), "기본")
+
+    def test_unrelated_prescription_does_not_touch_the_pair(self):
+        config = {"abstention_relaxed": True, "abstention_strict": False, "top_k": 5}
+        self._apply(config, {"retriever.top_k": 8})
+        self.assertEqual(config["top_k"], 8)
+        self.assertTrue(config["abstention_relaxed"])
+
+
+class AbstentionPromptExclusivityTest(unittest.TestCase):
+    """소비처 백스톱 — config_mapper 를 안 거친 입력(손으로 고친 config 등)에도 모순
+    문구가 동시에 실리지 않는다. 정상 경로의 승자 결정은 AbstentionFlagExclusivityTest.
+    """
+
+    def _system(self, **flags):
+        from agents.rag.generator import _build_prompt
+        system, _user = _build_prompt("질문", ["컨텍스트"],
+                                      max_context_chars=1000, config=flags)
+        return system
+
+    STRICT_PHRASE = "확신이 없으면"
+    RELAXED_PHRASE = "최대한 답하라"
+
+    def test_relaxed_wins_when_both_enabled(self):
+        system = self._system(abstention_strict=True, abstention_relaxed=True)
+        self.assertIn(self.RELAXED_PHRASE, system)
+        self.assertNotIn(self.STRICT_PHRASE, system)        # 모순 문구 동시 적재 금지
+
+    def test_strict_alone_unchanged(self):
+        system = self._system(abstention_strict=True)
+        self.assertIn(self.STRICT_PHRASE, system)
+        self.assertNotIn(self.RELAXED_PHRASE, system)
+
+    def test_neither_by_default(self):
+        system = self._system()
+        self.assertNotIn(self.STRICT_PHRASE, system)
+        self.assertNotIn(self.RELAXED_PHRASE, system)
 
 
 if __name__ == "__main__":
