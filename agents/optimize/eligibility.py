@@ -52,6 +52,9 @@ REASON_CAPABILITY = "unsupported_capability"
 REASON_RUNTIME = "runtime_capability_unavailable"
 REASON_PREREQUISITE = "prerequisite_unmet"
 REASON_NO_CANDIDATE = "no_candidate_value"
+# 단일 축 보장은 optimizer._prepare_search_space 가 소유한다. 여기서 같은 검사를
+# 다시 구현하면 이 모듈의 전제("정책을 재정의하지 않는다")를 스스로 어긴다 —
+# 사유 문자열만 공유해 두 계층의 보고가 갈리지 않게 한다.
 REASON_MULTI_AXIS = "multi_axis_search_space"
 
 
@@ -190,13 +193,3 @@ def evaluate_action(
 def is_sweepable(path: str, backend: str = "internal") -> bool:
     """여러 후보를 한 study 에서 비교할 수 있는 축인지."""
     return canonicalize_path(path) in BACKEND_SUPPORTED_PATHS.get(backend, set())
-
-
-def assert_single_axis(search_space: dict[str, list[Any]]) -> str | None:
-    """단일 축 보장. 위반이면 사유를 반환한다.
-
-    효과 귀속을 위해 한 번에 config 축 하나만 바꾼다는 것이 전체 설계의 전제다.
-    """
-    if len(search_space) != 1:
-        return REASON_MULTI_AXIS
-    return None

@@ -395,6 +395,41 @@ class ReportViewRecommendationsTest(unittest.TestCase):
         self.assertEqual(recs, [])
 
 
+class AxisLabelCompletenessTest(unittest.TestCase):
+    """차트 점 이름 표가 catalog 를 따라가는지.
+
+    빠진 축은 `action_key[:18]` 로 잘린 영문이 그대로 노출된다. 지금 누락된 7개는
+    전부 `not_state_mappable` 차단 상태라 무해하지만, 하나라도 활성화되는 순간
+    사용자에게 보인다 — 그때 이 테스트가 먼저 걸린다.
+    """
+
+    def test_every_executable_axis_has_a_human_name(self):
+        from agents.optimize import action_catalog
+        from agents.serve.report_view import _AXIS_NOUNS
+
+        missing = sorted(
+            action.canonical_path
+            for action in action_catalog.executable_actions()
+            if action.canonical_path not in _AXIS_NOUNS
+        )
+
+        self.assertEqual(missing, [], f"_AXIS_NOUNS 에 없는 실행 가능 축: {missing}")
+
+    def test_every_operation_has_a_verb(self):
+        from agents.optimize import action_catalog
+        from agents.serve.report_view import _OPERATION_VERBS
+
+        missing = sorted(
+            {
+                action.operation
+                for action in action_catalog.all_actions()
+                if action.operation not in _OPERATION_VERBS
+            }
+        )
+
+        self.assertEqual(missing, [])
+
+
 class ActionCenteredRxCardTest(unittest.TestCase):
     """처방 카드는 "무엇을 바꿨나"(action)와 "무엇이 지지했나"(라벨 전체)를 말한다."""
 

@@ -626,8 +626,8 @@ class Verdict:
     keep: bool
     before_score: float
     after_score: float
-    before_composite: Optional[float] = None
-    after_composite: Optional[float] = None
+    before_composite: float | None = None
+    after_composite: float | None = None
     floor_violations: list[str] = field(default_factory=list)
     reason: str = ""
     unjudgeable: bool = False

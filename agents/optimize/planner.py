@@ -46,7 +46,6 @@ from agents.optimize.evidence_window import build_evidence_windows
 from agents.optimize.schemas import (
     ActionAttemptKey,
     ActionStudyKey,
-    ConfigPatch,
     OptimizationRequest,
     OptimizeDecision,
 )
@@ -121,15 +120,18 @@ _CHUNK_PRECHECK_GROUNDING_STATUSES = frozenset({
 
 def plan(
     state: AgentDoctorState,
-    blacklist: set[tuple[str, str]] | None = None,
+    blacklist: set[str | ActionAttemptKey | ActionStudyKey] | None = None,
 ) -> tuple[OptimizationRequest | None, OptimizeDecision]:
     """
     진단 리포트를 보고 (최적화 요청, 흐름 결정)을 만든다.
 
     Args:
         state: 공유 상태. state.report 가 있어야 한다.
-        blacklist: 이미 실패해 재시도 금지된 (label, prescription_id) 조합.
-            history.py 가 나중에 채워 넘긴다. None 이면 빈 집합.
+        blacklist: 재시도에서 제외할 대상. agent.py 가 채워 넘긴다.
+            받는 형태는 네 가지이며 `_normalize_exclusions` 가 가른다 —
+            action key 문자열(방문 한정), `ActionStudyKey`(그 baseline 의 탐색 종료),
+            `ActionAttemptKey`(정확한 전이만 차단), 그리고 구버전
+            `(label, prescription_id)` 튜플. None 이면 빈 집합.
 
     Returns:
         (request, decision)
@@ -394,15 +396,6 @@ def _build_action_request(
         path, values, grounding, chunk_precheck_context
     )
 
-    patch = ConfigPatch(
-        changes={path: values[0] if len(values) == 1 else definition.operation},
-        reindex_required=definition.reindex_required,
-        description=f"{action.action_key} ({', '.join(action.supporting_labels)})",
-        metadata={
-            "action_key": action.action_key,
-            "prescription_id": primary_support.prescription_id,
-        },
-    )
     metadata: dict[str, Any] = {
         "primary_metric": "composite_score",
         "min_delta": history.MIN_IMPROVEMENT_MARGIN,

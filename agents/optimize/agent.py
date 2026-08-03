@@ -78,9 +78,22 @@ _LEGACY_RERANKER_PRESCRIPTIONS = frozenset({
 # 이 사유들도 함께 앞당겨졌다(구현계획 §8.3).
 #   runtime_capability_unavailable : Index 가 모델을 못 올렸다 → 다음 실행에 풀릴 수 있다
 #   prerequisite_unmet             : 선행 조건 미충족(예: 리랭커가 꺼진 채 후보창 확대)
+#
+# ⚠️ 나머지 사유(catalog_blocked·unsupported_state_mapping·unsupported_backend_path·
+# unsupported_capability·no_candidate_value·multi_axis_search_space)는 **의도적으로
+# 보류에서 뺀다.** 그것들은 "지금은 못 한다"가 아니라 "이 파이프라인에서는 불가능하다"
+# 이므로 매 방문마다 반복 보고하면 소음이 된다. 사용자에게 필요한 형태는 방문 단위
+# 보류가 아니라 catalog 수준의 "차단된 기능 목록"이며, 그건 별도 작업이다.
+# 제외된 사유 전체는 request/decision metadata 의 rejected_actions 에 남는다.
 _DEFERRABLE_ELIGIBILITY_REASONS = {
     "runtime_capability_unavailable",
     "prerequisite_unmet",
+}
+
+# 선행 조건별 사유 문구. optimizer 가 실행 직전에 쓰는 어휘와 같은 값을 쓴다 —
+# 두 계층의 보고가 갈리면 사용자가 같은 상황을 다른 이름으로 두 번 본다.
+_PREREQUISITE_REASONS = {
+    "reranker.enabled": "reranker_disabled",
 }
 
 
@@ -107,7 +120,15 @@ def _deferred_from_rejected_actions(
         reason = entry.get("reason")
         if reason not in _DEFERRABLE_ELIGIBILITY_REASONS:
             continue
-        prerequisite_unmet = reason == "prerequisite_unmet"
+        if reason == "prerequisite_unmet":
+            # 어느 선행 조건이 막았는지는 eligibility 가 detail 에 채워 준다.
+            # 하드코딩하면 선행 조건 축이 늘어나는 순간 조용히 틀린 사유를 보고한다.
+            unmet = (entry.get("eligibility") or {}).get("unmet_prerequisite", "")
+            detail = _PREREQUISITE_REASONS.get(unmet) or f"prerequisite_unmet:{unmet}"
+            retryable = False
+        else:
+            detail = capability.get("reason", "runtime_capability_unavailable")
+            retryable = bool(capability.get("retryable", True))
         for prescription_id in entry.get("prescription_ids") or [None]:
             deferred.append(
                 {
@@ -116,20 +137,8 @@ def _deferred_from_rejected_actions(
                         iter(entry.get("supporting_labels") or []), ""
                     ),
                     "prescription_id": prescription_id,
-                    "reason": (
-                        # 선행 조건 미충족의 유일한 사례가 "리랭커가 꺼져 있다"라,
-                        # optimizer 가 실행 직전에 쓰는 어휘와 같은 값을 쓴다.
-                        "reranker_disabled"
-                        if prerequisite_unmet
-                        else capability.get(
-                            "reason", "runtime_capability_unavailable"
-                        )
-                    ),
-                    "retryable": (
-                        False
-                        if prerequisite_unmet
-                        else bool(capability.get("retryable", True))
-                    ),
+                    "reason": detail,
+                    "retryable": retryable,
                 }
             )
     return deferred
@@ -699,10 +708,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     """
     state.current_agent = "optimize"
     try:
-        _log_optimize_input(state)
+        # ⚠️ 로깅보다 **먼저** 소비한다. 콘솔 인코딩 오류 같은 표시 계층 예외가
+        # 방문을 공짜로 만들면 안 된다 — 그 순간 이 불변조건이 무너진다.
         if state.optimize_visit_count >= state.max_optimize_visits:
+            _log_optimize_input(state)
             return _stop_at_optimize_visit_limit(state)
         state.optimize_visit_count += 1
+        _log_optimize_input(state)
         if state.optimize_visit_count >= state.max_optimize_visits:
             return _stop_at_optimize_visit_limit(state)
 

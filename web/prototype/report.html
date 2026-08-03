@@ -703,7 +703,8 @@
     var scoreHtml = hasScore ?
       '<div class="rx-scoredelta">종합 ' + esc(r.score[0]) + ' <b class="' + scoreCls + '">→ ' + esc(r.score[1]) + (arrowUp ? ' ↑' : ' ↓') + '</b></div>' :
       '<div class="rx-scoredelta error">종합 점수 측정 안 됨</div>';
-    var rowsHtml = r.drill.rows.length ? '<div class="sweep">' + r.drill.rows.map(function (s) {
+    var rows = r.drill.rows || [];
+    var rowsHtml = rows.length ? '<div class="sweep">' + rows.map(function (s) {
       return '<div class="sweep-row' + (s.win ? ' win' : '') + '"><span class="sweep-k' + (s.win ? ' win' : '') + '">' + esc(s.k) + '</span>' +
         '<span class="sweep-bar"><i style="width:' + s.w + '%"></i></span><span class="sweep-val">' + esc(s.val) + '</span></div>';
     }).join('') + '</div>' : '';
