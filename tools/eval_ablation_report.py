@@ -63,6 +63,13 @@ VERDICT_RE = re.compile(
     r"prescription=(?P<prescription>[^,\s]+).*?"
     r"before=(?P<before>-?\d+(?:\.\d+)?),\s*after=(?P<after>-?\d+(?:\.\d+)?)"
 )
+OPTIMIZE_EVAL_RE = re.compile(
+    r"\[Optimize\].*?(?:Eval 결과|Eval result):.*?"
+    r"overall=(?P<overall>-?\d+(?:\.\d+)?),\s*"
+    r"composite=(?P<composite>-?\d+(?:\.\d+)?),\s*"
+    r"pass=(?P<passed>True|False|true|false)"
+)
+FINAL_GATE_RE = re.compile(r"gate_pass\s*=\s*(?P<passed>True|False|true|false)")
 
 
 @dataclass
@@ -122,6 +129,20 @@ def parse_log_text(text: str, source: str = "<memory>") -> ParsedLog:
         line = raw_line.strip()
         _update_global_counts(parsed.counts, line)
 
+        optimize_eval = OPTIMIZE_EVAL_RE.search(line)
+        if optimize_eval and parsed.evals:
+            _update_eval_gate(
+                parsed.evals,
+                composite=_to_float(optimize_eval.group("composite")),
+                passed=_parse_pass(optimize_eval.group("passed")),
+            )
+            continue
+
+        final_gate = FINAL_GATE_RE.search(line)
+        if final_gate and parsed.evals:
+            parsed.evals[-1].passed = _parse_pass(final_gate.group("passed"))
+            continue
+
         step5 = LEGACY_STEP5_RE.search(line)
         if step5:
             pending_step5 = {
@@ -168,14 +189,13 @@ def parse_log_text(text: str, source: str = "<memory>") -> ParsedLog:
 
         verdict = VERDICT_RE.search(line)
         if verdict:
-            current_action = OptimizeAction(
-                eval_after=len(parsed.evals),
+            current_action = _attach_verdict(
+                parsed,
                 prescription=verdict.group("prescription"),
-                verdict=verdict.group("decision"),
-                verdict_before=_to_float(verdict.group("before")),
-                verdict_after=_to_float(verdict.group("after")),
+                decision=verdict.group("decision"),
+                before=_to_float(verdict.group("before")),
+                after=_to_float(verdict.group("after")),
             )
-            parsed.actions.append(current_action)
             continue
 
         if current_action is None:
@@ -211,7 +231,7 @@ def build_markdown(logs: Iterable[ParsedLog]) -> str:
         lines.append(f"- `{log.source}`")
 
     lines.extend(["", "## Eval Timeline", ""])
-    lines.append("| log | eval | score | quality | reliability | overall | pass | top labels |")
+    lines.append("| log | eval | score | quality | reliability | overall | gate pass | top labels |")
     lines.append("| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |")
     for log in logs:
         for snapshot in log.evals:
@@ -283,7 +303,7 @@ def write_csv(logs: Iterable[ParsedLog], output: Path) -> None:
         "quality",
         "reliability",
         "overall",
-        "passed",
+        "gate_pass",
         "retrieval_low_rank_weight",
         "context_noise_interference_weight",
         "bad_gold_answer_weight",
@@ -304,7 +324,7 @@ def write_csv(logs: Iterable[ParsedLog], output: Path) -> None:
                         "quality": _fmt(snapshot.quality),
                         "reliability": _fmt(snapshot.reliability),
                         "overall": _fmt(snapshot.overall),
-                        "passed": _fmt_bool(snapshot.passed),
+                        "gate_pass": _fmt_bool(snapshot.passed),
                         "retrieval_low_rank_weight": labels.get("retrieval_low_rank", 0),
                         "context_noise_interference_weight": labels.get("context_noise_interference", 0),
                         "bad_gold_answer_weight": labels.get("bad_gold_answer", 0),
@@ -388,6 +408,47 @@ def _action_summary(logs: list[ParsedLog]) -> list[dict[str, str]]:
         )
     rows.sort(key=lambda item: (-int(item["tries"]), item["action"]))
     return rows
+
+
+def _update_eval_gate(
+    evals: list[EvalSnapshot],
+    composite: float | None,
+    passed: bool | None,
+) -> None:
+    if passed is None:
+        return
+    target = evals[-1]
+    if composite is not None:
+        for snapshot in reversed(evals):
+            if snapshot.composite is not None and abs(snapshot.composite - composite) < 1e-6:
+                target = snapshot
+                break
+    target.passed = passed
+
+
+def _attach_verdict(
+    parsed: ParsedLog,
+    prescription: str,
+    decision: str,
+    before: float | None,
+    after: float | None,
+) -> OptimizeAction:
+    for action in reversed(parsed.actions):
+        if action.prescription == prescription and not action.verdict:
+            action.verdict = decision
+            action.verdict_before = before
+            action.verdict_after = after
+            return action
+
+    action = OptimizeAction(
+        eval_after=len(parsed.evals),
+        prescription=prescription,
+        verdict=decision,
+        verdict_before=before,
+        verdict_after=after,
+    )
+    parsed.actions.append(action)
+    return action
 
 
 def _distribution_from_line(line: str) -> dict[str, float]:
