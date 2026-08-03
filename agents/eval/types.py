@@ -26,6 +26,11 @@ from core.schema import Finding, Probe
 # lexical 단독 게이트 문턱 — RAGAS 가 없는 모드(DEEP 미만)나 판정기 실패 때만 쓰인다.
 # RAGAS 가 측정된 실행에서는 lexical 을 단독 게이트로 쓰지 않는다(아래 혼합 점수 참고).
 F1_PASS_THRESHOLD = 0.5
+# 어휘 완전일치(gold 완전 포함 = char-F1 최댓값). degrade 된(불안정한) 심판이 정답을 오답으로
+# 끌어내리는 걸 막는 면제선으로만 쓴다(_degraded_near_miss). 통과 문턱(0.5)이 아니라 이 값을
+# 쓰는 이유: 0.5~0.9 대의 애매한 근접 오답은 심판이 죽었을 때 보수적으로 강등해야 하고,
+# 완전포함(=애매하지 않은 정답)만 면제해야 안전망이 헐거워지지 않는다.
+F1_EXACT_MATCH = 1.0
 DEFAULT_TOP_K = 5              # index_config.top_k 미지정 시 검색 개수
 
 # STEP3-2 RAGAS 지표 임계값 (설계 STEP4 표 기준, 낮으면 Finding 생성)

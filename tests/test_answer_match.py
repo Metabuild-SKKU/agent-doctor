@@ -12,6 +12,7 @@ import itertools
 import os
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -21,7 +22,7 @@ from agents.eval.metrics_basic import answer_match, best_window_char_f1, char_f1
 from agents.eval.scoring import reliability_score
 from agents.eval.types import (
     ANSWER_CORRECTNESS_MIN, ANSWER_PASS_THRESHOLD, ANSWER_SEMANTIC_WEIGHT,
-    EvalRecord, F1_PASS_THRESHOLD, Mode, blend_answer_score,
+    EvalRecord, F1_EXACT_MATCH, F1_PASS_THRESHOLD, Mode, blend_answer_score,
 )
 
 
@@ -229,6 +230,63 @@ class TestGateMonotonicity(unittest.TestCase):
             rec = self._record(0.6, {"answer_correctness": 0.1,
                                      "answer_correctness_degraded": True})
             self.assertFalse(diagnose._f1_ok(rec))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
+
+class TestDegradeDoesNotFlipExactMatch(unittest.TestCase):
+    """버그1(probe_qa_26360): degrade 된 심판이 어휘 완전일치(정답)를 오답으로 뒤집으면
+    recall=1·oracle 통과와 겹쳐 context_noise_interference 로 오진되고, degrade 비결정성
+    때문에 같은 답이 반복마다 통과/실패를 오간다. 완전일치는 강등 면제, 애매한 근접 오답은 강등 유지."""
+
+    def _record(self, *, f1, ragas, recall=1.0, oracle_f1=1.0):
+        probe = Probe(probe_id="p1", question="질문", source="taxonomy",
+                      gold_chunk_ids=["g_a"], ground_truth="세종대왕")
+        rec = EvalRecord(probe=probe, generated_answer="세종대왕", oracle_answer="세종대왕")
+        rec.recall_at_k, rec.f1_score, rec.oracle_f1 = recall, f1, oracle_f1
+        rec.ragas = dict(ragas)
+        rec.ragas_done = True
+        rec.oracle_ragas = {}
+        rec.oracle_ragas_done = True
+        return rec
+
+    def test_exact_match_exempt_from_degrade_demotion(self):
+        """어휘 완전일치(f1=1.0) + degrade 낮은 ac → 강등 면제 → 정답 판정 유지."""
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            rec = self._record(f1=F1_EXACT_MATCH, ragas={
+                "faithfulness": 1.0, "answer_correctness": 0.1,
+                "answer_correctness_degraded": True})
+            self.assertFalse(diagnose._degraded_near_miss(rec, oracle=False))
+            self.assertTrue(diagnose._f1_ok(rec))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
+    def test_near_miss_below_exact_still_demotes(self):
+        """완전일치 미만(f1=0.6)은 degrade 시 여전히 강등 — 안전망 유지(경계 케이스)."""
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            rec = self._record(f1=0.6, ragas={
+                "faithfulness": 1.0, "answer_correctness": 0.1,
+                "answer_correctness_degraded": True})
+            self.assertTrue(diagnose._degraded_near_miss(rec, oracle=False))
+            self.assertFalse(diagnose._f1_ok(rec))
+        finally:
+            metrics_common.set_mode(Mode.FAST)
+
+    def test_no_false_context_noise_on_exact_match(self):
+        """probe 전체 흐름: 완전일치 + degrade 여도 성공 처리되어 context_noise_interference
+        (유령 실패)가 붙지 않는다 — diagnose 가 곧장 [] 로 종료."""
+        metrics_common.set_mode(Mode.DEEP)
+        try:
+            rec = self._record(f1=F1_EXACT_MATCH, ragas={
+                "faithfulness": 1.0, "answer_correctness": 0.1,
+                "answer_correctness_degraded": True})
+            with unittest.mock.patch.object(diagnose, "_compute_metrics"), \
+                 unittest.mock.patch.object(diagnose, "_compute_ragas_real"), \
+                 unittest.mock.patch.object(diagnose, "_compute_ragas_oracle"):
+                findings = diagnose.diagnose(rec, mode=int(Mode.DEEP))
+            self.assertEqual(findings, [])
         finally:
             metrics_common.set_mode(Mode.FAST)
 

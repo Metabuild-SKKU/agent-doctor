@@ -33,7 +33,7 @@ from typing import Optional
 from core.schema import Finding
 from agents.eval.types import (
     DEFAULT_TOP_K, EvalRecord, Mode, resolve_mode,
-    F1_PASS_THRESHOLD, ANSWER_PASS_THRESHOLD, ANSWER_SEMANTIC_FLOOR,
+    F1_PASS_THRESHOLD, F1_EXACT_MATCH, ANSWER_PASS_THRESHOLD, ANSWER_SEMANTIC_FLOOR,
     ANSWER_CORRECTNESS_MIN, EVIDENCE_DENSITY_MIN,
     CONTEXT_CHARS_MAX, CONTEXT_MIDDLE_BAND,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN, RAGAS_CONTEXT_PRECISION_MIN,
@@ -74,9 +74,20 @@ def _degraded_near_miss(record: EvalRecord, *, oracle: bool) -> bool:
     'degrade 는 판정을 느슨하게 만들지 않는다'는 규약(metrics_ragas._answer_correctness 주석)이
     깨진다 — 실제로 lexical 0.5·degraded ac 0.0 이 옛 게이트에선 실패, 새 게이트에선 통과였다.
     승격은 막고 강등만 남겨, 판정기가 죽었을 때 게이트가 헐거워지지 않게 한다.
-    """
+
+    단 어휘 F1 이 완전일치(gold 완전 포함, F1_EXACT_MATCH)면 강등하지 않는다 — 이 강등의 대상은
+    '어휘~0.5 의 애매한 근접 오답'인데(위 예시), 완전일치인(=애매하지 않은) 정답까지 끌어내리면
+    degrade 된(불안정한) 심판이 정답을 오답으로 뒤집는다. 그러면 recall=1·oracle 통과와 겹쳐
+    C 전제(_context_failed)가 열려 context_noise_interference 로 오진되고, 심판 degrade 의
+    비결정성 때문에 같은 답이 반복마다 통과/실패를 오간다(실측: probe_qa_26360 반복2 ❌ vs 반복3 ✅).
+    면제선을 통과 문턱(0.5)이 아니라 완전일치로 둔 이유는, 0.5~0.9 대의 애매한 근접 오답은 심판이
+    죽었을 때 여전히 보수적으로 강등해야 하기 때문이다(그 경계는 안전망으로 유지). 완전일치만
+    면제하므로 승격이 아니라 'degrade 가 정답을 끌어내리는 것'만 막는다 — 게이트는 안 헐거워진다."""
     ragas = record.oracle_ragas if oracle else record.ragas
     if not ragas.get("answer_correctness_degraded"):
+        return False
+    lexical = record.oracle_f1 if oracle else record.f1_score
+    if lexical is not None and lexical >= F1_EXACT_MATCH:
         return False
     ac = record.oracle_ragas_answer_correctness if oracle else record.ragas_answer_correctness
     return ac is not None and ac < ANSWER_CORRECTNESS_MIN
