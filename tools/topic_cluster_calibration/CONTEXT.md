@@ -7,13 +7,16 @@
 `concentrated` / `spread` / `none` / `unmeasured` 로 가른다. 이 신호는 Optimize
 planner 가 처방을 가르는 데 쓰인다(뭉침 → 임베딩 교체, 안 뭉침 → 청킹 조정).
 
-판정 경계는 `agents/eval/types.py` 의 두 상수다:
+판정 경계는 원래 `agents/eval/types.py` 의 두 고정 상수였다(캘리브레이션 전):
 
 ```python
 TOPIC_CLUSTER_CONCENTRATED_RATIO = 1.3   # ratio >= 이 값 → concentrated
 TOPIC_CLUSTER_SPREAD_RATIO       = 1.1   # ratio <= 이 값 → spread
 # 그 사이 → none
 ```
+
+이 캘리브레이션 결과로 경계는 실패 gold 수 N 에 따라 동적으로 바뀐다(아래 실측 결과 참고):
+`none 대 = 1.0 ± k·C/sqrt(N)`, `topic_cluster.dynamic_bounds(N)` 가 계산한다.
 
 ## 문제 (types.py TODO(eval-캘리브레이션))
 
@@ -69,7 +72,22 @@ run_corpus 경로, KorQuAD)에서만 뽑는다.
 ## 산출물
 
 - `tools/topic_cluster_calibration/collect_ratio_distribution.py` — 분포 수집·통계
-- 결과 리포트(분포 표 + 경계 제안). 확정 경계값은 별도 커밋으로 types.py 반영.
+- 결과 리포트(분포 표 + 경계 제안). 확정 경계값은 types.py 반영.
+
+## 실측 결과 (확정)
+
+코퍼스: 세금가이드 PDF(`tests/corpus/260508…펼침면.pdf`)를 정규 파이프라인으로 색인한
+597청크(`chunks.json` 포맷, BGE-M3 1024-dim). types.py 표의 문서 10×50=500청크 기준을 충족.
+
+- **null 분포**(무작위 실패 gold): 중앙값이 N 무관하게 1.00 에 붙고(baseline 편향 없음),
+  stdev 는 `C/sqrt(N)` 로 규칙적으로 감소 — `stdev·sqrt(N) ≈ 0.10~0.13`(평균 C≈0.118).
+    N=5→0.058  N=10→0.040  N=20→0.026  N=40→0.018  N=100→0.010
+- **신호 분포**(같은 주제 인접 블록): 중앙값 N=10→1.19, N=20→1.15, N=40→1.09 로 >1 쏠림.
+- **옛 고정 경계(1.1~1.3) 문제**: null 의 99%가 none 밖(대부분 spread)으로 오분류.
+- **확정: (b) 동적 조절** — none 대 = `1.0 ± k·C/sqrt(N)`, `C=0.118`, `k=2.33`.
+  null 누출(=비싼 재색인 오발) 1~4%, 신호 검출 91~97% 로 균형(k=1.645 는 누출 7~11%).
+  `topic_cluster.dynamic_bounds(N)` 가 계산하고, types.py 는 계수 `TOPIC_CLUSTER_NULL_C`
+  / `TOPIC_CLUSTER_BOUNDARY_K` 만 둔다.
 
 ## 범위 밖 (이 PR 아님)
 
