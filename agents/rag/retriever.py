@@ -253,14 +253,19 @@ def _dedup_by_chunk_id(results: list[dict]) -> list[dict]:
     잡혀 실제 후보가 4개). 리랭커·MMR 도 같은 쌍을 두 번 계산하고, Eval 의 recall·중복 신호가
     그만큼 왜곡된다. 융합(hybrid)은 chunk_id 로 접지만, 네이티브 RRF·keyword 폴백처럼 접지
     않는 경로가 있어 최종 결과 쪽에서 한 번 더 보장한다.
+
+    id 가 비어 있는 항목(payload 결측 → _hit_to_result·keyword_search 가 "" 로 채움)은 접지
+    않고 그대로 통과시킨다 — 서로 다른 청크인데 id 만 없는 것들이 "" 하나로 뭉쳐 조용히
+    버려지는 걸 막는다(중복 제거의 근거는 '같은 id'이지 '둘 다 id 가 없음'이 아니다).
     """
     seen: set[str] = set()
     deduped = []
     for item in results:
         chunk_id = item.get("chunk_id")
-        if chunk_id in seen:
-            continue
-        seen.add(chunk_id)
+        if chunk_id:
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
         deduped.append(item)
     return deduped
 
@@ -315,7 +320,10 @@ class Retriever:
         client: QdrantClient | None = None,
     ) -> None:
         self.settings = settings
-        self.chunks = [_chunk_to_dict(chunk) for chunk in chunks]
+        # 같은 chunk_id 가 두 번 들어오면 lexical 경로(keyword_search·BM25 융합)가 같은 본문을
+        # 두 번 후보로 올려 top_k 슬롯을 먹는다. 검색 결과 쪽에서 접으면 자른 뒤라 후보가
+        # 그만큼 비므로, 입력에서 한 번 접어 슬롯 수를 유지한다.
+        self.chunks = _dedup_by_chunk_id([_chunk_to_dict(chunk) for chunk in chunks])
         self.client = client
         self.chunk_ids = {
             chunk.get("chunk_id", "")
@@ -493,9 +501,9 @@ class Retriever:
         if not results:
             mode = "keyword"
             fallback_used = True
-            # 폴백은 _current_results 를 안 거치므로 여기서 중복을 접는다(청크 목록에 같은
-            # chunk_id 가 두 번 들어와 있으면 그대로 두 슬롯을 먹는다).
-            results = _dedup_by_chunk_id(keyword_search(self.chunks, query, top_k=candidate_k))
+            # self.chunks 가 이미 chunk_id 로 접혀 있어 여기서 중복이 생기지 않는다
+            # (접는 자리를 입력으로 올린 이유는 __init__ 주석 참고 — 자른 뒤 접으면 슬롯이 빈다).
+            results = keyword_search(self.chunks, query, top_k=candidate_k)
 
         # 리랭크 직전 후보 순서. Eval 이 "리랭커가 gold 를 봤나(후보창 안)"와
         # "보고도 떨어뜨렸나(강등)"를 가르는 유일한 신호라 결과에 함께 싣는다.

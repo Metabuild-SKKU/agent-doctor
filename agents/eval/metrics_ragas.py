@@ -492,7 +492,9 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
     ans_stmts = _decompose_statements(judge, question, answer, "correctness.answer_statements")
     ref_stmts = _decompose_statements(judge, question, reference, "correctness.gold_statements")
     if not ans_stmts or not ref_stmts:
-        degrade_reason = (f"문장 분해 실패(answer={len(ans_stmts)}문장, "
+        # '실패' 로 단정하지 않는다 — 기권("모르겠습니다")처럼 주장이 없는 답변은 0문장이
+        # 정상 분해 결과다. 어느 쪽이 비었는지는 아래 문장 수로 읽는다.
+        degrade_reason = (f"분해 결과 없음(answer={len(ans_stmts)}문장, "
                           f"gold={len(ref_stmts)}문장, gold {len(reference)}자)")
     if ans_stmts and ref_stmts:
         d = _chat(judge, _ragas_prompt(_CORRECTNESS_INSTRUCTION, _SCHEMA_CORRECTNESS, _CORRECTNESS_EXAMPLES,
@@ -526,7 +528,10 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
         components.append((w_s, max(_cosine(vecs[0], vecs[1]), 0.0)))
 
     if not components:
-        return {}                                # 두 성분 다 실패 → 진짜 미측정
+        # 두 성분 다 실패 → 진짜 미측정. degraded 플래그가 안 붙어 리포트 집계에도 안 잡히는
+        # 경로라, 여기서 안 남기면 '의미축이 왜 없는지'를 로그에서 아예 못 찾는다.
+        print(f"[Eval] answer_correctness 미측정 — {degrade_reason or '원인 미상'} + 임베딩 실패")
+        return {}
     # 성분이 하나만 측정돼도 가중 재정규화해 0~1 스케일을 유지한다.
     score = sum(w * v for w, v in components) / sum(w for w, _ in components)
     out = {"answer_correctness": score}

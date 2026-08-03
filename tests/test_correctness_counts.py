@@ -8,6 +8,8 @@ answer_correctness 의 TP/FP/FN 카운트 노출 계약 고정.
   2. degraded(factual 실패) 면 카운트가 없고, answer_correctness 점수 자체는 영향받지 않는다.
   3. 새 키가 리포트/스코어링 평균에 섞이지 않는다 (둘 다 키 allowlist 순회라는 보장).
 """
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -91,6 +93,40 @@ class CorrectnessCountsTest(_StubbedRagas):
         factual = 2 / (2 + 0.5 * (1 + 3))
         self.assertAlmostEqual(out["answer_correctness"],
                                (w_f * factual + w_s * 1.0) / (w_f + w_s))
+
+
+class DegradeReasonLogTest(_StubbedRagas):
+    """degrade·미측정의 '원인'이 로그로 남는지 — 리포트엔 건수만 남아 원인 추적이 안 됐다."""
+
+    def _log(self, stub):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            out = self._run(stub)
+        return out, buf.getvalue()
+
+    def test_classification_failure_reason_logged(self):
+        out, log = self._log(_StubJudge(0, 0, 0))
+        self.assertTrue(out["answer_correctness_degraded"])
+        self.assertIn("TP/FP/FN 분류 무응답", log)
+
+    def test_decomposition_empty_reason_logged_without_calling_it_a_failure(self):
+        """기권 답변은 0문장이 정상 분해 결과다 — '실패'로 단정하면 안 된다."""
+        out, log = self._log(_StubJudge(1, 0, 0, statements=False))
+        self.assertTrue(out["answer_correctness_degraded"])
+        self.assertIn("분해 결과 없음", log)
+        self.assertNotIn("분해 실패", log)
+
+    def test_both_components_failed_still_logs_cause(self):
+        """두 성분 다 죽으면 degraded 플래그가 안 붙어 리포트 집계에도 안 잡힌다 —
+        여기서 안 남기면 의미축이 왜 없는지 로그에서 아예 못 찾는다."""
+        out, log = self._log(_StubJudge(0, 0, 0, embed=False))
+        self.assertEqual(out, {})
+        self.assertIn("answer_correctness 미측정", log)
+        self.assertIn("임베딩 실패", log)
+
+    def test_measured_run_logs_nothing(self):
+        _, log = self._log(_StubJudge(2, 1, 3))
+        self.assertEqual(log, "")
 
 
 class CorrectnessCountsAccessorTest(unittest.TestCase):
