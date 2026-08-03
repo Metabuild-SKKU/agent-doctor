@@ -119,6 +119,35 @@ class TopicClusterClassifyTest(unittest.TestCase):
         self.assertNotEqual(tc.classify(failed, corpus), tc.CONCENTRATED)
 
 
+class DynamicBoundsTest(unittest.TestCase):
+    """dynamic_bounds — N→경계 공식(1.0 ± k·C/sqrt(N))을 리터럴로 핀(리뷰 Medium).
+
+    다른 테스트는 dynamic_bounds 를 호출해 기댓값을 만들어(동어반복) 공식 자체 버그
+    (k·C 오타, sqrt(N) 을 N 으로 오기 등)를 못 잡는다. 여기서만 실측 상수를 리터럴로
+    박아, 계수 이전이 틀어지거나 리팩터링으로 공식이 깨지면 조용히 지나가지 않게 한다.
+    """
+
+    def test_formula_pinned_at_n_100(self):
+        # N=100(sqrt=10): half = 2.33 * 0.118 / 10 = 0.027494
+        low, high = tc.dynamic_bounds(100)
+        self.assertAlmostEqual(low, 1.0 - 2.33 * 0.118 / 10, places=6)
+        self.assertAlmostEqual(high, 1.0 + 2.33 * 0.118 / 10, places=6)
+
+    def test_half_width_scales_as_inverse_sqrt_n(self):
+        # N 을 4배 키우면 폭은 절반 — sqrt(N) 스케일 확인(N 오기 방어).
+        _, high_25 = tc.dynamic_bounds(25)
+        _, high_100 = tc.dynamic_bounds(100)
+        self.assertAlmostEqual(high_100 - 1.0, (high_25 - 1.0) / 2, places=9)
+        # 경계는 항상 1.0 을 중심으로 대칭이어야 한다(none 대의 편향 없음).
+        low_25, _ = tc.dynamic_bounds(25)
+        self.assertAlmostEqual(1.0 - low_25, high_25 - 1.0, places=9)
+
+    def test_non_positive_n_collapses_to_zero_width(self):
+        # N<=0(방어): 폭 0 → classify_detail 이 UNMEASURED 로 빠지는 경로와 충돌 없음.
+        self.assertEqual(tc.dynamic_bounds(0), (1.0, 1.0))
+        self.assertEqual(tc.dynamic_bounds(-5), (1.0, 1.0))
+
+
 class TopicClusterClassifyDetailTest(unittest.TestCase):
     """classify_detail — 버킷뿐 아니라 캘리브레이션 근거 수치를 함께 돌려주는지.
 

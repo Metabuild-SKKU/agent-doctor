@@ -687,9 +687,9 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
     # 먹는 문제가 되살아나고, 호출부가 topic_cluster 의 private 유효성 규칙에 묶인다.
     result = topic_cluster.classify_detail(failed_vecs, corpus_vecs)
     # 버킷뿐 아니라 판정 근거 수치도 metadata 에 남긴다 — 소비 유예(관측용) 동안
-    # 임계값을 실측 분산에 맞춰 재보정할 근거가 finding 에 쌓이게 한다(캘리브레이션 과제).
+    # 이번 회차가 어떤 경계로 갈렸는지 finding 에서 재현·관측되게 한다.
     # 경계는 동적(1.0 ± k·C/sqrt(N)) 이라 이번 판정에 실제로 쓰인 값을 남긴다 —
-    # 고정 상수를 남기면 후속 재보정 때 어떤 경계로 갈렸는지 근거가 사라진다.
+    # 고정 상수를 남기면 어떤 경계로 갈렸는지 근거가 사라진다.
     spread_ratio, concentrated_ratio = topic_cluster.dynamic_bounds(result.failed_sample_size)
     for f in sem_findings:
         f.metadata["topic_cluster"] = result.bucket

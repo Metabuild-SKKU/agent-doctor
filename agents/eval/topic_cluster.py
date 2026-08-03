@@ -113,10 +113,10 @@ def stride_sample(vectors: list[Vector], limit: int = TOPIC_CLUSTER_BASELINE_SAM
 
 
 class TopicClusterResult(NamedTuple):
-    """classify 의 판정 + 그 근거 수치. 버킷만으로는 캘리브레이션을 못 하므로 함께 남긴다.
+    """classify 의 판정 + 그 근거 수치. 버킷만으로는 판정 근거를 못 남기므로 함께 돌려준다.
 
-    소비 유예(관측용) 동안에도 이 수치가 finding.metadata 에 쌓여야, 임계값
-    (CONCENTRATED/SPREAD_RATIO)을 실측 분산에 맞춰 재보정할 근거가 된다.
+    경계는 dynamic_bounds(N) 로 동적이라, 소비 유예(관측용) 동안 이 수치(ratio·N)가
+    finding.metadata 에 쌓여야 이번 회차가 어떤 동적 경계로 갈렸는지 재현·관측된다.
     unmeasured 면 ratio·baseline·failed_cohesion 은 None 이고, 표본 수만 남는다.
     """
     bucket: str
@@ -177,10 +177,11 @@ def classify(
 
     반환: "concentrated" | "spread" | "none" | "unmeasured".
     - 실패 gold 가 2개 미만이거나 baseline 을 못 재면 "unmeasured"(판정 불가 → fallback).
-    - ratio = 실패 gold 응집도 / baseline.
-        ratio >= CONCENTRATED_RATIO → "concentrated"
-        ratio <= SPREAD_RATIO       → "spread"
-        그 사이                     → "none"
+    - ratio = 실패 gold 응집도 / baseline. 경계는 고정이 아니라 실패 gold 수 N 에 따라
+      동적(1.0 ± k·C/sqrt(N)) — dynamic_bounds(N) 이 (spread 상한, concentrated 하한)을 준다.
+        ratio >= concentrated 하한 → "concentrated"
+        ratio <= spread 상한       → "spread"
+        그 사이                    → "none"
 
     근거 수치(ratio·표본 수 등)가 필요하면 classify_detail 을 쓴다 — 이 함수는 그
     버킷 문자열만 노출하는 얇은 래퍼다(기존 호출부·계약 유지).
