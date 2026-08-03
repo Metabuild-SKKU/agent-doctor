@@ -59,8 +59,8 @@ assert judge is not None, "심판 LLM 로드 실패"
 if os.getenv("EVAL_DEBUG"):
     _orig_chat = R._chat
 
-    def _spy(jg, prompt, label=""):
-        out = _orig_chat(jg, prompt, label=label)
+    def _spy(jg, prompt, label="", max_output_tokens=None):
+        out = _orig_chat(jg, prompt, label=label, max_output_tokens=max_output_tokens)
         head = prompt.split("\n", 1)[0][:70]
         print(f"    · LLM← {head}...\n      LLM→ {str(out)[:160]}")
         return out

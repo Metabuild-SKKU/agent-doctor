@@ -305,6 +305,18 @@ _CORRECTNESS_EXAMPLES = [
 # answer_correctness = weights[0]·factual_F1 + weights[1]·의미유사도 (ragas 기본 [0.75, 0.25])
 _ANSWER_CORRECTNESS_WEIGHTS = (0.75, 0.25)
 
+# 출력이 입력 크기에 비례하는 심판 호출의 상한. 공용 기본값(2048)보다 넉넉히 잡는다.
+#
+# 여기 걸리는 호출들은 입력 문장 하나마다 statement+reason 을 되풀이해 뱉는 스키마다
+# (NLI·TP/FP/FN 분류·context_recall 분류·문장 분해). 골드가 표나 장문이면 문장이 수십 개라
+# 출력이 2048 을 넘고, 잘린 응답은 JSON 파싱에 실패해 chat_json 이 {} 를 돌려준다 →
+# answer_correctness 의 factual 성분이 통째로 죽고(degrade) 정답 판정이 lexical 단독으로
+# 떨어진다. probe 합성(_SYNTHESIS_MAX_OUTPUT_TOKENS)이 같은 이유로 이미 올려 잡고 있다.
+# 출력이 입력과 무관하게 짧은 호출(relevancy·context_precision·aspect_critic·reasoning_mode)은
+# 기본값을 그대로 둬 비용 방어선을 유지한다.
+# 주의: Gemini 추론 모델은 내부 사고(thoughts)도 이 상한을 함께 소진한다(core/llm_clients.py).
+_LARGE_JUDGE_MAX_OUTPUT_TOKENS = _env_int("EVAL_JUDGE_MAX_OUTPUT_TOKENS", 4096)
+
 
 # 출력 JSON 스키마 힌트 (BasePrompt.to_string 의 output_schema 자리)
 _SCHEMA_STATEMENTS = '{"properties": {"statements": {"items": {"type": "string"}, "type": "array"}}, "required": ["statements"]}'
@@ -434,7 +446,7 @@ def _decompose_statements(judge, question: str, text: str, label: str = "stateme
         return []
     d = _chat(judge, _ragas_prompt(_FAITH_STMT_INSTRUCTION, _SCHEMA_STATEMENTS,
                                    _FAITH_STMT_EXAMPLES, {"question": question, "answer": text}),
-              label=label)
+              label=label, max_output_tokens=_LARGE_JUDGE_MAX_OUTPUT_TOKENS)
     return [s for s in _as_list(d, "statements") if isinstance(s, str) and s.strip()]
 
 
@@ -450,7 +462,8 @@ def _faithfulness(judge, question: str, answer: str, contexts: list[str]):
     context_str = "\n".join(contexts)
     d2 = _chat(judge, _ragas_prompt(_FAITH_NLI_INSTRUCTION, _SCHEMA_NLI,
                                     _FAITH_NLI_EXAMPLES, {"context": context_str, "statements": statements}),
-               label="faithfulness.nli")
+               label="faithfulness.nli",
+               max_output_tokens=_LARGE_JUDGE_MAX_OUTPUT_TOKENS)
     verdicts = [v for v in _as_list(d2, "statements") if isinstance(v, dict)]
     if not verdicts:
         return None
@@ -484,7 +497,8 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
     if ans_stmts and ref_stmts:
         d = _chat(judge, _ragas_prompt(_CORRECTNESS_INSTRUCTION, _SCHEMA_CORRECTNESS, _CORRECTNESS_EXAMPLES,
                                        {"question": question, "answer": ans_stmts, "ground_truth": ref_stmts}),
-                  label="correctness.classify")
+                  label="correctness.classify",
+                  max_output_tokens=_LARGE_JUDGE_MAX_OUTPUT_TOKENS)
         tp, fp, fn = len(_as_list(d, "TP")), len(_as_list(d, "FP")), len(_as_list(d, "FN"))
         denom = tp + 0.5 * (fp + fn)
         if denom <= 0:
@@ -594,7 +608,8 @@ def _context_recall(judge, question: str, reference: str, contexts: list[str]):
     context_str = "\n".join(contexts)
     d = _chat(judge, _ragas_prompt(_CTX_RECALL_INSTRUCTION, _SCHEMA_RECALL, _CTX_RECALL_EXAMPLES,
                                    {"question": question, "context": context_str, "answer": reference}),
-              label="context_recall")
+              label="context_recall",
+              max_output_tokens=_LARGE_JUDGE_MAX_OUTPUT_TOKENS)
     cls = _as_list(d, "classifications")
     if not cls:
         return None
@@ -657,12 +672,15 @@ def _average_precision(verdicts: list[int]) -> float:
     )
     return numerator / denominator
 
-def _chat(judge, prompt: str, label: str = "") -> dict:
+def _chat(judge, prompt: str, label: str = "", max_output_tokens: int | None = None) -> dict:
     """RAGAS 형식 단일 프롬프트를 JSON 강제로 호출 → dict. 실패 시 {}.
 
     label 은 실패 로그에 찍히는 호출 이름 — 호출부가 9곳인데 로그가 전부 같은 문구라
-    어느 지표의 심판이 죽었는지 못 가렸다(정답 판정 degrade 원인 추적)."""
-    return llm_provider.chat_json("", prompt, label=label)
+    어느 지표의 심판이 죽었는지 못 가렸다(정답 판정 degrade 원인 추적).
+    max_output_tokens 미지정이면 chat_json 기본값(비용 방어선)."""
+    if max_output_tokens is None:
+        return llm_provider.chat_json("", prompt, label=label)
+    return llm_provider.chat_json("", prompt, label=label, max_output_tokens=max_output_tokens)
 
 
 def _embed(judge, texts: list[str]) -> list[list[float]]:
