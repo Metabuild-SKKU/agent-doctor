@@ -1366,13 +1366,16 @@ _GROUNDED_VALUES: dict[str, dict[str, Any]] = {
     "retrieval_missing_gold": {
         "top_k": _ground_top_k_from_gold,
         "chunk_overlap": _ground_chunk_overlap_candidates,
+        "chunk_size": _ground_chunk_size_candidates,
     },
     "chunking_context_mismatch": {
         "chunk_overlap": _ground_chunk_overlap_candidates,
+        "chunk_size": _ground_chunk_size_candidates,
     },
     # gold span 이 청크보다 길어 겹침으로는 못 담는 경우 — 필요한 크기를 span 길이에서 계산한다
     # (없으면 _concrete_values 의 방향 폴백으로 현재값 배수 추측이 된다).
     "chunking_overchunking": {"chunk_size": _ground_chunk_size_candidates},
+    "chunking_underchunking": {"chunk_size": _ground_chunk_size_candidates},
     "too_long_context": {"chunk_size": _ground_chunk_size_candidates},
 }
 
@@ -1552,8 +1555,10 @@ def _allows_symbolic_fallback(
     """Chunk 방향 추측의 허용 여부를 명시적인 grounding status로 결정한다."""
 
     allowed_statuses = _SYMBOLIC_FALLBACK_ALLOWED.get(path)
-    if allowed_statuses is None or grounding_metadata is None:
+    if allowed_statuses is None:
         return True
+    if grounding_metadata is None:
+        return False
     status = grounding_metadata.get("status")
     return isinstance(status, str) and status in allowed_statuses
 

@@ -985,6 +985,36 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertEqual(metadata["status"], "grounded")
         self.assertEqual(metadata["source"], "structural_evidence_windows")
 
+    def test_ready_chunk_size_labels_do_not_use_direction_multiplier(self):
+        cases = [
+            ("retrieval_missing_gold", "increase", 900, 1600),
+            ("chunking_context_mismatch", "increase", 900, 1600),
+            ("chunking_underchunking", "decrease", 100, 400),
+        ]
+
+        for label, direction, evidence_length, forbidden in cases:
+            with self.subTest(label=label):
+                finding = make_finding("p1", label)
+                state = AgentDoctorState(index_config={
+                    "chunk_size": 800,
+                    "chunk_candidate_policy": self._chunk_policy(),
+                })
+
+                space, metadata = planner._finding_search_space(
+                    [finding],
+                    {"chunk_size": direction},
+                    state,
+                    self._evidence_analysis(length=evidence_length),
+                )
+
+                values = space["chunker.chunk_size"]
+                self.assertNotIn(forbidden, values)
+                self.assertEqual(metadata["status"], "grounded")
+                if direction == "increase":
+                    self.assertTrue(all(800 < value < 1600 for value in values))
+                else:
+                    self.assertTrue(all(400 < value < 800 for value in values))
+
     def test_chunk_candidate_policy_rejects_invalid_safety_bounds(self):
         base_policy = {
             "target_quantile": 0.85,
@@ -1198,6 +1228,18 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertFalse(planner._allows_symbolic_fallback(
             "chunker.chunk_size",
             {"status": "direction_conflict"},
+        ))
+        self.assertFalse(planner._allows_symbolic_fallback(
+            "chunker.chunk_size",
+            None,
+        ))
+        self.assertFalse(planner._allows_symbolic_fallback(
+            "chunker.chunk_overlap",
+            None,
+        ))
+        self.assertTrue(planner._allows_symbolic_fallback(
+            "retriever.top_k",
+            None,
         ))
 
 
