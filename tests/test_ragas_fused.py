@@ -61,7 +61,7 @@ class _Stub:
         self.chat_calls: list[str] = []
         self.embed_calls: list[list[str]] = []
 
-    def chat(self, judge, prompt, max_output_tokens=None):
+    def chat(self, judge, prompt, max_output_tokens=None, label=""):
         self.chat_calls.append(prompt)
         for marker, reply in _LEGACY_REPLIES:
             if marker in prompt:

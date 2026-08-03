@@ -145,9 +145,12 @@ def chat_json(
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError:
-        # 응답 길이도 남긴다 — 상한 절단이면 길이가 상한에 붙고 끝이 잘린 채로 끝나므로,
-        # "모델이 JSON 을 못 만든 것"과 "만들다 잘린 것"을 로그만으로 가를 수 있다.
+        # 응답 길이와 그 호출에 적용된 상한을 함께 남긴다 — 상한 절단이면 끝이 잘린 채로
+        # 끝나므로 "모델이 JSON 을 못 만든 것"과 "만들다 잘린 것"을 로그만으로 가를 수 있다.
+        # 상한값을 같이 찍는 이유: 길이는 '문자 수'고 상한은 '토큰 수'라 길이만으로는
+        # 상한에 붙었는지 판정할 수 없다(한국어는 문자당 토큰 비율이 커서 더 그렇다).
         print(f"[Eval] chat_json{where} JSON 파싱 실패({len(raw)}자, "
+              f"상한 {max_output_tokens}토큰, "
               f"앞 80자: {raw[:80]!r}, 끝 40자: {raw[-40:]!r}) → {{}}")
         return {}
     if isinstance(obj, dict):

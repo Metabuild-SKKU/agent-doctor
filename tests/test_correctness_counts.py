@@ -44,8 +44,10 @@ class _StubJudge:
         }
         self.statements = statements
         self.embed = embed
+        self.caps: dict = {}
 
     def chat(self, judge, prompt, label="", max_output_tokens=None):
+        self.caps[label] = max_output_tokens                   # 호출별 적용 상한 기록
         if "statements" in prompt and "TP" not in prompt:      # StatementGenerator 호출
             return {"statements": ["s1", "s2"]} if self.statements else {}
         return self.payload
@@ -93,6 +95,28 @@ class CorrectnessCountsTest(_StubbedRagas):
         factual = 2 / (2 + 0.5 * (1 + 3))
         self.assertAlmostEqual(out["answer_correctness"],
                                (w_f * factual + w_s * 1.0) / (w_f + w_s))
+
+
+class JudgeOutputCapTest(_StubbedRagas):
+    """출력이 입력 크기에 비례하는 심판 호출에 상한이 실제로 실리는지 고정.
+
+    이 PR 의 유일한 동작 변경이라 되돌려도(4096→2048) 아무 테스트가 안 잡혔다.
+    상한이 빠지면 골드가 장문일 때 응답이 잘려 factual 성분이 죽는다(degrade).
+    """
+
+    def test_correctness_calls_carry_the_large_cap(self):
+        stub = _StubJudge(2, 1, 3)
+        self._run(stub)
+        cap = metrics_ragas._LARGE_JUDGE_MAX_OUTPUT_TOKENS
+        for label in ("correctness.answer_statements", "correctness.gold_statements",
+                      "correctness.classify"):
+            self.assertEqual(stub.caps.get(label), cap, f"{label} 에 상한이 안 실렸다")
+
+    def test_large_cap_is_above_the_provider_default(self):
+        """공용 기본값보다 커야 의미가 있다 — 같아지면 상향이 no-op 이 된다."""
+        from core.llm_clients import DEFAULT_MAX_OUTPUT_TOKENS
+        self.assertGreater(metrics_ragas._LARGE_JUDGE_MAX_OUTPUT_TOKENS,
+                           DEFAULT_MAX_OUTPUT_TOKENS)
 
 
 class DegradeReasonLogTest(_StubbedRagas):

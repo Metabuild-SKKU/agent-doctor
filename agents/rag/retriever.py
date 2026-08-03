@@ -267,6 +267,10 @@ def _dedup_by_chunk_id(results: list[dict]) -> list[dict]:
                 continue
             seen.add(chunk_id)
         deduped.append(item)
+    # 정상 경로에선 chunk_id 가 f"{doc_id}_chunk_{idx:03d}" 라 중복이 안 생긴다. 그래서 여기서
+    # 뭔가 접혔다면 상류(Index) 쪽 중복이고, 조용히 접으면 그 원인이 로그에서 사라진다.
+    if len(deduped) < len(results):
+        print(f"[Retriever] 중복 chunk_id {len(results) - len(deduped)}건 제거 — 상류 중복 의심")
     return deduped
 
 
