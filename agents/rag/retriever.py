@@ -246,6 +246,25 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
+def _dedup_by_chunk_id(results: list[dict]) -> list[dict]:
+    """같은 chunk_id 는 첫 등장(=상위 순위)만 남긴다.
+
+    중복이 남으면 같은 본문이 top_k 슬롯을 두 번 먹는다(실측: top-5 에 chunk_005 가 두 번
+    잡혀 실제 후보가 4개). 리랭커·MMR 도 같은 쌍을 두 번 계산하고, Eval 의 recall·중복 신호가
+    그만큼 왜곡된다. 융합(hybrid)은 chunk_id 로 접지만, 네이티브 RRF·keyword 폴백처럼 접지
+    않는 경로가 있어 최종 결과 쪽에서 한 번 더 보장한다.
+    """
+    seen: set[str] = set()
+    deduped = []
+    for item in results:
+        chunk_id = item.get("chunk_id")
+        if chunk_id in seen:
+            continue
+        seen.add(chunk_id)
+        deduped.append(item)
+    return deduped
+
+
 def _mmr_select(
     results: list[dict], top_k: int, lambda_: float, embeddings: list[list[float] | None]
 ) -> list[dict] | None:
@@ -353,10 +372,11 @@ class Retriever:
         return max(candidate_k, min(max(len(self.chunks), candidate_k * 8), 200))
 
     def _current_results(self, results: list[dict]) -> list[dict]:
+        """검색 결과를 현재 청크 집합 기준으로 좁히고 payload 를 현재 값으로 덮는다."""
         if not self.chunk_ids:
-            return results
+            return _dedup_by_chunk_id(results)
         current_results = []
-        for item in results:
+        for item in _dedup_by_chunk_id(results):
             chunk = self._chunks_by_id.get(item.get("chunk_id"))
             if chunk is None:
                 continue
@@ -473,7 +493,9 @@ class Retriever:
         if not results:
             mode = "keyword"
             fallback_used = True
-            results = keyword_search(self.chunks, query, top_k=candidate_k)
+            # 폴백은 _current_results 를 안 거치므로 여기서 중복을 접는다(청크 목록에 같은
+            # chunk_id 가 두 번 들어와 있으면 그대로 두 슬롯을 먹는다).
+            results = _dedup_by_chunk_id(keyword_search(self.chunks, query, top_k=candidate_k))
 
         # 리랭크 직전 후보 순서. Eval 이 "리랭커가 gold 를 봤나(후보창 안)"와
         # "보고도 떨어뜨렸나(강등)"를 가르는 유일한 신호라 결과에 함께 싣는다.
