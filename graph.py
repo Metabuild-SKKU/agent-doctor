@@ -44,11 +44,18 @@ from agents.serve.agent import run as serve_run
 def route_after_eval(state: AgentDoctorState) -> str:
     """
     Eval 결과를 보고 다음 에이전트 결정.
+      상위/자체 실패(status=error)     → Serve (최종 상태에 실제 error 전달)
       품질 통과                       → Serve
       반복 예산 소진 + 판정 대기 처방  → Optimize (마지막 처방 판정 기회)
       반복 예산 소진 + 대기 없음       → Serve
       품질 미달(예산 남음)            → Optimize
     """
+    # 실패 상태면 Optimize/재색인으로 헛돌리지 않고 곧장 Serve 로 종료 흐름을 탄다.
+    # (Serve 가 error 를 유지하므로 최종 상태를 읽는 web_api 가 실제 원인을 표시한다.)
+    if state.status == "error":
+        print(f"[Orchestrator] 실패 감지({state.error}) → Serve 로 종료")
+        return "serve"
+
     if gate.passes_report(state.report):
         # 마지막으로 적용한 처방이 아직 판정(마감) 안 된 채로 통과했으면 Optimize 를
         # 한 번 더 태워 pending 을 확정(keep + after_composite 기록)한 뒤 Serve 로 보낸다.
@@ -77,9 +84,13 @@ def route_after_eval(state: AgentDoctorState) -> str:
 def route_after_optimize(state: AgentDoctorState) -> str:
     """
     Optimize 결과를 보고 다음 흐름 결정.
+      실패(status=error)                  → Serve (재색인 루프로 헛돌지 않게)
       config 변경(새 처방 적용 또는 롤백) → Index (재색인 후 재검증)
       변경 없음(제안/유지/수동/스킵)      → Serve
     """
+    if state.status == "error":
+        print(f"[Orchestrator] Optimize 실패({state.error}) → Serve 로 종료")
+        return "serve"
     if state.status in ("applied", "rolled_back"):
         print(f"[Orchestrator] config 변경({state.status}) → Index 재색인")
         return "index"

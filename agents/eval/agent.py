@@ -400,6 +400,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     """Eval Agent 진입점."""
     state.current_agent = "eval"
 
+    # 상위 노드(Ingest/Index)가 이미 실패했으면 그대로 통과시킨다. 자체 "청크가
+    # 없습니다" 로 덮으면 진짜 원인이 사라지고, 빈 상태에서 Eval(LLM 호출 포함)을
+    # 헛돌린다. (Index→Eval 엣지가 무조건이라 에러 상태도 이 노드에 들어온다.)
+    if state.status == "error":
+        print(f"[Eval] 상위 실패 감지 → 건너뜀 (error 유지: {state.error})")
+        return state
+
     if not state.chunks:
         state.status = "error"
         state.error = "청크가 없습니다. Index Agent 완료 여부를 확인하세요."

@@ -254,6 +254,14 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     쓰기: state.mcp_endpoint, state.status, state.error
     """
     state.current_agent = "serve"
+
+    # 상위 노드가 이미 실패했으면(라우터가 실패 상태를 Serve 로 종료시킨다) 그
+    # error 를 유지한 채 그대로 종료한다. 자체 "청크가 없습니다" 로 덮으면 최종
+    # 상태를 읽는 web_api 가 실제 원인 대신 일반 메시지를 표시한다.
+    if state.status == "error":
+        print(f"[Serve] 상위 실패 감지 → 서빙 생략 (error 유지: {state.error})")
+        return state
+
     print(f"[Serve] 청크 {len(state.chunks)}개 처리 중")
 
     if not state.chunks:

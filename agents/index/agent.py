@@ -1262,6 +1262,15 @@ def _process_document(
 def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctorState:
     tools = tools or _default_tools()
     state.current_agent = "index"
+
+    # 상위 노드(Ingest 등)가 이미 실패했으면 그대로 통과시킨다. 여기서 error 를
+    # 지우고 자체 "문서가 없습니다" 로 덮으면 진짜 실패 원인(예: 'gdrive 미구현',
+    # 잘못된 소스 URL)이 사라져, 최종 상태를 읽는 web_api 가 일반 메시지만 표시한다.
+    # (Ingest→Index 엣지가 무조건이라, 에러 상태도 물리적으로 이 노드에 들어온다.)
+    if state.status == "error":
+        print(f"[Index] 상위 실패 감지 → 건너뜀 (error 유지: {state.error})")
+        return state
+
     state.error = None
     print(f"[Index] 문서 {len(state.documents)}개 처리 시작")
 
