@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from core.llm_clients import openai_chat
+from core.llm_retry import run_with_retry
 from core.parallel import parallel_map
 from core.schema import Chunk
 from core.state import DEFAULT_GRAPH_LLM_MODEL
@@ -37,14 +38,20 @@ def _keyword_entities(text: str, limit: int = 8) -> tuple[list[str], list[dict]]
 # LLM을 쓸 수 있으면 entity/relation JSON만 받아온다.
 # 호출은 core/llm_clients.openai_chat 에 위임한다 — 직접 호출하던 시절엔 출력 상한이
 # 없어 반복 생성이 최대치까지 달릴 수 있었다(청크마다 1회라 피해가 곱해진다).
+# 429 는 run_with_retry 로 되받는다 — 청크 추출을 동시 실행하므로 rate limit 확률이 올라가는데,
+# 재시도가 없으면 _extract 가 예외를 삼켜 그 청크만 조용히 keyword 폴백으로 떨어진다.
 def _llm_entities(text: str, model: str) -> tuple[list[str], list[dict]]:
-    raw = openai_chat(
-        "기술 문서에서 핵심 entity와 entity 간 relation을 추출한다. "
-        '반드시 {"entities":["..."],"relations":'
-        '[{"source":"...","target":"...","type":"..."}]} JSON으로 답한다.',
-        text[:8000],
-        model,
-        json_mode=True,
+    raw = run_with_retry(
+        lambda: openai_chat(
+            "기술 문서에서 핵심 entity와 entity 간 relation을 추출한다. "
+            '반드시 {"entities":["..."],"relations":'
+            '[{"source":"...","target":"...","type":"..."}]} JSON으로 답한다.',
+            text[:8000],
+            model,
+            json_mode=True,
+            tag="Index",
+        ),
+        label="entity 추출",
         tag="Index",
     )
     data = json.loads(raw or "{}")
