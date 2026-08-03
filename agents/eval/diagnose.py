@@ -51,7 +51,7 @@ from agents.eval.metrics_search import (           # tier2
     _gold_ranks, _bm25_hits_gold, _gold_in_corpus, _missed_gold_in_corpus,
     _gold_absent_from_corpus, _gold_corpus_membership,
     _gold_dense_ranks, _gold_lexical_ranks, _gold_pre_rerank_ranks,
-    _redundancy_above_gold,
+    _redundancy_above_gold, _rerank_promoted_ids,
 )
 from agents.eval.metrics_ragas import (            # tier3
     _compute_ragas_real, _compute_ragas_oracle, _abstention_judged, _reasoning_mode_oracle,
@@ -1273,12 +1273,17 @@ def chunking_underchunking(record: EvalRecord) -> Optional[Finding]:
 def reranker_low_precision(record: EvalRecord) -> Optional[Finding]:
     """
     리랭커가 무관한 청크를 상위로 올림.
-    예비: C 전제 + 리랭크가 실제 적용됨 + context_precision 낮음 + 청크 안 노이즈는 아님.
+    확정: C 전제 + 리랭크가 실제 적용됨 + context_precision 낮음 + 청크 안 노이즈는 아님
+          + **리랭크가 top_k 구성을 실제로 바꿨음**(_rerank_promoted_ids).
 
-    C그룹에서 유일하게 예비로 남는 라벨이다 — 확정하려면 리랭크 전/후 순위를 대조해야 하는데
-    retriever 가 리랭크 전 후보를 남기지 않는다(search_with_details 가 results 를 덮어씀).
-    그래서 '리랭크를 거친 결과의 정밀도가 낮다'까지만 말한다(리랭커가 원인이라는 증거는 아니다 —
-    원래 검색이 나빴을 수도 있다). 전/후 기록을 남기면 그때 확정으로 올릴 수 있다(별도 PR).
+    마지막 조건이 이 라벨을 예비에서 확정으로 올린다. 예전엔 '리랭크를 거친 결과의 정밀도가
+    낮다'까지만 말했다 — 리랭커가 원인이라는 증거가 아니었다(원래 검색이 나빴을 수도 있다).
+    retriever 가 pre_rerank_ids 를 싣게 된 뒤로 전/후 대조가 가능해져(PR #51 이 미뤄둔 조건),
+    리랭크가 새로 밀어 올린 청크가 있을 때만 리랭커에 책임을 묻는다.
+
+    구성이 안 바뀌었으면(promoted 가 빈 리스트) 아예 발행하지 않는다 — 리랭크 전에도 같은
+    청크들이 들어 있었으므로 리랭커를 바꿔봐야 이 실패는 그대로다. 전/후 기록이 없는 옛
+    결과(promoted is None)는 판정할 근거가 없으니 종전대로 예비로 남긴다.
     """
     if not _context_failed(record):
         return None
@@ -1289,11 +1294,20 @@ def reranker_low_precision(record: EvalRecord) -> Optional[Finding]:
     precision = _ctx_precision(record)
     if precision is None or precision >= RAGAS_CONTEXT_PRECISION_MIN:
         return None
-    return _finding(
-        record, "reranker_low_precision", "retrieval_failure", confirmed=False,
+    promoted = _rerank_promoted_ids(record)
+    if promoted is not None and not promoted:
+        return None                      # 리랭커가 top_k 구성을 안 바꿈 → 원인 아님
+    confirmed = promoted is not None
+    evidence = (f"리랭크 승격 {len(promoted)}개" if confirmed
+                else "리랭크 전/후 기록 없음(예비)")
+    finding = _finding(
+        record, "reranker_low_precision", "retrieval_failure", confirmed=confirmed,
         reason=f"reranked=True, context_precision={_v(precision)}<{RAGAS_CONTEXT_PRECISION_MIN}, "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"{evidence}, recall@k={_v(record.recall_at_k)}",
     )
+    if confirmed:
+        finding.metadata["rerank_promoted_ids"] = list(promoted)
+    return finding
 
 
 def context_noise_interference(record: EvalRecord) -> Optional[Finding]:

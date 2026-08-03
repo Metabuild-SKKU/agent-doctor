@@ -130,6 +130,29 @@ def _gold_pre_rerank_ranks(record: EvalRecord):
     return _rank_map([{"chunk_id": cid} for cid in ids], golds)
 
 
+def _rerank_promoted_ids(record: EvalRecord):
+    """리랭크가 최종 top_k 안으로 **새로** 밀어 올린 청크 id. 재검색 비용 0.
+
+    gold 순위가 아니라 '컨텍스트 구성이 리랭크로 바뀌었나'를 본다. 빈 리스트면 리랭커가
+    top_k 멤버십을 그대로 뒀다는 뜻이라, 그 결과의 정밀도가 낮아도 리랭커를 원인으로
+    지목할 수 없다(리랭크 전에도 같은 청크들이 들어 있었다).
+
+    비교창을 최종 top_k 길이로 맞추는 이유: pre_rerank_ids 는 후보창(rerank_candidates)
+    전체라 최종 목록보다 길다. 그대로 비교하면 '후보창 안에 있었음'만 확인하게 되어,
+    리랭커가 하위 후보를 상위로 끌어올린 것과 원래 상위였던 것을 구분하지 못한다.
+
+    옛 계약의 retriever(테스트 주입 등)는 키가 없어 None — 호출부가 '판정 불가'로 다룬다.
+    """
+    ids = record.retrieval_details.get("pre_rerank_ids")
+    if not isinstance(ids, list) or not ids:
+        return None
+    final = list(record.retrieved_chunk_ids)
+    if not final:
+        return None
+    before_window = set(ids[:len(final)])
+    return [cid for cid in final if cid not in before_window]
+
+
 def _bm25_hits_gold(record: EvalRecord):
     """키워드(BM25) 검색이 dense top-k 가 놓친 gold 를 잡나. lexical/semantic mismatch 용.
     대상은 코퍼스에 있는 놓친 gold 만 — 코퍼스에 없는 걸 BM25 가 못 잡는 건 '의미 불일치'가

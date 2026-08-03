@@ -111,20 +111,24 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
     "retrieval_duplicate_crowding": {
         "group": "A",
         "assigned": "이승준",
-        # 진단은 확정으로 나오지만 지금 config 에 이 원인을 고칠 레버가 없다 → draft.
-        # (라벨은 리포트에 남아 "리랭커를 켜도 안 낫는다"는 사실을 알려준다.)
-        "status": "draft",
+        # PR #51 이 MMR 검색을 Retriever 에 구현하면서 이 라벨의 레버가 생겼다. 라벨 자체는
+        # 그 뒤(retrieval_low_rank 순위 단계 분할)에 만들어지며 분할 이전의 BLOCKER 주석
+        # ("mmr 필드가 index_config 에 없음")을 물려받아 draft 로 굳어 있었다 — 그 필드는
+        # core/state.py 에 use_mmr·mmr_lambda·mmr_candidates 로 이미 있고, 같은 enable_mmr
+        # 처방이 retrieval_incomplete_enumeration·context_noise_interference 에서 ready 로
+        # 실행 중이다. 3중 게이트를 다시 확인하고 ready 로 올린다.
+        "status": "ready",
         "diagnosis_confidence": None,   # 숫자 튜닝 필요
         "target_metrics": ["context_recall"],  # 중복이 먹던 슬롯을 gold에 돌려줌
         "prescriptions": [
             {
                 # 관련성만이 아니라 다양성까지 고려해 상위 슬롯 쏠림을 줄인다.
+                # 경로는 다른 두 라벨과 같은 canonical 표기를 쓴다(별칭 "mmr" 도 같은 축으로
+                # 정규화되지만, 같은 action 이 표기만 달라 보이면 감사할 때 서로 다른 축처럼 읽힌다).
                 "id": "enable_mmr",
-                "patch": {"mmr": True},
+                "patch": {"retriever.mmr": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                # BLOCKER: mmr 필드가 index_config에 없음(retrieval_incomplete_enumeration 과 동일).
-                #   # TODO(index-합의)
             },
         ],
         # NOTE: 리랭커는 이 라벨의 처방이 아니다 — cross-encoder 는 중복 청크를 상위에 그대로
@@ -547,7 +551,9 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "cost": None,           # 숫자 튜닝 필요
             },
         ],
-        # BLOCKER: Eval 라벨 생성, 모델 교체 후보, threshold 소비 경로가 아직 없음.
+        # BLOCKER: 모델 교체 후보와 threshold 소비 경로가 아직 없다(처방 2개 모두).
+        #   Eval 라벨 생성은 해소됐다 — diagnose.reranker_low_precision 이 pre_rerank_ids
+        #   전/후 대조로 **확정** 발행한다. 진단은 서지만 이 라벨을 ready 로 올릴 수는 없다.
     },
 
 
@@ -589,7 +595,14 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 "patch": {"generation.model": "upgrade"},  # 프롬프트로 안 되면 최후 수단
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
-                # BLOCKER(Tier3): 검증된 교체 후보 없음 → capability generation_model=False.
+                # BLOCKER(Tier3): 막힌 곳이 둘이다. capability 만 열면 되는 게 아니다.
+                #   1) 검증된 교체 후보 없음 → capability generation_model=False.
+                #   2) **소비 코드 없음** — index_config["generation_model"] 을 읽는 곳이
+                #      없다. generator._selected_model 은 rag_{provider}_model /
+                #      llm_model / response_model 만 본다(core/state.py 의 그 키 주석도
+                #      "Tier3용 자리"라고 적고 있다). capability 를 열어도 값이 서빙까지
+                #      전달만 되고 모델은 안 바뀐다 — 처방이 조용히 no-op 이 된다.
+                #   #89 의 prescription 단위 status 가 들어오면 draft 로 내릴 자리다.
             },
         ],
     },

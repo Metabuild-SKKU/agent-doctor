@@ -642,24 +642,29 @@ class OptimizeAgentForwardTest(unittest.TestCase):
 
         self.assertLessEqual(out.index_config["rerank_candidates"], 50)
 
-    def test_duplicate_crowding_is_reported_without_prescription(self):
-        """중복 밀림은 지금 config 에 레버가 없다 — 리랭커를 억지로 처방하지 않고 미룬다.
+    def test_duplicate_crowding_prescribes_mmr(self):
+        """중복 밀림의 레버는 MMR 다. 리랭커가 아니다.
 
-        deduplicate 는 기본값이 이미 True 인 본문 해시 완전일치 제거라 near-duplicate 를
-        못 걸러낸다(= patch 를 내도 config 가 안 바뀐다). mmr 필드는 아직 없다.
+        예전엔 "config 에 레버가 없다"며 미뤘는데, PR #51 이 Retriever 에 MMR 을 구현하고
+        core/state.py 에 use_mmr 을 넣으면서 그 전제가 사라졌다(같은 enable_mmr 처방이
+        retrieval_incomplete_enumeration·context_noise_interference 에서는 이미 실행 중).
+
+        리랭커를 처방하면 안 된다는 조건도 함께 고정한다 — cross-encoder 는 중복 청크를
+        상위에 그대로 둔다(각각이 질문과 실제로 관련 있어 점수가 높다). 처방했다면 실패 후
+        blacklist 만 쌓인다.
         """
         state = self._rank_cause_state(
             "retrieval_duplicate_crowding",
             {"crowding_analysis": {"g": {"rank": 4, "redundant": 2,
                                          "projected_rank": 2}}},
         )
-        before = dict(state.index_config)
 
         out = agent.run(state)
 
-        self.assertEqual(out.status, "skipped")
-        self.assertEqual(out.index_config, before)
-        self.assertFalse(rules.is_actionable("retrieval_duplicate_crowding"))
+        self.assertTrue(rules.is_actionable("retrieval_duplicate_crowding"))
+        self.assertTrue(out.index_config["use_mmr"])
+        self.assertFalse(out.index_config["use_reranker"])   # 리랭커는 이 라벨의 레버가 아니다
+        self.assertNotEqual(out.status, "skipped")
 
     def test_low_rank_does_not_widen_candidate_count(self):
         """low_rank 는 'gold 가 후보창 안'이라는 신호라 창 확대가 처방이 아니다.

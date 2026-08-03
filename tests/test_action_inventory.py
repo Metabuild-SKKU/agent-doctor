@@ -49,7 +49,8 @@ EXPECTED_EXECUTABLE = {
     "reranker.enabled:disable":              (1, ("A",),      False, "rules"),
     "reranker.enabled:enable":               (2, ("A",),      False, "rules"),
     "retriever.hybrid_dense_weight:adjust":  (1, ("A",),      False, "internal"),
-    "retriever.mmr:enable":                  (2, ("A", "C"),  False, "rules"),
+    # 지지 라벨 2 → 3: retrieval_duplicate_crowding 이 ready 로 올라오며 합류했다.
+    "retriever.mmr:enable":                  (3, ("A", "C"),  False, "rules"),
     "retriever.search_type:replace":         (1, ("A",),      False, "rules"),
     "retriever.top_k:decrease":              (2, ("C",),      False, "internal"),
     "retriever.top_k:increase":              (2, ("A",),      False, "internal"),
@@ -140,10 +141,12 @@ class ActionInventoryBaselineTest(unittest.TestCase):
         """계획서 §2에 적힌 수치와 일치해야 한다."""
         # #79 머지로 실행 가능 action 과 ready 라벨이 각각 하나씩 늘었다
         # (generation.abstention_relaxed:enable / generation_wrongful_abstention).
+        # retrieval_duplicate_crowding 이 ready 로 올라오며 ready 가 하나 더 늘었지만
+        # action 은 안 늘었다 — 이미 있는 retriever.mmr:enable 의 지지 라벨이 될 뿐이다.
         self.assertEqual(self.snapshot["executable_count"], 19)
         self.assertEqual(self.snapshot["shared_count"], 12)
         self.assertEqual(self.snapshot["blocked_count"], 9)
-        self.assertEqual(self.snapshot["label_status"]["ready"], 20)
+        self.assertEqual(self.snapshot["label_status"]["ready"], 21)
 
 
 class CompetingAxisBaselineTest(unittest.TestCase):
