@@ -48,6 +48,7 @@ _AXIS_NOUNS = {
     "generation.restate_question": "질문 재진술",
     "generation.completeness_mode": "완전성 모드",
     "generation.abstention_strict": "기권 기준",
+    "generation.abstention_relaxed": "기권 완화",
     "generation.model": "생성 모델",
 }
 _OPERATION_VERBS = {
