@@ -1,5 +1,13 @@
 # Optimizer 구현·연동 계획
 
+> ⚠️ **SUPERSEDED (일부)** — 선택 단위가 failure label 에서 **config action** 으로
+> 옮겨졌다. 이 문서에서 "라벨을 고른 뒤 그 라벨의 처방을 순서대로 시도한다"고
+> 설명하는 부분은 더 이상 코드와 맞지 않는다. 현행 설계는
+> [`ACTION_CENTERED_OPTIMIZER_IMPLEMENTATION_PLAN.md`](ACTION_CENTERED_OPTIMIZER_IMPLEMENTATION_PLAN.md)
+> 를 읽을 것. `PrescriptionCandidate` 와 `OptimizationRequest.failure_label` /
+> `related_failure_labels` / `candidates` 는 제거됐다.
+
+
 > 상태: 1차 구현 완료, 팀 연동 합의 항목 추적 중
 > 작성 목적: `optimizer.py`와 `internal_adapter.py` 담당 작업, 다른 Optimize/Eval/Index
 > 모듈과의 연결 계약, 테스트 및 완료 기준을 한곳에 기록한다.

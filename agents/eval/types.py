@@ -26,6 +26,19 @@ from core.schema import Finding, Probe
 # lexical 단독 게이트 문턱 — RAGAS 가 없는 모드(DEEP 미만)나 판정기 실패 때만 쓰인다.
 # RAGAS 가 측정된 실행에서는 lexical 을 단독 게이트로 쓰지 않는다(아래 혼합 점수 참고).
 F1_PASS_THRESHOLD = 0.5
+# answer_match 최댓값. degrade 된(불안정한) 심판이 정답을 오답으로 끌어내리는 걸 막는
+# 면제선으로만 쓴다(_degraded_near_miss). 통과 문턱(0.5)이 아니라 이 값을 쓰는 이유:
+# 0.5~0.9 대의 애매한 근접 오답은 심판이 죽었을 때 보수적으로 강등해야 하고, 최댓값만
+# 면제해야 안전망이 헐거워지지 않는다.
+#
+# 주의 — 이 값이 곧 문자열 완전일치는 아니다. gold 가 정규화 후 10자 이하면 answer_match
+# 가 char-recall 경로를 타므로(metrics_basic.answer_match) gold 를 포함하기만 하면 1.0 이
+# 나온다: gold '사망' ↔ 답 '사망하지 않았다' = 1.0. 즉 짧은 gold 의 부정문 근접 오답은
+# 이 선을 그냥 통과한다. 그래서 면제는 이 값 단독이 아니라 faithfulness 하한과 **함께**
+# 걸어야 한다 — 위 예에서 컨텍스트가 '사망'을 말하면 '사망하지 않았다'는 근거에 안 붙어
+# faithfulness 가 떨어지고, 그 축이 강등을 살려낸다. 면제선을 넓히거나 faithfulness 조건을
+# 떼면 _degraded_near_miss 가 원래 잡으려던 부정문 오답이 그대로 새어 나간다.
+F1_EXACT_MATCH = 1.0
 DEFAULT_TOP_K = 5              # index_config.top_k 미지정 시 검색 개수
 
 # STEP3-2 RAGAS 지표 임계값 (설계 STEP4 표 기준, 낮으면 Finding 생성)
@@ -111,22 +124,28 @@ KG_TOP_K_NEIGHBORS = 2
 #   그 사이               → "none"         (재봤으나 주제 응집 안 보임 → 청킹 조정)
 # "못 잰" 경우는 이 임계값과 무관하게 "unmeasured" 로 따로 나간다(topic_cluster.py 참고).
 #
-# 임의값 — 실측 캘리브레이션 필요(rules.py 의 diagnosis_confidence: None 과 같은 미완성 상태).
-# TODO(eval-캘리브레이션) 현재 두 값은 ratio 추정량의 분산에 비해 너무 촘촘하다.
-#   시뮬(문서 10×50청크, 실패를 무작위로 뽑아 '주제 신호 없음'을 만든 60회) 실측:
-#     실패 gold  10개 → ratio 중앙값 1.04, stdev 0.93
-#     실패 gold  20개 → ratio 중앙값 1.00, stdev 0.50
-#     실패 gold 100개 → ratio 중앙값 1.06, stdev 0.21
-#   중앙값은 1.0 에 제대로 붙지만(= baseline 추정은 편향 없음), 실패가 보통 수십 개인
-#   구간에서 stdev(~0.5)가 none 대의 폭(1.1~1.3 = 0.2)보다 훨씬 크다. 그래서 신호가
-#   없는 회차도 우연히 spread/concentrated 로 튄다(60회 중 none 은 7회뿐).
-#   캘리브레이션 때는 임계값만 옮길 게 아니라 (a) none 대 폭을 분산에 맞춰 넓히거나
-#   (b) 실패 gold 수에 따라 폭을 조절하는 쪽을 함께 봐야 한다.
-#   지금 이 좁은 폭이 안전한 이유는 spread/concentrated 가 같은 처방(임베딩 교체)으로
-#   수렴해서 오분류의 라우팅 영향이 없기 때문이다 — 둘이 갈리는 순간 이 TODO 가 급해진다.
-TOPIC_CLUSTER_CONCENTRATED_RATIO = 1.3
-TOPIC_CLUSTER_SPREAD_RATIO = 1.1
+# 경계는 고정 상수가 아니라 실패 gold 수 N 에 따라 동적으로 잡는다(캘리브레이션 결과).
+#   none 대 = 1.0 ± k·C/sqrt(N)  →  topic_cluster.dynamic_bounds(N) 가 계산한다.
+#     ratio >= 1.0 + k·C/sqrt(N) → "concentrated"
+#     ratio <= 1.0 - k·C/sqrt(N) → "spread"
+#     그 사이                    → "none"
+#
+# 캘리브레이션 근거(tools/topic_cluster_calibration, 세금가이드 코퍼스 597청크, LLM 0):
+#   "주제 신호 없음"(코퍼스 전체에서 실패 gold 를 무작위 추출)의 null ratio 분포는
+#   중앙값이 N 무관하게 1.00 에 붙고(baseline 편향 없음), stdev 는 N 이 커질수록
+#   규칙적으로 줄어든다 — stdev·sqrt(N) 이 0.10~0.13 로 거의 일정(=c/sqrt(N) 법칙):
+#     N=5→stdev0.058  N=10→0.040  N=20→0.026  N=40→0.018  N=100→0.010
+#   그래서 고정 폭(옛 1.1~1.3)은 표본 적은 구간에서 null 분산(예: N=10 이면 ±0.06)보다
+#   좁아 신호 없는 회차도 spread/concentrated 로 튀고(옛 경계로 null 의 99% 가 none 밖),
+#   표본 많은 구간에선 반대로 과하게 넓었다. 폭을 sqrt(N) 로 좁혀 오분류율을 표본 수와
+#   무관하게 일정하게 맞춘다(TODO 가 제시한 (b) 동적 조절).
+# k=2.33: null 분포를 none 으로 흡수하는 신뢰구간(편측 ~99%). 대조군(같은 주제 인접
+#   블록 = '뭉침' 신호)과 대비 시 null 누출(=비싼 재색인 오발) 1~4%, 신호 검출 91~97%
+#   로 균형점이었다(k=1.645 는 누출 7~11%, k=2.5 는 누출은 더 주나 검출 이득 없음).
+TOPIC_CLUSTER_NULL_C = 0.118        # null stdev·sqrt(N) 의 실측 상수(c/sqrt(N) 법칙)
+TOPIC_CLUSTER_BOUNDARY_K = 2.33     # 경계 폭 계수(1.0 ± k·C/sqrt(N)); 클수록 none 대가 넓다
 # 평균 응집도를 잴 때 뽑는 청크 표본 수 상한(전량 O(n^2) 회피). baseline·실패 gold 공용.
+# 캘리브레이션도 이 상한 안에서 stdev 를 쟀으므로 C 는 이 값과 짝이다(상한 바뀌면 재보정).
 TOPIC_CLUSTER_BASELINE_SAMPLE = 100
 
 # STEP1 시나리오 샘플링 후보 (RAGAS Scenario 파라미터)

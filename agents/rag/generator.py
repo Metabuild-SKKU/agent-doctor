@@ -450,6 +450,25 @@ def _warn_unknown_provider_once(selected: str) -> None:
           f"(RAG_LLM_PROVIDER: openai|gemini|github|auto)")
 
 
+# auto 는 OpenAI 를 먼저 시도한다 — 다른 용도로 OPENAI_API_KEY 를 넣으면 Gemini 로 돌던
+# 답변 생성이 말없이 OpenAI 로 옮겨간다. 그 전환만 프로세스당 한 번 알린다
+# (질문마다 찍으면 Eval/Optimize 병렬 실행에서 수백 줄이 된다).
+# 시도 시점이 아니라 첫 성공 직후에 찍는다 — 만료된 키면 실제로는 Gemini 로
+# 폴백하는데 "OpenAI 로 답했다"는 줄만 남는다.
+_notified_auto_openai = False
+_auto_openai_notice_lock = threading.Lock()
+
+
+def _notify_auto_openai_once() -> None:
+    global _notified_auto_openai
+    with _auto_openai_notice_lock:
+        if _notified_auto_openai:
+            return
+        _notified_auto_openai = True
+    print("[RAG] auto → OpenAI 로 답변 생성 중(OPENAI_API_KEY 감지). "
+          "고정하려면 RAG_LLM_PROVIDER=gemini|openai|github")
+
+
 # LLM provider를 선택 -> 실제 provider별 생성 함수를 호출
 # auto 모드에서는 OpenAI -> Gemini -> GitHub 순서로 사용 가능한 provider 시도
 # 모두 실패하면 None을 반환해 extractive fallback으로 넘어가기
@@ -492,6 +511,8 @@ def _llm_generate(
                     lambda: _openai_generate(system, user, model=selected_model, config=config),
                     "생성", tag="RAG")
                 if result:
+                    if selected == "auto":
+                        _notify_auto_openai_once()
                     return result
             if name == "gemini" and os.getenv("GEMINI_API_KEY"):
                 result = run_with_retry(
@@ -559,7 +580,19 @@ def _build_prompt(
         )
     else:
         clauses.append("한국어로 답하라.")
-    if _gen_flag(config, "abstention_strict", False):
+    # 기권 성향은 한 축의 양방향이라 둘을 동시에 싣지 않는다.
+    #
+    # 어느 쪽이 이길지는 여기서 정하지 않는다 — 처방 적용 시점에 config_mapper 의
+    # EXCLUSIVE_FLAG_PAIRS 가 반대쪽을 내려서(마지막에 쓴 쪽이 이긴다) 정상 경로에서는
+    # 애초에 한쪽만 True 로 들어온다. 아래 elif 는 손으로 고친 config 등 그 경로를 안 거친
+    # 입력에 대한 백스톱일 뿐이다. 여기서 우선순위로 푸는 건 안 된다: 진 쪽 처방이 영구히
+    # no-op 이 되어 롤백 + blacklist 로 사라지고, 그 라벨의 레버가 죽는다.
+    if _gen_flag(config, "abstention_relaxed", False):
+        clauses.append(
+            "컨텍스트에 질문과 관련된 근거가 조금이라도 있으면 그것을 바탕으로 최대한 답하라. "
+            "명백히 근거가 전혀 없을 때에만 '제공된 정보로는 알 수 없습니다'라고 답하라."
+        )
+    elif _gen_flag(config, "abstention_strict", False):
         clauses.append(
             "조금이라도 확신이 없으면 지어내지 말고 반드시 "
             "'제공된 정보로는 알 수 없습니다'라고 답하라."

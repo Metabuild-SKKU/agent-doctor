@@ -6,6 +6,8 @@ from copy import deepcopy
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from agents.optimize import action_catalog
+from agents.optimize.config_mapper import canonicalize_path
 from agents.optimize.optimizer import (
     filter_candidate_values,
     is_capability_supported,
@@ -16,7 +18,6 @@ from agents.optimize.schemas import (
     ConfigPatch,
     InternalAdapterResult,
     OptimizationRequest,
-    PrescriptionCandidate,
     RAGBuilderResult,
 )
 
@@ -79,35 +80,40 @@ class OptimizerPolicyTest(unittest.TestCase):
 
 
 class OptimizerExecutionTest(unittest.TestCase):
-    def make_candidate(
-        self,
+    # 선택 단위가 action 하나가 된 뒤 optimizer 는 후보 목록을 순회하지 않는다.
+    # 요청이 이미 고른 변경 하나를 들고 오고, optimizer 는 그것을 재검증할 뿐이다.
+    # 이 helper 는 그 "고른 변경"을 request kwargs 로 돌려준다.
+    @staticmethod
+    def make_action(
         *,
         prescription_id="resize_chunks",
+        action_key=None,
         search_space=None,
-        reindex=True,
+        **_ignored,
     ):
-        return PrescriptionCandidate(
-            id=prescription_id,
-            failure_label="retrieval_missing_gold",
-            group="A",
-            status="ready",
-            patch=ConfigPatch(
-                changes={"chunk_size": "increase"},
-                reindex_required=reindex,
-                description="청크 크기 조정",
-            ),
-            search_space=search_space or {},
-        )
+        space = dict(search_space or {})
+        if action_key is None and space:
+            # 축과 후보값에서 유도한다. 숫자 축은 이 테스트들에서 늘 '증가' 방향이라
+            # 기본값으로 두고, 필요하면 호출부가 action_key 를 직접 준다.
+            path, values = next(iter(space.items()))
+            first = values[0] if values else None
+            operation = action_catalog.derive_operation(first)
+            if operation == "replace" and isinstance(first, (int, float)):
+                operation = "increase"
+            action_key = f"{canonicalize_path(path)}:{operation}"
+        return {
+            "search_space": space,
+            "action_key": action_key,
+            "prescription_id": prescription_id,
+        }
 
     def make_request(self, **overrides):
         values = {
             "request_id": "request-1",
             "iteration": 0,
             "baseline_config": {"chunk_size": 512, "chunk_overlap": 50},
-            "failure_label": "retrieval_missing_gold",
-            "candidates": [
-                self.make_candidate(search_space={"chunker.chunk_size": [600, 800]})
-            ],
+            "supporting_labels": ["retrieval_missing_gold"],
+            **self.make_action(search_space={"chunker.chunk_size": [600, 800]}),
             "optimizer": "rules",
         }
         values.update(overrides)
@@ -125,30 +131,24 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertIsNone(result.improved)
         self.assertEqual(request.baseline_config["chunk_size"], 512)
 
-    def test_single_candidate_can_use_request_level_search_space(self):
-        request = self.make_request(
-            candidates=[self.make_candidate(search_space={})],
-            search_space={"chunk_size": [700]},
-        )
+    def test_request_search_space_accepts_flat_keys(self):
+        """요청의 search_space 가 유일한 탐색 범위 계약이다.
+
+        전환 전에는 후보별 search_space 와 요청 수준 search_space 가 둘 다 있어
+        어느 쪽이 이기는지 규칙이 필요했다. 선택이 planner 로 모이면서 그 이중
+        계약이 사라졌다 — 요청에 실린 것 하나뿐이다.
+        """
+        request = self.make_request(search_space={"chunk_size": [700]})
 
         result = run(request)
 
         self.assertEqual(result.config_patch.changes, {"chunker.chunk_size": 700})
 
-    def test_candidate_search_space_has_priority_over_request_search_space(self):
-        request = self.make_request(search_space={"chunk_size": [900]})
-
-        result = run(request)
-
-        self.assertEqual(result.config_patch.changes, {"chunker.chunk_size": 600})
-
     def test_constraints_remove_invalid_values_before_rules_selection(self):
         request = self.make_request(
-            candidates=[
-                self.make_candidate(
+            **self.make_action(
                     search_space={"chunker.chunk_size": [100, 400, 1600]}
                 )
-            ]
         )
 
         result = run(request)
@@ -158,14 +158,14 @@ class OptimizerExecutionTest(unittest.TestCase):
     def test_unsupported_pipeline_capability_is_skipped(self):
         # embedding_model 은 아직 소비처가 확인되지 않아 기본 비허용이다.
         # (top_k 는 소비처가 확인돼 허용으로 바뀌었으므로 이 케이스의 예시로 쓰지 않는다.)
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="swap_embedding_model",
             search_space={"embedding.model": ["openai://text-embedding-3-large"]},
             reindex=True,
         )
         request = self.make_request(
             baseline_config={"embedding_model": "openai://text-embedding-3-small"},
-            candidates=[candidate],
+            **candidate,
             metadata={"capabilities": {"retriever.top_k": False}},
         )
 
@@ -179,14 +179,14 @@ class OptimizerExecutionTest(unittest.TestCase):
         )
 
     def test_capability_can_be_explicitly_enabled(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="increase_top_k",
             search_space={"retriever.top_k": [5, 7]},
             reindex=False,
         )
         request = self.make_request(
             baseline_config={"top_k": 3},
-            candidates=[candidate],
+            **candidate,
             metadata={"capabilities": {"retriever.top_k": True}},
         )
 
@@ -197,14 +197,14 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertFalse(result.needs_reindex)
 
     def test_reranker_toggle_is_mappable_and_does_not_reindex(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="enable_reranker",
             search_space={"reranker.enabled": [True]},
             reindex=False,
         )
         request = self.make_request(
             baseline_config={"use_reranker": False},
-            candidates=[candidate],
+            **candidate,
         )
 
         result = run(request)
@@ -217,14 +217,14 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertFalse(result.needs_reindex)
 
     def test_context_compression_is_mappable_and_does_not_reindex(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="context_compression",
             search_space={"context.compression.enabled": [True]},
             reindex=False,
         )
         request = self.make_request(
             baseline_config={"context_compression": False},
-            candidates=[candidate],
+            **candidate,
         )
 
         result = run(request)
@@ -237,14 +237,14 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertFalse(result.needs_reindex)
 
     def test_unavailable_runtime_reranker_is_skipped(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="enable_reranker",
             search_space={"reranker.enabled": [True]},
             reindex=False,
         )
         request = self.make_request(
             baseline_config={"use_reranker": False},
-            candidates=[candidate],
+            **candidate,
             metadata={
                 "runtime_capabilities": {
                     "reranker": {
@@ -269,14 +269,14 @@ class OptimizerExecutionTest(unittest.TestCase):
         )
 
     def test_unknown_runtime_reranker_is_skipped(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="enable_reranker",
             search_space={"reranker.enabled": [True]},
             reindex=False,
         )
         request = self.make_request(
             baseline_config={"use_reranker": False},
-            candidates=[candidate],
+            **candidate,
             metadata={"runtime_capabilities": {}},
         )
 
@@ -289,7 +289,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         )
 
     def test_reranker_candidate_count_requires_enabled_reranker(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="widen_rerank_candidates",
             search_space={"reranker.candidate_count": [40]},
             reindex=False,
@@ -299,7 +299,7 @@ class OptimizerExecutionTest(unittest.TestCase):
                 "use_reranker": False,
                 "rerank_candidates": 20,
             },
-            candidates=[candidate],
+            **candidate,
             metadata={
                 "runtime_capabilities": {
                     "reranker": {
@@ -319,6 +319,7 @@ class OptimizerExecutionTest(unittest.TestCase):
             result.metadata["skipped_candidates"],
             [
                 {
+                    "action_key": "reranker.candidate_count:increase",
                     "prescription_id": "widen_rerank_candidates",
                     "reason": "reranker_disabled",
                 }
@@ -326,10 +327,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         )
 
     def test_missing_search_space_is_skipped_without_symbolic_interpretation(self):
-        request = self.make_request(
-            candidates=[self.make_candidate(search_space={})],
-            search_space={},
-        )
+        request = self.make_request(search_space={})
 
         result = run(request)
 
@@ -339,42 +337,46 @@ class OptimizerExecutionTest(unittest.TestCase):
 
     def test_multi_axis_search_space_is_skipped(self):
         request = self.make_request(
-            candidates=[
-                self.make_candidate(
+            **self.make_action(
                     search_space={
                         "chunker.chunk_size": [600],
                         "chunker.chunk_overlap": [100],
                     }
                 )
-            ]
         )
 
         result = run(request)
 
         self.assertEqual(result.status, "skipped")
 
-    def test_candidates_are_checked_in_planner_order(self):
-        unsupported = self.make_candidate(
-            prescription_id="swap_embedding_model",
-            search_space={"embedding.model": ["unsupported/model"]},
+    def test_optimizer_does_not_reorder_the_selection(self):
+        """optimizer 는 "어떤 변경을 먼저 시도할지"를 다시 정하지 않는다.
+
+        전환 전에는 planner 가 후보 목록을 넘기고 optimizer 가 선언 순서대로 훑어
+        첫 실행 가능 후보를 골랐다 — 선택 책임이 두 계층에 흩어져 있었다. 이제 경쟁은
+        planner 안에서 끝나고, optimizer 는 넘어온 변경 하나를 재검증만 한다.
+        실행 불가면 대신 고르는 게 아니라 skip 을 돌려주고, 다음 action 선택은
+        agent 가 planner 를 다시 불러서 한다.
+        """
+        request = self.make_request(
+            **self.make_action(
+                prescription_id="swap_embedding_model",
+                action_key="embedding.model:replace",
+                search_space={"embedding.model": ["unsupported/model"]},
+            )
         )
-        supported = self.make_candidate(
-            prescription_id="resize_chunks",
-            search_space={"chunker.chunk_size": [700]},
-        )
-        request = self.make_request(candidates=[unsupported, supported])
 
         result = run(request)
 
-        self.assertEqual(result.selected_candidate.id, "resize_chunks")
-        self.assertEqual(result.config_patch.changes, {"chunker.chunk_size": 700})
+        self.assertEqual(result.status, "skipped")
+        self.assertIsNone(result.config_patch)
         self.assertEqual(
-            result.metadata["skipped_candidates"][0]["prescription_id"],
-            "swap_embedding_model",
+            result.metadata["skipped_candidates"][0]["action_key"],
+            "embedding.model:replace",
         )
 
     def test_internal_next_candidate_is_normalized_to_patch(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="increase_top_k",
             search_space={"retriever.top_k": [8, 12]},
             reindex=False,
@@ -382,7 +384,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         request = self.make_request(
             optimizer="internal",
             baseline_config={"top_k": 5},
-            candidates=[candidate],
+            **candidate,
             max_trials=2,
         )
 
@@ -404,7 +406,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertEqual(result.metadata["parameter_path"], "retriever.top_k")
 
     def test_internal_completed_baseline_keeps_current_config(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="increase_top_k",
             search_space={"retriever.top_k": [8, 12]},
             reindex=False,
@@ -412,7 +414,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         request = self.make_request(
             optimizer="internal",
             baseline_config={"top_k": 5},
-            candidates=[candidate],
+            **candidate,
             max_trials=2,
         )
 
@@ -433,7 +435,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertEqual(result.metadata["error_code"], "baseline_selected")
 
     def test_internal_rejects_config_outside_filtered_candidates(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="increase_top_k",
             search_space={"retriever.top_k": [8, 12]},
             reindex=False,
@@ -441,7 +443,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         request = self.make_request(
             optimizer="internal",
             baseline_config={"top_k": 5},
-            candidates=[candidate],
+            **candidate,
             max_trials=2,
         )
 
@@ -461,12 +463,12 @@ class OptimizerExecutionTest(unittest.TestCase):
         )
 
     def test_chunk_prescreener_recoverable_skip_falls_back_to_rules(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             search_space={"chunker.chunk_size": [400]},
         )
         request = self.make_request(
             optimizer="internal",
-            candidates=[candidate],
+            **candidate,
             max_trials=1,
         )
 
@@ -494,12 +496,12 @@ class OptimizerExecutionTest(unittest.TestCase):
                 self.assertEqual(result.metadata["fallback_reason"], error_code)
 
     def test_chunk_prescreener_nonrecoverable_skip_does_not_fall_back(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             search_space={"chunker.chunk_size": [400]},
         )
         request = self.make_request(
             optimizer="internal",
-            candidates=[candidate],
+            **candidate,
             max_trials=1,
         )
 
@@ -576,7 +578,7 @@ class OptimizerExecutionTest(unittest.TestCase):
 
     # internal × chunker.strategy (범주형 축) ------------------------------
     def make_strategy_request(self, *, values=None, **overrides):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="switch_to_recursive_sentence",
             search_space={
                 "chunker.strategy": list(
@@ -592,8 +594,8 @@ class OptimizerExecutionTest(unittest.TestCase):
                 "chunk_overlap": 50,
                 "chunk_strategy": "fixed",
             },
-            "candidates": [candidate],
             "max_trials": 2,
+            **candidate,
         }
         values_.update(overrides)
         return self.make_request(**values_)
@@ -649,7 +651,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         self.assertEqual(result.metadata["error_code"], "unsupported_capability")
 
     def test_internal_strategy_keeps_single_axis_guarantee(self):
-        candidate = self.make_candidate(
+        candidate = self.make_action(
             prescription_id="switch_to_recursive_sentence",
             search_space={
                 "chunker.strategy": ["recursive_sentence"],
@@ -659,7 +661,7 @@ class OptimizerExecutionTest(unittest.TestCase):
         request = self.make_request(
             optimizer="internal",
             baseline_config={"chunk_size": 512, "chunk_strategy": "fixed"},
-            candidates=[candidate],
+            **candidate,
             max_trials=2,
         )
 

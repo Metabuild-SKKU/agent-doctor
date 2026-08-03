@@ -22,6 +22,36 @@ FailureGroup = Literal["A", "B", "C", "D"]
 # 처방 규칙의 실행 가능 상태. ready만 자동 적용 대상이다.
 PrescriptionStatus = Literal["ready", "draft", "unassigned", "manual"]
 
+# action이 config 축에 가하는 변경의 종류.
+#   increase/decrease : 방향이 고정. action key에 방향을 담는다.
+#   enable/disable    : boolean 축. 현재 상태가 한쪽을 no-op으로 만들어 자동 배타된다.
+#   replace           : 고정값 교체. 값은 key가 아니라 후보값으로 넘긴다 —
+#                       같은 축의 여러 값을 key로 쪼개면 지지 label 집합이 같아져
+#                       점수가 영원히 동률이 되고 그 축이 선택되지 않는다(starvation).
+#   adjust            : 방향과 폭이 진단 실측으로 정해진다(예: shift_to_favored_channel).
+ActionOperation = Literal[
+    "increase",
+    "decrease",
+    "enable",
+    "disable",
+    "replace",
+    "adjust",
+]
+
+# action이 실행되지 못하는 사유. 해제 조건이 다르므로 구분해 기록한다.
+#   not_state_mappable : config_mapper 계약 부재. mapper와 소비 노드가 함께 필요하다.
+#   capability_off     : 소비 경로는 있으나 검증된 후보/구현이 없다. capability 값만
+#                        바꾸면 열린다.
+#   runtime_unavailable: 이번 실행의 runtime capability 미검증. 품질 실패와 구분한다.
+ActionBlockedReason = Literal[
+    "not_state_mappable",
+    "capability_off",
+    "runtime_unavailable",
+]
+
+# aggregate 단계에서 action이 놓인 상태.
+ActionCandidateStatus = Literal["ready", "blocked", "conflicted"]
+
 # 사용자가 어떤 최적화 성향을 우선하는지 나타낸다.
 TargetProfile = Literal["accuracy", "speed", "cost", "balanced"]
 
@@ -88,58 +118,184 @@ class ConfigPatch:
 
 
 @dataclass
-class PrescriptionCandidate:
-    """
-    하나의 진단 라벨에 대해 시도할 수 있는 처방 후보.
+class SelectedAction:
+    """optimizer 가 실행 직전 검증까지 마치고 준비한 **변경 하나**.
 
-    rules.py의 raw dict 처방을 optimizer/adapter가 쓰기 쉬운 형태로 감싼다.
-    한 라벨에 여러 후보가 있을 수 있으며, planner나 optimizer는 priority,
-    cost, patch.reindex_required 등을 보고 어떤 후보를 먼저 적용할지 결정한다.
+    `PrescriptionCandidate`(라벨별 처방 후보 목록)를 대체한다. 선택 단위가 action 이
+    된 뒤 planner 는 이미 하나를 고른 상태로 요청을 보내므로, optimizer 가 후보
+    목록을 순회하며 "어떤 처방을 먼저 시도할지" 다시 정하는 계층이 사라졌다.
+    남은 책임은 "이 변경이 지금 실행 가능한가"의 재검증뿐이다.
 
     Attributes:
-        id: 처방 식별자. 예: "enable_reranker", "increase_top_k".
-        failure_label: 이 처방이 대응하는 진단 라벨.
-        group: 라벨 그룹. A=검색, B=생성, C=context 구조, D=데이터/평가 문제.
-        status: ready, draft, manual 등 현재 처방 실행 가능 상태.
-        patch: 실제 config 변경 내용. 수동 조치 라벨이면 None일 수 있다.
-        search_space: RAGBuilder/AutoRAG에 넘길 탐색 후보 영역.
-        cost: 처방 비용. 낮을수록 우선 시도하기 쉽다.
-        priority: planner가 계산한 후보 우선순위 점수.
-        target_metrics: 이 처방으로 개선하려는 주요 지표 목록.
-        applies_when: 이 처방이 적용되는 조건(신호 기반 택1).
-            예: {"topic_cluster": ["spread", "concentrated"]}.
-            ⚠️ 현재 이 태그의 소비는 꺼져 있다(planner._CONSUME_TOPIC_CLUSTER_SIGNAL=False)
-            — 관측용 신호로만 유지. Eval 은 finding.metadata 에 신호를 계속 기록하지만
-            planner 는 아직 그 값으로 후보를 거르지 않는다(전 처방 순차 시도). 소비를
-            유예한 이유: 신호가 고르는 swap_embedding_model 이 optimizer capability
-            (embedding_model=False)로 항상 거절되고, 임계값도 캘리브레이션 전이라
-            노이즈로 비싼 재색인을 잘못 발동시킬 위험이 있기 때문. 자세한 배경은
-            planner 의 _CONSUME_TOPIC_CLUSTER_SIGNAL 정의부 주석 참고.
-
-            (소비 ON 일 때의 계약) Eval이 finding.metadata로 주는 신호와 planner가
-            대조해 후보를 거른다(planner._prescription_applies). 비어있으면(또는 신호
-            미측정이면) 신호 판단 없이 순서대로 순차 시도(fallback). optimizer 는 걸러진
-            뒤의 search_space 만 소비하며 applies_when 을 직접 보지 않는다.
-            신호는 '선호'이지 '차단'이 아니다 — 걸러서 후보가 0개가 되면 planner 가
-            조건을 완화해 블랙리스트만 적용한다. 신호 때문에 라벨이 통째로 스킵돼
-            고칠 기회를 잃는 일을 막기 위해서다(planner._available_prescriptions).
-        reason: 이 처방을 제안한 이유.
-        tradeoffs: latency, cost, precision 하락 등 예상되는 부작용.
-        metadata: 실험적 신호나 원본 rule dict 같은 확장 정보.
+        action_key: 실제 config 변경의 canonical 식별자.
+        prescription_id: 이 변경을 선언한 rules.py 처방 id. 리포트가 선언으로
+            되짚기 위한 표시용이며 실행 제어에는 쓰지 않는다.
+        description: 사람이 읽는 변경 설명.
+        reindex_required: 적용 후 재색인이 필요한지.
+        search_space: constraint·no-op 필터를 통과한 최종 후보값. 단일 축이다.
     """
 
-    id: str
-    failure_label: str
-    group: FailureGroup
-    status: PrescriptionStatus
-    patch: ConfigPatch | None = None
-    search_space: dict[str, Any] = field(default_factory=dict)
-    cost: float | None = None
-    priority: float = 0.0
+    action_key: str | None = None
+    prescription_id: str | None = None
+    description: str = ""
+    reindex_required: bool = False
+    search_space: dict[str, list[Any]] = field(default_factory=dict)
+
+
+# ── Action 중심 모델 ──────────────────────────────────────────────
+# 선택 단위를 failure label에서 실제 config action으로 옮기기 위한 모델이다.
+# label은 진단 근거·영향 probe·목표 metric을 제공하고, action이 우선순위 경쟁·
+# 후보값·적용·이력·차단의 중심이 된다.
+# (설계: agents/optimize/ACTION_CENTERED_OPTIMIZER_IMPLEMENTATION_PLAN.md)
+
+
+@dataclass(frozen=True)
+class ActionDefinition:
+    """실제 config 변경 하나의 정적 정의. label과 독립적으로 한 번만 선언한다.
+
+    같은 config 변경이 여러 label에서 다른 이름으로 선언되던 것을 여기로 모은다.
+    reindex/cost/capability/conflict family의 단일 진실 원천이다.
+
+    key 규칙은 ``<canonical_path>:<operation>``이며 label이나 기존 prescription id를
+    넣지 않는다. 고정값도 넣지 않는다(replace 주석 참고).
+    """
+
+    key: str
+    canonical_path: str
+    operation: ActionOperation
+    description: str
+    # 재색인 필요 여부. base_cost의 판정 근거이며 optimizer.REINDEX_PATHS와 일치해야 한다.
+    reindex_required: bool = False
+    # 우선순위 점수의 분모. 현재는 재색인 여부로만 유도한다(재색인 3 / 런타임 1).
+    # rules.py의 cost가 전부 None이라 실측 근거가 없기 때문이며, 근거 없는 숫자를
+    # 새로 만들지 않는다. 실측 기반 세분화는 confidence 생산과 함께 별도 작업이다.
+    base_cost: float = 1.0
+    # 이 경로가 요구하는 pipeline capability(optimizer.PATH_CAPABILITIES 기준).
+    capability: str | None = None
+    # 같은 축을 공유해 서로 경쟁할 수 있는 action 묶음. 보통 canonical_path와 같다.
+    conflict_family: str = ""
+    # 실행 전에 만족해야 하는 조건(예: candidate_count는 reranker가 켜져 있어야 한다).
+    prerequisites: tuple[str, ...] = ()
+    # 실행 불가 사유. None이면 실행 가능하다.
+    blocked_reason: ActionBlockedReason | None = None
+    # 차단 사유의 상세(어느 capability인지 등). 리포트와 catalog 검증에 쓴다.
+    blocked_detail: str = ""
+    tradeoffs: tuple[str, ...] = ()
+
+    @property
+    def is_blocked(self) -> bool:
+        return self.blocked_reason is not None
+
+
+@dataclass
+class ActionSupport:
+    """한 label 묶음이 특정 action에 제공하는 런타임 근거.
+
+    Eval은 Finding을 probe마다 따로 만든다(affected_probes는 항상 1개). 같은 label의
+    Finding 여러 개를 먼저 support 하나로 묶은 뒤, 같은 action을 지지하는 support들을
+    ActionCandidate로 통합한다.
+    """
+
+    action_key: str
+    label: str
+    group: FailureGroup | None = None
+    # 이 support 를 만든 rules.py 처방 id. action 이 선택 단위가 된 뒤에도 리포트와
+    # 하위 호환 필드를 채우려면 "어느 선언에서 왔는지"를 알아야 한다.
+    prescription_id: str = ""
+    finding_ids: list[str] = field(default_factory=list)
+    # 이 label이 영향을 준 고유 probe. 점수는 label 수가 아니라 이 집합으로 센다.
+    affected_probes: set[str] = field(default_factory=set)
+    # rules.py diagnosis_confidence. 현재 전부 None이라 1.0으로 채워진다.
+    confidence: float = 1.0
+    # confidence의 출처. 나중에 실측 confidence가 생산되면 이력에서 구분할 수 있다.
+    confidence_source: str = "default"
     target_metrics: list[str] = field(default_factory=list)
+    # 이 support가 제안하는 구체 후보값. 근거값 계산 결과이거나 방향 키워드 폴백이다.
+    candidate_values: list[Any] = field(default_factory=list)
     applies_when: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
-    tradeoffs: list[str] = field(default_factory=list)
+    # 후보값이 어떻게 나왔는지(status, source, 분포 등). 리포트와 디버깅용.
+    grounding_metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_grounded(self) -> bool:
+        """측정값에 근거한 후보인지(방향 키워드 추측이 아닌지)."""
+        return self.grounding_metadata.get("status") in {
+            "grounded",
+            "explicit_candidates",
+        }
+
+
+@dataclass
+class ActionCandidate:
+    """같은 action key를 지지하는 support를 통합한 실제 선택 단위."""
+
+    action_key: str
+    definition: ActionDefinition
+    supports: list[ActionSupport] = field(default_factory=list)
+    # 이 action을 지지하는 label과 고유 probe. 점수와 설명의 근거다.
+    supporting_labels: list[str] = field(default_factory=list)
+    supporting_probes: set[str] = field(default_factory=set)
+    # 같은 축에서 반대 방향을 지지하는 action과 그 label.
+    opposing_action_keys: list[str] = field(default_factory=list)
+    opposing_labels: list[str] = field(default_factory=list)
+    # {canonical_path: [후보값...]}. 단일 축만 담는다.
+    search_space: dict[str, list[Any]] = field(default_factory=dict)
+    target_metrics: list[str] = field(default_factory=list)
+    score: float = 0.0
+    # 점수 구성 요소. 사용자에게 선택 이유를 설명하는 데 쓴다.
+    score_breakdown: dict[str, Any] = field(default_factory=dict)
+    status: ActionCandidateStatus = "ready"
+    reason: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def causal_rank_group(self) -> FailureGroup | None:
+        """이 action을 지지하는 label 중 가장 높은 우선순위 그룹.
+
+        A > C > B 인과는 점수보다 먼저 적용되는 1차 정렬 키다. 검색이 새는 상태에서
+        생성 처방을 먼저 적용하면 garbage-in tuning이 되기 때문이다.
+        """
+        order: dict[str, int] = {"A": 0, "C": 1, "B": 2, "D": 3}
+        groups = [s.group for s in self.supports if s.group]
+        if not groups:
+            return None
+        return min(groups, key=lambda g: order.get(g, 99))
+
+
+@dataclass(frozen=True)
+class ActionAttemptKey:
+    """정확한 config 전이 하나. 품질 실패로 차단할 단위다.
+
+    ``(label, prescription_id)``와 달리 baseline과 candidate를 포함하므로, 같은
+    action이라도 다른 baseline에서는 다시 시도할 수 있다. 즉 차단을 강화하는 것이
+    아니라 baseline별로 완화하는 식별자다.
+    """
+
+    action_key: str
+    baseline_fingerprint: str
+    candidate_fingerprint: str
+
+
+@dataclass(frozen=True)
+class ActionStudyKey:
+    """한 baseline에서 특정 search space를 이미 탐색했음을 나타낸다.
+
+    sweep을 정상 완료한 뒤 같은 탐색을 다시 시작하지 않기 위한 식별자다.
+    """
+
+    action_key: str
+    baseline_fingerprint: str
+    search_space_fingerprint: str
+
+
+@dataclass
+class SkippedAction:
+    """실행 단계에서 제외된 action과 그 사유."""
+
+    action_key: str
+    reason: str
+    target: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -288,10 +444,9 @@ class OptimizationRequest:
         request_id: 최적화 요청 고유 ID.
         iteration: 현재 optimize 반복 회차.
         baseline_config: 변경 전 기준 config.
-        failure_label: 이번 요청에서 해결하려는 대표 진단 라벨.
-        related_failure_labels: 같은 Eval report에서 함께 관찰된 관련 라벨 목록.
-        candidates: planner가 선정한 처방 후보 목록.
-        search_space: optimizer가 탐색할 수 있는 config 후보 범위.
+        action_key: 이번 요청이 적용하려는 실제 config 변경. 선택의 단위다.
+        supporting_labels: 그 변경을 지지한 진단 라벨 전체.
+        search_space: optimizer가 탐색할 수 있는 config 후보 범위. 단일 축이다.
         fixed_config: 최적화 중 고정해야 하는 config 값.
         target_metrics: 개선해야 하는 목표 지표 목록.
         target_profile: 사용자의 최적화 성향. 예: accuracy, speed, cost, balanced.
@@ -300,14 +455,12 @@ class OptimizationRequest:
         reason: 요청 생성 이유.
         propose_only: True이면 실제 적용하지 않고 제안만 생성한다.
         metadata: adapter별 추가 입력이나 실험 정보를 담는 확장 필드.
+        prescription_id: 이 변경을 선언한 rules.py 처방 id(표시용).
     """
 
     request_id: str
     iteration: int
     baseline_config: dict[str, Any]
-    failure_label: str
-    related_failure_labels: list[str] = field(default_factory=list)
-    candidates: list[PrescriptionCandidate] = field(default_factory=list)
     search_space: dict[str, Any] = field(default_factory=dict)
     fixed_config: dict[str, Any] = field(default_factory=dict)
     target_metrics: list[str] = field(default_factory=list)
@@ -317,6 +470,22 @@ class OptimizationRequest:
     reason: str = ""
     propose_only: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    # ── action 중심 필드 ──────────────────────────────────────────
+    # 이 요청이 적용하려는 실제 config 변경. 선택의 단위이자 이력·차단의 identity 다.
+    action_key: str | None = None
+    action: ActionCandidate | None = None
+    # 이 action 을 지지한 라벨과 고유 probe. 대표 라벨 하나가 아니라 전체다.
+    supporting_labels: list[str] = field(default_factory=list)
+    supporting_probes: list[str] = field(default_factory=list)
+    # 같은 config 축에서 반대 방향을 지지한 라벨(있다면). 리포트가 충돌을 설명한다.
+    opposing_labels: list[str] = field(default_factory=list)
+    # 선택 근거. 사용자에게 "왜 이걸 골랐는지" 설명하는 데 쓴다.
+    action_score: float | None = None
+    action_score_breakdown: dict[str, Any] = field(default_factory=dict)
+    # 이 변경을 선언한 rules.py 처방 id. 리포트가 선언으로 되짚기 위한 표시용이며
+    # 실행 제어에는 쓰지 않는다(구현계획 §8.2 완료 조건).
+    prescription_id: str | None = None
 
 
 @dataclass
@@ -332,7 +501,7 @@ class OptimizationResult:
         request_id: 이 결과가 대응하는 OptimizationRequest ID.
         status: proposed, applied, manual_required, failed 등 결과 상태.
         optimizer: 실제 실행한 backend 이름.
-        selected_candidate: 최종 선택된 처방 후보.
+        selected_action: optimizer 가 실행 직전 검증을 마치고 준비한 변경 하나.
         config_patch: 현재 config에 병합할 변경 조각.
         best_config: 외부 optimizer가 반환한 전체 최적 config.
         before_metrics: 적용 전 평가 지표.
@@ -347,7 +516,7 @@ class OptimizationResult:
     request_id: str
     status: OptimizationStatus
     optimizer: OptimizerBackend
-    selected_candidate: PrescriptionCandidate | None = None
+    selected_action: SelectedAction | None = None
     config_patch: ConfigPatch | None = None
     best_config: dict[str, Any] | None = None
     before_metrics: dict[str, Any] = field(default_factory=dict)
@@ -409,6 +578,11 @@ class OptimizeDecision:
         manual_labels: 이번 진단에서 함께 발견된 D그룹(manual) 라벨들.
             apply_optimize로 자동 처방이 진행되는 경우에도, 별도로 사람이
             확인해야 할 문제가 있으면 여기 담아 reporter가 사용자에게 알린다.
+        metadata: 결정의 부가 근거. 특히 실행 가능한 action이 하나도 남지 않아
+            request가 None인 경우, 어떤 action이 왜 제외됐는지(rejected_actions)와
+            어떤 축이 충돌로 보류됐는지(deferred_axes)를 여기 담는다. request가
+            없으면 그 설명을 실을 곳이 여기뿐이다 — 없으면 "처방 없음"만 남고
+            사용자는 이유를 알 수 없다.
     """
 
     mode: DecisionMode
@@ -418,6 +592,7 @@ class OptimizeDecision:
     next_route: NextRoute = "serve"
     reason: str = ""
     manual_labels: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -442,16 +617,21 @@ class Verdict:
         unjudgeable: 리포트 부재로 '측정 자체가 없어' 롤백한 경우 True.
             처방이 나빴다는 증거가 아니라 판정이 불가했다는 뜻이므로, config 복원은
             하되 블랙리스트 등록은 건너뛴다(무죄추정). 정상 판정(유지/롤백)은 False.
+        margin_rejected: 점수가 오르긴 했으나 상승폭이
+            history.MIN_IMPROVEMENT_MARGIN 미만이라 롤백한 경우 True. 마진 값이
+            노이즈보다 과도하게 큰지 사후 검증하기 위한 기록이며, 판정 자체는
+            일반 롤백과 같다(하락으로 롤백한 경우는 False).
     """
 
     keep: bool
     before_score: float
     after_score: float
-    before_composite: Optional[float] = None
-    after_composite: Optional[float] = None
+    before_composite: float | None = None
+    after_composite: float | None = None
     floor_violations: list[str] = field(default_factory=list)
     reason: str = ""
     unjudgeable: bool = False
+    margin_rejected: bool = False
 
 
 @dataclass
@@ -470,6 +650,8 @@ class OptimizationReport:
         summary: 한두 문장짜리 전체 요약.
         problem: 진단된 핵심 문제 원인 설명.
         selected_prescription: 선택된 처방 ID 또는 이름.
+            ⚠️ DEPRECATED — 실제 선택 단위는 action_key다. rules.py 선언으로 되짚기
+            위한 표시용으로 남는다.
         config_changes: 사용자에게 보여줄 config 변경 요약.
         expected_tradeoffs: latency, cost, precision 등 예상되는 영향.
         manual_actions: 사용자가 직접 해야 하는 조치 목록.
@@ -477,6 +659,17 @@ class OptimizationReport:
         diff: config 적용 전후 차이. 제안만 한 경우 None일 수 있다.
         metadata: UI 표시용 세부 정보나 원본 result 정보.
         created_at: 리포트 생성 시각.
+
+        ── action 중심 설명 필드 ──────────────────────────────────
+        action_key: 이번에 바꾼(또는 바꾸려는) 실제 config 변경.
+        supporting_labels: 그 변경을 지지한 진단 라벨 전체. 대표 하나가 아니다 —
+            여러 라벨이 같은 변경을 지지했다는 사실이 선택 근거이기 때문이다.
+        opposing_labels: 같은 축에서 반대 방향을 지지한 라벨. 왜 이쪽을 골랐는지
+            설명하려면 반대편도 보여야 한다.
+        resolved_labels / remaining_labels: 지지받은 라벨 중 실제로 사라진 것과
+            남은 것. "지지받았다"와 "해결됐다"는 다른 사실이라 구분해 보고한다.
+        score_breakdown: 선택 점수의 구성 요소(고유 probe 수·가중 지지·비용 출처 등).
+        deferred_axes: 근소한 차이로 이번 방문에서 보류한 축과 그 이유.
     """
 
     report_id: str
@@ -492,6 +685,14 @@ class OptimizationReport:
     diff: ConfigDiff | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
+
+    action_key: str | None = None
+    supporting_labels: list[str] = field(default_factory=list)
+    opposing_labels: list[str] = field(default_factory=list)
+    resolved_labels: list[str] = field(default_factory=list)
+    remaining_labels: list[str] = field(default_factory=list)
+    score_breakdown: dict[str, Any] = field(default_factory=dict)
+    deferred_axes: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -525,9 +726,13 @@ class OptimizationHistoryItem:
     trial_id: str
     request_id: str
     iteration: int
+    # DEPRECATED: 선택 단위가 action 으로 옮겨졌다. 이 목록의 첫 원소를 "대표 라벨"로
+    #   읽던 실행 제어는 action_key 로 대체됐고, 여기는 설명·구버전 호환용으로 남는다.
+    #   지지 라벨 전체는 supporting_labels 를 읽어야 한다.
     failure_labels: list[str]
     optimizer: OptimizerBackend
     status: OptimizationStatus
+    # DEPRECATED: 실행 제어는 action_key/attempt·study key 가 소유한다(구현계획 §8.2).
     selected_prescription_id: str | None = None
     before_config: dict[str, Any] = field(default_factory=dict)
     after_config: dict[str, Any] = field(default_factory=dict)
@@ -538,3 +743,14 @@ class OptimizationHistoryItem:
     rollback_reason: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    # ── action 중심 필드 (구현계획 §5.4 결과 귀속) ────────────────────
+    # 이 시도가 실제로 바꾼 config 변경. 실행·이력·차단 identity 의 정본이다.
+    action_key: str | None = None
+    # 적용 당시 이 action 을 지지한 라벨과 고유 probe 스냅샷. 다음 Eval 의 남은
+    # 라벨과 비교해 "지지받았다"와 "실제로 해결됐다"를 구분한다.
+    supporting_labels: list[str] = field(default_factory=list)
+    supporting_probes: list[str] = field(default_factory=list)
+    # 정확한 config 전이와 탐색 범위의 식별자. 재선택 차단에 쓴다.
+    action_attempt_key: ActionAttemptKey | None = None
+    action_study_key: ActionStudyKey | None = None

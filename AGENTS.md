@@ -41,7 +41,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 | `probes`, `report` | Eval | Optimize, Serve, `graph.py` 분기 |
 | `diagnosis_cache`, `diagnosis_cache_version` | Eval | Eval |
 | `eval_cache`, `active_eval_key`, `eval_cache_hit` | Eval | Eval, Optimize |
-| `optimization_history`, `blacklist`, `completed_prescriptions` | Optimize | Optimize (다음 라운드), `route_after_eval()` (pending 확인) |
+| `optimization_history`, `blocked_action_attempts`, `completed_action_studies` | Optimize | Optimize (다음 라운드), `route_after_eval()` (pending 확인) |
+| `blacklist`, `completed_prescriptions` (구버전 표시용) | Optimize | 리포트 호환 경로만 — 실행 제어에는 쓰지 않는다 |
 | `iteration`, `max_iterations`, `optimize_visit_count`, `max_optimize_visits` | 반복 제어 | Optimize, `route_after_eval()` |
 | `mcp_endpoint` | Serve | (최종 출력) |
 | `status`, `error`, `current_agent` | 모든 에이전트 | 오케스트레이터 (`route_after_optimize()`가 `status`로 분기) |

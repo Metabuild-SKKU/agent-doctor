@@ -627,6 +627,15 @@ class InternalAdapter:
         budget_used: int,
         max_trials: int,
     ) -> InternalAdapterResult:
+        baseline = next(
+            (
+                trial
+                for trial in trials
+                if trial.is_baseline and self._is_completed(trial)
+            ),
+            None,
+        )
+
         passing = [trial for trial in trials if self._trial_passed(trial)]
         if passing:
             scored_passing = [trial for trial in passing if self._is_completed(trial)]
@@ -635,6 +644,28 @@ class InternalAdapter:
                 if scored_passing
                 else passing[0]
             )
+            # pass_threshold를 넘었다는 사실만으로 채택하면, '노이즈로 넘은 통과'가
+            # 그대로 굳는다(baseline 89.9 → 후보 90.1 같은 경우). 비교 가능한
+            # baseline이 있으면 통과 여부와 무관하게 min_delta를 요구한다.
+            # baseline이 없거나 후보에 점수가 없으면 비교 자체가 불가하므로 현행 유지.
+            pass_improved: bool | None = (
+                False if selected_pass.is_baseline else None
+            )
+            if (
+                baseline is not None
+                and not selected_pass.is_baseline
+                and self._is_completed(selected_pass)
+            ):
+                pass_improved = self._meets_min_delta(
+                    self._improvement(
+                        selected_pass.score,
+                        baseline.score,
+                        direction,
+                    ),
+                    min_delta,
+                )
+                if not pass_improved:
+                    selected_pass = baseline
             return self._result(
                 request,
                 status="completed",
@@ -652,7 +683,7 @@ class InternalAdapter:
                 metadata={
                     "best_trial_id": selected_pass.trial_id,
                     "best_is_baseline": selected_pass.is_baseline,
-                    "improved": False if selected_pass.is_baseline else None,
+                    "improved": pass_improved,
                     "min_delta": min_delta,
                     "budget_used": budget_used,
                     "max_trials": max_trials,
@@ -661,14 +692,6 @@ class InternalAdapter:
                 },
             )
 
-        baseline = next(
-            (
-                trial
-                for trial in trials
-                if trial.is_baseline and self._is_completed(trial)
-            ),
-            None,
-        )
         candidates = [
             trial
             for trial in trials
@@ -733,14 +756,13 @@ class InternalAdapter:
         best_is_baseline = False
         selected = best_candidate
         if baseline is not None:
-            improvement = self._improvement(
-                best_candidate.score,
-                baseline.score,
-                direction,
-            )
-            improved = improvement > 0 and (
-                improvement > min_delta
-                or math.isclose(improvement, min_delta, rel_tol=1e-12, abs_tol=1e-12)
+            improved = self._meets_min_delta(
+                self._improvement(
+                    best_candidate.score,
+                    baseline.score,
+                    direction,
+                ),
+                min_delta,
             )
             if not improved:
                 best_is_baseline = True
@@ -810,6 +832,19 @@ class InternalAdapter:
 
     def _is_completed(self, trial: InternalTrialResult) -> bool:
         return trial.status == "completed" and self._is_finite_number(trial.score)
+
+    def _meets_min_delta(self, improvement: float, min_delta: float) -> bool:
+        """상승폭이 min_delta를 만족하는가. (경계 포함)
+
+        ⚠️ history.meets_improvement_margin과 **동작이 같아야 한다**. 두 모듈이
+        독립적으로 "개선"을 판정하고 둘 다 사용자 리포트에 나가므로, 경계값에서
+        판정이 갈리면 같은 점수 변화가 경로에 따라 다르게 보고된다.
+        부동소수 비교식(`> delta` 또는 math.isclose)까지 그대로 맞춘다.
+        """
+        return improvement > 0 and (
+            improvement > min_delta
+            or math.isclose(improvement, min_delta, rel_tol=1e-12, abs_tol=1e-12)
+        )
 
     def _improvement(
         self,
@@ -962,6 +997,16 @@ class InternalAdapter:
         warnings: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> InternalAdapterResult:
+        # sweep 하나는 ActionStudy 하나다. 어느 study 의 관측인지 결과 자체가 말하게
+        # 해 두면, 이력·리포트가 대표 라벨을 되짚어 추측하지 않아도 된다.
+        # 지지 라벨은 설명용으로 전부 싣는다 — 하나만 남기면 "왜 이 축을 건드렸나"가
+        # 실제보다 좁게 보고된다.
+        study_metadata = dict(metadata or {})
+        if request.action_key:
+            study_metadata.setdefault("action_key", request.action_key)
+            study_metadata.setdefault(
+                "supporting_labels", list(request.supporting_labels)
+            )
         return InternalAdapterResult(
             request_id=request.request_id,
             status=status,  # type: ignore[arg-type]
@@ -974,7 +1019,7 @@ class InternalAdapter:
             search_space=deepcopy(search_space or {}),
             error=error,
             warnings=list(warnings or []),
-            metadata=dict(metadata or {}),
+            metadata=study_metadata,
         )
 
 

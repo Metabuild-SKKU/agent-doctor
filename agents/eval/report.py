@@ -103,6 +103,11 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     if rescued:
         scores["semantic_rescued"] = rescued
 
+    # fused RAGAS 가 개별 호출로 되돌아간 지표 수 — 0 이 정상(트랙당 chat 1회 전제).
+    repaired = _fused_repair_count(records)
+    if repaired:
+        scores["fused_repaired"] = repaired
+
     # 평가 신호(GT 규칙지표/RAGAS)가 전혀 없으면 진단 불가 →
     # eval 한계로 파이프라인을 막지 않도록 통과 처리(overall_score=None).
     # [설계 결정] 이건 "판정 보류"이지 "품질 확인"이 아니다 — ground_truth 없는 probe만 있거나
@@ -223,6 +228,18 @@ def _degraded_correctness_count(records: list[EvalRecord]) -> int:
     )
 
 
+def _fused_repair_count(records: list[EvalRecord]) -> int:
+    """fused RAGAS 가 결손으로 개별 호출을 되살린 지표 수(두 트랙 합).
+
+    fused 는 '트랙당 chat 1회'가 전제인데, 응답 절단·파싱 실패로 보수가 돌면 그 전제가
+    조용히 깨진다. 로그로만 남으면 회귀를 못 보므로 리포트 지표로 올린다 — 값이 크면
+    EVAL_RAGAS_FUSED_MAX_TOKENS 를 올리거나 프롬프트 블록 수를 줄일 신호다."""
+    return sum(
+        int(r.ragas.get("fused_repaired") or 0) + int(r.oracle_ragas.get("fused_repaired") or 0)
+        for r in records
+    )
+
+
 def _reranker_runtime(records: list[EvalRecord]) -> dict:
     """이번 Eval에서 reranker가 실제 점수를 만든 횟수를 운영 신호로 집계한다."""
     enabled_probes = sum(
@@ -323,7 +340,9 @@ def _rule_means(records: list[EvalRecord]) -> dict:
     # 판정에 쓰이는 값은 f1 단독이 아니라 혼합 점수(answer_score)다 — 의미축이 측정된 실행에서는
     # 그 평균도 함께 남긴다. f1 만 보면 '판정 기준'과 '표시 숫자'가 어긋난다.
     answer_scores = [r.answer_score for r in gt if r.answer_semantic is not None]
-    oracles = [r.oracle_f1 for r in gt]
+    # 오라클은 실패 probe 에만 생성되므로(agent.py STEP3) 실측된 record 만 평균 낸다 —
+    # 미측정분을 0 으로 섞으면 성공이 많을수록 평균이 내려가는 거꾸로 된 지표가 된다.
+    oracles = [r.oracle_f1 for r in gt if r.oracle_answer is not None]
     ems = [1.0 if r.exact_match else 0.0 for r in gt]
     out = {}
     if recalls:
@@ -336,6 +355,7 @@ def _rule_means(records: list[EvalRecord]) -> dict:
         out["mean_answer_score"] = sum(answer_scores) / len(answer_scores)
     if oracles:
         out["mean_oracle_f1"] = sum(oracles) / len(oracles)
+        out["oracle_measured"] = len(oracles)   # mean_oracle_f1·oracle_accuracy 의 실측 표본 수
     return out
 
 
@@ -362,11 +382,21 @@ def _oracle_accuracy(records: list[EvalRecord]) -> float | None:
 
     판정은 diagnose._oracle_ok 을 그대로 쓴다 — lexical(oracle_f1)뿐 아니라 DEEP 에서
     측정된 RAGAS answer_correctness 강등까지 반영해야, '진단은 oracle 실패인데 리포트엔
-    성공으로 집계'되는 어긋남이 생기지 않는다."""
+    성공으로 집계'되는 어긋남이 생기지 않는다.
+
+    오라클 답변은 실패 probe 에만 생성하므로(agent.py STEP3), 미측정 성공 probe 는 통과로
+    추론한다 — 성공의 전제가 recall=1 이라 gold 는 이미 실제 context 안에 있었고 그 답이
+    근거까지 맞았다. 분모는 그대로 gt 전체라 이전 실행과 비교 가능하고, 실측 표본 수는
+    scores 의 oracle_measured 로 남는다.
+
+    성공 판정을 _is_success 로 다시 묻지 않고 findings 로 읽는 이유: _is_success 는
+    _faith/_abstention_judged 를 타서 LLM 을 부를 수 있는데, 리포트는 LLM 을 안 부른다.
+    'findings 가 비었으면 성공' 은 diagnose 의 성공 게이트가 세우는 보장이다."""
     gt = [r for r in records if r.probe.ground_truth]
     if not gt:
         return None
-    passed = sum(1 for r in gt if _oracle_ok(r))
+    passed = sum(1 for r in gt
+                 if _oracle_ok(r) or (r.oracle_answer is None and not r.findings))
     return passed / len(gt)
 
 
@@ -391,6 +421,9 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     if rs.get("answer_correctness_degraded"):
         print(f"  ⚠ 정답 판정 degrade {rs['answer_correctness_degraded']}건 — "
               f"판정기(TP/FP/FN 분류) 실패로 의미유사도 단독 계산. 근접 오답을 못 걸렀을 수 있음")
+    if rs.get("fused_repaired"):
+        print(f"  ⚠ RAGAS fused 보수 {rs['fused_repaired']}건 — 통합 응답 결손으로 개별 호출 재실행. "
+              f"EVAL_RAGAS_FUSED_MAX_TOKENS 를 올릴 신호")
     runtime = report.runtime_summary or {}
     search = runtime.get("search") or {}
     rerank = runtime.get("reranker") or {}

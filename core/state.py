@@ -17,6 +17,11 @@ from core.schema import (
 )
 
 
+# 그래프 entity 추출 기본 모델. graph_index 가 config 미지정 시 폴백으로 같이 쓴다
+# (안내 로그가 실제 모델과 어긋나지 않도록 기본값 출처를 하나로 둔다).
+DEFAULT_GRAPH_LLM_MODEL = "gpt-4.1-mini"
+
+
 @dataclass
 class AgentDoctorState:
     """
@@ -120,7 +125,7 @@ class AgentDoctorState:
         },
         "graph_enabled": True,
         "graph_extraction": "auto",
-        "graph_llm_model": "gpt-4.1-mini",
+        "graph_llm_model": DEFAULT_GRAPH_LLM_MODEL,
         "graph_similarity_threshold": 0.9,
         "graph_output_dir": "output/index_graph",
         "corpus_visualization_enabled": True,
@@ -152,6 +157,7 @@ class AgentDoctorState:
         "restate_question": False,   # 답변 전 질문 재진술 강제
         "completeness_mode": False,  # 모든 하위 질문에 빠짐없이 답하도록 유도
         "abstention_strict": False,  # 확신 없으면 반드시 기권하도록 강화
+        "abstention_relaxed": False, # 근거가 있으면 기권 말고 최대한 답하도록 (과다 기권 완화)
         "generation_model": "",      # Tier3(모델 교체)용 자리. 빈값=env/기본 사용
     })
     # 인덱싱 부산물(청크/문서 수, 그래프 파일 경로, failed_documents 등).
@@ -178,19 +184,38 @@ class AgentDoctorState:
 
     # 반복 제어
     iteration: int = 0
-    max_iterations: int = 3
+    # iteration 은 "새 ActionStudy 를 적용한 횟수"다. 같은 action 안의 후보 sweep 은
+    # 전체가 iteration 하나로 묶이고, 롤백 후 다른 action 을 고르면 새 iteration 이다.
+    # 선택 단위가 라벨에서 action 으로 잘게 쪼개지면서 3회로는 18개 action 을 탐색하기에
+    # 얕아 5로 올렸다(위험 대응이 아니라 탐색 깊이 확보 — 구현계획 §5.3).
+    # 절대 안전선은 이 값이 아니라 아래 max_optimize_visits 다.
+    max_iterations: int = 5
     optimize_visit_count: int = 0
     max_optimize_visits: int = 20
 
     # Optimize Agent 이력/제어
     # optimization_history: 각 처방 시도 기록. 원소는 OptimizationHistoryItem
     #   (agents/optimize/schemas.py). core가 optimize를 import하지 않도록 타입은 느슨하게 둔다.
-    # blacklist: 롤백된 (label, prescription_id) 조합. planner가 재시도에서 제외.
+    # blacklist: 롤백된 (label, prescription_id) 조합.
+    #   ⚠️ DEPRECATED — 실행 제어(planner 제외 목록)는 아래 action 식별자 집합이 소유한다.
+    #   이 필드는 구버전 리포트·이력 호환을 위해 계속 채워지기만 한다.
     optimization_history: list = field(default_factory=list)
     blacklist: set = field(default_factory=set)
     # 내부 sweep을 정상 완료한 (label, prescription_id) 조합.
-    # 같은 파이프라인 실행에서 이미 탐색을 끝낸 처방을 다시 시작하지 않도록 한다.
+    #   ⚠️ DEPRECATED — blacklist 와 같은 이유로 기록만 남긴다.
     completed_prescriptions: set = field(default_factory=set)
+    # ── action 기반 실행 제어 (구현계획 §5.1) ─────────────────────────
+    # blocked_action_attempts: 품질이 나빠져 롤백된 **정확한 config 전이**.
+    #   원소는 ActionAttemptKey(action_key, baseline_fingerprint, candidate_fingerprint)
+    #   — agents/optimize/schemas.py. core가 optimize를 import하지 않도록 타입은 느슨하게 둔다.
+    #   baseline 이 달라지면 같은 action 을 다시 시도할 수 있다. 축 단위 방문 이력은
+    #   두지 않는다 — 상류를 고친 뒤 하류를 재평가하는 A>C>B 설계 의도와 충돌하기 때문이다.
+    blocked_action_attempts: set = field(default_factory=set)
+    # completed_action_studies: 한 baseline 에서 결론이 난 탐색.
+    #   원소는 ActionStudyKey(action_key, baseline_fingerprint, search_space_fingerprint).
+    #   sweep 정상 완료뿐 아니라 optimizer 가 "이 baseline 에서 적용 불가"로 판정한 경우도
+    #   같은 탐색을 다시 시작하지 않도록 여기에 기록한다.
+    completed_action_studies: set = field(default_factory=set)
     # optimization_report: 이번 Optimize 방문의 사용자용 처방 리포트.
     #   원소 타입은 OptimizationReport(agents/optimize/schemas.py). core가 optimize를
     #   import하지 않도록 타입은 느슨하게 둔다. Serve가 마지막 방문 리포트를 읽는다.

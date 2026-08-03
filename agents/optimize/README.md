@@ -1,5 +1,13 @@
 # Optimize Module Plan
 
+> ⚠️ **SUPERSEDED (일부)** — 선택 단위가 failure label 에서 **config action** 으로
+> 옮겨졌다. 이 문서에서 "라벨을 고른 뒤 그 라벨의 처방을 순서대로 시도한다"고
+> 설명하는 부분은 더 이상 코드와 맞지 않는다. 현행 설계는
+> [`ACTION_CENTERED_OPTIMIZER_IMPLEMENTATION_PLAN.md`](ACTION_CENTERED_OPTIMIZER_IMPLEMENTATION_PLAN.md)
+> 를 읽을 것. `PrescriptionCandidate` 와 `OptimizationRequest.failure_label` /
+> `related_failure_labels` / `candidates` 는 제거됐다.
+
+
 ## 목적
 
 Optimize 모듈은 Eval 단계에서 생성된 진단 결과를 읽고, RAG pipeline의 어떤 설정을 조정할지 결정한다. 단순히 점수가 낮은 지표에 대해 여러 설정을 한꺼번에 바꾸는 방식이 아니라, failure label을 기반으로 문제 원인을 분류하고, 그 원인에 맞는 처방과 search space를 만든다.

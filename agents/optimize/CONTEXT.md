@@ -133,7 +133,11 @@ Agent Doctor = 기존 RAG 파이프라인을 입력받아 **"왜 실패하는지
 ```
 agents/optimize/
   agent.py         # 진입점: state 읽고 → planner 호출 → state.index_config 수정 + iteration++
-  planner.py       # 라벨 읽고 우선순위 정렬 → 처방 후보(search space) 생성
+  planner.py       # 얇은 조율자: 분류·흐름 결정 → action 선택 요청 포장
+  action_catalog.py    # config 변경(action)의 단일 진실 원천
+  action_aggregator.py # Finding→support→action 통합·점수·충돌·정렬
+  eligibility.py       # "지금 실행 가능한가" 공유 판정 (optimizer 정책 재노출)
+  candidate_values.py  # 진단 측정값 → 구체 후보값 계산
   rules.py         # 라벨→처방 테이블 (선언적 데이터) [초안 완성]
   schemas.py       # OptimizationRequest, ConfigPatch, Guardrail 등 데이터 모델
   optimizer.py     # 어댑터 호출 상위 래퍼
