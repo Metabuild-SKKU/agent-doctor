@@ -159,6 +159,9 @@ class TreatmentCourseViewTest(unittest.TestCase):
         self.assertEqual(error_rx["drill"], {
             "label": "오류 원인",
             "rows": [],
+            # 선택 근거는 rows 와 모양이 달라 notes 로 따로 싣는다. 이 이력에는
+            # action 스냅샷이 없어 비어 있다.
+            "notes": [],
             "caption": "adapter 연결 실패",
         })
 
@@ -390,6 +393,107 @@ class ReportViewRecommendationsTest(unittest.TestCase):
                           metadata={"group": "A"})
         recs = build_report_view(self._state([finding], []))["recommendations"]
         self.assertEqual(recs, [])
+
+
+class ActionCenteredRxCardTest(unittest.TestCase):
+    """처방 카드는 "무엇을 바꿨나"(action)와 "무엇이 지지했나"(라벨 전체)를 말한다."""
+
+    @staticmethod
+    def _item(**overrides):
+        values = {
+            "trial_id": "t1",
+            "request_id": "r1",
+            "iteration": 1,
+            "failure_labels": ["retrieval_missing_gold"],
+            "optimizer": "rules",
+            "status": "applied",
+            "selected_prescription_id": "increase_top_k",
+            "before_config": {"top_k": 5},
+            "after_config": {"top_k": 10},
+            "reason": "gold가 검색 결과에 없음",
+            "action_key": "retriever.top_k:increase",
+            "supporting_labels": [
+                "retrieval_missing_gold",
+                "retrieval_incomplete_enumeration",
+            ],
+            "supporting_probes": ["p1", "p2", "p3"],
+        }
+        values.update(overrides)
+        item = OptimizationHistoryItem(**values)
+        item.metadata.update(
+            {
+                "before_score": 0.6,
+                "after_score": 0.8,
+                "resolved_labels": ["retrieval_missing_gold"],
+                "remaining_labels": ["retrieval_incomplete_enumeration"],
+            }
+        )
+        return item
+
+    def _rxs(self, item):
+        state = make_state(make_report())
+        state.optimization_history = [item]
+        return build_report_view(state)["rxs"]
+
+    def test_card_shows_action_and_every_supporting_label(self):
+        card = self._rxs(self._item())[0]
+
+        self.assertEqual(card["action"], "retriever.top_k:increase")
+        # 대표 라벨 하나로 좁히면 "여러 문제가 같은 변경을 원했다"는 선택 근거가 사라진다.
+        self.assertEqual(
+            card["target"],
+            "retrieval_missing_gold, retrieval_incomplete_enumeration",
+        )
+
+    def test_card_separates_supported_from_resolved(self):
+        """지지받은 라벨을 그대로 성과로 읽으면 리포트가 실제보다 좋아 보인다."""
+        card = self._rxs(self._item())[0]
+
+        self.assertEqual(card["resolved"], ["retrieval_missing_gold"])
+        self.assertEqual(card["remaining"], ["retrieval_incomplete_enumeration"])
+        notes = dict(card["drill"]["notes"])
+        self.assertEqual(notes["해결됨"], "retrieval_missing_gold")
+        self.assertEqual(notes["남음"], "retrieval_incomplete_enumeration")
+        self.assertEqual(notes["영향 질문"], "3건")
+
+    def test_selection_notes_do_not_leak_into_sweep_rows(self):
+        """drill.rows 는 sweep 막대 전용이다 — 모양이 섞이면 프론트 렌더가 깨진다."""
+        card = self._rxs(self._item())[0]
+
+        self.assertEqual(card["drill"]["rows"], [])
+
+    def test_course_point_uses_a_human_action_name(self):
+        state = make_state(make_report())
+        state.optimization_history = [self._item()]
+
+        labels = [p["label"] for p in build_report_view(state)["course"]]
+
+        self.assertIn("top_k 확대", labels)
+
+    def test_legacy_history_without_action_still_renders(self):
+        """이전 실행이 저장한 이력에는 action 필드가 없다 — 그래도 읽혀야 한다."""
+        legacy = OptimizationHistoryItem(
+            trial_id="old",
+            request_id="old",
+            iteration=1,
+            failure_labels=["retrieval_missing_gold"],
+            optimizer="rules",
+            status="applied",
+            selected_prescription_id="increase_top_k",
+            before_config={"top_k": 5},
+            after_config={"top_k": 10},
+        )
+        legacy.metadata.update({"before_score": 0.6, "after_score": 0.8})
+        state = make_state(make_report())
+        state.optimization_history = [legacy]
+
+        view = build_report_view(state)
+
+        self.assertEqual(view["rxs"][0]["action"], "")
+        self.assertEqual(view["rxs"][0]["target"], "retrieval_missing_gold")
+        self.assertEqual(view["rxs"][0]["drill"]["notes"], [])
+        # 처방 id 표를 통한 구버전 이름이 그대로 나온다.
+        self.assertIn("top_k 확대", [p["label"] for p in view["course"]])
 
 
 if __name__ == "__main__":

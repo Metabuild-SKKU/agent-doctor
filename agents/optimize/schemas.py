@@ -684,6 +684,8 @@ class OptimizationReport:
         summary: 한두 문장짜리 전체 요약.
         problem: 진단된 핵심 문제 원인 설명.
         selected_prescription: 선택된 처방 ID 또는 이름.
+            ⚠️ DEPRECATED — 실제 선택 단위는 action_key다. rules.py 선언으로 되짚기
+            위한 표시용으로 남는다.
         config_changes: 사용자에게 보여줄 config 변경 요약.
         expected_tradeoffs: latency, cost, precision 등 예상되는 영향.
         manual_actions: 사용자가 직접 해야 하는 조치 목록.
@@ -691,6 +693,17 @@ class OptimizationReport:
         diff: config 적용 전후 차이. 제안만 한 경우 None일 수 있다.
         metadata: UI 표시용 세부 정보나 원본 result 정보.
         created_at: 리포트 생성 시각.
+
+        ── action 중심 설명 필드 ──────────────────────────────────
+        action_key: 이번에 바꾼(또는 바꾸려는) 실제 config 변경.
+        supporting_labels: 그 변경을 지지한 진단 라벨 전체. 대표 하나가 아니다 —
+            여러 라벨이 같은 변경을 지지했다는 사실이 선택 근거이기 때문이다.
+        opposing_labels: 같은 축에서 반대 방향을 지지한 라벨. 왜 이쪽을 골랐는지
+            설명하려면 반대편도 보여야 한다.
+        resolved_labels / remaining_labels: 지지받은 라벨 중 실제로 사라진 것과
+            남은 것. "지지받았다"와 "해결됐다"는 다른 사실이라 구분해 보고한다.
+        score_breakdown: 선택 점수의 구성 요소(고유 probe 수·가중 지지·비용 출처 등).
+        deferred_axes: 근소한 차이로 이번 방문에서 보류한 축과 그 이유.
     """
 
     report_id: str
@@ -706,6 +719,14 @@ class OptimizationReport:
     diff: ConfigDiff | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
+
+    action_key: str | None = None
+    supporting_labels: list[str] = field(default_factory=list)
+    opposing_labels: list[str] = field(default_factory=list)
+    resolved_labels: list[str] = field(default_factory=list)
+    remaining_labels: list[str] = field(default_factory=list)
+    score_breakdown: dict[str, Any] = field(default_factory=dict)
+    deferred_axes: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

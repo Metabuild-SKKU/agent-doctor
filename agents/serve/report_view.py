@@ -26,6 +26,41 @@ _METRIC_LABELS = {
     "response_relevancy": ("답변 관련성", "답이 질문에 얼마나 들어맞는지입니다."),
 }
 
+# ── action 을 사람 말로 ────────────────────────────────────────────
+# 선택 단위가 action 이 된 뒤로, 차트 점 이름도 "어떤 처방을 골랐나"가 아니라
+# "무엇을 바꿨나"를 보여준다. 축 이름 + 동작 동사로 조립하므로 catalog 에 새 action 이
+# 생겨도 표를 손보지 않아도 된다(축만 등록하면 된다).
+_AXIS_NOUNS = {
+    "retriever.top_k": "top_k",
+    "retriever.mmr": "MMR",
+    "retriever.hybrid_dense_weight": "하이브리드 가중치",
+    "retriever.search_type": "하이브리드 검색",
+    "reranker.enabled": "리랭커",
+    "reranker.candidate_count": "리랭커 후보군",
+    "context.compression.enabled": "컨텍스트 압축",
+    "chunker.chunk_size": "청크 크기",
+    "chunker.chunk_overlap": "청크 겹침",
+    "chunker.strategy": "청킹 전략",
+    "embedding.model": "임베딩 모델",
+    "generation.temperature": "생성 온도",
+    "generation.grounding_strict": "근거 지시",
+    "generation.require_citation": "인용 표시",
+    "generation.restate_question": "질문 재진술",
+    "generation.completeness_mode": "완전성 모드",
+    "generation.abstention_strict": "기권 기준",
+    "generation.model": "생성 모델",
+}
+_OPERATION_VERBS = {
+    "increase": "확대",
+    "decrease": "축소",
+    "enable": "활성화",
+    "disable": "비활성화",
+    "replace": "교체",
+    "adjust": "조정",
+}
+
+# ⚠️ 구버전 이력 fallback. 이전 실행이 저장한 항목에는 action_key 가 없어
+# 처방 id 만 남아 있다. 그 리포트도 계속 읽혀야 하므로 표를 유지한다.
 _PRESCRIPTION_POINT_LABELS = {
     "enable_reranker": "리랭커 활성화",
     "widen_rerank_candidates": "후보군 확대",
@@ -229,12 +264,27 @@ def _is_study_error(item) -> bool:
     return "study_error" in item.metadata
 
 
+def _action_point_label(action_key: str) -> str:
+    """`retriever.top_k:increase` → `top_k 확대`. 모르는 축이면 None 대신 원문 축약."""
+    path, _, operation = action_key.rpartition(":")
+    noun = _AXIS_NOUNS.get(path)
+    verb = _OPERATION_VERBS.get(operation)
+    if noun and verb:
+        return f"{noun} {verb}"
+    return action_key[:18]
+
+
 def _course_point_label(item, prescription_index: int) -> str:
-    """차트 폭에 맞는 짧은 처방명. Rx 순번 대신 실제 처방의 의미를 보여준다.
+    """차트 폭에 맞는 짧은 변경명. Rx 순번 대신 실제로 무엇을 바꿨는지 보여준다.
 
     prescription_index는 차트 점 번호가 아니라 optimization history의 처방 순번이다.
     실패한 처방이 실패·복구 두 점을 만들더라도 다음 처방의 순번은 하나만 증가한다.
+
+    action_key 를 먼저 본다. 구버전 이력에는 없으므로 처방 id 로 폴백한다.
     """
+    action_key = getattr(item, "action_key", None)
+    if action_key:
+        return _action_point_label(action_key)
     prescription_id = item.selected_prescription_id or ""
     if prescription_id in _PRESCRIPTION_POINT_LABELS:
         return _PRESCRIPTION_POINT_LABELS[prescription_id]
@@ -314,7 +364,12 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             key = changed[0]
             change = [key, str(item.before_config.get(key, "")), str(item.after_config.get(key, ""))]
         else:
-            change = [item.selected_prescription_id or "설정 변경", "", ""]
+            # 변경 흔적이 없으면(롤백 등) 무엇을 시도했는지라도 보여준다.
+            change = [
+                _course_point_label(item, idx) or "설정 변경",
+                "",
+                "",
+            ]
 
         # 헤드라인(composite)과 일관되게 처방 카드 점수도 종합점수로 표시.
         # (유지/롤백 판정 자체는 overall 탐색 신호 기준이므로 direction 과 verdict 이
@@ -326,11 +381,19 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             direction = "up" if after_head >= before_head else "down"
             score = [str(before_head), str(after_head), direction]
 
+        # 이 변경을 지지한 라벨 전체를 보여준다. 대표 하나로 좁히면 "왜 이걸
+        # 골랐나"의 핵심(여러 문제가 같은 변경을 원했다)이 사라진다.
+        # 구버전 이력에는 supporting_labels 가 없어 failure_labels 로 폴백한다.
+        supporting = list(getattr(item, "supporting_labels", None) or item.failure_labels)
+
         out.append({
             "state": state_key,
             "num": f"{idx:02d}",
             "change": change,
-            "target": ", ".join(item.failure_labels),
+            "action": getattr(item, "action_key", None) or "",
+            "target": ", ".join(supporting),
+            "resolved": list(item.metadata.get("resolved_labels") or []),
+            "remaining": list(item.metadata.get("remaining_labels") or []),
             "reason": ["처방 근거", item.reason or ""],
             "score": score,
             "verdict": (
@@ -341,7 +404,10 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             ),
             "drill": {
                 "label": "오류 원인" if study_error else "판정 근거",
+                # rows 는 sweep 후보 실측 막대그래프 전용이다(report.html rxCard).
+                # 선택 근거는 모양이 달라 notes 로 따로 싣는다 — 섞으면 렌더가 깨진다.
                 "rows": [],
+                "notes": _selection_notes(item, supporting),
                 "caption": (
                     str(item.metadata.get("study_error", ""))
                     if study_error else
@@ -350,6 +416,30 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             },
         })
     return out
+
+
+def _selection_notes(item, supporting: list[str]) -> list[list[str]]:
+    """선택 근거 drill-down: 무엇이 지지했고 무엇이 실제로 해결됐는지.
+
+    "지지받았다"와 "해결됐다"를 나란히 보여주는 것이 핵심이다. 지지 라벨을 그대로
+    성과로 읽으면 리포트가 실제보다 좋게 보인다.
+
+    구버전 이력에는 이 정보가 없어 빈 목록이 되고, 그때는 카드가 caption 만
+    보여주던 이전 모습 그대로다.
+    """
+    notes: list[list[str]] = []
+    if len(supporting) > 1:
+        notes.append(["지지 라벨", f"{len(supporting)}개 · {', '.join(supporting)}"])
+    probes = list(getattr(item, "supporting_probes", None) or [])
+    if probes:
+        notes.append(["영향 질문", f"{len(probes)}건"])
+    resolved = item.metadata.get("resolved_labels") or []
+    remaining = item.metadata.get("remaining_labels") or []
+    if resolved:
+        notes.append(["해결됨", ", ".join(resolved)])
+    if remaining:
+        notes.append(["남음", ", ".join(remaining)])
+    return notes
 
 
 def _build_dxs(findings: list) -> list[dict[str, Any]]:

@@ -622,10 +622,10 @@ rollback cache·reindex 요구, `graph.py` route 무변경.
 | ~~**4**~~ | ~~planner 선택 중심 전환~~ | ✅ 알려진 실패 21건은 5~7에서 해소 |
 | ~~**5**~~ | ~~history·blacklist·iteration 전환~~ | ✅ 16건 해소 (§8.2 결과) |
 | ~~**6**~~ | ~~reranker·adapter guardrail 이관~~ | ✅ 5건 해소 (§8.3 결과) |
-| **7** | reporter·serve 전환 | §8.4 |
+| ~~**7**~~ | ~~reporter·serve 전환~~ | ✅ §8.4 결과 |
 | **8** | compatibility 제거·문서 갱신 | §8.5 |
 
-알려진 실패 21건은 전부 해소됐다. 현재 **1052 tests 전부 통과**
+알려진 실패 21건은 전부 해소됐다. 현재 **1066 tests 전부 통과**
 (환경 사유 4개 모듈 `test_pipeline`·`test_ragas_eval`·`test_oauth`·`test_eval` 제외).
 
 ### 8.1 중단 기준 판정 결과 (단계 3)
@@ -789,6 +789,27 @@ agent 가 보류로 번역해 리포트에 싣는다. 어느 계층이 걸렀는
 - resolved / remaining label 구분
 - **구버전 history fallback 유지** — 이전 실행의 `selected_prescription_id` 기록도 읽어야 한다
 - reporter 는 실제 selected action 을 읽는다. 첫 candidate 로 추측하지 않는다
+
+#### 단계 7 결과
+
+소비처는 3개 파일이었다(`reporter.py`, `serve/report_view.py`, `serve/web_api.py`).
+
+| 지점 | 전환 |
+| --- | --- |
+| `OptimizationReport` | `action_key`·`supporting`/`opposing`/`resolved`/`remaining_labels`·`score_breakdown`·`deferred_axes` 추가 |
+| `reporter._selected_prescription` | 후보 목록 첫 원소 **추측을 제거**. patch metadata 의 출처를 읽는다 |
+| `reporter` 요약문 | 대표 라벨 1개 → action + 지지 라벨 전체("N개 라벨이 함께 지지한") |
+| `report_view` 차트 점 이름 | 처방 id 표 → **축 이름 + 동작 동사** 조립(`top_k 확대`). catalog 에 action 이 늘어도 축만 등록하면 된다 |
+| `report_view` 처방 카드 | `target` 을 지지 라벨 전체로, `resolved`/`remaining` 노출 |
+| `web_api` 단계 요약 | `selected_prescription_id` → `action_key` |
+
+**롤백에는 resolved 를 붙이지 않는다.** 설정을 되돌렸으므로 그 개선은 지금 config 에
+남아 있지 않다. 지지 라벨 전체가 remaining 이 된다.
+
+**`drill.rows` 에 섞지 않았다.** 그 필드는 `report.html` 의 sweep 막대그래프 전용
+(`{k, val, w, win}`)이라 선택 근거를 넣으면 렌더가 깨진다. `drill.notes` 로 분리하고
+프론트에 렌더링·CSS 를 추가했다. 펼친 패널은 고정 높이(320px)라 내용이 잘릴 수 있어
+420px + 스크롤로 바꿨다.
 
 ### 8.5 단계 8 — compatibility 제거
 

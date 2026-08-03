@@ -14,11 +14,17 @@ Optimize 모듈의 "사용자 리포트" 계층.
            rules.py(manual 라벨의 사람용 조치 문구)
 [쓰는 것]  없음 — OptimizationReport 를 만들어 반환만 한다(planner/history와 동일 규칙).
 
+[설명의 단위는 action 이다]
+  "어떤 라벨을 골랐나"가 아니라 **"어떤 config 변경을 왜 골랐나"**를 설명한다.
+  라벨은 그 변경을 지지한 근거이므로 대표 하나가 아니라 전체를 보여준다 — 여러
+  라벨이 같은 변경을 지지했다는 사실 자체가 선택 근거이기 때문이다.
+
+  함께 드러내는 것: 같은 축의 반대편(opposing), 근소한 차이로 보류된 축(deferred),
+  점수 구성(score breakdown), 그리고 지지받은 라벨 중 **실제로 해결된 것**.
+
 [MVP 결정 사항]  (나중에 재검토 가능)
   - manual 라벨의 조치 문구는 rules.py 의 manual_action 필드에서 읽는다.
     문구가 비어있으면 일반 fallback 문장을 쓴다.
-  - selected_prescription 은 요청 후보의 첫 번째(가장 가벼운) 처방 id 로 잡는다.
-    실제 적용된 처방을 정확히 추적하는 건 optimizer/agent.py 완성 후 개선.
   - propose_only 는 뼈대만. 현재 기본 흐름은 apply_optimize.
 """
 from __future__ import annotations
@@ -69,18 +75,29 @@ def build_trial_report(
     점수가 서로 어긋나지 않도록 입력을 이력 항목에서만 뽑는다.
     """
     prescription = item.selected_prescription_id
-    label = item.failure_labels[0] if item.failure_labels else ""
+    # 구버전 이력에는 action_key 가 없다. 그때는 처방 id 를 이름으로 쓴다.
+    supporting = list(item.supporting_labels or item.failure_labels)
+    subject = _action_phrase(item.action_key, prescription)
+    resolved = list(item.metadata.get("resolved_labels") or [])
+    remaining = list(item.metadata.get("remaining_labels") or [])
 
     if verdict.keep:
         status = "applied"
         summary = (
-            f"'{prescription}' 처방으로 점수가 "
+            f"{subject}(으)로 점수가 "
             f"{verdict.before_score:.1f}→{verdict.after_score:.1f}로 올라 적용을 유지했습니다."
         )
+        # "지지받았다"와 "해결됐다"는 다른 사실이다. 유지된 경우에만 해결 여부를
+        # 말할 수 있고(롤백은 설정을 되돌렸으므로 귀속 자체가 성립하지 않는다),
+        # 실제로 사라진 라벨이 있을 때만 덧붙인다.
+        if resolved:
+            summary += f" 해결된 문제: {', '.join(resolved)}."
+        if remaining:
+            summary += f" 남은 문제: {', '.join(remaining)}."
     else:
         status = "failed"
         summary = (
-            f"'{prescription}' 처방을 시도했으나 개선되지 않아 되돌렸습니다. "
+            f"{subject}을(를) 시도했으나 개선되지 않아 되돌렸습니다. "
             f"({verdict.reason})"
         )
 
@@ -89,13 +106,19 @@ def build_trial_report(
         request_id=item.request_id,
         status=status,
         summary=summary,
-        problem=item.reason or label,
+        problem=item.reason or ", ".join(supporting),
         selected_prescription=prescription,
         config_changes=_config_changes_from_configs(
             item.before_config, item.after_config
         ),
         next_steps=_next_steps_apply(verdict.keep),
         metadata=_score_metadata(verdict),
+        action_key=item.action_key,
+        supporting_labels=supporting,
+        # 롤백된 처방에 "해결됐다"를 붙이지 않는다 — 설정을 되돌렸으므로 그 개선은
+        # 지금 config 에 남아 있지 않다.
+        resolved_labels=resolved if verdict.keep else [],
+        remaining_labels=remaining if verdict.keep else supporting,
     )
 
 
@@ -109,21 +132,24 @@ def _report_apply(
 ) -> OptimizationReport:
     """자동 처방을 적용한 경우. verdict가 있으면 유지/롤백 결과까지 반영."""
     prescription = _selected_prescription(request)
+    action_key = request.action_key if request is not None else None
+    supporting = list(request.supporting_labels) if request is not None else []
+    subject = _action_phrase(action_key, prescription)
     kept = verdict.keep if verdict is not None else None
 
     if verdict is None:
         status = "proposed"
-        summary = f"'{_label(request)}' 문제에 '{prescription}' 처방을 적용했습니다."
+        summary = f"{_support_phrase(supporting, request)} {subject}을(를) 적용했습니다."
     elif kept:
         status = "applied"
         summary = (
-            f"'{prescription}' 처방으로 점수가 "
+            f"{subject}(으)로 점수가 "
             f"{verdict.before_score:.1f}→{verdict.after_score:.1f}로 올라 적용을 유지했습니다."
         )
     else:
         status = "failed"
         summary = (
-            f"'{prescription}' 처방을 시도했으나 개선되지 않아 되돌렸습니다. "
+            f"{subject}을(를) 시도했으나 개선되지 않아 되돌렸습니다. "
             f"({verdict.reason})"
         )
 
@@ -140,6 +166,13 @@ def _report_apply(
         next_steps=_next_steps_apply(kept),
         diff=diff,
         metadata=_score_metadata(verdict),
+        action_key=action_key,
+        supporting_labels=supporting,
+        opposing_labels=list(request.opposing_labels) if request is not None else [],
+        score_breakdown=(
+            dict(request.action_score_breakdown) if request is not None else {}
+        ),
+        deferred_axes=_deferred_axes(request),
     )
 
 
@@ -165,17 +198,30 @@ def _report_propose(
 ) -> OptimizationReport:
     """제안만 하고 적용하지 않는 경우(propose_only). MVP 뼈대."""
     prescription = _selected_prescription(request)
+    action_key = request.action_key if request is not None else None
+    supporting = list(request.supporting_labels) if request is not None else []
+    subject = _action_phrase(action_key, prescription)
     return OptimizationReport(
         report_id=_new_id(),
         request_id=_request_id(decision, request),
         status="proposed",
-        summary=f"'{_label(request)}' 문제에 '{prescription}' 처방을 제안합니다(자동 적용하지 않음).",
+        summary=(
+            f"{_support_phrase(supporting, request)} {subject}을(를) "
+            "제안합니다(자동 적용하지 않음)."
+        ),
         problem=_problem_text(request),
         selected_prescription=prescription,
         config_changes=_config_changes(None, request),
         expected_tradeoffs=_tradeoffs(request),
         manual_actions=_manual_actions(decision.manual_labels),
         next_steps=["제안을 검토하고 승인하면 적용합니다."],
+        action_key=action_key,
+        supporting_labels=supporting,
+        opposing_labels=list(request.opposing_labels) if request is not None else [],
+        score_breakdown=(
+            dict(request.action_score_breakdown) if request is not None else {}
+        ),
+        deferred_axes=_deferred_axes(request),
     )
 
 
@@ -187,6 +233,12 @@ def _report_use_current(decision: OptimizeDecision) -> OptimizationReport:
         summary = decision.reason
     else:
         summary = "적용할 수 있는 처방이 없어 현재 설정을 유지합니다."
+    # 실행 가능한 action 이 하나도 없어서 아무것도 못 한 경우다. 그 사유를 실을 곳이
+    # request 가 아니라 decision 뿐이므로(planner._selection_diagnostics) 여기서 옮긴다.
+    # 없으면 사용자에게는 "처방 없음"만 남고 왜인지 알 수 없다.
+    rejected = decision.metadata.get("rejected_actions") or []
+    if rejected:
+        summary += f" (검토했으나 실행할 수 없던 변경 {len(rejected)}건)"
     return OptimizationReport(
         report_id=_new_id(),
         request_id=_request_id(decision, None),
@@ -194,6 +246,8 @@ def _report_use_current(decision: OptimizeDecision) -> OptimizationReport:
         summary=summary,
         manual_actions=_manual_actions(decision.manual_labels),
         next_steps=["현재 설정으로 서빙을 진행합니다."],
+        metadata={"rejected_actions": list(rejected)} if rejected else {},
+        deferred_axes=list(decision.metadata.get("deferred_axes") or []),
     )
 
 
@@ -213,22 +267,77 @@ def _request_id(
 
 
 def _label(request: OptimizationRequest | None) -> str:
-    """이번에 다룬 대표 진단 라벨."""
+    """이번에 다룬 대표 진단 라벨.
+
+    ⚠️ DEPRECATED — 설명은 supporting_labels 전체를 쓴다. 구버전 호환용.
+    """
     return request.failure_label if request is not None else ""
 
 
 def _problem_text(request: OptimizationRequest | None) -> str:
-    """문제 설명. request.reason 우선, 없으면 라벨명."""
+    """문제 설명. request.reason 우선, 없으면 지지 라벨 목록."""
     if request is None:
         return ""
-    return request.reason or request.failure_label
+    return request.reason or ", ".join(
+        request.supporting_labels or [request.failure_label]
+    )
+
+
+def _action_phrase(action_key: str | None, prescription: str | None) -> str:
+    """사용자에게 보여줄 '무엇을 바꿨나' 한 조각.
+
+    action key 는 `retriever.top_k:increase` 처럼 기계용이라, 처방 id 를 함께
+    보여줘 rules.py 선언으로 되짚을 수 있게 한다. 구버전 이력처럼 action 이
+    없으면 처방 id 만 쓴다.
+    """
+    if action_key and prescription:
+        return f"'{action_key}'({prescription}) 변경"
+    if action_key:
+        return f"'{action_key}' 변경"
+    return f"'{prescription}' 처방"
+
+
+def _support_phrase(
+    supporting: list[str],
+    request: OptimizationRequest | None,
+) -> str:
+    """'무엇이 이 변경을 지지했나'. 대표 라벨 하나로 좁히지 않는다.
+
+    여러 라벨이 같은 변경을 지지했다는 사실 자체가 선택 근거이므로, 그 수를 함께
+    보여주면 사용자가 "왜 하필 이걸" 을 이해할 수 있다.
+    """
+    if not supporting:
+        label = _label(request)
+        return f"'{label}' 문제에" if label else "진단 결과에 따라"
+    if len(supporting) == 1:
+        return f"'{supporting[0]}' 문제에"
+    return f"{len(supporting)}개 라벨({', '.join(supporting)})이 함께 지지한"
+
+
+def _deferred_axes(request: OptimizationRequest | None) -> list[dict]:
+    """근소한 차이로 이번 방문에서 보류한 축. 왜 안 골랐는지의 설명이다."""
+    if request is None:
+        return []
+    return list(request.metadata.get("deferred_axes") or [])
 
 
 def _selected_prescription(request: OptimizationRequest | None) -> str | None:
-    """이번에 적용/제안한 대표 처방 id. MVP는 첫(가장 가벼운) 후보 기준."""
-    if request is None or not request.candidates:
+    """이번에 **실제로 선택된** action 의 출처 처방 id.
+
+    전환 전에는 "후보 목록의 첫(가장 가벼운) 것"으로 추측했다. 지금은 요청이
+    선택된 action 하나만 담으므로 추측할 필요가 없다 — patch metadata 에 실린
+    출처를 그대로 읽고, 없을 때만 후보에서 가져온다.
+    """
+    if request is None:
         return None
-    return request.candidates[0].id
+    for candidate in request.candidates:
+        patch = candidate.patch
+        if patch is not None:
+            origin = patch.metadata.get("prescription_id")
+            if origin:
+                return str(origin)
+        return candidate.id
+    return None
 
 
 def _config_changes(
