@@ -26,7 +26,7 @@ action은 **우선순위 경쟁·후보값·적용·이력·차단**의 중심�
 | #67의 근거 | 재조사 결과 |
 | --- | --- |
 | ① `cost`/`confidence`가 비어 정렬 재료가 없다 | **여전히 사실** (`cost` 51/51 None, `confidence` 25/25 None) |
-| ② 라벨 간 공유 처방이 적다 | **해소됨** — 실행 가능 18개 중 12개가 복수 라벨 지지 |
+| ② 라벨 간 공유 처방이 적다 | **해소됨** — 실행 가능 19개 중 12개가 복수 라벨 지지 |
 | ③ A>C>B 인과가 깨진다 | **위험 증가** — B그룹이 ready가 되어 실제로 A와 경쟁 |
 | ④ 측정이 병목이다 | **대응 착수** — 선행 PR ① |
 
@@ -54,14 +54,19 @@ action은 **우선순위 경쟁·후보값·적용·이력·차단**의 중심�
 > ⚠️ 아래 수치는 **`origin/main` 머지 시점(#70·#72·#73·#76·#78 반영)** 집계다.
 > 초판 이후 네 번 갱신했다. 착수 후에도 main이 움직이면 §2.2의 집계를 다시 돌린다.
 
-전체 라벨 **30개** (ready 19 / draft 7 / manual 4).
-실행 가능 action **18개**, 그중 **12개가 복수 라벨 지지**. 차단 **9개**.
+전체 라벨 **31개** (ready 20 / draft 7 / manual 4).
+실행 가능 action **19개**, 그중 **12개가 복수 라벨 지지**. 차단 **9개**.
+
+> 갱신(#79 머지): `generation.abstention_relaxed:enable` 과 그 라벨
+> `generation_wrongful_abstention` 이 추가됐다. 수치 정본은
+> `tests/test_action_inventory.py` 의 baseline 이다.
 
 | action | 지지 | tier | 재색인 | backend | 비고 |
 | --- | --- | --- | --- | --- | --- |
 | `chunker.chunk_size:increase` | 3 | A | ✔ | internal | |
 | `chunker.chunk_size:decrease` | 3 | A·C | ✔ | internal | 증가와 경쟁 |
 | `generation.require_citation:enable` | 3 | B | | rules | |
+| `generation.abstention_relaxed:enable` | 1 | B | | rules | #79. strict 의 반대 방향 레버 |
 | `generation.abstention_strict:enable` | 3 | B | | rules | |
 | `chunker.chunk_overlap:increase` | 2 | A | ✔ | internal | |
 | `chunker.strategy:replace` | 2 | A | ✔ | **internal** | 후보 2개 — #73으로 sweep 지원 |

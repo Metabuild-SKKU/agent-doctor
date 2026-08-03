@@ -37,6 +37,9 @@ EXPECTED_EXECUTABLE = {
     "chunker.chunk_size:increase":           (3, ("A",),      True,  "internal"),
     "chunker.strategy:replace":              (2, ("A",),      True,  "internal"),
     "context.compression.enabled:enable":    (2, ("C",),      False, "rules"),
+    # #79: generation_wrongful_abstention(과다 기권)의 relax_abstention. abstention_strict 의
+    # 반대 방향 레버라 같은 축의 경쟁 action 으로 함께 선다.
+    "generation.abstention_relaxed:enable":  (1, ("B",),      False, "rules"),
     "generation.abstention_strict:enable":   (3, ("B",),      False, "rules"),
     "generation.completeness_mode:enable":   (1, ("B",),      False, "rules"),
     "generation.require_citation:enable":    (3, ("B",),      False, "rules"),
@@ -135,10 +138,12 @@ class ActionInventoryBaselineTest(unittest.TestCase):
 
     def test_counts_match_plan_document(self):
         """계획서 §2에 적힌 수치와 일치해야 한다."""
-        self.assertEqual(self.snapshot["executable_count"], 18)
+        # #79 머지로 실행 가능 action 과 ready 라벨이 각각 하나씩 늘었다
+        # (generation.abstention_relaxed:enable / generation_wrongful_abstention).
+        self.assertEqual(self.snapshot["executable_count"], 19)
         self.assertEqual(self.snapshot["shared_count"], 12)
         self.assertEqual(self.snapshot["blocked_count"], 9)
-        self.assertEqual(self.snapshot["label_status"]["ready"], 19)
+        self.assertEqual(self.snapshot["label_status"]["ready"], 20)
 
 
 class CompetingAxisBaselineTest(unittest.TestCase):
