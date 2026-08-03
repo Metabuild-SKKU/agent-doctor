@@ -452,7 +452,7 @@ def _rank_reason(record: EvalRecord, targets: dict[str, int]) -> str:
     """순위 라벨 공통 reason 접두 — 대상 gold 의 순위와 top_k."""
     ranked = ", ".join(f"{g}:{r}" for g, r in sorted(targets.items(), key=lambda kv: kv[1]))
     return (f"missed_gold_ranks=[{ranked}] > top_k={len(record.retrieved_chunk_ids)}, "
-            f"recall@k={_v(record.recall_at_k)}")
+            f"recall@k({record.recall_basis})={_v(record.recall_at_k)}")
 
 
 def retrieval_rank_fusion_loss(record: EvalRecord) -> Optional[Finding]:
@@ -472,7 +472,7 @@ def retrieval_rank_fusion_loss(record: EvalRecord) -> Optional[Finding]:
     finding = _finding(
         record, "retrieval_rank_fusion_loss", "retrieval_failure", confirmed=True,
         reason=f"{channel}_rank={channel_rank}<=top_k={len(record.retrieved_chunk_ids)} "
-               f"인데 fused_rank={fused_rank}({gold_id}), recall@k={_v(record.recall_at_k)}",
+               f"인데 fused_rank={fused_rank}({gold_id}), recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["favored_channel"] = channel
     finding.metadata["channel_ranks"] = {
@@ -505,7 +505,7 @@ def retrieval_duplicate_crowding(record: EvalRecord) -> Optional[Finding]:
         record, "retrieval_duplicate_crowding", "retrieval_failure", confirmed=True,
         reason=f"rank={analysis['rank']}({gold_id}), 중복 경쟁청크={analysis['redundant']} → "
                f"중복 제거 시 순위={analysis['projected_rank']}<=top_k="
-               f"{len(record.retrieved_chunk_ids)}, recall@k={_v(record.recall_at_k)}",
+               f"{len(record.retrieved_chunk_ids)}, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["crowding_analysis"] = {
         g: dict(a) for g, a in (_redundancy_above_gold(record) or {}).items()
@@ -564,7 +564,7 @@ def retrieval_reranker_ineffective(record: EvalRecord) -> Optional[Finding]:
         reason=f"pre_rerank_ranks=[{seen}] — 리랭크 전에도 top_k="
                f"{len(record.retrieved_chunk_ids)} 밖(강등 아님, 못 끌어올림), "
                f"reranker_status={record.retrieval_details.get('reranker_status')}, "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["pre_rerank_ranks"] = dict(targets)
     return finding
@@ -606,7 +606,7 @@ def retrieval_reranker_demotion(record: EvalRecord) -> Optional[Finding]:
         reason=f"pre_rerank_ranks=[{seen}](리랭크 전 top_k 안) 인데 최종 top_k="
                f"{len(record.retrieved_chunk_ids)} 밖, fused_ranks=[{fused_note}], "
                f"reranker_status={record.retrieval_details.get('reranker_status')}, "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["pre_rerank_ranks"] = dict(targets)
     return finding
@@ -656,7 +656,7 @@ def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
         return None                      # 순위 라벨이 다룰 구간 → 그쪽에 양보
     return _finding(
         record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True,
-        reason=f"bm25_hits_gold=True, dense_missed=True, recall@k={_v(record.recall_at_k)}",
+        reason=f"bm25_hits_gold=True, dense_missed=True, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -683,14 +683,14 @@ def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     if in_corpus is None:
         return _finding(
             record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=False,
-            reason=f"bm25_hits_gold=False, missed_gold_in_corpus=-, recall@k={_v(record.recall_at_k)}",
+            reason=f"bm25_hits_gold=False, missed_gold_in_corpus=-, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
         )
     if in_corpus:
         return _finding(
             record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=True,
             reason=f"bm25_hits_gold=False, "
                    f"missed_gold_in_corpus={len(in_corpus)}/{len(missed_gold_ids(record))}, "
-                   f"recall@k={_v(record.recall_at_k)}",
+                   f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
         )
     return None                          # 놓친 gold 가 전부 코퍼스 밖 → corpus_gap 영역
 
@@ -711,13 +711,13 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
     if in_corpus is None:
         return _finding(
             record, "retrieval_missing_gold", "retrieval_failure", confirmed=False,
-            reason=f"missed_gold_in_corpus=-, recall@k={_v(record.recall_at_k)}",
+            reason=f"missed_gold_in_corpus=-, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
         )
     if in_corpus:
         return _finding(
             record, "retrieval_missing_gold", "retrieval_failure", confirmed=True,
             reason=f"missed_gold_in_corpus={len(in_corpus)}/{len(missed_gold_ids(record))}, "
-                   f"recall@k={_v(record.recall_at_k)}",
+                   f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
         )
     return None                          # 놓친 gold 가 전부 코퍼스 밖 → corpus_gap 영역
 
@@ -745,7 +745,7 @@ def chunking_overchunking(record: EvalRecord) -> Optional[Finding]:
     finding = _finding(
         record, "chunking_overchunking", "retrieval_failure", confirmed=True,
         reason=f"max_span={analysis['max_span_len']}>max_chunk={analysis['max_chunk_len']}, "
-               f"oversized={analysis['oversized_count']}, recall@k={_v(record.recall_at_k)}",
+               f"oversized={analysis['oversized_count']}, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["oversized_analysis"] = dict(analysis)
     return finding
@@ -780,7 +780,7 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     finding = _finding(
         record, "chunking_context_mismatch", "retrieval_failure", confirmed=True,
         reason=f"boundary_split={analysis.get('boundary_split_count')}, "
-               f"recall@k={_v(record.recall_at_k)}, {_answer_reason(record)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}, {_answer_reason(record)}",
     )
     finding.metadata["boundary_analysis"] = dict(analysis)
     return finding
@@ -801,7 +801,7 @@ def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]
 
     return _finding(
         record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False,
-        reason=f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
+        reason=f"qtype={record.probe.qtype}, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -829,7 +829,7 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
         record, "retrieval_incomplete_enumeration", "retrieval_failure", confirmed=confirmed,
         reason=f"spans={len(record.probe.gold_spans)}, gold_chunks={len(record.probe.gold_chunk_ids)}, "
                f"top_k={len(record.retrieved_chunk_ids)}, qtype={record.probe.qtype}, "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 def retrieval_failure(record: EvalRecord) -> Optional[Finding]:
@@ -979,7 +979,7 @@ def generation_parametric_overreliance(record: EvalRecord) -> Optional[Finding]:
     return _finding(
         record, "generation_parametric_overreliance", "generation_failure", confirmed=True,
         reason=f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
-               f"{_answer_reason(record)}(정답), recall@k={_v(record.recall_at_k)}",
+               f"{_answer_reason(record)}(정답), recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -1136,7 +1136,7 @@ def too_long_context(record: EvalRecord) -> Optional[Finding]:
         record, "too_long_context", "context_failure", confirmed=True,
         reason=f"context_chars={total}>={CONTEXT_CHARS_MAX}, "
                f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -1156,7 +1156,7 @@ def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
         record, "lost_in_the_middle", "context_failure", confirmed=True,
         reason=f"gold_position={_v(_gold_position_band(record))}(중간), context_chars={total}, "
                f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -1183,7 +1183,7 @@ def chunking_underchunking(record: EvalRecord) -> Optional[Finding]:
         record, "chunking_underchunking", "retrieval_failure", confirmed=True,
         reason=f"evidence_density={_v(_gold_chunk_evidence_density(record))}<{EVIDENCE_DENSITY_MIN}, "
                f"context_precision={_v(_ctx_precision(record))}<{RAGAS_CONTEXT_PRECISION_MIN}, "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -1209,7 +1209,7 @@ def reranker_low_precision(record: EvalRecord) -> Optional[Finding]:
     return _finding(
         record, "reranker_low_precision", "retrieval_failure", confirmed=False,
         reason=f"reranked=True, context_precision={_v(precision)}<{RAGAS_CONTEXT_PRECISION_MIN}, "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -1233,7 +1233,7 @@ def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     return _finding(
         record, "context_noise_interference", "context_failure", confirmed=True,
         reason=f"faithfulness={_v(faith)}>={RAGAS_FAITHFULNESS_MIN}(검색 context 엔 근거 있음), "
-               f"recall@k={_v(record.recall_at_k)}, {_answer_reason(record)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}, {_answer_reason(record)}",
     )
 
 def context_failure(record: EvalRecord) -> Optional[Finding]:
@@ -1360,7 +1360,7 @@ def _gap_finding(record: EvalRecord, label: str) -> Finding:
     finding = _finding(
         record, label, "gap", confirmed=True,
         reason=f"gold_in_corpus={_corpus_membership_ratio(record)}, "
-               f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
+               f"qtype={record.probe.qtype}, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["missing_gold_ids"] = _gold_absent_ids(record)
     return finding

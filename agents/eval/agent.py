@@ -827,7 +827,14 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
             f"{str(bool(rec.retrieval_details.get('search_fallback_used'))).lower()}, "
             f"reranker={rec.retrieval_details.get('reranker_status', 'disabled')}"
         )
-    metric_line = f"    recall@k={recall}  f1={f1}  oracle_f1={oracle}"
+    # recall 은 gold_spans 가 있으면 span 커버리지(빈틈없이 덮어야 1점)라, 이름만 'recall@k' 로
+    # 찍으면 '골드 청크가 검색 목록에 있는데 recall=0' 이 모순처럼 보인다. 기준과 청크 적중수를
+    # 함께 남겨 그 착시를 없앤다.
+    recall_note = f"recall@k({rec.recall_basis})={recall}"
+    if p.gold_chunk_ids:
+        hit = len(set(p.gold_chunk_ids) & set(rec.retrieved_chunk_ids))
+        recall_note += f"  gold청크 {hit}/{len(p.gold_chunk_ids)} 검색"
+    metric_line = f"    {recall_note}  f1={f1}  oracle_f1={oracle}"
     # 판정 기준은 f1 단독이 아니라 혼합 점수(answer_score = lexical·의미 가중합)다 —
     # 그 값과 의미축을 함께 남기지 않으면 'f1 이 낮은데 왜 통과(또는 통과 못)했나'를 로그만
     # 보고 알 수 없다. 의미축은 DEEP 에서만 측정되므로 있을 때만 붙인다.
