@@ -258,6 +258,16 @@ def _reranker_runtime(records: list[EvalRecord]) -> dict:
         "seconds": round(seconds, 2),
         "pairs": pairs,
         "ms_per_pair": round(seconds * 1000 / pairs, 1) if pairs else None,
+        # 상한이 걸린 채 돌았나 — 폴백으로 빠진 실행과 구분해야 다음 처방 판정이
+        # capped/uncapped 를 같은 조건으로 묶지 않는다. None = 상한 없이 돎.
+        "max_lengths": sorted(
+            {
+                r.retrieval_details.get("rerank_max_length")
+                for r in records
+                if r.retrieval_details.get("rerank_pairs")
+            },
+            key=lambda v: (v is None, v),
+        ),
     }
 
 
@@ -272,7 +282,11 @@ def _search_runtime(records: list[EvalRecord]) -> dict:
     rerank = sum(_num(r.retrieval_details.get("rerank_seconds")) for r in records)
     return {
         "seconds": round(seconds, 2),
-        "searches": sum(1 for r in records if r.retrieval_details),
+        # search_seconds 를 실은 레코드만 센다 — 옛 계약(키 없음) 레코드까지 세면
+        # 분자에 기여하지 않는 건이 분모에 들어가 건당 시간이 희석된다.
+        "searches": sum(
+            1 for r in records if r.retrieval_details.get("search_seconds") is not None
+        ),
         "rerank_share": round(rerank / seconds, 3) if seconds > 0 else None,
     }
 
@@ -386,6 +400,11 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
         if rerank.get("pairs"):
             line += (f" · 리랭크 {rerank['seconds']}초 {rerank['pairs']}쌍 "
                      f"(쌍당 {rerank['ms_per_pair']}ms, 검색의 {search['rerank_share']})")
+        # 실패한 리랭크의 벽시계는 쌍당 비용에서 빼지만(순도), 그 사실까지 지우면 안 된다 —
+        # 큰 청크로 추론이 오래 돌다 실패하면 그 시간은 검색 총시간에만 남아, 리랭크가 원인인데
+        # '검색이 느렸다'로 읽힌다.
+        if rerank.get("failed"):
+            line += f" · 리랭크 실패 {rerank['failed']}건(시간 미집계)"
         print(line)
     if report.findings:
         # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N

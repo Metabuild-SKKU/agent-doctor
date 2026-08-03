@@ -82,6 +82,10 @@ _FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
 # 정책을 따른다 — 영구 캐시하면 일시적 실패 후에도 프로세스 내내 리랭킹이 죽는다.
 _rerankers: dict[str, Any] = {}
 _failed_rerankers: dict[str, float] = {}
+# model_name → 실제로 적용된 입력 토큰 상한(None = 상한 없이 로드됨). 폴백으로 상한이 빠진
+# 실행을 리포트가 구분할 수 있어야 한다 — reranker_status 는 그 경우에도 "ready" 라
+# capped/uncapped 가 안 남고, 다음 처방 판정이 둘을 같은 실행으로 취급한다.
+_reranker_max_lengths: dict[str, int | None] = {}
 _FAILED_RERANKER_RETRY_SEC = _env_float("INDEX_RERANKER_RETRY_SEC", 300.0)
 # 리랭커(cross-encoder) 입력 토큰 상한. 0 이하면 모델 기본값(이 모델은 8192)을 쓴다.
 #
@@ -136,12 +140,20 @@ def _new_cross_encoder(cross_encoder_cls, model_name: str):
     UnicodeEncodeError 가 나면 호출부(_load_reranker)의 except 가 로드 실패로 삼킨다.
     """
     if _RERANKER_MAX_LENGTH <= 0:
+        _reranker_max_lengths[model_name] = None
         return cross_encoder_cls(model_name)
     if not _accepts_max_length(cross_encoder_cls):
         print("[Index] reranker 구현이 max_length 를 받지 않아 입력 길이 상한 없이 로드한다 "
               "(청크가 크면 리랭크 비용이 그만큼 커진다)")
+        _reranker_max_lengths[model_name] = None
         return cross_encoder_cls(model_name)
+    _reranker_max_lengths[model_name] = _RERANKER_MAX_LENGTH
     return cross_encoder_cls(model_name, max_length=_RERANKER_MAX_LENGTH)
+
+
+def reranker_max_length(model_name: str = DEFAULT_RERANKER_MODEL) -> int | None:
+    """이 모델에 실제로 적용된 입력 토큰 상한. 상한 없이 로드됐거나 아직 안 실렸으면 None."""
+    return _reranker_max_lengths.get(model_name)
 
 
 def _load_reranker(model_name: str) -> tuple[Any | None, str]:

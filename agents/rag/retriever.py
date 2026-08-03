@@ -34,6 +34,7 @@ from agents.index.qdrant_store import (
     hybrid_search,
     keyword_search,
     rerank_with_status,
+    reranker_max_length,
     search as dense_search,
     upsert_chunks,
 )
@@ -562,6 +563,11 @@ class Retriever:
             "pre_rerank_ids": pre_rerank_ids,
             "rerank_seconds": round(rerank_seconds, 3),
             "rerank_pairs": rerank_pairs,
+            # 상한이 실제로 걸린 채 돌았는지 — 폴백으로 빠진 실행과 구분해야 다음 처방 판정이
+            # capped/uncapped 를 같은 실행으로 묶지 않는다.
+            "rerank_max_length": (
+                reranker_max_length(self.settings.reranker_model) if reranked else None
+            ),
             "search_seconds": round(time.monotonic() - search_started, 3),
             "results": results,
         }

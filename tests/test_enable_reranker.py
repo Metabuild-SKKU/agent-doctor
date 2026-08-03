@@ -45,6 +45,7 @@ class RerankerExecutionTest(unittest.TestCase):
     def tearDown(self):
         qdrant_store._rerankers.clear()
         qdrant_store._failed_rerankers.clear()
+        qdrant_store._reranker_max_lengths.clear()
 
     def test_none_metadata_uses_default_reranker_model(self):
         settings = resolve_retrieval_settings(
@@ -148,6 +149,33 @@ class RerankerExecutionTest(unittest.TestCase):
         self.assertIsNone(model)
         self.assertEqual(status, "model_load_failed")
         self.assertEqual(len(loads), 1)                 # 재시도 없음
+
+    def test_cap_disabled_by_env_zero(self):
+        """INDEX_RERANKER_MAX_LENGTH<=0 이면 상한 없이 로드하고, 그 사실이 조회로 남는다."""
+        model_name = "test/uncapped-reranker"
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = lambda _name, **kw: _FakeCrossEncoder([0.1], **kw)
+
+        with patch.object(qdrant_store, "_RERANKER_MAX_LENGTH", 0):
+            with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+                model, status = qdrant_store._load_reranker(model_name)
+
+        self.assertEqual(status, "ready")
+        self.assertEqual(model.kwargs, {})                       # max_length 안 넘김
+        self.assertIsNone(qdrant_store.reranker_max_length(model_name))
+
+    def test_applied_cap_is_queryable(self):
+        model_name = "test/capped-reranker"
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = lambda _name, **kw: _FakeCrossEncoder([0.1], **kw)
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+            qdrant_store._load_reranker(model_name)
+
+        self.assertEqual(
+            qdrant_store.reranker_max_length(model_name),
+            qdrant_store._RERANKER_MAX_LENGTH,
+        )
 
     def test_fallback_survives_cp949_console(self):
         """폴백 경고가 cp949 로 인코딩 안 되는 문자를 쓰면, 그 UnicodeEncodeError 를
@@ -457,6 +485,60 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
             affected_probes=["p1"],
         )
 
+    def _cost_record(self, probe_id, *, search, rerank, pairs, status="applied",
+                     max_length=1024):
+        return EvalRecord(
+            probe=Probe(probe_id, "질문", "test"),
+            retrieval_details={
+                "reranker_enabled": True,
+                "reranker_attempted": True,
+                "reranked": status == "applied",
+                "reranker_status": status,
+                "search_seconds": search,
+                "rerank_seconds": rerank,
+                "rerank_pairs": pairs,
+                "rerank_max_length": max_length if status == "applied" else None,
+            },
+        )
+
+    def test_report_aggregates_search_and_rerank_cost(self):
+        """비영값 집계 경로 — 검색 총시간·건수·리랭크 몫·쌍당 비용이 실제로 계산되나."""
+        records = [
+            self._cost_record("p1", search=2.0, rerank=1.5, pairs=10),
+            self._cost_record("p2", search=3.0, rerank=2.5, pairs=15),
+        ]
+
+        report = build_report(records, iteration=1)
+
+        search = report.runtime_summary["search"]
+        rerank = report.runtime_summary["reranker"]
+        self.assertEqual(search["seconds"], 5.0)
+        self.assertEqual(search["searches"], 2)
+        self.assertEqual(search["rerank_share"], round(4.0 / 5.0, 3))
+        self.assertEqual(rerank["pairs"], 25)
+        self.assertEqual(rerank["ms_per_pair"], round(4.0 * 1000 / 25, 1))
+        self.assertEqual(rerank["max_lengths"], [1024])
+
+    def test_report_search_count_ignores_legacy_records(self):
+        """search_seconds 를 안 싣는 옛 계약 레코드는 건수 분모에서 뺀다(건당 시간 희석 방지)."""
+        legacy = EvalRecord(
+            probe=Probe("p0", "질문", "test"),
+            retrieval_details={"reranker_enabled": False, "reranker_status": "disabled"},
+        )
+        records = [legacy, self._cost_record("p1", search=2.0, rerank=1.0, pairs=5)]
+
+        report = build_report(records, iteration=1)
+
+        self.assertEqual(report.runtime_summary["search"]["searches"], 1)
+
+    def test_report_marks_uncapped_reranker_run(self):
+        """상한 없이 로드된 실행은 capped 실행과 구분돼 남는다."""
+        records = [self._cost_record("p1", search=2.0, rerank=1.0, pairs=5, max_length=None)]
+
+        report = build_report(records, iteration=1)
+
+        self.assertEqual(report.runtime_summary["reranker"]["max_lengths"], [None])
+
     def test_report_counts_actual_reranker_execution(self):
         records = [
             EvalRecord(
@@ -492,6 +574,7 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
                 "seconds": 0.0,
                 "pairs": 0,
                 "ms_per_pair": None,
+                "max_lengths": [],
                 "status_counts": {
                     "load_failed": 1,
                     "applied": 1,
