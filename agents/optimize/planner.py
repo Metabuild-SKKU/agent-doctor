@@ -283,7 +283,7 @@ def _rejected_action_entries(selection: _ActionSelection) -> list[dict[str, Any]
             ),
             "eligibility": dict(candidate.metadata.get("eligibility") or {}),
         }
-        grounding = _selected_grounding(candidate, candidate.definition.canonical_path)
+        grounding = _selected_grounding(candidate)
         if grounding:
             entry["candidate_grounding"] = grounding
         entries.append(entry)
@@ -389,7 +389,7 @@ def _build_action_request(
                 state, selection, action.supporting_labels, findings
             ),
         )
-    grounding = _selected_grounding(action, path)
+    grounding = _selected_grounding(action)
     use_internal = _should_sweep(
         path, values, grounding, chunk_precheck_context
     )
@@ -499,9 +499,28 @@ def _merged_evidence_analysis(
     return selection.evidence_cache[key]
 
 
-def _selected_grounding(action: Any, path: str) -> dict[str, Any] | None:
-    """선택된 action 의 후보값이 어떻게 나왔는지(실측 근거 여부)."""
-    for support in action.supports:
+def _selected_grounding(action: Any) -> dict[str, Any] | None:
+    """선택된 action 의 후보값이 **어떻게 나왔는지**.
+
+    ⚠️ 이 값은 표시용이 아니다. `_should_sweep` 이 chunk 축의 사전검증 여부를 이걸로
+    가른다. 예전에는 support 목록의 첫 원소를 그대로 돌려줘서, 같은 축을 여러 라벨이
+    지지할 때 근거 계산에 **실패한** 쪽이 앞에 오면 실패 status 가 보고됐다 —
+    실측 후보가 있는데도 사전검증을 건너뛰고 rules 로 떨어졌다. **finding 순서가
+    backend 를 바꾼 것**이다.
+
+    그래서 두 가지를 지킨다.
+      1. 살아남은 후보값을 **실제로 제공한** support 의 근거를 쓴다 — 값과 설명이
+         어긋나면 리포트가 시험하지도 않은 계산을 근거로 든다.
+      2. 그중 실측(`is_grounded`)을 우선하고, 남는 동률은 라벨 사전순으로 가른다.
+         어떤 선택이든 **입력 순서와 무관해야** 하기 때문이다.
+    """
+    values = set(map(str, next(iter(action.search_space.values()), [])))
+
+    def rank(support: Any) -> tuple[int, int, str]:
+        contributed = bool(values & set(map(str, support.candidate_values)))
+        return (0 if contributed else 1, 0 if support.is_grounded else 1, support.label)
+
+    for support in sorted(action.supports, key=rank):
         if support.grounding_metadata:
             return dict(support.grounding_metadata)
     return None

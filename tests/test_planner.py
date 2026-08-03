@@ -10,6 +10,7 @@ Planner 검증 — 후보값을 어떻게 정하고, 그걸 optimizer 요청으�
 같은 원인이 probe N개에서 터지면 Finding 도 N개다. Planner 는 이를 라벨로 묶어
 점수(빈도)와 근거값(측정 기반 목표값)을 계산해야 한다.
 """
+import itertools
 import os
 import sys
 import unittest
@@ -667,6 +668,47 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertEqual(request.optimizer, "internal")
         self.assertEqual(request.max_trials, 2)
         self.assertNotIn("chunk_precheck_context", request.metadata)
+
+    def test_selection_is_independent_of_finding_order(self):
+        """Eval 이 Finding 을 내는 순서가 실행 경로를 바꾸면 안 된다 (§7.2-6).
+
+        같은 축(chunk_size 축소)을 두 라벨이 지지하는데 한쪽만 gold span 근거를 갖는
+        상황이다. 예전에는 support 순서가 곧 후보값 순서였고 `_selected_grounding` 이
+        첫 support 의 근거를 그대로 보고했다. 그 status 는 표시용이 아니라
+        `_should_sweep` 의 입력이라 **backend(internal↔rules)와 적용값까지 뒤집혔다.**
+        """
+        document = Document("d1", "memory", "txt", "가" * 4000)
+        probes = [
+            Probe(probe_id="p1", question="q1", source="taxonomy", answer_exists=True,
+                  gold_spans=[{"doc_id": "d1", "start": 0, "end": 300},
+                              {"doc_id": "d1", "start": 900, "end": 1250},
+                              {"doc_id": "d1", "start": 1800, "end": 2100},
+                              {"doc_id": "d1", "start": 2500, "end": 2800}]),
+            Probe(probe_id="p2", question="q2", source="taxonomy", answer_exists=True),
+        ]
+        pair = [("p1", "too_long_context"), ("p2", "retrieval_semantic_mismatch")]
+        # 더 싼 축을 막아 chunk_size 축이 선택되게 한다.
+        blacklist = {"retriever.top_k:decrease", "context.compression.enabled:enable",
+                     "chunker.strategy:replace", "embedding.model:replace"}
+
+        seen = set()
+        for order in itertools.permutations(pair):
+            config = dict(AgentDoctorState().index_config)
+            config.update({"top_k": 5, "chunk_size": 800, "chunk_overlap": 50,
+                           "chunk_strategy": "fixed"})
+            state = AgentDoctorState(
+                report=_report([make_finding(p, l) for p, l in order]),
+                documents=[document], probes=probes, index_config=config,
+            )
+            request, _decision = planner.plan(state, blacklist=blacklist)
+            seen.add((
+                request.action_key,
+                tuple(request.search_space["chunker.chunk_size"]),
+                request.optimizer,
+                request.metadata.get("candidate_grounding", {}).get("status"),
+            ))
+
+        self.assertEqual(len(seen), 1, f"finding 순서에 따라 선택이 갈렸다: {seen}")
 
     def test_chunk_precheck_merges_every_supporting_label(self):
         """사전검증 입력은 지지 라벨 **전체**의 evidence 에서 모은다.

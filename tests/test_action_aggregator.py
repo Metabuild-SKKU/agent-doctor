@@ -556,6 +556,70 @@ class AppliesWhenSignalConsumeOnTest(unittest.TestCase):
         self.assertEqual(ids, ["only"])
 
 
+class MergeCandidateValuesTest(unittest.TestCase):
+    """같은 축을 여러 라벨이 지지할 때 후보값을 어떻게 합치는가 (계획서 §4.5)."""
+
+    @staticmethod
+    def _support(label, values, *, grounded):
+        return ActionSupport(
+            action_key="chunker.chunk_size:decrease",
+            label=label,
+            group="A",
+            candidate_values=list(values),
+            grounding_metadata={"status": "grounded"} if grounded else {"status": "missing_gold_spans"},
+        )
+
+    def _merge(self, supports):
+        state = make_state([make_finding("p1", "too_long_context")])
+        state.index_config["chunk_size"] = 800
+        return aggregator.merge_candidate_values(
+            supports, "chunker.chunk_size", state
+        )
+
+    def test_measured_values_win_over_direction_guesses(self):
+        """실측 근거가 있으면 방향 키워드 폴백을 버린다.
+
+        섞으면 근거 없는 값이 sweep 에 합류해 파이프라인 전체 재평가를 한 번 더
+        태운다 — 실측이 있는데 추측을 시험할 이유가 없다.
+        """
+        merged = self._merge([
+            self._support("too_long_context", [400, 600], grounded=True),
+            self._support("retrieval_semantic_mismatch", [256], grounded=False),
+        ])
+
+        self.assertEqual(merged, [400, 600])
+
+    def test_guesses_survive_when_nothing_is_measured(self):
+        merged = self._merge([
+            self._support("retrieval_semantic_mismatch", [256], grounded=False),
+        ])
+
+        self.assertEqual(merged, [256])
+
+    def test_merge_is_independent_of_support_order(self):
+        """Eval 이 Finding 을 내는 순서가 적용값을 바꾸면 안 된다.
+
+        rules backend 는 첫 값을 그대로 적용하므로 이 순서가 곧 적용 결과다.
+        """
+        a = self._support("aaa_label", [500], grounded=True)
+        b = self._support("zzz_label", [700], grounded=True)
+
+        self.assertEqual(self._merge([a, b]), self._merge([b, a]))
+        self.assertEqual(self._merge([b, a]), [500, 700])
+
+    def test_within_support_order_is_preserved(self):
+        """support 안쪽 순서는 candidate_values 의 도메인 논리다 — 건드리지 않는다.
+
+        무릎 분석의 [8, 12, 15] 나 chunk 의 path_fractions 단계값을 baseline
+        거리순으로 다시 세우면 그 의도가 뒤집힌다.
+        """
+        merged = self._merge([
+            self._support("too_long_context", [600, 400], grounded=True),
+        ])
+
+        self.assertEqual(merged, [600, 400])
+
+
 class BlockedAttemptFilterTest(unittest.TestCase):
     """품질 실패는 **정확한 전이 하나**만 막는다 (계획서 §5.1).
 

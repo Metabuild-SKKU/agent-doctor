@@ -226,10 +226,14 @@ def aggregate_action_candidates(
             for metric in support.target_metrics:
                 if metric not in metrics:
                     metrics.append(metric)
+        values = merge_candidate_values(group, definition.canonical_path, state)
+        # 채택된 값에 대해서만 출처를 남긴다 — 버려진 폴백 값의 provenance 가 남으면
+        # 리포트가 시험하지 않은 값을 후보로 설명한다.
+        kept = set(map(str, values))
+        for support in group:
             for value in support.candidate_values:
-                if value not in values:
-                    values.append(value)
-                provenance.setdefault(str(value), []).append(support.label)
+                if str(value) in kept:
+                    provenance.setdefault(str(value), []).append(support.label)
 
         candidate = ActionCandidate(
             action_key=action_key,
@@ -249,6 +253,41 @@ def aggregate_action_candidates(
 
     _annotate_opposition(candidates)
     return candidates
+
+
+def merge_candidate_values(
+    supports: list[ActionSupport],
+    canonical_path: str,
+    state: AgentDoctorState,
+) -> list[Any]:
+    """여러 support 의 후보값을 하나로 합친다 (계획서 §4.5).
+
+    두 가지를 지킨다. 둘 다 **입력 순서와 무관해야** 한다 — Eval 이 Finding 을 내는
+    순서가 실행 경로를 바꾸면 같은 진단이 방문마다 다른 config 를 적용한다.
+
+    1. **실측 근거가 있으면 추측값을 버린다.** 같은 축을 여러 라벨이 지지할 때 한쪽은
+       gold span 으로 목표값을 계산하고(예: 400·600) 다른 쪽은 근거가 없어 방향
+       키워드로 폴백한다(800÷2=400). 둘을 합치면 근거 없는 값이 sweep 에 섞여
+       파이프라인 전체 재평가를 한 번 더 태운다. 실측이 있는데 추측을 시험할 이유가 없다.
+    2. **support 를 라벨 사전순으로 훑는다.** 순서가 흔들리는 원인은 Eval 이 Finding 을
+       내는 순서다 — 그건 라벨 **간** 순서다. 같은 라벨 안의 처방 순서는 rules.py 의
+       정적 선언이라 이미 결정적이므로 건드리지 않는다(정렬은 stable).
+       rules backend 는 첫 값을 그대로 적용하므로 이 순서가 곧 **적용 결과**다.
+
+    ⚠️ support **안쪽** 값 순서는 건드리지 않는다. 계획서 §4.5 는 "baseline 변화량이
+    작은 값부터"라고 적었지만, 그 순서는 candidate_values 가 도메인 논리로 이미
+    정한 것이다(무릎 분석의 `[8, 12, 15]`, chunk 의 `path_fractions` 단계값).
+    거리순으로 다시 세우면 그 의도가 뒤집힌다 — 여기서 고치려는 것은 support 간
+    순서지 후보값 자체의 의미가 아니다.
+    """
+    grounded_values: list[Any] = []
+    fallback_values: list[Any] = []
+    for support in sorted(supports, key=lambda s: s.label):
+        target = grounded_values if support.is_grounded else fallback_values
+        for value in support.candidate_values:
+            if value not in target:
+                target.append(value)
+    return grounded_values or fallback_values
 
 
 def score_candidate(candidate: ActionCandidate) -> tuple[float, dict[str, Any]]:
