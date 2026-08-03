@@ -1524,10 +1524,17 @@ def _answer_reason(record: EvalRecord) -> str:
 
     f1 만 적으면 오독을 부른다: 판정은 f1 단독이 아니라 혼합 점수(_answer_ok)라, f1 이 문턱
     아래인데 통과한(또는 f1 이 문턱 위인데 실패한) 라벨의 근거가 로그에서 사라진다.
-    의미축 미측정(DEEP 미만)이면 lexical 단독 판정이므로 f1 만 적는다."""
+
+    의미축이 없을 때는 '왜 없는지'까지 적는다 — DEEP 미만(미측정)과 판정기 실패(degrade)는
+    같은 'f1 단독 판정'으로 보이지만 뜻이 다르다. 특히 degrade 는 _degraded_near_miss 로
+    정답을 오답으로 강등시킬 수 있어서, 그 사실을 안 적으면 'f1=1.00 인데 실패'처럼 스스로
+    모순돼 보이는 reason 이 남는다(판정을 뒤집은 신호가 로그에서 사라진다)."""
     semantic = record.answer_semantic
     if semantic is None:
-        return f"f1={_v(record.f1_score)}"
+        if not record.ragas.get("answer_correctness_degraded"):
+            return f"f1={_v(record.f1_score)}(의미축 미측정)"
+        demoted = "→강등" if _degraded_near_miss(record, oracle=False) else ""
+        return f"f1={_v(record.f1_score)}(의미축 degrade{demoted})"
     return (f"answer={_v(record.answer_score)}"
             f"(f1 {_v(record.f1_score)}·의미 {_v(semantic)})")
 

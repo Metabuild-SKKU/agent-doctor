@@ -835,6 +835,10 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
         metric_line += (f"  answer={_fmt_metric(rec.answer_score)}"
                         f"(의미 {_fmt_metric(rec.answer_semantic)}"
                         f", 커버리지 {_fmt_metric(rec.gold_coverage)})")
+    elif p.ground_truth and rec.ragas.get("answer_correctness_degraded"):
+        # 의미축이 죽어 lexical 단독으로 판정된 probe. 이 줄이 없으면 'f1=1.00 인데 실패'가
+        # 설명 없이 남는다 — 판정을 뒤집은 게 어휘 점수가 아니라 판정기 실패라는 걸 못 본다.
+        metric_line += "  answer=f1 단독(의미축 degrade)"
     print(metric_line)
     if p.ground_truth and rec.best_gold_answer_f1 > rec.raw_f1_score:
         print(
