@@ -536,7 +536,15 @@ def _response_relevancy(judge, question: str, answer: str):
     if not gen_qs:
         return 0.0
     all_noncommittal = all(n == 1 for n in noncommittal) # noncommittal: 답변이 회피형(잘모르겠다.)인지 판별
-    vecs = _embed(judge, [question] + gen_qs)  # Embedding
+    # 임베딩 실패는 이 지표만 결측으로 만든다. 예전엔 예외가 그대로 올라가 parallel_map →
+    # evaluate_real_track → _ragas_track 순으로 전파돼 트랙 전체가 {} 가 됐다 —
+    # 임베딩이 없는 provider(OpenRouter 등)에서 faithfulness·context_* 까지 통째로
+    # 사라지고 심판 호출 비용만 버려졌다. 나머지 두 임베딩 호출부(_answer_correctness 등)는
+    # 이미 같은 방식으로 가드하고 있어, 여기만 빠져 있던 것.
+    try:
+        vecs = _embed(judge, [question] + gen_qs)  # Embedding
+    except Exception:
+        return None
     if not vecs or len(vecs) < 2:
         return None
     sims = [_cosine(vecs[0], v) for v in vecs[1:]] # Cosine Similarity

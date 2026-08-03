@@ -206,5 +206,76 @@ class RagAutoNoticeTest(unittest.TestCase):
         self.assertNotIn("auto → OpenAI", log)
 
 
+class EmbeddingUnavailableNoticeTest(unittest.TestCase):
+    """임베딩을 못 쓰는 provider 조합에서 안내가 실행당 1회인지."""
+
+    def setUp(self):
+        llm_provider._embed_unavailable_notified = False
+
+    def _embed(self, env):
+        buf = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), redirect_stdout(buf):
+            vecs = llm_provider.embed_texts(["가", "나"])
+        return vecs, buf.getvalue()
+
+    def test_openrouter_without_openai_key_returns_empty_and_notifies(self):
+        env = {"EVAL_LLM_PROVIDER": "openrouter", "OPENAI_API_KEY": ""}
+        vecs, log = self._embed(env)
+        self.assertEqual(vecs, [])          # 예외 대신 빈 결과 → 호출부가 결측으로 흡수
+        self.assertIn("임베딩", log)
+
+    def test_notice_is_printed_once_per_run(self):
+        env = {"EVAL_LLM_PROVIDER": "openrouter", "OPENAI_API_KEY": ""}
+        self._embed(env)
+        _, second = self._embed(env)
+        self.assertEqual(second, "")        # probe 마다 반복되면 다른 로그를 덮는다
+
+    def test_embeddings_available_reflects_active_provider(self):
+        with patch.dict(os.environ, {"EVAL_LLM_PROVIDER": "gemini",
+                                     "GEMINI_API_KEY": "k"}, clear=False):
+            self.assertTrue(llm_provider.embeddings_available())
+        with patch.dict(os.environ, {"EVAL_LLM_PROVIDER": "openrouter",
+                                     "OPENAI_API_KEY": ""}, clear=False):
+            self.assertFalse(llm_provider.embeddings_available())
+
+
+class RagasTrackSurvivesMissingEmbeddingTest(unittest.TestCase):
+    """임베딩이 없어도 RAGAS 트랙 전체가 날아가지 않는지(회귀).
+
+    예전엔 _response_relevancy 의 임베딩 예외가 parallel_map → evaluate_real_track →
+    _ragas_track 으로 전파돼 트랙이 통째로 {} 가 됐다. 심판 호출 비용은 이미 쓴 뒤라
+    faithfulness·context_* 까지 잃고 진단 라벨이 안 붙었다."""
+
+    def test_embedding_failure_yields_none_not_exception(self):
+        from agents.eval import metrics_ragas
+
+        with (
+            patch.object(metrics_ragas, "_chat",
+                         return_value={"question": "재생성 질문", "noncommittal": 0}),
+            patch.object(metrics_ragas, "_embed",
+                         side_effect=RuntimeError("Missing credentials")),
+        ):
+            score = metrics_ragas._response_relevancy(
+                object(), "질문?", "답변입니다.")
+        self.assertIsNone(score)   # 예외 전파가 아니라 결측(None)
+
+    def test_sibling_metrics_still_computed(self):
+        """같은 트랙의 다른 지표는 임베딩과 무관하게 계산돼야 한다."""
+        from agents.eval import metrics_ragas
+
+        # faithfulness 는 chat 2회(문장 분해 → NLI 판정)를 쓰고 임베딩은 안 쓴다.
+        with (
+            patch.object(metrics_ragas, "_chat", side_effect=[
+                {"statements": ["주장 하나"]},          # 1) 분해
+                {"statements": [{"verdict": 1}]},       # 2) NLI 판정
+            ]),
+            patch.object(metrics_ragas, "_embed",
+                         side_effect=RuntimeError("Missing credentials")),
+        ):
+            faith = metrics_ragas._faithfulness(
+                object(), "질문?", "답변입니다.", ["근거 문장."])
+        self.assertEqual(faith, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

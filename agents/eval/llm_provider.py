@@ -163,8 +163,40 @@ def chat_json(
 # 즉 EVAL_LLM_PROVIDER=openrouter 로 RAGAS 전량(response_relevancy 포함)을 돌리려면
 # OPENAI_API_KEY 가 별도로 필요하다.
 
+# 임베딩 불가 조합을 실행당 한 번만 알린다. 안 그러면 probe·트랙마다 같은 실패 줄이 찍혀
+# 정작 봐야 할 로그를 덮는다(agents/index/graph_index.py 의 _notify_llm_extraction_once 와 같은 패턴).
+_embed_unavailable_notified = False
+_embed_notice_lock = threading.Lock()
+
+
+def embeddings_available() -> bool:
+    """활성 provider 조합으로 임베딩을 호출할 수 있는지. 키 유무만 본다(호출은 안 한다)."""
+    if _provider() == "gemini":
+        return bool(os.getenv("GEMINI_API_KEY"))
+    return bool(os.getenv("OPENAI_API_KEY"))
+
+
+def _notify_embeddings_unavailable_once() -> None:
+    global _embed_unavailable_notified
+    with _embed_notice_lock:
+        if _embed_unavailable_notified:
+            return
+        _embed_unavailable_notified = True
+    print(f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없고 "
+          f"OPENAI_API_KEY 도 없어 임베딩 의존 지표(response_relevancy 등)를 건너뜁니다. "
+          f"— 나머지 RAGAS 지표는 정상 계산됩니다. 필요하면 OPENAI_API_KEY 를 설정하세요.")
+
+
 def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
-    """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파; rate limit 은 재시도)"""
+    """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파; rate limit 은 재시도)
+
+    키가 없어 애초에 불가능한 조합이면 호출을 시도하지 않고 빈 리스트를 돌려준다 —
+    provider 마다 다른 인증 예외 문구가 probe 수만큼 찍히는 것을 막기 위함. 호출부는
+    빈 결과를 '결측'으로 흡수한다."""
+    if not embeddings_available():
+        _notify_embeddings_unavailable_once()
+        return []
+
     def _do():
         if _provider() == "gemini":
             return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))

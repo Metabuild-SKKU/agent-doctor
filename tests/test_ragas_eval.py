@@ -24,25 +24,42 @@ except ImportError:
 
 from agents.eval.llm_provider import _provider, has_key
 
+
+def _skip_module(reason: str) -> None:
+    """스크립트 실행(python tests/...)과 pytest 수집 양쪽에서 안전하게 스킵한다.
+
+    모듈 최상단에서 sys.exit(0) 을 부르면 pytest 는 수집 중 SystemExit 을 받아
+    INTERNALERROR 로 죽는다(스킵이 아니라 러너 전체가 중단). pytest 아래에서는
+    pytest.skip 을 쓰고, 직접 실행일 때만 exit 한다."""
+    print(reason)
+    if "pytest" in sys.modules:
+        import pytest
+        pytest.skip(reason, allow_module_level=True)
+    sys.exit(0)
+
+
 # 활성 provider(EVAL_LLM_PROVIDER) 기준으로 키를 확인한다 — OpenAI 키만 보면
 # gemini/github provider 로 돌릴 때도 무조건 스킵됐다.
 _PROVIDER = _provider()
-_KEY_ENV = {"gemini": "GEMINI_API_KEY", "github": "GITHUB_TOKEN"}.get(_PROVIDER, "OPENAI_API_KEY")
+_KEY_ENV = {
+    "gemini": "GEMINI_API_KEY",
+    "github": "GITHUB_TOKEN",
+    "openrouter": "OPENROUTER_API_KEY",
+}.get(_PROVIDER, "OPENAI_API_KEY")
 _key = os.getenv(_KEY_ENV, "").strip()
 if not has_key() or "..." in _key or len(_key) < 20:
     # 비었거나 .env.example 의 placeholder("sk-...") 면 실제 API 불가 → 스킵
-    print(f"실제 {_KEY_ENV} 없음(비었거나 placeholder) → 스킵  [provider={_PROVIDER}]")
-    print(f"  .env 의 {_KEY_ENV} 를 진짜 키로 바꾸고 다시 실행하세요.")
-    sys.exit(0)
+    _skip_module(f"실제 {_KEY_ENV} 없음(비었거나 placeholder) → 스킵  [provider={_PROVIDER}]"
+                 f"\n  .env 의 {_KEY_ENV} 를 진짜 키로 바꾸고 다시 실행하세요.")
 
-# github provider 는 채팅만 GitHub Models 로 하고 임베딩(response_relevancy)은
-# _openai_embed 로 내려가므로 OPENAI_API_KEY 도 필요하다. 없으면 임베딩 테스트에서
-# Missing credentials 로 죽으니 여기서 명확히 스킵한다.
-if _PROVIDER == "github":
+# github·openrouter 는 채팅만 자기 엔드포인트로 하고 임베딩(response_relevancy)은
+# _openai_embed 로 내려가므로 OPENAI_API_KEY 도 필요하다. 아래 [2] 블록이 임베딩
+# 결과를 단언하므로, 키가 없으면 None 이 돌아와 실패한다 → 여기서 명확히 스킵한다.
+if _PROVIDER in {"github", "openrouter"}:
     _oai = os.getenv("OPENAI_API_KEY", "").strip()
     if not _oai or "..." in _oai or len(_oai) < 20:
-        print("github provider 는 임베딩(response_relevancy)에 OPENAI_API_KEY 도 필요 → 스킵")
-        sys.exit(0)
+        _skip_module(f"{_PROVIDER} provider 는 임베딩(response_relevancy)에 "
+                     f"OPENAI_API_KEY 도 필요 → 스킵")
 
 print(f"provider = {_PROVIDER}")
 
