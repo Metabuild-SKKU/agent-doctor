@@ -83,7 +83,7 @@ from agents.optimize.schemas import (
     OptimizationHistoryItem,
     OptimizationRequest,
     OptimizationResult,
-    PrescriptionCandidate,
+    SelectedAction,
     Verdict,
 )
 
@@ -119,8 +119,10 @@ class OptimizeManualLogTest(unittest.TestCase):
         self.assertIn("재색인", out)
 
 
-class OptimizeCandidateLogTest(unittest.TestCase):
-    def test_request_skip_does_not_reassign_reason_to_first_candidate(self):
+class OptimizeActionLogTest(unittest.TestCase):
+    """로그가 "후보 목록 중 하나"가 아니라 **정해진 변경 하나**를 보고한다."""
+
+    def test_request_skip_does_not_reassign_reason_to_the_skipped_entry(self):
         result = OptimizationResult(
             request_id="req-1",
             status="skipped",
@@ -128,38 +130,37 @@ class OptimizeCandidateLogTest(unittest.TestCase):
             metadata={
                 "error_code": "missing_search_space",
                 "skipped_candidates": [
-                    {"prescription_id": "a", "reason": "not_ready"},
-                    {"prescription_id": "b", "reason": "empty_search_space"},
+                    {
+                        "action_key": "retriever.top_k:increase",
+                        "prescription_id": "increase_top_k",
+                        "reason": "no_valid_candidate_values",
+                    },
                 ],
             },
         )
 
         buf = StringIO()
         with redirect_stdout(buf):
-            agent._log_candidate_review(result)
+            agent._log_action_review(result)
 
-        lines = buf.getvalue().splitlines()
         self.assertEqual(
-            lines,
+            buf.getvalue().splitlines(),
             [
-                "[Optimize] 후보 SKIP: id=a, reason=not_ready",
-                "[Optimize] 후보 SKIP: id=b, reason=empty_search_space",
+                "[Optimize] action SKIP: retriever.top_k:increase, "
+                "reason=no_valid_candidate_values",
                 "[Optimize] 요청 SKIP: reason=missing_search_space",
             ],
         )
 
-    def test_failed_candidate_is_not_logged_as_selected(self):
-        candidate = PrescriptionCandidate(
-            "a",
-            "too_long_context",
-            "C",
-            "ready",
-        )
+    def test_failed_action_is_not_logged_as_selected(self):
         result = OptimizationResult(
             request_id="req-1",
             status="failed",
             optimizer="internal",
-            selected_candidate=candidate,
+            selected_action=SelectedAction(
+                action_key="retriever.top_k:increase",
+                prescription_id="increase_top_k",
+            ),
             message="internal 평가에 실패했습니다.",
             error="internal 평가에 실패했습니다.",
             metadata={"error_code": "internal_failed"},
@@ -167,15 +168,15 @@ class OptimizeCandidateLogTest(unittest.TestCase):
 
         buf = StringIO()
         with redirect_stdout(buf):
-            agent._log_candidate_review(result)
+            agent._log_action_review(result)
 
         self.assertEqual(
             buf.getvalue().strip(),
-            "[Optimize] 후보 FAIL: id=a, reason=internal_failed",
+            "[Optimize] action FAIL: retriever.top_k:increase, reason=internal_failed",
         )
         self.assertNotIn("SELECT", buf.getvalue())
 
-    def test_failed_request_without_candidate_is_logged(self):
+    def test_failed_request_without_action_is_logged(self):
         result = OptimizationResult(
             request_id="req-1",
             status="failed",
@@ -187,73 +188,74 @@ class OptimizeCandidateLogTest(unittest.TestCase):
 
         buf = StringIO()
         with redirect_stdout(buf):
-            agent._log_candidate_review(result)
+            agent._log_action_review(result)
 
         self.assertEqual(
             buf.getvalue().strip(),
             "[Optimize] 요청 FAIL: reason=invalid_internal_next_config",
         )
 
-    def test_candidate_list_omits_unused_fields_and_shared_reason_duplicates(self):
-        candidates = [
-            PrescriptionCandidate(
-                "a",
-                "too_long_context",
-                "C",
-                "ready",
-                cost=1.0,
-                priority=0.0,
-                reason="검색 context가 너무 깁니다.",
-                tradeoffs=["현재는 생산되지 않는 값"],
-            ),
-            PrescriptionCandidate(
-                "b",
-                "too_long_context",
-                "C",
-                "ready",
-                cost=2.0,
-                priority=0.0,
-                reason="검색 context가 너무 깁니다.",
-                tradeoffs=["현재는 생산되지 않는 값"],
-            ),
-        ]
-        request = OptimizationRequest(
-            request_id="req-1",
-            iteration=1,
-            baseline_config={},
-            failure_label="too_long_context",
-            candidates=candidates,
-        )
+    def test_selection_log_shows_the_action_and_what_it_beat(self):
+        """선택 로그는 고른 변경과 **밀린 것들**을 함께 보여준다.
 
-        buf = StringIO()
-        with redirect_stdout(buf):
-            agent._log_candidate_list(request)
-
-        output = buf.getvalue()
-        self.assertEqual(output.count("검색 context가 너무 깁니다."), 1)
-        self.assertNotIn("priority=", output)
-        self.assertNotIn("예상 부작용", output)
-
-    def test_selected_reason_is_logged_once_at_application(self):
-        candidate = PrescriptionCandidate(
-            "a",
-            "too_long_context",
-            "C",
-            "ready",
-            patch=ConfigPatch(changes={"top_k": 2}),
-        )
+        전환 전에는 "후보 N개" 목록을 나열했는데, 그 목록은 이제 planner 안에서
+        경쟁이 끝난 뒤라 존재하지 않는다. 대신 runner-up 과 보류 축을 남긴다.
+        """
         request = OptimizationRequest(
             request_id="req-1",
             iteration=1,
             baseline_config={"top_k": 4},
-            failure_label="too_long_context",
-            candidates=[candidate],
+            search_space={"retriever.top_k": [8]},
+            supporting_labels=["too_long_context", "retrieval_missing_gold"],
+            supporting_probes=["p1", "p2"],
+            action_key="retriever.top_k:increase",
+            prescription_id="increase_top_k",
+            action_score=2.0,
+            action_score_breakdown={
+                "weighted_probe_support": 2.0,
+                "base_cost": 1.0,
+                "cost_source": "reindex_flag",
+                "confidence_source": "default",
+            },
+            metadata={
+                "runner_up_actions": [
+                    {"action_key": "chunker.chunk_size:decrease", "score": 0.67}
+                ],
+                "deferred_axes": [
+                    {"axis": "retriever.top_k", "reason": "conflict_margin_unmet"}
+                ],
+            },
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_selected_action(request)
+
+        output = buf.getvalue()
+        self.assertIn("선택된 action: retriever.top_k:increase", output)
+        self.assertIn("지지 라벨 2개", output)
+        self.assertIn("probe 2개", output)
+        self.assertIn("밀린 action: chunker.chunk_size:decrease", output)
+        self.assertIn("보류된 축: retriever.top_k (conflict_margin_unmet)", output)
+
+    def test_selected_reason_is_logged_once_at_application(self):
+        request = OptimizationRequest(
+            request_id="req-1",
+            iteration=1,
+            baseline_config={"top_k": 4},
+            search_space={"retriever.top_k": [2]},
+            supporting_labels=["too_long_context"],
+            action_key="retriever.top_k:decrease",
+            prescription_id="decrease_top_k",
         )
         result = OptimizationResult(
             request_id="req-1",
             status="applied",
             optimizer="rules",
-            selected_candidate=candidate,
+            selected_action=SelectedAction(
+                action_key="retriever.top_k:decrease",
+                prescription_id="decrease_top_k",
+            ),
             message="top_k를 줄입니다.",
         )
         state = AgentDoctorState(
@@ -264,7 +266,7 @@ class OptimizeCandidateLogTest(unittest.TestCase):
 
         buf = StringIO()
         with redirect_stdout(buf):
-            agent._log_candidate_review(result)
+            agent._log_action_review(result)
             agent._log_optimize_application(
                 state,
                 request,
@@ -272,11 +274,11 @@ class OptimizeCandidateLogTest(unittest.TestCase):
                 {"top_k": 4},
                 {"top_k": 2},
                 ["top_k"],
-                "a",
+                "decrease_top_k",
             )
 
         output = buf.getvalue()
-        self.assertIn("[Optimize] 후보 SELECT: id=a", output)
+        self.assertIn("[Optimize] action SELECT: retriever.top_k:decrease", output)
         self.assertEqual(output.count("top_k를 줄입니다."), 1)
 
 
@@ -291,6 +293,12 @@ def make_state(overall=60.0, chunk_size=512, iteration=0, max_iterations=3,
 
 class OptimizeAgentForwardTest(unittest.TestCase):
     def test_unjudgeable_exclusions_only_returns_recorded_failures(self):
+        """측정 불가는 action key 단위로만 막는다.
+
+        정확한 전이(attempt)가 아니라 축 전체를 막는 이유는, 못 잰 것이 그 후보값의
+        문제가 아니라 이 방문의 문제라서다 — 같은 축의 다른 값으로 바꿔도 똑같이
+        못 잰다. 대신 품질 blacklist 와 달리 방문 예산으로만 제한한다.
+        """
         unjudgeable = OptimizationHistoryItem(
             trial_id="u1",
             request_id="r1",
@@ -299,6 +307,7 @@ class OptimizeAgentForwardTest(unittest.TestCase):
             optimizer="rules",
             status="failed",
             selected_prescription_id="enable_reranker",
+            action_key="reranker.enabled:enable",
             metadata={"unjudgeable": True},
         )
         judged = OptimizationHistoryItem(
@@ -309,13 +318,29 @@ class OptimizeAgentForwardTest(unittest.TestCase):
             optimizer="rules",
             status="failed",
             selected_prescription_id="increase_top_k",
+            action_key="retriever.top_k:increase",
             metadata={"unjudgeable": False},
         )
 
         self.assertEqual(
             agent._unjudgeable_exclusions([unjudgeable, judged]),
-            {("retrieval_low_rank", "enable_reranker")},
+            {"reranker.enabled:enable"},
         )
+
+    def test_unjudgeable_exclusions_ignore_legacy_items_without_action(self):
+        """구버전 이력(action_key 없음)은 실행 제어에 쓰이지 않는다."""
+        legacy = OptimizationHistoryItem(
+            trial_id="u1",
+            request_id="r1",
+            iteration=1,
+            failure_labels=["retrieval_low_rank"],
+            optimizer="rules",
+            status="failed",
+            selected_prescription_id="enable_reranker",
+            metadata={"unjudgeable": True},
+        )
+
+        self.assertEqual(agent._unjudgeable_exclusions([legacy]), set())
 
     def test_absolute_visit_limit_stops_before_new_prescription(self):
         state = make_state()
@@ -332,13 +357,27 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertIn("절대 방문 상한", state.optimization_report.summary)
 
     def test_apply_creates_pending_and_increments_iteration(self):
+        """too_long_context 가 지지하는 action 중 하나가 적용되고 예산 1회를 쓴다.
+
+        셋 다 같은 C tier 이고 probe 도 하나뿐이라 점수가 동률이다. 재색인이 필요한
+        chunker.chunk_size:decrease 는 비용 3 으로 밀리고, 남은 둘은 action_key
+        사전순으로 갈린다(context.compression < retriever.top_k). rules.py 의 선언
+        순서('가벼운 것 먼저')가 실행 순서를 소유하지 않게 된 결과다 — 최종 판정은
+        Eval 실측이 하고, 밀린 후보도 예산 안에서 결국 시도된다(구현계획 §8.1).
+        """
         state = agent.run(make_state())
         self.assertEqual(state.status, "applied")
         self.assertEqual(state.iteration, 1)
         self.assertEqual(state.current_agent, "optimize")
-        self.assertEqual(state.index_config["top_k"], 2)  # 가장 싼 top-k 처방이 먼저 적용됨
+        self.assertTrue(state.index_config["context_compression"])
+        self.assertEqual(state.index_config["top_k"], 4)   # 다른 축은 건드리지 않는다
         self.assertFalse(state.reindex_required)
-        self.assertIsNotNone(history.find_pending(state.optimization_history))
+        pending = history.find_pending(state.optimization_history)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.action_key, "context.compression.enabled:enable")
+        self.assertEqual(pending.supporting_labels, ["too_long_context"])
+        self.assertIsNotNone(pending.action_attempt_key)
+        self.assertIsNotNone(pending.action_study_key)
 
     def test_manual_label_makes_no_change(self):
         state = make_state(label="corpus_gap")
@@ -369,9 +408,9 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertIn("[Optimize] 반복 횟수: 1/3", out)
         self.assertIn("Eval 결과: overall=0.42, composite=40.0, pass=false", out)
         self.assertIn("발견된 문제: too_long_context 1건", out)
-        self.assertIn("[Optimize] 후보 생성:", out)
-        self.assertIn("[Optimize] 후보 SELECT:", out)
-        self.assertIn("[Optimize] 처방 적용:", out)
+        self.assertIn("[Optimize] 선택된 action:", out)
+        self.assertIn("[Optimize] action SELECT:", out)
+        self.assertIn("[Optimize] action 적용:", out)
         self.assertIn("다음 단계: Index 경유(물리 재색인 생략) 후 Eval 재실행", out)
         self.assertEqual(graph.route_after_optimize(state), "index")
 
@@ -382,7 +421,7 @@ class OptimizeAgentForwardTest(unittest.TestCase):
             request_id=request.request_id,
             status="proposed",
             optimizer="rules",
-            selected_candidate=request.candidates[0],
+            selected_action=SelectedAction(action_key=request.action_key),
             config_patch=ConfigPatch(
                 changes={"embedding.model": "BAAI/bge-m3"},
                 reindex_required=True,
@@ -416,7 +455,10 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                     request_id=request.request_id,
                     status="skipped",
                     optimizer="internal",
-                    selected_candidate=request.candidates[0],
+                    selected_action=SelectedAction(
+                        action_key=request.action_key,
+                        prescription_id=request.prescription_id,
+                    ),
                     metadata={"error_code": "baseline_selected"},
                 )
             return real_optimizer_run(request)
@@ -430,7 +472,7 @@ class OptimizeAgentForwardTest(unittest.TestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertIn(
-            "[Optimize] 후보 SKIP: id=increase_chunk_overlap, "
+            "[Optimize] action SKIP: chunker.chunk_overlap:increase, "
             "reason=baseline_selected",
             buf.getvalue(),
         )
@@ -638,11 +680,15 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         )
 
     def test_inapplicable_prescription_falls_through_to_next(self):
-        """issue #26: 적용 불가 처방이 최우선이어도 다음 actionable finding을 적용한다.
+        """issue #26: 적용 불가 action 이 최다 지지를 받아도 다음 action 이 적용된다.
 
-        lexical_mismatch(12건)가 최우선이지만 baseline이 이미 hybrid라 enable_hybrid는
-        유효 후보가 없어(no-op) 적용 불가 → blacklist 되고 missing_gold(increase_top_k)로
-        폴스루한다. (enable_hybrid 자체는 dense baseline에선 정상 적용된다 — hybrid 언블록.)"""
+        lexical_mismatch(12 probe)가 최다 지지지만 baseline 이 이미 hybrid 라
+        retriever.search_type:replace 는 유효 후보가 없다(no-op). 전환 전에는 그
+        처방이 선택된 **뒤** optimizer 에서 탈락해 blacklist 에 올랐다 — 그 방문이
+        통째로 낭비됐다. 이제는 **점수 경쟁 전** eligibility 에서 제외되므로
+        blacklist 에 오르지 않고, 같은 방문에서 곧바로 missing_gold 의 top_k 확대가
+        적용된다(구현계획 §4.6 / 안전 원칙 7).
+        """
         def _finding(pid, label, **metadata):
             return Finding(
                 finding_id=f"{pid}:{label}",
@@ -687,17 +733,29 @@ class OptimizeAgentForwardTest(unittest.TestCase):
             max_iterations=3,
         )
 
+        request, _decision = agent.planner.plan(state)
+        rejected = {
+            entry["action_key"]: entry["reason"]
+            for entry in request.metadata["rejected_actions"]
+        }
+        self.assertEqual(
+            rejected.get("retriever.search_type:replace"),
+            "no_candidate_value",
+        )
+
         out = agent.run(state)
 
-        self.assertIn(
-            ("retrieval_lexical_mismatch", "enable_hybrid"),
-            out.blacklist,
-        )
         self.assertEqual(out.status, "applied")
         self.assertEqual(out.index_config["top_k"], 10)
+        self.assertTrue(out.index_config["use_hybrid"])   # no-op 축은 손대지 않는다
         self.assertEqual(
-            out.optimization_history[-1].failure_labels,
-            ["retrieval_missing_gold"],
+            out.optimization_history[-1].action_key,
+            "retriever.top_k:increase",
+        )
+        # 실행 전에 걸러졌으므로 품질 실패로 기록되지 않는다.
+        self.assertEqual(
+            [key.action_key for key in out.blocked_action_attempts],
+            [],
         )
 
     def test_always_returns_state_even_without_report(self):
@@ -724,7 +782,7 @@ class OptimizeCGroupUnblockTest(unittest.TestCase):
         )
         request, decision = plan(state)
         self.assertEqual(decision.mode, "apply_optimize")
-        return request.candidates[0].search_space
+        return request.search_space
 
     def test_lost_in_the_middle_leads_with_top_k(self):
         space = self._first_candidate_space("lost_in_the_middle")
@@ -745,21 +803,51 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(state.optimization_history[0].status, "applied")
         self.assertEqual(len(state.blacklist), 0)
 
-    def test_worse_rolls_back_and_blacklists(self):
-        state = agent.run(make_state(overall=60.0))         # 방문1: top_k 4 -> 2
-        self.assertEqual(state.index_config["top_k"], 2)
+    def test_worse_rolls_back_and_blocks_the_exact_transition(self):
+        state = agent.run(make_state(overall=60.0))         # 방문1: 압축 켜기
+        self.assertTrue(state.index_config["context_compression"])
         state.report = make_report(50.0)                    # Eval: 악화
         state = agent.run(state)                            # 방문2: 판정 → 롤백
-        self.assertEqual(state.status, "applied")           # 같은 라벨의 다음 처방은 계속 진행
-        self.assertEqual(state.index_config["top_k"], 4)    # 첫 후보는 baseline으로 복원
-        self.assertTrue(state.index_config["context_compression"])
+        self.assertEqual(state.status, "applied")           # 다음 action 은 계속 진행
+        # 첫 시도는 baseline 으로 복원됐다(적용 전 config 에 없던 키라 사라진다).
+        self.assertNotIn("context_compression", state.index_config)
+        self.assertEqual(state.index_config["top_k"], 2)
         self.assertEqual(
-            state.optimization_history[-1].selected_prescription_id,
-            "context_compression",
+            state.optimization_history[-1].action_key,
+            "retriever.top_k:decrease",
         )
-        self.assertEqual(len(state.blacklist), 1)
+        # 차단 단위는 (action, baseline, 후보값) 전이 하나다.
+        blocked = list(state.blocked_action_attempts)
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0].action_key, "context.compression.enabled:enable")
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
+
+    def test_blocked_attempt_is_released_on_a_new_baseline(self):
+        """같은 action 이라도 baseline 이 달라지면 다시 시도할 수 있다(구현계획 §5.1).
+
+        기존 (label, prescription_id) blacklist 는 baseline 무관 영구 차단이라
+        "검색을 고친 뒤 하류를 다시 본다"는 A>C>B 설계 의도와 충돌했다.
+        """
+        state = agent.run(make_state(overall=60.0))
+        state.report = make_report(50.0)
+        state = agent.run(state)                             # 롤백 → 전이 차단
+        blocked = set(state.blocked_action_attempts)
+        self.assertEqual(
+            {key.action_key for key in blocked},
+            {"context.compression.enabled:enable"},
+        )
+
+        # 차단이 걸린 그 baseline(=시도 직전 config)에서는 다시 뽑히지 않는다.
+        same_baseline = make_state(overall=60.0)
+        request, _decision = agent.planner.plan(same_baseline, blacklist=blocked)
+        self.assertNotEqual(request.action_key, "context.compression.enabled:enable")
+
+        # 다른 축이 baseline 을 바꾸면 같은 action 이 후보로 돌아온다.
+        moved = make_state(overall=60.0)
+        moved.index_config["chunk_size"] = 256
+        request, _decision = agent.planner.plan(moved, blacklist=blocked)
+        self.assertEqual(request.action_key, "context.compression.enabled:enable")
 
     def test_rollback_then_followup_application_logs_both_prescriptions(self):
         state = agent.run(make_state(overall=60.0))
@@ -772,11 +860,11 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertEqual(
-            state.optimization_history[-1].selected_prescription_id,
-            "shrink_chunk_size",
+            state.optimization_history[-1].action_key,
+            "chunker.chunk_size:decrease",
         )
-        self.assertIn("decrease_top_k", out)
-        self.assertIn("shrink_chunk_size", out)
+        self.assertIn("context.compression.enabled:enable", out)   # 롤백된 action
+        self.assertIn("chunker.chunk_size:decrease", out)          # 새로 적용된 action
         self.assertIn("판정 결과: keep=false, before=60.00, after=40.00", out)
         verdict_block = out[:out.index("판정 결과: keep=false")]
         self.assertIn("Eval 결과:", verdict_block)
@@ -786,7 +874,7 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertNotIn("다음 단계:", verdict_block)
         self.assertLess(
             out.index("이전 처방 판정: ROLLBACK"),
-            out.index("처방 적용: id=shrink_chunk_size"),
+            out.index("action 적용: chunker.chunk_size:decrease"),
         )
 
     def test_keep_then_followup_application_logs_previous_verdict(self):
@@ -800,12 +888,19 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertEqual(state.optimization_history[0].status, "applied")
         self.assertEqual(
-            state.optimization_history[-1].selected_prescription_id,
-            "shrink_chunk_size",
+            state.optimization_history[-1].action_key,
+            "chunker.chunk_size:decrease",
         )
-        self.assertIn("선택한 처방: decrease_top_k", out)
+        self.assertIn(
+            "선택한 action: context.compression.enabled:enable "
+            "(처방 context_compression)",
+            out,
+        )
         self.assertIn("판정 결과: keep=true, before=60.00, after=75.00", out)
-        self.assertIn("선택한 처방: shrink_chunk_size", out)
+        self.assertIn(
+            "선택한 action: chunker.chunk_size:decrease (처방 shrink_chunk_size)",
+            out,
+        )
         verdict_block = out[:out.index("판정 결과: keep=true")]
         self.assertIn("Eval 결과:", verdict_block)
         self.assertIn("발견된 문제:", verdict_block)
@@ -813,7 +908,7 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertNotIn("다음 단계:", verdict_block)
         self.assertLess(
             out.index("이전 처방 판정: KEEP"),
-            out.index("처방 적용: id=shrink_chunk_size"),
+            out.index("action 적용: chunker.chunk_size:decrease"),
         )
 
     def test_unjudgeable_rollback_does_not_blacklist(self):
@@ -838,10 +933,10 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         # 불일치 방지, 버그 A). 버그가 있으면 이 값이 False 가 된다.
         state = agent.run(make_state(overall=60.0, label="retrieval_semantic_mismatch"))
         pending = history.find_pending(state.optimization_history)
-        self.assertEqual(pending.selected_prescription_id, "shrink_chunk_size")
+        self.assertEqual(pending.action_key, "chunker.chunk_size:decrease")
         self.assertTrue(pending.metadata["reindex_required"])   # 방문1 = index-time
 
-        # 방문2: 악화 + 검색시점 라벨 → 롤백(재색인 요구) 후 dynamic_top_k(재색인 불필요) 적용
+        # 방문2: 악화 + 검색시점 라벨 → 롤백(재색인 요구) 후 MMR(재색인 불필요) 적용
         state.report = make_report(50.0, label="retrieval_incomplete_enumeration")
         buf = StringIO()
         with redirect_stdout(buf):
@@ -849,26 +944,66 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(state.status, "applied")
         self.assertTrue(state.reindex_required)   # 롤백 재색인 요구가 보존됨
         out = buf.getvalue()
-        self.assertIn("선택한 처방: shrink_chunk_size", out)
+        self.assertIn("선택한 action: chunker.chunk_size:decrease", out)
         self.assertIn("판정 결과: keep=false, before=60.00, after=50.00", out)
-        self.assertIn("선택한 처방: dynamic_top_k", out)
+        self.assertIn("선택한 action: retriever.mmr:enable", out)
         verdict_block = out[:out.index("판정 결과: keep=false")]
         self.assertNotIn("다음 단계:", verdict_block)
-        self.assertIn("reindex_required=true", out[out.rindex("dynamic_top_k"):])
-        self.assertIn("다음 단계: Index 재색인 후 Eval 재실행", out[out.rindex("dynamic_top_k"):])
+        tail = out[out.rindex("retriever.mmr:enable"):]
+        self.assertIn("reindex_required=true", tail)
+        self.assertIn("다음 단계: Index 재색인 후 Eval 재실행", tail)
 
-    def test_budget_exhausted_allows_same_label_without_increment(self):
+    def test_budget_exhausted_stops_before_a_new_action_study(self):
+        """예산이 바닥나면 같은 라벨이어도 새 ActionStudy 를 시작하지 않는다.
+
+        ⚠️ 전환으로 뒤집힌 동작이다. 예전 판정 기준은 '대표 라벨이 바뀌었는가'라,
+        한 라벨이 처방을 갈아 끼우는 동안은 예산을 소비하지 않았다 — 라벨 하나가
+        예산 밖에서 무한히 config 를 바꿀 수 있었다는 뜻이다. 이제 iteration 은
+        '새 ActionStudy 를 적용한 횟수'이므로(구현계획 §5.3) 다른 action 은 곧
+        새 iteration 이고, 예산이 없으면 롤백만 확정하고 종료한다.
+
+        롤백 자체는 예산과 무관하게 먼저 처리된다 — 나빠진 config 를 예산이 없다는
+        이유로 남겨 두면 안전망이 무의미해진다.
+        """
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
         self.assertEqual(state.iteration, 3)                # 방문1: 2 -> 3
-        state.report = make_report(50.0)                    # 악화
-        state = agent.run(state)                            # 방문2: 같은 라벨의 다음 처방
-        self.assertEqual(state.iteration, 3)                # 후보/처방 전환은 증가 없음
         self.assertTrue(state.index_config["context_compression"])
-        self.assertEqual(
-            state.optimization_history[-1].selected_prescription_id,
-            "context_compression",
+        state.report = make_report(50.0)                    # 악화
+        state = agent.run(state)                            # 방문2: 롤백 후 종료
+        self.assertEqual(state.iteration, 3)                # 새 study 를 시작하지 않음
+        self.assertEqual(state.status, "rolled_back")
+        self.assertNotIn("context_compression", state.index_config)
+        self.assertIsNone(history.find_pending(state.optimization_history))
+        self.assertEqual(len(state.optimization_history), 1)
+
+    def test_sweep_candidates_do_not_consume_extra_iterations(self):
+        """같은 action 안의 후보 전환은 예산을 소비하지 않는다(구현계획 §5.3).
+
+        OptimizeTopKSweepTest 가 sweep 전체를 검증하지만, 예산 규칙 자체를 여기에
+        고정해 두어 iteration 의미가 바뀌면 바로 드러나게 한다.
+        """
+        finding = Finding(
+            finding_id="sweep", type="retrieval_failure", severity="warning",
+            description="gold가 검색 결과에 없음", label="retrieval_missing_gold",
+            affected_probes=["p1"],
+            metadata={"parameter_candidates": {"retriever.top_k": [7, 9]}},
         )
-        self.assertEqual(state.status, "applied")
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="r", findings=[finding], overall_score=60.0,
+                ragas_scores={"context_recall": 0.7, "faithfulness": 0.7,
+                              "noise_sensitivity": 0.2},
+                pass_threshold=False,
+            ),
+            index_config={"top_k": 5, "chunk_size": 512, "chunk_overlap": 50},
+            iteration=0, max_iterations=1,
+        )
+
+        state = agent.run(state)                             # 후보 1
+        self.assertEqual((state.index_config["top_k"], state.iteration), (7, 1))
+        state.report.overall_score = 55.0
+        state = agent.run(state)                             # 후보 2 — 같은 study
+        self.assertEqual((state.index_config["top_k"], state.iteration), (9, 1))
 
     def test_baseline_dead_end_preserves_same_visit_rollback(self):
         state = agent.run(make_state(overall=60.0))
@@ -878,7 +1013,7 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
             request_id=request.request_id,
             status="skipped",
             optimizer="internal",
-            selected_candidate=request.candidates[0],
+            selected_action=SelectedAction(action_key=request.action_key),
             metadata={"error_code": "baseline_selected"},
         )
 
@@ -991,7 +1126,7 @@ class OptimizeTopKSweepTest(unittest.TestCase):
         with redirect_stdout(buf):
             state = agent.run(state)
         self.assertEqual((state.index_config["top_k"], state.iteration), (9, 1))
-        self.assertIn("선택한 처방: increase_top_k", buf.getvalue())
+        self.assertIn("선택한 action: retriever.top_k:increase", buf.getvalue())
 
         state.report = self._report(70.0)
         state = agent.run(state)
@@ -1011,12 +1146,24 @@ class OptimizeTopKSweepTest(unittest.TestCase):
         )
         self.assertIn("다음 단계: Index 경유(물리 재색인 생략) 후 Eval 재실행", buf.getvalue())
 
+        # 끝난 탐색은 다시 시작하지 않는다. sweep 승자가 baseline 을 움직이므로
+        # study fingerprint 만으로는 부족하고, 측정한 후보값이 결과 baseline 에서도
+        # 소진 처리돼야 같은 축을 곧바로 재탐색하지 않는다.
+        finished = state.optimization_history[-1]
         state.report = self._report(65.0)
-        state = agent.run(state)
-        self.assertNotEqual(
-            state.optimization_history[-1].selected_prescription_id,
-            "increase_top_k",
+        request, _decision = agent.planner.plan(
+            state,
+            blacklist=set(state.blocked_action_attempts)
+            | set(state.completed_action_studies),
         )
+        self.assertNotEqual(
+            getattr(request, "action_key", None),
+            "retriever.top_k:increase",
+        )
+
+        state = agent.run(state)
+        self.assertIsNone(history.find_active_study(state.optimization_history))
+        self.assertIs(state.optimization_history[-1], finished)
 
     def test_absolute_visit_limit_restores_active_sweep_baseline(self):
         state = agent.run(self._state())
@@ -1137,7 +1284,10 @@ class OptimizeReportWiringTest(unittest.TestCase):
     def test_keep_stores_applied_trial_report(self):
         # 방문2가 '판정만' 하도록 예산을 소진시킨다(예산이 남으면 새 처방 적용이 headline).
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
-        self.assertEqual(state.optimization_history[-1].selected_prescription_id, "decrease_top_k")
+        self.assertEqual(
+            state.optimization_history[-1].action_key,
+            "context.compression.enabled:enable",
+        )
         state.report = make_report(75.0, label="retrieval_missing_gold")  # 개선 + 다음 라벨
         buf = StringIO()
         with redirect_stdout(buf):
@@ -1146,11 +1296,11 @@ class OptimizeReportWiringTest(unittest.TestCase):
         self.assertEqual(report.status, "applied")
         self.assertIn("유지", report.summary)
         out = buf.getvalue()
-        self.assertIn("선택한 라벨: too_long_context", out)
-        self.assertIn("선택한 처방: decrease_top_k", out)
+        self.assertIn("지지 라벨: too_long_context", out)
+        self.assertIn("선택한 action: context.compression.enabled:enable", out)
         self.assertIn("판정 결과: keep=true, before=60.00, after=75.00", out)
         self.assertIn("다음 단계: Serve 이동 (verified, 반복 예산 소진)", out)
-        self.assertNotIn("선택한 처방: -", out)
+        self.assertNotIn("선택한 action: -", out)
 
     def test_rollback_stores_failed_trial_report(self):
         state = agent.run(make_state(overall=60.0, iteration=2, max_iterations=3))
@@ -1164,7 +1314,7 @@ class OptimizeReportWiringTest(unittest.TestCase):
         self.assertGreater(len(report.metadata.get("floor_violations", [])) +
                            int("점수" in report.summary), 0)  # 롤백 사유가 실림
         out = buf.getvalue()
-        self.assertIn("선택한 처방:", out)
+        self.assertIn("선택한 action:", out)
         self.assertIn("다음 단계: Index 경유(물리 재색인 생략) 후 Eval 재실행", out)
 
     def test_rollback_baseline_carries_restored_score_not_degraded(self):
@@ -1251,6 +1401,108 @@ class GraphRoutingTest(unittest.TestCase):
         state = AgentDoctorState(report=make_report(50.0), iteration=3, max_iterations=3,
                                  optimization_history=[])
         self.assertEqual(self._route(graph.route_after_eval, state), "serve")
+
+
+class OptimizeVisitBudgetInvariantTest(unittest.TestCase):
+    """종료 보장은 iteration 이 아니라 optimize_visit_count 가 한다.
+
+    iteration 은 "새 ActionStudy 를 적용한 횟수"라 소비하지 않는 경로가 여럿이다
+    (sweep 중간 후보, 판정만 한 방문, 적용 불가 소진, study 오류 복원…). graph.py 는
+    iteration 만 읽고 visit 은 모른 채 라우팅하므로, **미소비 경로가 반복돼도 닫히는
+    이유는 오직 visit 이 무조건 증가하기 때문**이다. 그 불변조건을 여기 고정한다.
+    """
+
+    _TERMINAL = {"verified", "skipped", "manual_required", "already_optimal", "error"}
+
+    def _drive(self, state, max_steps=64):
+        """graph 라우팅을 흉내 내 config 가 안 바뀔 때까지 Optimize 를 반복 호출한다."""
+        seen_counts = []
+        for _ in range(max_steps):
+            before = state.optimize_visit_count
+            with redirect_stdout(StringIO()):
+                state = agent.run(state)
+            seen_counts.append((before, state.optimize_visit_count))
+            if graph.route_after_optimize(state) != "index":
+                return state, seen_counts
+        self.fail(f"Optimize 방문이 {max_steps}회 안에 끝나지 않았다")
+
+    def _assert_visit_consumed(self, transitions):
+        """상한 도달 방문을 빼면 매 방문이 visit 을 정확히 1 소비한다."""
+        for before, after in transitions:
+            self.assertIn(
+                after - before,
+                (0, 1),
+                f"visit 이 1을 넘게 움직였다: {before} → {after}",
+            )
+            if after == before:
+                # 증가하지 않는 유일한 경로는 상한 도달이며 그 방문은 종료 경로다.
+                self.assertGreaterEqual(before, 20)
+
+    def test_every_visit_consumes_the_visit_budget(self):
+        """처방 적용 → 롤백 → 다음 action 이 반복돼도 방문 예산이 계속 줄어든다."""
+        state = make_state(overall=60.0, max_iterations=5)
+        transitions = []
+        for _ in range(12):
+            before = state.optimize_visit_count
+            with redirect_stdout(StringIO()):
+                state = agent.run(state)
+            transitions.append((before, state.optimize_visit_count))
+            if graph.route_after_optimize(state) != "index":
+                break
+            # Eval 이 매번 악화를 보고한다 = 최악 시나리오(적용·롤백 왕복)
+            state.report = make_report(50.0)
+        self._assert_visit_consumed(transitions)
+        self.assertTrue(all(after > before for before, after in transitions))
+
+    def test_iteration_free_paths_still_close(self):
+        """iteration 을 소비하지 않는 경로들도 결국 Serve 로 닫힌다.
+
+        sweep 중간 후보(경로 1)와 sweep 종료(경로 2)는 iteration 이 1에 묶여 있어
+        graph.py 의 예산 가드가 발동하지 않는다. 그래도 방문은 유한하다.
+        """
+        finding = Finding(
+            finding_id="sweep", type="retrieval_failure", severity="warning",
+            description="gold가 검색 결과에 없음", label="retrieval_missing_gold",
+            affected_probes=["p1"],
+            metadata={"parameter_candidates": {"retriever.top_k": [7, 9, 11]}},
+        )
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="r", findings=[finding], overall_score=60.0,
+                ragas_scores={"context_recall": 0.7, "faithfulness": 0.7,
+                              "noise_sensitivity": 0.2},
+                pass_threshold=False,
+            ),
+            index_config={"top_k": 5, "chunk_size": 512, "chunk_overlap": 50},
+            iteration=0, max_iterations=1,
+        )
+
+        state, transitions = self._drive(state)
+
+        self._assert_visit_consumed(transitions)
+        self.assertEqual(state.iteration, 1)            # sweep 전체가 iteration 하나
+        self.assertGreater(state.optimize_visit_count, 1)
+        self.assertIn(state.status, self._TERMINAL)
+
+    def test_visit_limit_converges_in_one_extra_round(self):
+        """상한 도달 방문은 visit 을 늘리지 않는다 — 그래도 한 바퀴 안에 닫힌다.
+
+        복원이 config 를 바꾸면 status=rolled_back 이라 Index 를 한 번 더 돌지만,
+        그 다음 방문에는 복원할 pending 이 없어 verified 로 Serve 에 도달한다.
+        """
+        state = make_state(overall=60.0)
+        with redirect_stdout(StringIO()):
+            state = agent.run(state)
+        state.optimize_visit_count = 19
+        state.report = make_report(50.0)
+
+        state, transitions = self._drive(state)
+
+        self.assertEqual(state.optimize_visit_count, 20)
+        self.assertIn(state.status, self._TERMINAL)
+        self.assertEqual(graph.route_after_optimize(state), "serve")
+        # 상한 처리에 쓴 방문은 두 번(rolled_back 1 + verified 1)을 넘지 않는다.
+        self.assertLessEqual(len(transitions), 3)
 
 
 if __name__ == "__main__":

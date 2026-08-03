@@ -64,6 +64,7 @@ from agents.eval.metrics_common import (
     DEFAULT_RERANK_CANDIDATES,
     missed_gold_ids,
     set_context as set_diag_context,
+    set_mode,
 )
 from agents.eval import topic_cluster
 from agents.eval.metrics_basic import _compute_metrics
@@ -408,6 +409,12 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     # 진단 모드(비용 tier 상한): EVAL_MODE 환경변수. STEP3-2/STEP4/리포트가 이 값으로 게이팅된다.
     mode = resolve_mode()
+    # 측정 self-gate 의 전역 tier 도 여기서 맞춘다 — 예전엔 diagnose() 진입점만 set_mode 를 불러,
+    # STEP3 의 실패 판정이 모듈 기본값(FAST)으로 돌았다. 그러면 _grounded_ok/_abstained 의 tier3
+    # 축이 통째로 빠져(_faith 가 None) 근거성만으로 실패하는 probe 가 성공으로 분류되고, 그
+    # probe 는 오라클 답변 생성 대상에서 빠진다(STEP4 diagnose 는 DEEP 으로 실패 판정 → 불일치).
+    # 매 run 마다 다시 세팅하므로 이전 iteration 의 전역이 새 실행에 새는 것도 함께 막는다.
+    set_mode(mode)
     # state.iteration 은 raw 값을 그대로 찍는다(graph.py Orchestrator 로그와 표시 일치).
     # 예전엔 +1 을 더해 "다음 Optimize 방문에서 증가할 값"을 미리 보여줬는데, 같은 라벨이
     # 이어지는 방문(starts_new_label=False)에서는 실제로 증가하지 않아 Eval 로그만 매번
@@ -534,65 +541,78 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         #   LLM 호출(답변 생성)만 병렬화하고 검색·진단은 순차 유지 — Qdrant/임베딩/
         #   signals 전역이 병렬 구간에 들어가지 않게 하는 설계(계획 B안).
         concurrency = resolve_llm_concurrency()
+        # index_config 를 전달해 Optimize(B그룹)의 프롬프트·온도 처방(temperature,
+        # grounding_strict 등)이 실제 답변 생성에 반영되게 한다. generator 는 아는
+        # 키만 읽고 나머지(chunk_size 등)는 무시한다. 없으면 기본값이 현 동작 유지.
+        gen_config = state.index_config or {}
         with step("Eval", 2, "검색 + 답변 생성"):
-            # Phase A(순차): 검색 + record 준비, 답변 생성 태스크 수집
+            # Phase A(순차): 검색 + record 준비
             records = []
-            gen_tasks: list[tuple[EvalRecord, str, list[str]]] = []
             for p in probes:
                 rec = _prepare_record(p, retriever, chunk_text, top_k,
                                       state.diagnosis_cache.setdefault(p.probe_id, {}))
                 records.append(rec)
-                gen_tasks.append((rec, "real", rec.retrieved_context))
-                if rec.oracle_context:  # gold context 가 있을 때만 Oracle 트랙 (기존 동일)
-                    gen_tasks.append((rec, "oracle", rec.oracle_context))
 
-            # Phase B(병렬): LLM 답변 생성만 동시 실행 (EVAL_LLM_CONCURRENCY, 1이면 순차)
+            # Phase B(병렬): 실제 트랙 답변 생성만 동시 실행 (EVAL_LLM_CONCURRENCY, 1이면 순차).
+            # 오라클 트랙은 여기서 안 만든다 — 실패로 판정된 probe 에만 필요해서 STEP3 로 미룬다.
             parallel_note = (f" 병렬 (동시성 {concurrency})"
-                             if concurrency > 1 and len(gen_tasks) > 1 else " 순차")
-            print(f"  probe {len(probes)}개 · 답변 {len(gen_tasks)}건{parallel_note}")
-            # index_config 를 전달해 Optimize(B그룹)의 프롬프트·온도 처방(temperature,
-            # grounding_strict 등)이 실제 답변 생성에 반영되게 한다. generator 는 아는
-            # 키만 읽고 나머지(chunk_size 등)는 무시한다. 없으면 기본값이 현 동작 유지.
-            gen_config = state.index_config or {}
+                             if concurrency > 1 and len(records) > 1 else " 순차")
+            print(f"  probe {len(probes)}개 · 실제 답변 {len(records)}건{parallel_note}")
             answers = parallel_map(
-                lambda t: generate_answer(t[0].probe.question, t[2], config=gen_config),
-                gen_tasks, concurrency)
-            for (rec, track, _ctx), answer in zip(gen_tasks, answers):
-                if track == "real":
-                    rec.generated_answer = answer
-                else:
-                    rec.oracle_answer = answer
+                lambda r: generate_answer(r.probe.question, r.retrieved_context, config=gen_config),
+                records, concurrency)
+            for rec, answer in zip(records, answers):
+                rec.generated_answer = answer
 
-        # ── STEP3: 지표 · RAGAS 진단 ──────────────────────────
-        # Phase B2(병렬): RAGAS 선계산 — 트랙별로 필요한 probe 만 동시 실행하고 *_done
-        # 플래그를 세워, Phase C 의 _compute_ragas_real/_oracle 이 캐시 히트만 하게 한다.
-        # _ragas_track 은 진단 전역과 무관한 모듈 함수라 병렬 구간에 안전.
+        # ── STEP3: 지표 · 오라클 트랙 · RAGAS 진단 ─────────────
+        # Phase B2(병렬): 실패 판정을 먼저 세우고, 그 판정으로 오라클 트랙(답변 생성 + RAGAS)을
+        # 실패 probe 로 한정한다 — 오라클 소비처가 실패 경로뿐이라 성공 probe 몫은 순수 낭비다.
+        # RAGAS 는 *_done 플래그를 세워 Phase C 의 _compute_ragas_real/_oracle 이 캐시 히트만
+        # 하게 한다. _ragas_track 은 진단 전역과 무관한 모듈 함수라 병렬 구간에 안전.
         # 게이트는 _compute_ragas_* 와 동일(mode >= DEEP); LLM 비활성·키없음은
         # _ragas_track 이 {} 폴백이라 기존과 같은 동작으로 수렴한다.
         # 동시성 1이면 태스크 순서가 Phase C 호출 순서(probe 순)와 일치.
         with step("Eval", 3, "지표 · RAGAS 진단"):
+            # B2-1: 실제 트랙 RAGAS 는 전 probe 에 필요하다 — 성공/실패 판정(_f1_ok 의 의미축)과
+            # 리포트 RAGAS 평균이 모두 실제 트랙을 쓴다.
             if mode < Mode.DEEP:
                 print(f"  모드 {_MODE_NAMES.get(mode, mode)} — RAGAS 생략 (deep 이상에서 실행)")
             else:
-                # B2-1: 실제 트랙은 전 probe 에 필요하다 — 성공/실패 판정(_f1_ok 의 강등)과
-                # 리포트 RAGAS 평균이 모두 실제 트랙을 쓴다.
                 real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records, concurrency)
                 for rec, score in zip(records, real_scores):
                     rec.ragas, rec.ragas_done = score, True
 
-                # B2-2: 오라클 트랙은 '실패로 판정된 probe' 에만 필요하다 — 소비처가 B그룹 라벨과
-                # _oracle_ok 뿐이고, 리포트 평균은 실제 트랙만 쓴다. 성공 probe 는 diagnose 가
-                # 성공 게이트에서 바로 끝나므로 오라클 LLM 비용을 지불할 이유가 없다.
-                # 판정에 쓸 규칙 지표를 먼저 채운다(_compute_metrics 는 순수·멱등이라 Phase C 에서
-                # diagnose 가 다시 불러도 같은 값이 나온다).
-                for rec in records:
-                    _compute_metrics(rec)
-                failed = [rec for rec in records if _is_success(rec) is False]
-                print(f"  RAGAS 실제 {len(records)}건 / 오라클 {len(failed)}건 (실패 probe 만)")
-                if failed:
-                    oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency)
-                    for rec, score in zip(failed, oracle_scores):
-                        rec.oracle_ragas, rec.oracle_ragas_done = score, True
+            # B2-2: 실패 판정 — _is_success 는 오라클 필드를 안 읽으므로(recall·실제 트랙 정답
+            # 판정·근거성·기권) 오라클보다 먼저 세울 수 있다. 이 판정 하나로 아래 오라클 답변
+            # 생성과 오라클 RAGAS 를 함께 자른다. RAGAS 를 안 돌리는 모드에서도 답변 생성은
+            # 잘라야 하므로 게이트가 mode 밖에 있다.
+            # (_compute_metrics 는 순수·멱등이라 Phase C 에서 diagnose 가 다시 불러도 같은 값.)
+            for rec in records:
+                _compute_metrics(rec)
+            failed = [rec for rec in records if _is_success(rec) is False]
+
+            # B2-3: 오라클 답변 생성 — 실패 probe 중 gold context 가 있는 것만. 소비처가
+            # B/C그룹 전제(_oracle_ok)뿐이고, 성공 probe 는 diagnose 가 성공 게이트에서 바로
+            # 끝나 오라클 답을 아예 읽지 않는다. 미측정 성공분은 report 가 _oracle_ok 의
+            # 추론 분기로 통과 처리한다.
+            oracle_targets = [rec for rec in failed if rec.oracle_context]
+            print(f"  실패 판정 {len(failed)}/{len(records)}건"
+                  f" · 오라클 답변 {len(oracle_targets)}건 (실패 probe 만)")
+            if oracle_targets:
+                oracle_answers = parallel_map(
+                    lambda r: generate_answer(r.probe.question, r.oracle_context, config=gen_config),
+                    oracle_targets, concurrency)
+                for rec, answer in zip(oracle_targets, oracle_answers):
+                    rec.oracle_answer = answer
+                    _compute_metrics(rec)       # 방금 생긴 오라클 답으로 oracle_f1 채우기
+
+            # B2-4: 오라클 트랙 RAGAS — 같은 실패 집합. gold context 없는 probe 는
+            # _ragas_track 이 {} 를 돌려주므로 기존과 같다.
+            if mode >= Mode.DEEP and failed:
+                print(f"  RAGAS 실제 {len(records)}건 / 오라클 {len(failed)}건")
+                oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency)
+                for rec, score in zip(failed, oracle_scores):
+                    rec.oracle_ragas, rec.oracle_ragas_done = score, True
 
         # ── STEP4: 원인 판정 ──────────────────────────────────
         # Phase C(순차): 지표·진단·로그 — diagnose 는 signals 전역·진단 캐시·tier2
@@ -687,7 +707,10 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
     # 먹는 문제가 되살아나고, 호출부가 topic_cluster 의 private 유효성 규칙에 묶인다.
     result = topic_cluster.classify_detail(failed_vecs, corpus_vecs)
     # 버킷뿐 아니라 판정 근거 수치도 metadata 에 남긴다 — 소비 유예(관측용) 동안
-    # 임계값을 실측 분산에 맞춰 재보정할 근거가 finding 에 쌓이게 한다(캘리브레이션 과제).
+    # 이번 회차가 어떤 경계로 갈렸는지 finding 에서 재현·관측되게 한다.
+    # 경계는 동적(1.0 ± k·C/sqrt(N)) 이라 이번 판정에 실제로 쓰인 값을 남긴다 —
+    # 고정 상수를 남기면 어떤 경계로 갈렸는지 근거가 사라진다.
+    spread_ratio, concentrated_ratio = topic_cluster.dynamic_bounds(result.failed_sample_size)
     for f in sem_findings:
         f.metadata["topic_cluster"] = result.bucket
         f.metadata["topic_cluster_detail"] = {
@@ -696,8 +719,8 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
             "baseline": result.baseline,
             "failed_sample_size": result.failed_sample_size,
             "corpus_sample_size": result.corpus_sample_size,
-            "concentrated_ratio": topic_cluster.TOPIC_CLUSTER_CONCENTRATED_RATIO,
-            "spread_ratio": topic_cluster.TOPIC_CLUSTER_SPREAD_RATIO,
+            "concentrated_ratio": concentrated_ratio,
+            "spread_ratio": spread_ratio,
         }
     ratio_str = f"{result.ratio:.3f}" if result.ratio is not None else "n/a"
     print(
@@ -847,6 +870,7 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
         # 설명 없이 남는다 — 판정을 뒤집은 게 어휘 점수가 아니라 판정기 실패라는 걸 못 본다.
         metric_line += "  answer=f1 단독(의미축 degrade)"
     print(metric_line)
+    # gold 용어 별칭(자산총계↔총자산 등)이 실제로 점수를 올렸을 때만 — gold 품질 검수 신호다.
     if p.ground_truth and rec.best_gold_answer_f1 > rec.raw_f1_score:
         print(
             f"    gold_variant: raw_f1={_fmt_metric(rec.raw_f1_score)} "

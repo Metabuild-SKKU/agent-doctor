@@ -17,6 +17,7 @@ from agents.index.agent import (
     _refresh_runtime_metadata,
     run as run_index,
 )
+from agents.optimize import planner
 from agents.optimize.agent import run as run_optimize
 from agents.rag.retriever import (
     RetrievalSettings,
@@ -474,6 +475,47 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
             {"enable_reranker"},
         )
 
+    def test_optimizer_side_deferral_still_runs_when_runtime_is_unknown(self):
+        """runtime 정보가 아직 없으면 판정은 optimizer 가 한다 — 그 경로가 살아 있어야 한다.
+
+        단계 4 에서 planner 의 runtime 판정을 "정보 부재는 통과"로 바꿨다. Index 가
+        capability 를 생산하기 전(첫 방문)에 막아 버리면 reranker 계열 action 이 한 번도
+        선택되지 못하고 deferred 기록조차 남지 않아 사용자가 이유를 알 수 없기 때문이다.
+        그 전제는 "최종 판정을 optimizer 가 한다"이므로, 여기서 실제로 그런지 고정한다.
+
+        planner 가 거른 경우(status=unavailable)와 optimizer 가 거른 경우(정보 부재)는
+        보고 형태가 같아야 한다 — 어느 계층이 잡았는지는 사용자 관심사가 아니다.
+        """
+        state = AgentDoctorState(
+            report=DiagnosticReport(
+                report_id="unknown-runtime",
+                findings=[self._finding()],
+                overall_score=0.3,
+                ragas_scores={"context_precision": 0.2},
+                pass_threshold=False,
+            ),
+            # runtime_capabilities 를 비워 둔다 = Index 가 아직 안 돌았다
+        )
+
+        request, _decision = planner.plan(state)
+        self.assertEqual(request.action_key, "reranker.enabled:enable")   # planner 는 통과
+
+        optimized = run_optimize(state)
+
+        self.assertEqual(optimized.status, "skipped")
+        self.assertFalse(optimized.index_config.get("use_reranker", False))
+        deferred = optimized.optimization_report.metadata[
+            "runtime_deferred_prescriptions"
+        ]
+        self.assertEqual(
+            [(item["action_key"], item["reason"]) for item in deferred],
+            [("reranker.enabled:enable", "runtime_capability_unavailable")],
+        )
+        self.assertTrue(deferred[0]["retryable"])
+        # 측정도 못 한 것을 품질 실패로 기록하면 리포트가 처방을 잘못 비난한다.
+        self.assertEqual(optimized.blocked_action_attempts, set())
+        self.assertEqual(optimized.completed_action_studies, set())
+
     def test_candidate_widening_is_deferred_while_reranker_is_off(self):
         """후보창 확대는 리랭커가 꺼져 있으면 의미가 없다 — 재시도 불가로 미룬다."""
         finding = Finding(
@@ -644,14 +686,30 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
         self.assertEqual(state.optimization_history[0].metadata["floor_violations"], [])
 
         # 순위 원인 분할 이후: low_rank 의 처방은 enable_reranker 하나뿐이라, 리랭커가 이미
-        # 켜진 상태에서 같은 라벨이 남아 있으면 그 쌍은 더 시도할 게 없어(no_valid_candidate_values)
-        # 소진 처리된다. 품질 때문에 롤백된 게 아니므로 위 세 단언(유지·applied·위반 없음)이
-        # 완화 판정의 검증이고, 이 소진은 그와 별개다.
+        # 켜진 상태에서 같은 라벨이 남아 있으면 그 축은 더 시도할 게 없다. 위 세 단언
+        # (유지·applied·위반 없음)이 완화 판정의 검증이고, 이 소진은 그와 별개다.
         #   분할 전에는 low_rank 에 widen_rerank_candidates 가 2순위로 달려 있어 다음 후보로
         #   넘어갔다. 지금은 창 확대가 retrieval_rerank_candidate_miss 로 옮겨갔고, 실제
         #   파이프라인에서도 리랭커가 켜진 뒤의 순위 실패는 그 라벨(또는 reranker_demotion)로
         #   잡히므로 low_rank 쪽이 소진돼도 처방이 막히지 않는다.
-        self.assertIn(("retrieval_low_rank", "enable_reranker"), state.blacklist)
+        #
+        # 소진을 표현하는 방식이 전환으로 바뀌었다. 예전에는 optimizer 가 선택 후
+        # no_valid_candidate_values 로 거절하면서 blacklist 에 올렸다. 이제 no-op 은
+        # **점수 경쟁 전** eligibility 가 걸러내므로 애초에 선택되지 않고, 품질 실패로
+        # 기록되지도 않는다 — 잘못된 비난을 남기지 않는 쪽이 맞다.
+        request, decision = planner.plan(state)
+        self.assertIsNone(request)
+        self.assertEqual(
+            {
+                entry["action_key"]: entry["reason"]
+                for entry in decision.metadata["rejected_actions"]
+            }["reranker.enabled:enable"],
+            "no_candidate_value",
+        )
+        self.assertEqual(
+            [key.action_key for key in state.blocked_action_attempts],
+            [],
+        )
 
     def test_reranker_precision_floor_still_rolls_back_without_low_rank_improvement(self):
         state = AgentDoctorState(

@@ -26,7 +26,6 @@ LLM 호출도, 추가 검색 쿼리도 쓰지 않는다 — 이미 가진 답변
 from __future__ import annotations
 
 import string
-import re
 from collections import Counter
 
 from agents.eval.types import EvalRecord
@@ -179,7 +178,6 @@ def answer_match(prediction: str, reference: str) -> float:
     return f1
 
 
-_NUMBER_RE = re.compile(r"\d+(?:[,\d]*\d)?(?:\.\d+)?%?")
 _SAFE_TERM_VARIANTS = (
     ("자산총계", "총자산"),
     ("부채총계", "총부채"),
@@ -194,9 +192,12 @@ _SAFE_TERM_VARIANTS = (
 def gold_answer_variants(reference: str) -> list[str]:
     """Build safe reference variants for lexical matching.
 
-    The variants preserve the original facts. They are intentionally limited to
-    formatting and common label aliases so a wrong answer is not accepted merely
-    because it shares a number.
+    사실을 보존하는 용어 별칭만 만든다 — 숫자 하나 겹친다고 오답이 통과하면 안 된다.
+
+    표기 변형(표 마크업 `|`·`:` 제거, 숫자 콤마 제거)은 만들지 않는다: _normalize 가 ASCII
+    구두점을 지우고 _chars 가 공백을 버리므로 원본과 문자 멀티셋이 완전히 같아져 점수를
+    바꿀 수 없다(실측: 표 gold 0.7027=0.7027, 창 경로 0.75=0.75). 만들면 채점만 늘고
+    variant_count 도 실제 신호를 과대 표시한다.
     """
     base = (reference or "").strip()
     if not base:
@@ -210,15 +211,12 @@ def gold_answer_variants(reference: str) -> list[str]:
             variants.append(value)
 
     add(base)
-    add(_strip_table_markup(base))
-    add(_numbers_without_commas(base))
 
     for left, right in _SAFE_TERM_VARIANTS:
         if left in base:
             add(base.replace(left, right))
         if right in base:
             add(base.replace(right, left))
-
 
     # Keep the candidate set small and auditable.
     return variants[:8]
@@ -228,33 +226,14 @@ def best_answer_match(prediction: str, reference: str) -> tuple[float, str, floa
     """Return best lexical match over safe gold-answer variants.
 
     Returns: best_score, best_variant, raw_score_against_original, variant_count.
+    best 는 관측 전용이다 — 게이트·점수가 쓰는 값은 raw 다(_compute_metrics 참고).
     """
     variants = gold_answer_variants(reference)
     if not variants:
         return 0.0, "", 0.0, 0
-    raw = answer_match(prediction, variants[0])
     scored = [(answer_match(prediction, variant), variant) for variant in variants]
     best_score, best_variant = max(scored, key=lambda item: item[0])
-    return best_score, best_variant, raw, len(variants)
-
-
-def _strip_table_markup(text: str) -> str:
-    value = (text or "").replace("|", " ")
-    value = value.replace(":", " ")
-    return " ".join(value.split())
-
-
-def _numbers_without_commas(text: str) -> str:
-    return _NUMBER_RE.sub(lambda m: m.group(0).replace(",", ""), text or "")
-
-
-def _looks_like_fragment(text: str) -> bool:
-    stripped = (text or "").strip()
-    if not stripped:
-        return False
-    if stripped.endswith((".", "?", "!", "다", "요")):
-        return False
-    return bool(_NUMBER_RE.search(stripped) or "|" in stripped or ":" in stripped)
+    return best_score, best_variant, scored[0][0], len(variants)
 
 
 # ── 검색 지표 ─────────────────────────────────────────────────────

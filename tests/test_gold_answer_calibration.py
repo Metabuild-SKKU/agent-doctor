@@ -13,13 +13,13 @@ from agents.eval.types import EvalRecord
 
 class GoldAnswerCalibrationTest(unittest.TestCase):
     def test_best_answer_match_observes_safe_gold_variants(self):
-        reference = "asset_total 49,157,964,024"
-        prediction = "asset_total is 49157964024."
+        reference = "자산총계 49,157,964,024원"
+        prediction = "총자산은 49157964024원입니다."
 
         best, variant, raw, count = best_answer_match(prediction, reference)
 
-        self.assertGreaterEqual(best, raw)
-        self.assertTrue(variant)
+        self.assertGreater(best, raw)          # 용어 별칭(총자산)이 실제로 점수를 올린다
+        self.assertIn("총자산", variant)
         self.assertGreaterEqual(count, 2)
 
     def test_sentence_boilerplate_variant_is_not_added(self):
@@ -27,6 +27,14 @@ class GoldAnswerCalibrationTest(unittest.TestCase):
 
         self.assertFalse(any(item.endswith("입니다.") for item in variants))
         self.assertFalse(any(item.endswith("is.") for item in variants))
+
+    def test_formatting_only_variants_are_not_generated(self):
+        """표 마크업·콤마 변형은 _normalize 후 원본과 동일해 점수를 못 바꾼다 → 만들지 않는다."""
+        table_gold = "팀 | 경기 | 승 | 패\n두산 | 144 | 88 | 56"
+
+        self.assertEqual(gold_answer_variants(table_gold), [" ".join(table_gold.split())])
+        self.assertEqual(gold_answer_variants("asset_total 49,157,964,024"),
+                         ["asset_total 49,157,964,024"])
 
     def test_compute_metrics_keeps_gate_f1_raw(self):
         record = EvalRecord(
