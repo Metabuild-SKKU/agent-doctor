@@ -174,6 +174,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
             },
             {
                 "id": "swap_reranker_model",
+                "status": "draft",
                 "patch": {"reranker_model": "upgrade"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
@@ -333,6 +334,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
             {
               
                 "id": "expand_query",
+                "status": "draft",
                 "patch": {"query_rewrite": "expand"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
@@ -371,6 +373,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
             {
                 # top-k 고정 대신, 검색 도중 "더 필요한지" 판단해 반복 검색
                 "id": "enable_adaptive_retrieval",
+                "status": "draft",
                 "patch": {"adaptive_retrieval": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
@@ -607,6 +610,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
             },
             {
                 "id": "checklist_review_step",
+                "status": "draft",
                 "patch": {"answer_checklist_review": True},  # 답변 누락 점검 단계 추가
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
@@ -794,6 +798,7 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
                 # 가장 관련도 높은 청크를 컨텍스트 양끝에 배치해 lost-in-the-middle 을 직접
                 # 완화하는 본래 처방. 컨텍스트 정렬 서브시스템 부재로 아직 막힘(후보로만 남김).
                 "id": "reorder_context_edges",
+                "status": "draft",
                 "patch": {"context_ordering": "most_relevant_edges"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
@@ -829,12 +834,14 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
             },
             {
                 "id": "enable_noise_filter",
+                "status": "draft",
                 "patch": {"noise_filter": True},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
             },
             {
                 "id": "strict_conflict_prompt",
+                "status": "draft",
                 "patch": {"conflict_resolution_prompt": "prefer_high_confidence_evidence"},
                 "reindex": False,
                 "cost": None,           # 숫자 튜닝 필요
@@ -962,6 +969,16 @@ def get_rule(label: str) -> dict | None:
     return LABEL_TO_PRESCRIPTIONS.get(label)
 
 
+def prescription_status(rule: dict, prescription: dict) -> str | None:
+    """Return prescription-level status, falling back to the parent rule status."""
+    return prescription.get("status", rule.get("status"))
+
+
+def is_prescription_ready(rule: dict, prescription: dict) -> bool:
+    """True when this prescription can be applied automatically."""
+    return prescription_status(rule, prescription) == "ready"
+
+
 def is_actionable(label: str) -> bool:
     """planner가 실제로 처방을 실행해도 되는 라벨인지.
     ready 상태 + 처방이 비어있지 않아야 True.
@@ -969,7 +986,10 @@ def is_actionable(label: str) -> bool:
     rule = LABEL_TO_PRESCRIPTIONS.get(label)
     if not rule:
         return False
-    return rule.get("status") == "ready" and bool(rule.get("prescriptions"))
+    return rule.get("status") == "ready" and any(
+        is_prescription_ready(rule, prescription)
+        for prescription in rule.get("prescriptions", [])
+    )
 
 
 def is_manual(label: str) -> bool:

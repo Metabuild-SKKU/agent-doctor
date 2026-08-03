@@ -380,6 +380,25 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertEqual(request.optimizer, "rules")
         self.assertEqual(request.max_trials, 1)
 
+    def test_draft_prescriptions_inside_ready_rule_are_not_available(self):
+        finding = make_finding("p1", "context_noise_interference")
+        rule = rules.LABEL_TO_PRESCRIPTIONS["context_noise_interference"]
+
+        available_ids = {
+            prescription["id"]
+            for prescription in planner._available_prescriptions(
+                rule,
+                "context_noise_interference",
+                set(),
+                [finding],
+            )
+        }
+
+        self.assertIn("context_compression", available_ids)
+        self.assertIn("enable_mmr", available_ids)
+        self.assertNotIn("enable_noise_filter", available_ids)
+        self.assertNotIn("strict_conflict_prompt", available_ids)
+
     def test_top_k_candidates_make_one_internal_request(self):
         finding = make_finding(
             "p1", "retrieval_missing_gold",

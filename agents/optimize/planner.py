@@ -243,6 +243,7 @@ def _rule_uses_chunk_size(rule: dict[str, Any]) -> bool:
         canonicalize_path(path) == "chunker.chunk_size"
         for prescription in rule.get("prescriptions", [])
         if isinstance(prescription, dict)
+        and rules.is_prescription_ready(rule, prescription)
         for path in prescription.get("patch", {})
         if isinstance(path, str)
     )
@@ -490,7 +491,10 @@ def _available_prescriptions(
     쪽이 안전하다.
     """
     unblacklisted = [
-        p for p in rule.get("prescriptions", []) if (label, p["id"]) not in blacklist
+        p
+        for p in rule.get("prescriptions", [])
+        if rules.is_prescription_ready(rule, p)
+        and (label, p["id"]) not in blacklist
     ]
     if findings is None or not _CONSUME_TOPIC_CLUSTER_SIGNAL:
         return unblacklisted
@@ -1645,7 +1649,7 @@ def _build_candidates(
                 id=pres["id"],
                 failure_label=label,
                 group=rule.get("group"),
-                status=rule.get("status"),
+                status=rules.prescription_status(rule, pres),
                 patch=patch,
                 # optimizer 가 소비할 구체 후보값.
                 # 우선순위: Finding.metadata 후보 > 근거값 계산 > 방향 키워드 추측.
