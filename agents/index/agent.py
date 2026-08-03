@@ -523,7 +523,7 @@ def _graph_cache_signature(config: dict) -> dict:
         for key, value in config.items()
         if key.startswith("graph_")
     }
-    extraction = str(config.get("graph_extraction", "auto"))
+    extraction = str(config.get("graph_extraction", "keyword"))
     graph_config["llm_available"] = bool(
         extraction in {"auto", "llm"} and os.getenv("OPENAI_API_KEY")
     )

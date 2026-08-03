@@ -132,7 +132,11 @@ class AgentDoctorState:
             "max_overlap": 300,
         },
         "graph_enabled": True,
-        "graph_extraction": "auto",
+        # keyword 고정 — "auto" 는 OPENAI/OPENROUTER 키가 있기만 하면 LLM 추출을 켜서
+        # 청크당 1회(직렬) 호출을 붙인다. 키를 Eval provider 용으로만 넣어도 걸리고,
+        # 그래프는 시각화·구조 확인용이라 진단 점수엔 쓰이지 않는다. LLM 추출이
+        # 필요하면 index_config["graph_extraction"] = "llm" 로 명시적으로 켠다.
+        "graph_extraction": "keyword",
         "graph_llm_model": DEFAULT_GRAPH_LLM_MODEL,
         "graph_similarity_threshold": 0.9,
         "graph_output_dir": "output/index_graph",

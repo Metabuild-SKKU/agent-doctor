@@ -134,14 +134,26 @@ class IndexGraphNoticeTest(unittest.TestCase):
             graph_index._extract(_chunk(), config)
         return buf.getvalue()
 
+    # auto 는 이제 기본값이 아니다(기본 keyword) — 명시해야 LLM 추출이 켜진다.
     def test_auto_mode_notifies_once(self):
-        first = self._extract({})
+        first = self._extract({"graph_extraction": "auto"})
         self.assertIn("OPENAI_API_KEY 감지", first)
         self.assertIn("graph_extraction=keyword", first)
-        self.assertEqual(self._extract({}), "")
+        self.assertEqual(self._extract({"graph_extraction": "auto"}), "")
 
     def test_notice_names_the_configured_model(self):
-        self.assertIn("gpt-4.1-nano", self._extract({"graph_llm_model": "gpt-4.1-nano"}))
+        self.assertIn("gpt-4.1-nano", self._extract(
+            {"graph_extraction": "auto", "graph_llm_model": "gpt-4.1-nano"}
+        ))
+
+    def test_default_config_skips_llm_extraction(self):
+        # 설정을 안 주면 키가 있어도 LLM 을 부르지 않는다 — 청크당 유료 호출이
+        # 키 존재만으로 붙던 동작을 막는다.
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-dummy"}, clear=False), \
+                patch.object(graph_index, "_llm_entities",
+                             side_effect=AssertionError("LLM 추출이 호출되면 안 된다")):
+            _entities, _relations, used_mode = graph_index._extract(_chunk(), {})
+        self.assertEqual(used_mode, "keyword")
 
     def test_explicit_llm_mode_is_silent(self):
         # 명시적으로 켠 경우는 놀랄 일이 아니라 알리지 않는다.
@@ -168,7 +180,7 @@ class IndexGraphNoticeTest(unittest.TestCase):
                 patch.object(graph_index, "_llm_entities", return_value=([], [])), \
                 redirect_stdout(buf):
             os.environ.pop("OPENAI_API_KEY", None)
-            graph_index._extract(_chunk(), {})
+            graph_index._extract(_chunk(), {"graph_extraction": "auto"})
         log = buf.getvalue()
         self.assertIn("OPENROUTER_API_KEY 감지", log)
         self.assertNotIn("OPENAI_API_KEY 감지", log)

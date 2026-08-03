@@ -124,7 +124,7 @@ def _notify_llm_extraction_once(model: str, key_name: str) -> None:
 
 # 설정과 API key 상태에 따라 LLM/keyword 추출을 고른다.
 def _extract(chunk: Chunk, config: dict) -> tuple[list[str], list[dict], str]:
-    mode = config.get("graph_extraction", "auto")
+    mode = config.get("graph_extraction", "keyword")
     target = _graph_llm_target(config) if mode in {"auto", "llm"} else None
     if target is not None:
         api_key, base_url, model = target
@@ -150,7 +150,7 @@ def _extraction_ctx(config: dict) -> str:
     # entity 추출 결과에 영향을 주는 조건: 요청 모드, 실제로 쓰일 모델, 키 존재 여부.
     # provider 는 따로 넣지 않는다 — OpenRouter 모델명은 "publisher/model" 이라 모델
     # 문자열만으로 이미 구분되고, OpenAI 경로는 기존 캐시 키를 그대로 유지한다.
-    mode = config.get("graph_extraction", "auto")
+    mode = config.get("graph_extraction", "keyword")
     target = _graph_llm_target(config) if mode in {"auto", "llm"} else None
     if target is None:
         return f"{mode}:{config.get('graph_llm_model', DEFAULT_GRAPH_LLM_MODEL)}:0"
