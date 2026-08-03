@@ -115,7 +115,9 @@ class RerankerExecutionTest(unittest.TestCase):
         self.assertEqual(model.kwargs["max_length"], qdrant_store._RERANKER_MAX_LENGTH)
 
     def test_loader_falls_back_when_max_length_unsupported(self):
-        """상한 인자를 못 받는 구현이어도 리랭킹 자체는 죽지 않는다(상한만 빠진다)."""
+        """상한 인자를 못 받는 구현이어도 리랭킹 자체는 죽지 않는다(상한만 빠진다).
+        판정은 시그니처로 한다 — 예외로 떠보면 생성자 내부의 무관한 TypeError 까지
+        '상한 미지원'으로 오진하고 대형 모델을 한 번 더 로드한다."""
         model_name = "test/no-max-length-reranker"
         fake_module = types.ModuleType("sentence_transformers")
         fake_module.CrossEncoder = lambda _name: _FakeCrossEncoder([0.1])
@@ -125,6 +127,27 @@ class RerankerExecutionTest(unittest.TestCase):
 
         self.assertEqual(status, "ready")
         self.assertEqual(model.kwargs, {})
+
+    def test_loader_does_not_retry_on_unrelated_type_error(self):
+        """생성자 내부의 무관한 TypeError 는 '상한 미지원' 으로 오진하지 않는다 —
+        폴백으로 재시도하면 2GB 대 모델을 한 번 더 로드한다."""
+        model_name = "test/unrelated-type-error"
+        loads = []
+
+        class _BrokenInside:
+            def __init__(self, _name, max_length=None):
+                loads.append(max_length)
+                raise TypeError("내부 구현 오류")
+
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = _BrokenInside
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+            model, status = qdrant_store._load_reranker(model_name)
+
+        self.assertIsNone(model)
+        self.assertEqual(status, "model_load_failed")
+        self.assertEqual(len(loads), 1)                 # 재시도 없음
 
     def test_fallback_survives_cp949_console(self):
         """폴백 경고가 cp949 로 인코딩 안 되는 문자를 쓰면, 그 UnicodeEncodeError 를

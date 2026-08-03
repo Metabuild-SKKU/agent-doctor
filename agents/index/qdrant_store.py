@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import math
 import os
 import re
@@ -87,10 +88,15 @@ _FAILED_RERANKER_RETRY_SEC = _env_float("INDEX_RERANKER_RETRY_SEC", 300.0)
 # 상한이 없으면 리랭크 1쌍의 비용이 chunk_size 에 그대로 비례한다 — 이 모델의 tokenizer 는
 # model_max_length=8192 라 청크를 통째로 받는다(실측, 한국어: 512자=304토큰 / 1024자=604토큰).
 # Optimize 가 chunk_size 를 키우는 처방 하나를 내면 Eval·Serve 의 검색 시간이 함께 뛰는데
-# (실측 corpus_20260730: 청크 수는 절반인데 STEP2 검색 23초 → 915초), 그 비용은 어떤 지표에도
-# 안 잡혀 다음 처방 판정이 무시한다. 기본 512 는 512자 청크를 자르지 않으므로 기존 구성의
-# 순위는 그대로고, 그보다 큰 청크만 앞부분으로 잘려 비용 상한이 생긴다.
-_RERANKER_MAX_LENGTH = _env_int("INDEX_RERANKER_MAX_LENGTH", 512)
+# (실측 corpus_20260730: 청크 수는 절반인데 STEP2 검색 구간이 23초 → 915초), 그 비용은 어떤
+# 지표에도 안 잡혀 다음 처방 판정이 무시한다.
+#
+# 기본값 1024 는 '정책상 가능한 최대 청크를 자르지 않는 최소 상한'이다 —
+# optimizer.DEFAULT_CONSTRAINTS 의 chunker.chunk_size 최대가 1500자이고, 위 환산비로 약
+# 885토큰이라 쿼리·특수토큰을 더해도 1024 안에 들어온다. 더 낮게(예: 512=약 868자) 잡으면
+# 합법적인 chunk_size 후보가 리랭커 입력에서만 잘려, Optimize 의 청크 크기 비교가
+# '진짜 품질 차이'인지 '뒤가 잘려서'인지 구분되지 않는다. 모델 기본값(8192) 대비로는 8배 축소다.
+_RERANKER_MAX_LENGTH = _env_int("INDEX_RERANKER_MAX_LENGTH", 1024)
 _collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, dict[str, bool]] = (
     WeakKeyDictionary()
 )
@@ -99,24 +105,40 @@ _collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, dict[str, bool]
 _reranker_lock = threading.Lock()
 
 
+def _accepts_max_length(cross_encoder_cls) -> bool:
+    """생성자가 max_length 를 받나 — 예외로 떠보지 않고 시그니처로 판정한다.
+
+    TypeError 를 잡아 재시도하면 생성자 **내부**에서 난 무관한 TypeError 까지 '상한 미지원'
+    으로 오진하고, 그 오진의 대가로 2GB 대 모델을 한 번 더 로드한다. 시그니처 조회는 공짜다.
+    **kwargs 를 받는 래퍼는 지원으로 본다 — 넘겨봐야 알 수 있고, 틀렸다면 로드 실패로
+    드러나는 편이 상한만 조용히 빠지는 것보다 낫다. 시그니처를 못 읽으면 보수적으로 False.
+    """
+    try:
+        params = inspect.signature(cross_encoder_cls).parameters
+    except (TypeError, ValueError):
+        return False
+    if "max_length" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 def _new_cross_encoder(cross_encoder_cls, model_name: str):
     """입력 길이 상한(_RERANKER_MAX_LENGTH)을 걸어 CrossEncoder 를 만든다.
 
     상한 인자를 못 받는 구현이면 상한 없이 만들되 조용히 넘어가지 않는다 — 상한이 빠지면
     리랭크 비용이 다시 chunk_size 에 비례해 열리므로, 로그로 드러내야 원인을 찾을 수 있다.
 
-    경고 문구에 ASCII 밖 기호(em-dash·이모지 등)를 쓰지 않는다 — 호출부(_load_reranker)의
-    try 안에서 출력되므로, cp949 콘솔에서 UnicodeEncodeError 가 나면 바깥 except 가 그걸
-    로드 실패로 삼켜 이 폴백 자체가 무력화된다(쿨다운까지 등록된다).
+    경고 문구는 ASCII 기호로만 쓴다. 이 모듈은 진입점의 인코딩 보정
+    (core.console.force_utf8_stdio)을 거치지 않고 import 될 수 있어, cp949 콘솔에서
+    UnicodeEncodeError 가 나면 호출부(_load_reranker)의 except 가 로드 실패로 삼킨다.
     """
     if _RERANKER_MAX_LENGTH <= 0:
         return cross_encoder_cls(model_name)
-    try:
-        return cross_encoder_cls(model_name, max_length=_RERANKER_MAX_LENGTH)
-    except TypeError:
+    if not _accepts_max_length(cross_encoder_cls):
         print("[Index] reranker 구현이 max_length 를 받지 않아 입력 길이 상한 없이 로드한다 "
               "(청크가 크면 리랭크 비용이 그만큼 커진다)")
         return cross_encoder_cls(model_name)
+    return cross_encoder_cls(model_name, max_length=_RERANKER_MAX_LENGTH)
 
 
 def _load_reranker(model_name: str) -> tuple[Any | None, str]:
