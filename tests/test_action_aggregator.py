@@ -406,6 +406,156 @@ class SupportConstructionTest(unittest.TestCase):
                 self.assertEqual(support.affected_probes, {"p0"})
 
 
+class AppliesWhenSignalDeferredTest(unittest.TestCase):
+    """applies_when(topic_cluster) 신호 소비가 꺼진 현재 동작 — 관측용으로만 유지.
+
+    planner 에서 이관했다(계획서 §3.3: "applies_when 을 만족하지 않는 support 는
+    생성하지 않는다"는 이 계층의 책임). 소비가 꺼진 동안에는 신호값과 무관하게 전
+    처방이 support 를 만들어야 한다 — 신호 배선 이전과 동작이 같아야 한다.
+    """
+
+    LABEL = "retrieval_semantic_mismatch"
+
+    def _rule(self):
+        from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
+        return LABEL_TO_PRESCRIPTIONS[self.LABEL]
+
+    def _finding_with_signal(self, signal):
+        finding = make_finding("p0", self.LABEL)
+        if signal is not None:
+            finding.metadata["topic_cluster"] = signal
+        return finding
+
+    def _ids(self, signal):
+        return [
+            p["id"]
+            for p in aggregator._applicable_prescriptions(
+                self._rule(), [self._finding_with_signal(signal)]
+            )
+        ]
+
+    def test_consume_flag_is_off(self):
+        # 이 전환이 착지시키는 상태 = 소비 OFF. 켜지면 아래 회귀들이 의미를 잃으므로
+        # 플래그 자체를 고정한다(소비를 켤 때 이 테스트가 먼저 걸린다).
+        self.assertFalse(aggregator.CONSUME_APPLIES_WHEN_SIGNAL)
+
+    def test_all_signals_keep_all_prescriptions(self):
+        all_ids = [p["id"] for p in self._rule()["prescriptions"]]
+        for signal in ("concentrated", "spread", "none", "unmeasured", None):
+            with self.subTest(signal=signal):
+                self.assertEqual(self._ids(signal), all_ids)
+
+    def test_supports_are_built_for_every_prescription(self):
+        """소비 OFF 에서는 신호가 support 생성을 막지 않는다."""
+        findings = [self._finding_with_signal("spread")]
+        state = make_state(findings)
+
+        supports = aggregator.build_action_supports(_grouped(findings), state)
+
+        # swap_embedding_model 은 신호가 '선호'하는 처방이지만, 신호를 보지 않으므로
+        # 청킹 처방들도 그대로 support 를 만든다.
+        self.assertIn(
+            "chunker.chunk_size:decrease",
+            {support.action_key for support in supports},
+        )
+
+
+class AppliesWhenSignalConsumeOnTest(unittest.TestCase):
+    """소비를 켰을 때의 applies_when 대조 계약.
+
+    소비는 꺼져 있지만 대조 로직과 완화 경로는 그대로 배선돼 있다. 캘리브레이션이
+    끝나 켤 때 이 계약이 깨지지 않도록 플래그를 켠 상태로 고정해 회귀를 잡는다.
+
+    rules.py 계약: spread/concentrated → swap_embedding_model 만,
+    none → 청킹 처방만, 신호 미측정/unmeasured → 셋 다(순차 fallback).
+    """
+
+    LABEL = "retrieval_semantic_mismatch"
+
+    def setUp(self):
+        self._saved = aggregator.CONSUME_APPLIES_WHEN_SIGNAL
+        aggregator.CONSUME_APPLIES_WHEN_SIGNAL = True
+
+    def tearDown(self):
+        aggregator.CONSUME_APPLIES_WHEN_SIGNAL = self._saved
+
+    def _rule(self, label=None):
+        from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
+        return LABEL_TO_PRESCRIPTIONS[label or self.LABEL]
+
+    def _finding_with_signal(self, signal, label=None):
+        finding = make_finding("p0", label or self.LABEL)
+        if signal is not None:
+            finding.metadata["topic_cluster"] = signal
+        return finding
+
+    def _ids(self, signal):
+        return [
+            p["id"]
+            for p in aggregator._applicable_prescriptions(
+                self._rule(), [self._finding_with_signal(signal)]
+            )
+        ]
+
+    def test_concentrated_keeps_only_embedding_swap(self):
+        self.assertEqual(self._ids("concentrated"), ["swap_embedding_model"])
+
+    def test_spread_keeps_only_embedding_swap(self):
+        self.assertEqual(self._ids("spread"), ["swap_embedding_model"])
+
+    def test_none_keeps_only_chunking(self):
+        ids = self._ids("none")
+        self.assertNotIn("swap_embedding_model", ids)
+        self.assertIn("shrink_chunk_size", ids)
+        chunking_ids = [
+            p["id"]
+            for p in self._rule()["prescriptions"]
+            if p["id"] != "swap_embedding_model"
+        ]
+        self.assertEqual(ids, chunking_ids)
+
+    def test_missing_signal_keeps_all_prescriptions(self):
+        # 신호 미측정 → 전부 통과 = 순차 fallback (동작 불변).
+        self.assertEqual(
+            self._ids(None), [p["id"] for p in self._rule()["prescriptions"]]
+        )
+
+    def test_unmeasured_signal_keeps_all_prescriptions(self):
+        # 판정 불가는 어느 허용 리스트에도 없지만 완화 경로로 전부 통과해야 한다 —
+        # 근거가 없을 때는 신호 배선 이전과 같아야 하기 때문.
+        self.assertEqual(
+            self._ids("unmeasured"), [p["id"] for p in self._rule()["prescriptions"]]
+        )
+
+    def test_prescription_without_applies_when_always_passes(self):
+        label = "retrieval_lexical_mismatch"
+        rule = self._rule(label)
+        finding = self._finding_with_signal("concentrated", label)   # 무관 신호
+
+        self.assertEqual(
+            len(aggregator._applicable_prescriptions(rule, [finding])),
+            len(rule["prescriptions"]),
+        )
+
+    def test_signal_never_empties_a_label(self):
+        """신호가 전부 걸러내면 조건을 완화한다 — 라벨을 통째로 막아선 안 된다.
+
+        신호는 처방 순서를 '선호'하게 만들 뿐이다. 걸러서 0개가 되면 그 라벨이 어떤
+        action 도 지지하지 못하고 사라지는데, 임계값이 아직 임의값이라 더욱 위험하다.
+        """
+        rule = {
+            "prescriptions": [
+                {"id": "only", "patch": {"top_k": "increase"},
+                 "applies_when": {"topic_cluster": ["spread"]}},
+            ]
+        }
+        finding = self._finding_with_signal("none")
+
+        ids = [p["id"] for p in aggregator._applicable_prescriptions(rule, [finding])]
+
+        self.assertEqual(ids, ["only"])
+
+
 class BlockedAttemptFilterTest(unittest.TestCase):
     """품질 실패는 **정확한 전이 하나**만 막는다 (계획서 §5.1).
 

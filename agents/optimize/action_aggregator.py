@@ -50,6 +50,69 @@ CONFLICT_MARGIN_RATIO = 0.20
 CONFLICT_MARGIN_PROBES = 2
 
 
+# ── applies_when 신호 소비 스위치 — 현재 OFF (관측용 신호로만 유지) ──
+# planner 에서 이관했다. 계획서 §3.3 "applies_when 을 만족하지 않는 support 는
+# 생성하지 않는다"가 이 계층의 책임이기 때문이다.
+#
+# 신호 생산(Eval)·대조 로직·테스트는 모두 배선돼 있으나 소비는 의도적으로 꺼 둔다.
+#   1) 신호가 고르는 유일한 처방 swap_embedding_model 은 embedding.model action 이
+#      capability_off 로 차단돼 있어 분기가 config 적용까지 이어지지 않는다.
+#   2) 임계값(rules.py TOPIC_CLUSTER_*_RATIO)이 캘리브레이션 전 임의값이고, 실측상
+#      추정량 분산이 구간 폭보다 커 신호 없는 회차도 spread/concentrated 로 튄다.
+#      소비를 켜면 그 노이즈가 비싼 재색인을 잘못 발동시킨다.
+# 임베딩 교체 실행과 임계값 캘리브레이션이 준비된 뒤 True 로 켠다.
+CONSUME_APPLIES_WHEN_SIGNAL = False
+
+
+def _finding_signal(findings: list[Finding], key: str) -> Any:
+    """findings metadata 에서 신호값 하나를 읽는다.
+
+    같은 라벨의 findings 는 Eval 이 라벨 단위로 같은 신호를 실으므로 첫 값을 대표로
+    쓴다. 없으면 None → 호출부가 '미측정 = 통과'로 처리한다.
+    """
+    for finding in findings:
+        value = finding.metadata.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _prescription_applies(prescription: dict, findings: list[Finding]) -> bool:
+    """처방의 applies_when 조건을 finding metadata 와 대조한다.
+
+    계약(rules.py 주석):
+      - applies_when 이 없으면            → 항상 적용(신호 무관 처방)
+      - 신호 키는 있는데 값이 없으면       → 적용(미측정 = 순차 fallback)
+      - 값이 있으면 허용 리스트 membership → 포함될 때만 적용
+    키가 여러 개면 전부(AND) 만족해야 한다.
+    """
+    for key, allowed in (prescription.get("applies_when") or {}).items():
+        signal = _finding_signal(findings, key)
+        if signal is None:
+            continue                    # 미측정 → 이 조건은 통과
+        if signal not in allowed:
+            return False
+    return True
+
+
+def _applicable_prescriptions(
+    rule: dict,
+    findings: list[Finding],
+) -> list[dict]:
+    """신호 조건을 통과한 처방만. 전부 걸러지면 조건을 완화한다.
+
+    **완화가 핵심이다.** 신호는 처방 순서를 '선호'하게 만들 뿐 라벨을 통째로 막아선
+    안 된다. 걸러서 0개가 되면 그 라벨은 이번 진단에서 아무 action 도 지지하지 못하고
+    사라지는데, 임계값이 아직 캘리브레이션 전 임의값이라 더욱 — 신호 때문에 고칠
+    기회를 잃는 쪽보다 덜 맞는 처방이라도 시도하는 쪽이 안전하다.
+    """
+    prescriptions = rule.get("prescriptions") or []
+    if not CONSUME_APPLIES_WHEN_SIGNAL:
+        return list(prescriptions)
+    preferred = [p for p in prescriptions if _prescription_applies(p, findings)]
+    return preferred or list(prescriptions)
+
+
 # ── 1. Finding → ActionSupport ────────────────────────────────────
 
 def build_action_supports(
@@ -76,7 +139,7 @@ def build_action_supports(
         if confidence is None:
             confidence = DEFAULT_CONFIDENCE
 
-        for prescription in rule.get("prescriptions") or []:
+        for prescription in _applicable_prescriptions(rule, findings):
             changes = dict(prescription.get("patch") or {})
             if not changes:
                 continue
