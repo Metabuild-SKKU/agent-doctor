@@ -111,6 +111,7 @@ PATH_CAPABILITIES: dict[str, str] = {
     "generation.restate_question": "generation_prompt",
     "generation.completeness_mode": "generation_prompt",
     "generation.abstention_strict": "generation_prompt",
+    "generation.abstention_relaxed": "generation_prompt",
     "generation.model": "generation_model",
 }
 
@@ -137,6 +138,11 @@ STATE_MAPPABLE_PATHS: set[str] = {
     "generation.restate_question",
     "generation.completeness_mode",
     "generation.abstention_strict",
+    # 과다 기권 완화(generation_wrongful_abstention 의 relax_abstention). strict 와 같은
+    # generation_prompt capability 를 쓰고 config_mapper 에도 매핑돼 있어 rules 백엔드로
+    # 적용 가능하다. 여기 빠지면 unsupported_backend_path 로 스킵돼 rules.py 의
+    # status="ready" 가 사실과 달라진다(리뷰 Blocker).
+    "generation.abstention_relaxed",
     "generation.model",
 }
 

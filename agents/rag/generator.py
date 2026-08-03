@@ -580,15 +580,21 @@ def _build_prompt(
         )
     else:
         clauses.append("한국어로 답하라.")
-    if _gen_flag(config, "abstention_strict", False):
-        clauses.append(
-            "조금이라도 확신이 없으면 지어내지 말고 반드시 "
-            "'제공된 정보로는 알 수 없습니다'라고 답하라."
-        )
+    # 기권 성향은 한 축의 양방향이라 둘을 동시에 싣지 않는다 — index_config 는 회차 간
+    # 누적되므로(iteration 1 에 환각으로 strict, iteration 3 에 과다 기권으로 relaxed)
+    # 그대로 두면 "확신 없으면 반드시 기권" 과 "근거 있으면 최대한 답하라" 가 함께 들어간다.
+    # relaxed 를 우선한다: wrongful_abstention 진단은 '현재 설정이 과하게 보수적'이라는
+    # 실측이라 더 최신 근거이고, strict 를 이기지 못하면 relax_abstention 처방이 no-op 이
+    # 되어 롤백·blacklist 로 빠져 과다 기권을 고칠 수단 자체가 사라진다(리뷰 High).
     if _gen_flag(config, "abstention_relaxed", False):
         clauses.append(
             "컨텍스트에 질문과 관련된 근거가 조금이라도 있으면 그것을 바탕으로 최대한 답하라. "
             "명백히 근거가 전혀 없을 때에만 '제공된 정보로는 알 수 없습니다'라고 답하라."
+        )
+    elif _gen_flag(config, "abstention_strict", False):
+        clauses.append(
+            "조금이라도 확신이 없으면 지어내지 말고 반드시 "
+            "'제공된 정보로는 알 수 없습니다'라고 답하라."
         )
     if _gen_flag(config, "completeness_mode", False):
         clauses.append("질문에 여러 항목이나 하위 질문이 있으면 빠짐없이 모두 답하라.")

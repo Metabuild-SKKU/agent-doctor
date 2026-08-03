@@ -1929,6 +1929,116 @@ class WrongfulAbstentionTest(_DiagnoseTestBase):
         self.assertNotIn("context_noise_interference", labels)
         self.assertNotIn("reranker_low_precision", labels)
 
+    def test_fires_when_oracle_also_abstained(self):
+        """리뷰 High: 오라클도 함께 기권한 '체계적' 과다 기권을 놓치지 않는다.
+
+        오라클 답변도 같은 generator·같은 index_config 로 생성되므로, 과다 기권이 체계적이면
+        오라클도 기권해 oracle_f1 이 낮아진다. 전제가 _oracle_ok 를 요구하면 '가끔 기권'만
+        잡고 더 심한 '항상 기권'을 놓치는 역설이 생긴다."""
+        rec = _record(recall=1.0, f1=0.0, oracle_f1=0.0, answer=self.ABSTAIN,
+                      oracle_answer=self.ABSTAIN, faith=1.0, rel=1.0)
+        self.assertFalse(diagnose._oracle_ok(rec))          # 오라클도 실패
+        finding = diagnose.generation_wrongful_abstention(rec)
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding.label, "generation_wrongful_abstention")
+
+    def test_no_judge_call_on_correct_answer(self):
+        """리뷰 Medium: 정답 probe 에는 AspectCritic(LLM)이 붙지 않는다.
+
+        _generation_failed 가 _context_failed 보다 먼저 평가돼 첫 _abstained 호출이 이 전제에서
+        난다. not _f1_ok + 마커 선필터가 없으면 정답·비기권 경로에도 판정기가 붙는다."""
+        judge = _FakeAbstentionJudge(1)
+        self._with(ragas=judge)
+        correct = _record(recall=1.0, f1=1.0, oracle_f1=1.0, answer="세종대왕",
+                          faith=1.0, rel=1.0)
+        self.assertFalse(diagnose._wrongful_abstention_premise(correct))
+        self.assertEqual(judge.calls, [])                   # LLM 호출 없음
+
+    def test_no_judge_call_without_abstention_marker(self):
+        """마커(is_abstention)가 없으면 판정기까지 가지 않는다 — 실패 probe 전체에 LLM 을
+        물리지 않기 위한 싼 게이트(#81 과 같은 규약)."""
+        judge = _FakeAbstentionJudge(1)
+        self._with(ragas=judge)
+        wrong = _record(recall=1.0, f1=0.0, oracle_f1=1.0, answer="엉뚱한 답",
+                        faith=1.0, rel=1.0)
+        self.assertFalse(diagnose._wrongful_abstention_premise(wrong))
+        self.assertEqual(judge.calls, [])
+
+    def test_context_and_generation_share_one_predicate(self):
+        """B(과다 기권)와 C(컨텍스트 구조)가 같은 술어로 갈린다 — 한쪽이 가져가면 다른 쪽은
+        안 가져간다는 배타가 순서가 아니라 신호로 보장돼야 한다."""
+        rec = self._abstained_rec()
+        self.assertTrue(diagnose._wrongful_abstention_premise(rec))
+        self.assertFalse(diagnose._context_failed(rec))
+        # 기권이 아니면 반대로 C 가 열리고 B(과다 기권)는 침묵한다.
+        answered = _record(recall=1.0, f1=0.0, oracle_f1=1.0, answer="엉뚱한 답",
+                           faith=1.0, rel=1.0)
+        self.assertFalse(diagnose._wrongful_abstention_premise(answered))
+        self.assertTrue(diagnose._context_failed(answered))
+
+
+class AbstentionFlagWiringTest(unittest.TestCase):
+    """relax_abstention 처방이 실제로 적용·전파되는지 (리뷰 Blocker 1·2).
+
+    rules.py 가 status="ready" 라고 선언하려면 optimizer 3관문(backend·state mapping·
+    capability)을 통과하고 serve 까지 전파돼야 한다 — 하나라도 빠지면 처방이 조용히 스킵된다.
+    """
+
+    PATH = "generation.abstention_relaxed"
+
+    def test_optimizer_accepts_relax_abstention_path(self):
+        from agents.optimize.optimizer import _prepare_search_space, DEFAULT_CAPABILITIES
+        space, reason = _prepare_search_space(
+            {self.PATH: [True]},
+            {"abstention_strict": False, "abstention_relaxed": False},
+            "rules", dict(DEFAULT_CAPABILITIES), None, None,
+        )
+        self.assertEqual(reason, "")                        # unsupported_backend_path 아님
+        self.assertEqual(space, {self.PATH: [True]})
+
+    def test_config_mapper_maps_flag(self):
+        from agents.optimize.config_mapper import map_canonical_change
+        self.assertEqual(map_canonical_change(self.PATH, True),
+                         ("abstention_relaxed", True))
+
+    def test_serve_config_propagates_flag(self):
+        from agents.serve.serve_config import extract_serve_config
+        served = extract_serve_config({"abstention_relaxed": True})
+        self.assertEqual(served.get("abstention_relaxed"), True)
+
+
+class AbstentionPromptExclusivityTest(unittest.TestCase):
+    """기권 성향은 한 축의 양방향이라 프롬프트에 동시에 실리지 않는다 (리뷰 High 3).
+
+    index_config 는 회차 간 누적되므로 strict(환각 대응)와 relaxed(과다 기권 대응)가 함께
+    True 로 남을 수 있다. relaxed 를 우선한다 — 그러지 않으면 relax_abstention 이 no-op 이 돼
+    롤백·blacklist 로 빠지고 과다 기권을 고칠 수단이 사라진다.
+    """
+
+    def _system(self, **flags):
+        from agents.rag.generator import _build_prompt
+        system, _user = _build_prompt("질문", ["컨텍스트"],
+                                      max_context_chars=1000, config=flags)
+        return system
+
+    STRICT_PHRASE = "확신이 없으면"
+    RELAXED_PHRASE = "최대한 답하라"
+
+    def test_relaxed_wins_when_both_enabled(self):
+        system = self._system(abstention_strict=True, abstention_relaxed=True)
+        self.assertIn(self.RELAXED_PHRASE, system)
+        self.assertNotIn(self.STRICT_PHRASE, system)        # 모순 문구 동시 적재 금지
+
+    def test_strict_alone_unchanged(self):
+        system = self._system(abstention_strict=True)
+        self.assertIn(self.STRICT_PHRASE, system)
+        self.assertNotIn(self.RELAXED_PHRASE, system)
+
+    def test_neither_by_default(self):
+        system = self._system()
+        self.assertNotIn(self.STRICT_PHRASE, system)
+        self.assertNotIn(self.RELAXED_PHRASE, system)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

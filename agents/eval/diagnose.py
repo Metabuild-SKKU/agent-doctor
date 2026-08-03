@@ -879,16 +879,27 @@ def _generation_failed(record: EvalRecord) -> bool:
 
 
 def _wrongful_abstention_premise(record: EvalRecord) -> bool:
-    """유효한 근거가 있는데 기권했나 — 과다 기권(B) 전제.
+    """근거가 검색됐는데 기권했나 — 과다 기권(B) 전제.
 
-    검색 성공(recall=1) + 골드로 답 나옴(oracle 통과) = 답의 근거가 실제로 top-k 에 있었는데
-    모델이 '제공된 정보로는 알 수 없습니다'로 회피한 경우다. 기권이 옳은 상황(_expects_abstention:
-    무응답 기대·코퍼스 결손)은 제외한다 — 그건 generation_abstention_failure 의 정반대 짝이다.
+    검색 성공(recall=1) = 답의 근거가 실제로 top-k 에 있었는데 모델이 '제공된 정보로는 알 수
+    없습니다'로 회피한 경우다. 기권이 옳은 상황(_expects_abstention: 무응답 기대·코퍼스 결손)은
+    제외한다 — 그건 generation_abstention_failure 의 정반대 짝이다.
 
-    _abstained 를 맨 뒤에 둔다 — AspectCritic(LLM) 호출이라, 싼 지표 조건으로 먼저 걸러
-    recall=1·oracle 통과·기권 기대 아님인 좁은 집합에서만 판정을 부른다(record 단위 memoize)."""
-    return (_recall_ok(record) and _oracle_ok(record)
-            and not _expects_abstention(record) and _abstained(record))
+    _oracle_ok 는 전제에 넣지 않는다(리뷰 High): 오라클 답변도 같은 generator·같은
+    index_config 로 생성되므로(eval/agent.py), 과다 기권이 체계적이면 오라클도 함께 기권해
+    oracle_f1 이 낮아진다. 그걸 요구하면 '가끔 기권'만 잡고 '항상 기권'(더 심각한 쪽)은
+    놓치는 역설이 생긴다 — 이 라벨이 잡으려던 상황이 정확히 그쪽이다.
+
+    비용 순서: 싼 지표(recall·f1)로 먼저 거르고, 마커 휴리스틱(is_abstention)이 걸린
+    뒤에만 판정기(_abstained → AspectCritic, record 단위 memoize)를 부른다. not _f1_ok 는
+    의미상 무해하고(기권 답이 정답 판정을 통과할 일은 없다) 정답 경로의 LLM 호출을 없앤다."""
+    if not _recall_ok(record) or _f1_ok(record):
+        return False
+    if _expects_abstention(record):
+        return False
+    if not is_abstention(record.generated_answer):
+        return False                     # 싼 게이트 — 마커가 없으면 판정기까지 가지 않는다
+    return _abstained(record)
 
 
 def _reasoning_mode(record: EvalRecord) -> Optional[str]:
@@ -1003,23 +1014,26 @@ def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
 
 
 def generation_wrongful_abstention(record: EvalRecord) -> Optional[Finding]:
-    """유효한 근거를 두고 잘못 기권함 — generation_abstention_failure 의 정반대 짝.
+    """근거는 검색됐는데 잘못 기권함 — generation_abstention_failure 의 정반대 짝.
 
-    확정: 검색 성공(recall=1)·골드로 답 나옴(oracle 통과)인데 실제 답은 기권('제공된 정보로는
-    알 수 없습니다'). 답의 근거가 실제로 top-k 에 있었는데 모델이 회피한 것이라, 검색·컨텍스트
-    구조가 아니라 생성측 과다 기권이다. 처방은 노이즈필터/MMR 이 아니라 기권 완화(relax_abstention).
+    확정: 검색 성공(recall=1)인데 실제 답은 기권('제공된 정보로는 알 수 없습니다'). 답의 근거가
+    실제로 top-k 에 있었는데 모델이 회피한 것이라, 검색·컨텍스트 구조가 아니라 생성측 과다
+    기권이다. 처방은 노이즈필터/MMR 이 아니라 기권 완화(relax_abstention).
+
+    오라클 통과를 요구하지 않는다 — 오라클도 같은 generator·설정으로 생성돼 과다 기권이
+    체계적이면 함께 기권하므로, 요구하면 정작 심한 케이스를 놓친다(전제 함수 주석 참고).
 
     기권 답은 주장이 없어 faithfulness=1 로 C 게이트(context_noise_interference·
     reranker_low_precision)를 trivially 통과해 오라벨됐었다(실측: probe_qa_42204 반복1 →
-    reranker_low_precision, 반복2·3 → context_noise_interference). _context_failed 가 기권을
-    제외하고 이 라벨이 B 슬롯에서 진실한 원인을 짚는다."""
+    reranker_low_precision, 반복2·3 → context_noise_interference). _context_failed 가 같은
+    전제로 기권을 제외하고 이 라벨이 B 슬롯에서 진실한 원인을 짚는다."""
     if not _wrongful_abstention_premise(record):
         return None
     judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
     return _finding(
         record, "generation_wrongful_abstention", "generation_failure", confirmed=True,
-        reason=f"recall@k={_v(record.recall_at_k)}, oracle 통과(근거 있음), "
-               f"기권함({judge}), {_answer_reason(record)}",
+        reason=f"recall@k={_v(record.recall_at_k)}(근거 검색됨), "
+               f"oracle_f1={_v(record.oracle_f1)}, 기권함({judge}), {_answer_reason(record)}",
     )
 
 
@@ -1150,9 +1164,13 @@ def _context_failed(record: EvalRecord) -> bool:
     기권은 제외한다 — 유효 근거를 두고 기권한 건 컨텍스트 '구조'(노이즈·길이·배치)로 답이
     틀린 게 아니라 생성측 과다 기권이다(generation_wrongful_abstention, B). 제외하지 않으면
     기권 답이 주장 없음 → faithfulness=1 로 context_noise_interference·reranker_low_precision
-    게이트를 trivially 통과해 오라벨되고, 노이즈필터/MMR 같은 엉뚱한 처방을 부른다."""
+    게이트를 trivially 통과해 오라벨되고, 노이즈필터/MMR 같은 엉뚱한 처방을 부른다.
+
+    배제 술어는 B 라벨과 같은 _wrongful_abstention_premise 를 쓴다 — 두 슬롯이 한 신호로
+    갈려야 '한쪽이 가져가면 다른 쪽은 안 가져간다'가 보장되고, 그 안의 마커 선필터
+    (is_abstention) 덕에 C 후보마다 AspectCritic 을 부르지 않는다(리뷰 Medium)."""
     return (_recall_ok(record) and _oracle_ok(record)
-            and not _f1_ok(record) and not _abstained(record))
+            and not _f1_ok(record) and not _wrongful_abstention_premise(record))
 
 def _context_ungrounded(record: EvalRecord) -> bool:
     """C 전제 + 실제 답이 gold·노이즈 어디에도 근거 없음(real faithfulness 낮음).
