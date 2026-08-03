@@ -148,7 +148,9 @@
   .rx-verdict.roll { color: var(--warning); background: var(--warning-glow); }
   .rx-verdict.error { color: var(--critical); background: var(--critical-glow); }
   .rx-drill { border-top: 1px solid var(--border); padding: 0 20px; max-height: 0; overflow: hidden; transition: max-height .3s ease, padding .3s ease; background: var(--bg-2); }
-  .rx-card.open .rx-drill { max-height: 320px; padding: 18px 20px; }
+  /* 선택 근거(notes)가 sweep 막대 위에 더 얹히므로 고정 높이로는 잘린다.
+     overflow:hidden 은 접힘 애니메이션용이라 펼친 상태에서만 스크롤을 허용한다. */
+  .rx-card.open .rx-drill { max-height: 420px; overflow-y: auto; padding: 18px 20px; }
   .drill-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-bottom: 12px; }
   .sweep { display: flex; flex-direction: column; gap: 7px; }
   .sweep-row { display: grid; grid-template-columns: 96px 1fr 54px; align-items: center; gap: 12px; }
@@ -158,6 +160,10 @@
   .sweep-bar i { display: block; height: 100%; background: var(--faint); border-radius: 4px; }
   .sweep-row.win .sweep-bar i { background: var(--accent); }
   .sweep-val { font-family: var(--mono); font-size: 11.5px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .drill-notes { display: flex; flex-direction: column; gap: 6px; }
+  .drill-note { display: grid; grid-template-columns: 96px 1fr; align-items: baseline; gap: 12px; }
+  .dn-k { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .dn-v { font-size: 12px; color: var(--muted); line-height: 1.5; }
   .drill-caption { font-size: 12px; color: var(--muted); margin-top: 12px; line-height: 1.5; }
   .rx-expand { font-family: var(--mono); font-size: 10.5px; color: var(--faint); display: inline-flex; align-items: center; gap: 4px; }
 
@@ -697,9 +703,17 @@
     var scoreHtml = hasScore ?
       '<div class="rx-scoredelta">종합 ' + esc(r.score[0]) + ' <b class="' + scoreCls + '">→ ' + esc(r.score[1]) + (arrowUp ? ' ↑' : ' ↓') + '</b></div>' :
       '<div class="rx-scoredelta error">종합 점수 측정 안 됨</div>';
-    var rowsHtml = r.drill.rows.length ? '<div class="sweep">' + r.drill.rows.map(function (s) {
+    var rows = r.drill.rows || [];
+    var rowsHtml = rows.length ? '<div class="sweep">' + rows.map(function (s) {
       return '<div class="sweep-row' + (s.win ? ' win' : '') + '"><span class="sweep-k' + (s.win ? ' win' : '') + '">' + esc(s.k) + '</span>' +
         '<span class="sweep-bar"><i style="width:' + s.w + '%"></i></span><span class="sweep-val">' + esc(s.val) + '</span></div>';
+    }).join('') + '</div>' : '';
+    // 선택 근거(어떤 라벨이 지지했고 무엇이 실제로 해결됐는지). sweep 막대와 모양이
+    // 달라 별도 목록으로 받는다. 구버전 리포트에는 이 키가 없으므로 방어적으로 읽는다.
+    var notes = r.drill.notes || [];
+    var notesHtml = notes.length ? '<div class="drill-notes">' + notes.map(function (n) {
+      return '<div class="drill-note"><span class="dn-k">' + esc(n[0]) + '</span>' +
+        '<span class="dn-v">' + esc(n[1]) + '</span></div>';
     }).join('') + '</div>' : '';
     return '<div class="rx-card ' + r.state + '">' +
       '<div class="rx-main">' +
@@ -715,7 +729,7 @@
           '<div class="rx-expand">상세 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>' +
         '</div>' +
       '</div>' +
-      '<div class="rx-drill"><div class="drill-label">' + esc(r.drill.label) + '</div>' + rowsHtml +
+      '<div class="rx-drill"><div class="drill-label">' + esc(r.drill.label) + '</div>' + rowsHtml + notesHtml +
         '<div class="drill-caption">' + esc(r.drill.caption) + '</div></div>' +
     '</div>';
   }
