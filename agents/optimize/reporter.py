@@ -266,21 +266,11 @@ def _request_id(
     return decision.request_id or ""
 
 
-def _label(request: OptimizationRequest | None) -> str:
-    """이번에 다룬 대표 진단 라벨.
-
-    ⚠️ DEPRECATED — 설명은 supporting_labels 전체를 쓴다. 구버전 호환용.
-    """
-    return request.failure_label if request is not None else ""
-
-
 def _problem_text(request: OptimizationRequest | None) -> str:
     """문제 설명. request.reason 우선, 없으면 지지 라벨 목록."""
     if request is None:
         return ""
-    return request.reason or ", ".join(
-        request.supporting_labels or [request.failure_label]
-    )
+    return request.reason or ", ".join(request.supporting_labels)
 
 
 def _action_phrase(action_key: str | None, prescription: str | None) -> str:
@@ -307,8 +297,7 @@ def _support_phrase(
     보여주면 사용자가 "왜 하필 이걸" 을 이해할 수 있다.
     """
     if not supporting:
-        label = _label(request)
-        return f"'{label}' 문제에" if label else "진단 결과에 따라"
+        return "진단 결과에 따라"
     if len(supporting) == 1:
         return f"'{supporting[0]}' 문제에"
     return f"{len(supporting)}개 라벨({', '.join(supporting)})이 함께 지지한"
@@ -324,20 +313,10 @@ def _deferred_axes(request: OptimizationRequest | None) -> list[dict]:
 def _selected_prescription(request: OptimizationRequest | None) -> str | None:
     """이번에 **실제로 선택된** action 의 출처 처방 id.
 
-    전환 전에는 "후보 목록의 첫(가장 가벼운) 것"으로 추측했다. 지금은 요청이
-    선택된 action 하나만 담으므로 추측할 필요가 없다 — patch metadata 에 실린
-    출처를 그대로 읽고, 없을 때만 후보에서 가져온다.
+    전환 전에는 "후보 목록의 첫(가장 가벼운) 것"으로 추측했다. 지금은 요청이 선택된
+    action 하나만 담으므로 추측할 자리가 없다 — 요청이 직접 들고 있는 값을 읽는다.
     """
-    if request is None:
-        return None
-    for candidate in request.candidates:
-        patch = candidate.patch
-        if patch is not None:
-            origin = patch.metadata.get("prescription_id")
-            if origin:
-                return str(origin)
-        return candidate.id
-    return None
+    return request.prescription_id if request is not None else None
 
 
 def _config_changes(
@@ -353,13 +332,13 @@ def _config_changes(
         for key in diff.added_keys:
             lines.append(f"{key}: (신규) {diff.after_config.get(key)}")
         return lines
-    # diff가 없으면(제안만 등) 후보의 제안 변경을 그대로 보여준다.
-    if request is None or not request.candidates:
+    # diff 가 없으면(제안만 등) 탐색 범위를 그대로 보여준다.
+    if request is None or not request.search_space:
         return []
-    patch = request.candidates[0].patch
-    if patch is None:
-        return []
-    return [f"{k}: {v}" for k, v in patch.changes.items()]
+    return [
+        f"{path}: {values[0] if len(values) == 1 else values}"
+        for path, values in request.search_space.items()
+    ]
 
 
 def _config_changes_from_configs(
@@ -378,10 +357,10 @@ def _config_changes_from_configs(
 
 
 def _tradeoffs(request: OptimizationRequest | None) -> list[str]:
-    """대표 후보 처방의 예상 부작용."""
-    if request is None or not request.candidates:
+    """선택된 action 의 예상 부작용. catalog 정의가 단일 진실 원천이다."""
+    if request is None or request.action is None:
         return []
-    return list(request.candidates[0].tradeoffs)
+    return list(request.action.definition.tradeoffs)
 
 
 def _manual_actions(labels: list[str]) -> list[str]:

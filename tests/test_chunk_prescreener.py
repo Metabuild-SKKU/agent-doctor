@@ -33,7 +33,7 @@ class ChunkPrescreenerTest(unittest.TestCase):
             request_id="chunk-precheck",
             iteration=0,
             baseline_config=baseline,
-            failure_label="chunk_test",
+            supporting_labels=["chunk_test"],
             search_space={path: values},
             optimizer="internal",
             max_trials=len(values),

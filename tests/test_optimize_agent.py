@@ -83,7 +83,7 @@ from agents.optimize.schemas import (
     OptimizationHistoryItem,
     OptimizationRequest,
     OptimizationResult,
-    PrescriptionCandidate,
+    SelectedAction,
     Verdict,
 )
 
@@ -119,8 +119,10 @@ class OptimizeManualLogTest(unittest.TestCase):
         self.assertIn("재색인", out)
 
 
-class OptimizeCandidateLogTest(unittest.TestCase):
-    def test_request_skip_does_not_reassign_reason_to_first_candidate(self):
+class OptimizeActionLogTest(unittest.TestCase):
+    """로그가 "후보 목록 중 하나"가 아니라 **정해진 변경 하나**를 보고한다."""
+
+    def test_request_skip_does_not_reassign_reason_to_the_skipped_entry(self):
         result = OptimizationResult(
             request_id="req-1",
             status="skipped",
@@ -128,38 +130,37 @@ class OptimizeCandidateLogTest(unittest.TestCase):
             metadata={
                 "error_code": "missing_search_space",
                 "skipped_candidates": [
-                    {"prescription_id": "a", "reason": "not_ready"},
-                    {"prescription_id": "b", "reason": "empty_search_space"},
+                    {
+                        "action_key": "retriever.top_k:increase",
+                        "prescription_id": "increase_top_k",
+                        "reason": "no_valid_candidate_values",
+                    },
                 ],
             },
         )
 
         buf = StringIO()
         with redirect_stdout(buf):
-            agent._log_candidate_review(result)
+            agent._log_action_review(result)
 
-        lines = buf.getvalue().splitlines()
         self.assertEqual(
-            lines,
+            buf.getvalue().splitlines(),
             [
-                "[Optimize] 후보 SKIP: id=a, reason=not_ready",
-                "[Optimize] 후보 SKIP: id=b, reason=empty_search_space",
+                "[Optimize] action SKIP: retriever.top_k:increase, "
+                "reason=no_valid_candidate_values",
                 "[Optimize] 요청 SKIP: reason=missing_search_space",
             ],
         )
 
-    def test_failed_candidate_is_not_logged_as_selected(self):
-        candidate = PrescriptionCandidate(
-            "a",
-            "too_long_context",
-            "C",
-            "ready",
-        )
+    def test_failed_action_is_not_logged_as_selected(self):
         result = OptimizationResult(
             request_id="req-1",
             status="failed",
             optimizer="internal",
-            selected_candidate=candidate,
+            selected_action=SelectedAction(
+                action_key="retriever.top_k:increase",
+                prescription_id="increase_top_k",
+            ),
             message="internal 평가에 실패했습니다.",
             error="internal 평가에 실패했습니다.",
             metadata={"error_code": "internal_failed"},
@@ -167,15 +168,15 @@ class OptimizeCandidateLogTest(unittest.TestCase):
 
         buf = StringIO()
         with redirect_stdout(buf):
-            agent._log_candidate_review(result)
+            agent._log_action_review(result)
 
         self.assertEqual(
             buf.getvalue().strip(),
-            "[Optimize] 후보 FAIL: id=a, reason=internal_failed",
+            "[Optimize] action FAIL: retriever.top_k:increase, reason=internal_failed",
         )
         self.assertNotIn("SELECT", buf.getvalue())
 
-    def test_failed_request_without_candidate_is_logged(self):
+    def test_failed_request_without_action_is_logged(self):
         result = OptimizationResult(
             request_id="req-1",
             status="failed",
@@ -187,73 +188,74 @@ class OptimizeCandidateLogTest(unittest.TestCase):
 
         buf = StringIO()
         with redirect_stdout(buf):
-            agent._log_candidate_review(result)
+            agent._log_action_review(result)
 
         self.assertEqual(
             buf.getvalue().strip(),
             "[Optimize] 요청 FAIL: reason=invalid_internal_next_config",
         )
 
-    def test_candidate_list_omits_unused_fields_and_shared_reason_duplicates(self):
-        candidates = [
-            PrescriptionCandidate(
-                "a",
-                "too_long_context",
-                "C",
-                "ready",
-                cost=1.0,
-                priority=0.0,
-                reason="검색 context가 너무 깁니다.",
-                tradeoffs=["현재는 생산되지 않는 값"],
-            ),
-            PrescriptionCandidate(
-                "b",
-                "too_long_context",
-                "C",
-                "ready",
-                cost=2.0,
-                priority=0.0,
-                reason="검색 context가 너무 깁니다.",
-                tradeoffs=["현재는 생산되지 않는 값"],
-            ),
-        ]
-        request = OptimizationRequest(
-            request_id="req-1",
-            iteration=1,
-            baseline_config={},
-            failure_label="too_long_context",
-            candidates=candidates,
-        )
+    def test_selection_log_shows_the_action_and_what_it_beat(self):
+        """선택 로그는 고른 변경과 **밀린 것들**을 함께 보여준다.
 
-        buf = StringIO()
-        with redirect_stdout(buf):
-            agent._log_candidate_list(request)
-
-        output = buf.getvalue()
-        self.assertEqual(output.count("검색 context가 너무 깁니다."), 1)
-        self.assertNotIn("priority=", output)
-        self.assertNotIn("예상 부작용", output)
-
-    def test_selected_reason_is_logged_once_at_application(self):
-        candidate = PrescriptionCandidate(
-            "a",
-            "too_long_context",
-            "C",
-            "ready",
-            patch=ConfigPatch(changes={"top_k": 2}),
-        )
+        전환 전에는 "후보 N개" 목록을 나열했는데, 그 목록은 이제 planner 안에서
+        경쟁이 끝난 뒤라 존재하지 않는다. 대신 runner-up 과 보류 축을 남긴다.
+        """
         request = OptimizationRequest(
             request_id="req-1",
             iteration=1,
             baseline_config={"top_k": 4},
-            failure_label="too_long_context",
-            candidates=[candidate],
+            search_space={"retriever.top_k": [8]},
+            supporting_labels=["too_long_context", "retrieval_missing_gold"],
+            supporting_probes=["p1", "p2"],
+            action_key="retriever.top_k:increase",
+            prescription_id="increase_top_k",
+            action_score=2.0,
+            action_score_breakdown={
+                "weighted_probe_support": 2.0,
+                "base_cost": 1.0,
+                "cost_source": "reindex_flag",
+                "confidence_source": "default",
+            },
+            metadata={
+                "runner_up_actions": [
+                    {"action_key": "chunker.chunk_size:decrease", "score": 0.67}
+                ],
+                "deferred_axes": [
+                    {"axis": "retriever.top_k", "reason": "conflict_margin_unmet"}
+                ],
+            },
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            agent._log_selected_action(request)
+
+        output = buf.getvalue()
+        self.assertIn("선택된 action: retriever.top_k:increase", output)
+        self.assertIn("지지 라벨 2개", output)
+        self.assertIn("probe 2개", output)
+        self.assertIn("밀린 action: chunker.chunk_size:decrease", output)
+        self.assertIn("보류된 축: retriever.top_k (conflict_margin_unmet)", output)
+
+    def test_selected_reason_is_logged_once_at_application(self):
+        request = OptimizationRequest(
+            request_id="req-1",
+            iteration=1,
+            baseline_config={"top_k": 4},
+            search_space={"retriever.top_k": [2]},
+            supporting_labels=["too_long_context"],
+            action_key="retriever.top_k:decrease",
+            prescription_id="decrease_top_k",
         )
         result = OptimizationResult(
             request_id="req-1",
             status="applied",
             optimizer="rules",
-            selected_candidate=candidate,
+            selected_action=SelectedAction(
+                action_key="retriever.top_k:decrease",
+                prescription_id="decrease_top_k",
+            ),
             message="top_k를 줄입니다.",
         )
         state = AgentDoctorState(
@@ -264,7 +266,7 @@ class OptimizeCandidateLogTest(unittest.TestCase):
 
         buf = StringIO()
         with redirect_stdout(buf):
-            agent._log_candidate_review(result)
+            agent._log_action_review(result)
             agent._log_optimize_application(
                 state,
                 request,
@@ -272,11 +274,11 @@ class OptimizeCandidateLogTest(unittest.TestCase):
                 {"top_k": 4},
                 {"top_k": 2},
                 ["top_k"],
-                "a",
+                "decrease_top_k",
             )
 
         output = buf.getvalue()
-        self.assertIn("[Optimize] 후보 SELECT: id=a", output)
+        self.assertIn("[Optimize] action SELECT: retriever.top_k:decrease", output)
         self.assertEqual(output.count("top_k를 줄입니다."), 1)
 
 
@@ -406,8 +408,8 @@ class OptimizeAgentForwardTest(unittest.TestCase):
         self.assertIn("[Optimize] 반복 횟수: 1/3", out)
         self.assertIn("Eval 결과: overall=0.42, composite=40.0, pass=false", out)
         self.assertIn("발견된 문제: too_long_context 1건", out)
-        self.assertIn("[Optimize] 후보 생성:", out)
-        self.assertIn("[Optimize] 후보 SELECT:", out)
+        self.assertIn("[Optimize] 선택된 action:", out)
+        self.assertIn("[Optimize] action SELECT:", out)
         self.assertIn("[Optimize] action 적용:", out)
         self.assertIn("다음 단계: Index 경유(물리 재색인 생략) 후 Eval 재실행", out)
         self.assertEqual(graph.route_after_optimize(state), "index")
@@ -419,7 +421,7 @@ class OptimizeAgentForwardTest(unittest.TestCase):
             request_id=request.request_id,
             status="proposed",
             optimizer="rules",
-            selected_candidate=request.candidates[0],
+            selected_action=SelectedAction(action_key=request.action_key),
             config_patch=ConfigPatch(
                 changes={"embedding.model": "BAAI/bge-m3"},
                 reindex_required=True,
@@ -453,7 +455,10 @@ class OptimizeAgentForwardTest(unittest.TestCase):
                     request_id=request.request_id,
                     status="skipped",
                     optimizer="internal",
-                    selected_candidate=request.candidates[0],
+                    selected_action=SelectedAction(
+                        action_key=request.action_key,
+                        prescription_id=request.prescription_id,
+                    ),
                     metadata={"error_code": "baseline_selected"},
                 )
             return real_optimizer_run(request)
@@ -467,7 +472,7 @@ class OptimizeAgentForwardTest(unittest.TestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertIn(
-            "[Optimize] 후보 SKIP: id=increase_chunk_overlap, "
+            "[Optimize] action SKIP: chunker.chunk_overlap:increase, "
             "reason=baseline_selected",
             buf.getvalue(),
         )
@@ -777,7 +782,7 @@ class OptimizeCGroupUnblockTest(unittest.TestCase):
         )
         request, decision = plan(state)
         self.assertEqual(decision.mode, "apply_optimize")
-        return request.candidates[0].search_space
+        return request.search_space
 
     def test_lost_in_the_middle_leads_with_top_k(self):
         space = self._first_candidate_space("lost_in_the_middle")
@@ -1008,7 +1013,7 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
             request_id=request.request_id,
             status="skipped",
             optimizer="internal",
-            selected_candidate=request.candidates[0],
+            selected_action=SelectedAction(action_key=request.action_key),
             metadata={"error_code": "baseline_selected"},
         )
 

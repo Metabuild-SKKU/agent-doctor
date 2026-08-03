@@ -1001,7 +1001,7 @@ def _grounded_search_space(
     return space, grounding_metadata
 
 
-# ── 6. 처방 후보 생성 (rules.py → PrescriptionCandidate) ──────────
+# ── 6. 후보값 변환 (rules.py patch 값 → 구체 후보값) ──────────────
 
 def _concrete_values(
     key: str, patch_value: Any, baseline_config: dict

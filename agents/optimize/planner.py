@@ -49,7 +49,6 @@ from agents.optimize.schemas import (
     ConfigPatch,
     OptimizationRequest,
     OptimizeDecision,
-    PrescriptionCandidate,
 )
 
 # ── 후보값 계산은 candidate_values 로 분리했다 ────────────────────
@@ -404,23 +403,6 @@ def _build_action_request(
             "prescription_id": primary_support.prescription_id,
         },
     )
-    legacy_candidate = PrescriptionCandidate(
-        id=primary_support.prescription_id or action.action_key,
-        failure_label=primary_label,
-        group=primary_support.group,
-        status="ready",
-        patch=patch,
-        search_space={path: values},
-        cost=definition.base_cost,
-        priority=action.score,
-        target_metrics=list(action.target_metrics),
-        applies_when=dict(primary_support.applies_when),
-        reason=primary_support.reason,
-        metadata=(
-            {"candidate_grounding": grounding} if grounding else {}
-        ),
-    )
-
     metadata: dict[str, Any] = {
         "primary_metric": "composite_score",
         "min_delta": history.MIN_IMPROVEMENT_MARGIN,
@@ -454,11 +436,6 @@ def _build_action_request(
         request_id=str(uuid.uuid4()),
         iteration=state.iteration,
         baseline_config=dict(state.index_config),
-        failure_label=primary_label,
-        related_failure_labels=[
-            label for label in action.supporting_labels if label != primary_label
-        ],
-        candidates=[legacy_candidate],
         search_space={path: values},
         target_metrics=list(action.target_metrics),
         target_profile="balanced",
@@ -478,6 +455,7 @@ def _build_action_request(
         opposing_labels=list(action.opposing_labels),
         action_score=action.score,
         action_score_breakdown=dict(action.score_breakdown),
+        prescription_id=primary_support.prescription_id or None,
     )
 
 

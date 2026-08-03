@@ -17,7 +17,7 @@ class InternalAdapterTest(unittest.TestCase):
             "request_id": "internal-request",
             "iteration": 0,
             "baseline_config": {"chunk_size": 512, "chunk_overlap": 50},
-            "failure_label": "retrieval_missing_gold",
+            "supporting_labels": ["retrieval_missing_gold"],
             "search_space": {"chunker.chunk_size": [600, 800]},
             "target_metrics": ["context_recall"],
             "optimizer": "internal",
@@ -513,7 +513,7 @@ class InternalAdapterCategoricalAxisTest(unittest.TestCase):
                 "chunk_overlap": 50,
                 "chunk_strategy": "fixed",
             },
-            "failure_label": "chunking_context_mismatch",
+            "supporting_labels": ["chunking_context_mismatch"],
             "search_space": {
                 "chunker.strategy": ["recursive_sentence", "markdown_recursive"]
             },
@@ -654,7 +654,7 @@ class InternalStudyIdentityTest(unittest.TestCase):
             "request_id": "study-identity",
             "iteration": 0,
             "baseline_config": {"top_k": 5},
-            "failure_label": "retrieval_missing_gold",
+            "supporting_labels": ["retrieval_missing_gold"],
             "search_space": {"retriever.top_k": [7, 9]},
             "target_metrics": ["context_recall"],
             "optimizer": "internal",

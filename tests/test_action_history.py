@@ -151,7 +151,7 @@ class FingerprintTest(unittest.TestCase):
             request_id="r",
             iteration=0,
             baseline_config={"top_k": 5},
-            failure_label="retrieval_missing_gold",
+            supporting_labels=["retrieval_missing_gold"],
         )
         self.assertIsNone(history.study_key_for_request(request))
 
@@ -168,10 +168,12 @@ class PendingItemSnapshotTest(unittest.TestCase):
             request_id="req-1",
             iteration=0,
             baseline_config={"top_k": 5},
-            failure_label="retrieval_missing_gold",
             search_space={"retriever.top_k": [7, 9]},
             action_key="retriever.top_k:increase",
-            supporting_labels=["retrieval_missing_gold", "retrieval_incomplete_enumeration"],
+            supporting_labels=[
+                "retrieval_missing_gold",
+                "retrieval_incomplete_enumeration",
+            ],
             supporting_probes=["p1", "p2"],
         )
 
@@ -222,8 +224,12 @@ class PendingItemSnapshotTest(unittest.TestCase):
 
         self.assertIsNone(item.action_attempt_key)
         self.assertIsNone(item.action_study_key)
-        # 구버전 필드는 그대로 채워져 리포트가 깨지지 않는다.
-        self.assertEqual(item.failure_labels, ["retrieval_missing_gold"])
+        # failure_labels 의 의미가 "대표 라벨 하나"에서 "대상 라벨 전체"로 넓어졌다.
+        # 값이 supporting_labels 와 같아지므로 리포트의 두 경로가 어긋나지 않는다.
+        self.assertEqual(
+            item.failure_labels,
+            ["retrieval_missing_gold", "retrieval_incomplete_enumeration"],
+        )
         self.assertEqual(item.selected_prescription_id, "increase_top_k")
 
 

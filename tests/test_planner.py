@@ -122,10 +122,9 @@ class GroundedValueTest(unittest.TestCase):
         request, decision = planner.plan(make_state(findings, top_k=5))
 
         self.assertEqual(decision.mode, "apply_optimize")
-        first = request.candidates[0]
-        self.assertEqual(first.id, "dynamic_top_k")
+        self.assertEqual(request.prescription_id, "dynamic_top_k")
         # ×2 추측이면 [10] 하나가 나왔을 것. 측정 기반은 무릎(8)부터 그 위로.
-        self.assertEqual(first.search_space, {"retriever.top_k": [8, 12, 15]})
+        self.assertEqual(request.search_space, {"retriever.top_k": [8, 12, 15]})
         # 후보가 여러 개 → internal 이 방문에 걸쳐 sweep 하고 실측으로 승자를 고른다.
         self.assertEqual(request.optimizer, "internal")
         self.assertEqual(request.max_trials, 3)
@@ -317,17 +316,50 @@ class GroupingTest(unittest.TestCase):
             request.action_score_breakdown["supporting_probe_count"], 3
         )
 
-    def test_more_frequent_label_wins_within_same_group(self):
-        # 두 라벨 모두 A그룹. probe 수가 많은 쪽이 먼저 처방된다.
+    def test_more_probes_wins_within_the_same_tier(self):
+        """같은 tier·같은 비용이면 고유 probe 가 많은 action 이 이긴다.
+
+        두 라벨이 **다른 축**을 지지하도록 골랐다. 같은 축을 지지하면 표가 합쳐져
+        경쟁이 아니라 통합이 되므로(그 성질은 아래 shared_support 테스트가 본다)
+        점수 비교를 보려면 축이 갈려야 한다.
+        """
         findings = [
-            make_finding("p1", "retrieval_missing_gold"),
-            make_finding("p2", "retrieval_incomplete_enumeration", gold_n=4),
-            make_finding("p3", "retrieval_incomplete_enumeration", gold_n=4),
-            make_finding("p4", "retrieval_incomplete_enumeration", gold_n=4),
+            make_finding("p1", "retrieval_missing_gold"),                     # A, probe 1
+            *[
+                make_finding(f"lm{i}", "retrieval_lexical_mismatch")          # A, probe 3
+                for i in range(3)
+            ],
         ]
         request, _decision = planner.plan(make_state(findings))
 
-        self.assertEqual(request.failure_label, "retrieval_incomplete_enumeration")
+        self.assertEqual(request.action_key, "retriever.search_type:replace")
+        self.assertEqual(request.action_score_breakdown["supporting_probe_count"], 3)
+
+    def test_two_labels_on_one_axis_are_merged_not_ranked(self):
+        """같은 축을 지지하는 두 라벨은 경쟁하지 않고 표를 합친다.
+
+        `retrieval_missing_gold`(increase_top_k)와
+        `retrieval_incomplete_enumeration`(dynamic_top_k)은 선언 이름이 다르지만
+        같은 config 변경이다 — 전환의 목적이 바로 이 통합이다.
+        """
+        findings = [
+            make_finding("p1", "retrieval_missing_gold"),
+            *[
+                make_finding(f"p{i}", "retrieval_incomplete_enumeration", gold_n=4)
+                for i in range(2, 5)
+            ],
+        ]
+        request, _decision = planner.plan(
+            make_state(findings), blacklist={"retriever.mmr:enable"}
+        )
+
+        self.assertEqual(request.action_key, "retriever.top_k:increase")
+        self.assertEqual(
+            sorted(request.supporting_labels),
+            ["retrieval_incomplete_enumeration", "retrieval_missing_gold"],
+        )
+        # probe 4개가 하나의 action 에 합산된다.
+        self.assertEqual(request.action_score_breakdown["supporting_probe_count"], 4)
 
     def test_causal_tier_beats_probe_dominance(self):
         """A > C 는 불변조건이다 — 지지가 몰려도 뒤집히지 않는다(구현계획 §4.3).
@@ -424,7 +456,7 @@ class ConfirmedGatingTest(unittest.TestCase):
         ]
         request, _decision = planner.plan(make_state(findings))
 
-        self.assertEqual(request.failure_label, "retrieval_incomplete_enumeration")
+        self.assertEqual(next(iter(request.supporting_labels), None), "retrieval_incomplete_enumeration")
 
 
 # ── 2. 후보 전달 (optimizer 요청 계약) ────────────────────────────
@@ -591,7 +623,7 @@ class PlannerCandidateListTest(unittest.TestCase):
         )
 
         self.assertEqual(decision.mode, "apply_optimize")
-        self.assertEqual(request.candidates[0].id, "switch_to_recursive_sentence")
+        self.assertEqual(request.prescription_id, "switch_to_recursive_sentence")
         self.assertEqual(
             request.search_space,
             {"chunker.strategy": ["recursive_sentence", "markdown_recursive"]},

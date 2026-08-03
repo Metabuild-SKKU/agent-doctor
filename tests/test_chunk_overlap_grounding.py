@@ -278,7 +278,7 @@ class ChunkOverlapGroundingTest(unittest.TestCase):
             "no_recoverable_crossings",
         )
         self.assertEqual(request.action_key, "chunker.chunk_size:increase")
-        self.assertEqual(result.selected_candidate.id, "increase_chunk_size")
+        self.assertEqual(result.selected_action.prescription_id, "increase_chunk_size")
         self.assertEqual(result.config_patch.changes, {"chunker.chunk_size": 800})
 
 

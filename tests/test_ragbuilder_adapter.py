@@ -7,7 +7,7 @@ from importlib.util import find_spec
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from agents.optimize.adapters.ragbuilder_adapter import RAGBuilderAdapter
-from agents.optimize.schemas import ConfigPatch, OptimizationRequest, PrescriptionCandidate
+from agents.optimize.schemas import OptimizationRequest
 
 
 class RAGBuilderAdapterTest(unittest.TestCase):
@@ -21,7 +21,7 @@ class RAGBuilderAdapterTest(unittest.TestCase):
                 "chunk_overlap": 50,
                 "input_source": "sample_data.txt",
             },
-            "failure_label": "retrieval_missing_gold",
+            "supporting_labels": ["retrieval_missing_gold"],
             "search_space": {"retriever.top_k": [5, 7]},
             "target_metrics": ["context_recall"],
             "metadata": {"use_mock": True},
@@ -39,15 +39,7 @@ class RAGBuilderAdapterTest(unittest.TestCase):
                 "chunk_overlap": 50,
                 "input_source": "sample_data.txt",
             },
-            failure_label="retrieval_missing_gold",
-            candidates=[
-                PrescriptionCandidate(
-                    id="increase_top_k",
-                    failure_label="retrieval_missing_gold",
-                    group="A",
-                    status="ready",
-                )
-            ],
+            supporting_labels=["retrieval_missing_gold"],
             search_space={"retriever.top_k": [5, 7, 9]},
             target_metrics=["context_recall"],
             max_trials=3,
@@ -80,15 +72,7 @@ class RAGBuilderAdapterTest(unittest.TestCase):
             request_id="req-ragbuilder-client",
             iteration=1,
             baseline_config={"top_k": 4, "input_source": "sample_data.txt"},
-            failure_label="retrieval_missing_gold",
-            candidates=[
-                PrescriptionCandidate(
-                    id="increase_top_k",
-                    failure_label="retrieval_missing_gold",
-                    group="A",
-                    status="ready",
-                )
-            ],
+            supporting_labels=["retrieval_missing_gold"],
             search_space={"retriever.top_k": [6, 8]},
             metadata={"ragbuilder_client": fake_client},
         )
@@ -103,15 +87,6 @@ class RAGBuilderAdapterTest(unittest.TestCase):
     def test_empty_search_space_is_skipped_without_reading_candidates(self):
         request = self.make_request(
             search_space={},
-            candidates=[
-                PrescriptionCandidate(
-                    id="increase_top_k",
-                    failure_label="retrieval_missing_gold",
-                    group="A",
-                    status="ready",
-                    patch=ConfigPatch(changes={"retriever.top_k": 8}),
-                )
-            ],
         )
 
         result = RAGBuilderAdapter().run(request)
@@ -560,7 +535,6 @@ class RAGBuilderAdapterTest(unittest.TestCase):
                 "retrieval_incomplete_enumeration",
             ],
             supporting_probes=["p1", "p2"],
-            related_failure_labels=["retrieval_incomplete_enumeration"],
         )
         mapping = adapter.build_mapping(request)
 
@@ -573,23 +547,25 @@ class RAGBuilderAdapterTest(unittest.TestCase):
         )
         self.assertEqual(metadata["supporting_probes"], ["p1", "p2"])
         # 외부 계약이라 구버전 키는 유지한다 — 키를 빼면 소비처가 깨진다.
+        # 다만 값은 지지 라벨에서 파생한다(대표 라벨 개념이 내부에서 사라졌다).
         self.assertEqual(metadata["failure_label"], "retrieval_missing_gold")
         self.assertEqual(
             metadata["related_failure_labels"],
             ["retrieval_incomplete_enumeration"],
         )
 
-    def test_payload_metadata_omits_action_fields_for_legacy_requests(self):
+    def test_payload_metadata_tolerates_a_request_without_an_action(self):
         """action 없이 만들어진 요청도 payload 를 만들 수 있어야 한다."""
         adapter = RAGBuilderAdapter()
-        request = self.make_request()
+        request = self.make_request(supporting_labels=[])
         mapping = adapter.build_mapping(request)
 
         metadata = adapter.build_payload(request, mapping)["metadata"]
 
         self.assertIsNone(metadata["action_key"])
         self.assertEqual(metadata["supporting_labels"], [])
-        self.assertEqual(metadata["failure_label"], "retrieval_missing_gold")
+        self.assertEqual(metadata["failure_label"], "")
+        self.assertEqual(metadata["related_failure_labels"], [])
 
 
 if __name__ == "__main__":

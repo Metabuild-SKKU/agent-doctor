@@ -30,15 +30,18 @@ from tests.test_planner import make_finding, make_state
 
 
 def _select(findings, blacklist=None, **state_kwargs):
-    """planner.plan 을 돌려 (선택 라벨, 선택 처방 id, search_space) 를 뽑는다."""
+    """planner.plan 을 돌려 (대표 지지 라벨, 처방 id, search_space) 를 뽑는다.
+
+    전환 후 "대표 라벨"은 실행 의미가 없다 — 여기서는 박제 비교를 위해 지지 라벨의
+    첫 원소를 쓴다(인과 등급이 가장 높은 support 가 앞에 온다).
+    """
     state = make_state(findings, **state_kwargs)
     request, decision = planner.plan(state, blacklist=blacklist or set())
     if request is None:
         return None, None, None, decision
-    first = request.candidates[0] if request.candidates else None
     return (
-        request.failure_label,
-        first.id if first else None,
+        next(iter(request.supporting_labels), None),
+        request.prescription_id,
         dict(request.search_space),
         decision,
     )

@@ -16,11 +16,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from agents.optimize import reporter
 from agents.optimize.schemas import (
-    ConfigPatch,
     OptimizationHistoryItem,
     OptimizationRequest,
     OptimizeDecision,
-    PrescriptionCandidate,
     Verdict,
 )
 
@@ -39,28 +37,13 @@ def _decision(mode="apply_optimize", status="proposed", **overrides):
 
 def _request(**overrides):
     """planner._build_action_request 가 만드는 모양의 요청."""
-    candidate = PrescriptionCandidate(
-        id="increase_top_k",
-        failure_label="retrieval_missing_gold",
-        group="A",
-        status="ready",
-        patch=ConfigPatch(
-            changes={"retriever.top_k": 10},
-            metadata={
-                "action_key": "retriever.top_k:increase",
-                "prescription_id": "increase_top_k",
-            },
-        ),
-        search_space={"retriever.top_k": [10]},
-    )
     values = {
         "request_id": "req-1",
         "iteration": 0,
         "baseline_config": {"top_k": 5},
-        "failure_label": "retrieval_missing_gold",
-        "candidates": [candidate],
         "search_space": {"retriever.top_k": [10]},
         "action_key": "retriever.top_k:increase",
+        "prescription_id": "increase_top_k",
         "supporting_labels": [
             "retrieval_missing_gold",
             "retrieval_incomplete_enumeration",
@@ -109,25 +92,25 @@ class ApplyReportTest(unittest.TestCase):
             ["conflict_margin_unmet"],
         )
 
-    def test_selected_prescription_reads_the_patch_not_the_first_candidate(self):
-        """실제 선택된 action 의 출처를 읽는다 — 후보 목록 순서로 추측하지 않는다.
+    def test_selected_prescription_is_read_not_guessed(self):
+        """실제 선택된 action 의 출처를 그대로 읽는다.
 
         전환 전 reporter 는 `request.candidates[0].id` 로 "가장 가벼운 처방"을
-        추측했다. 그 가정이 깨지면(후보 순서가 선택 순서가 아니게 되면) 리포트가
-        적용되지 않은 처방 이름을 보고한다.
+        추측했다. 후보 순서가 선택 순서라는 가정이 깨지면 적용되지 않은 처방
+        이름을 보고했다. 이제 후보 목록 자체가 없어 추측할 자리가 사라졌다 —
+        요청이 들고 있는 값이 곧 보고되는 값이다.
         """
-        request = _request()
-        # 후보 객체의 id 와 실제 선택의 출처가 다른 상황을 만든다.
-        request.candidates[0].id = "다른_처방"
+        request = _request(prescription_id="switch_to_recursive_sentence")
 
         report = reporter.build_report(_decision(), request)
 
-        self.assertEqual(report.selected_prescription, "increase_top_k")
+        self.assertEqual(report.selected_prescription, "switch_to_recursive_sentence")
+        self.assertIn("switch_to_recursive_sentence", report.summary)
 
-    def test_legacy_request_without_action_still_reports(self):
+    def test_request_without_an_action_key_still_reports(self):
+        """action 이 비어도 리포트는 만들어진다 — 처방 id 로 설명한다."""
         request = _request(
             action_key=None,
-            supporting_labels=[],
             opposing_labels=[],
             action_score_breakdown={},
         )
@@ -135,6 +118,7 @@ class ApplyReportTest(unittest.TestCase):
         report = reporter.build_report(_decision(), request)
 
         self.assertIsNone(report.action_key)
+        self.assertIn("increase_top_k", report.summary)   # 처방 id 로 설명한다
         self.assertIn("retrieval_missing_gold", report.summary)
 
 

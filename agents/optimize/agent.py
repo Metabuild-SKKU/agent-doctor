@@ -429,56 +429,61 @@ def _log_optimize_input(state: AgentDoctorState) -> None:
         print(f"[Optimize] 제외된 action: [{', '.join(blocked_keys)}]")
 
 
-def _log_candidate_list(request: OptimizationRequest) -> None:
-    """Planner가 만든 처방 후보와 후보별 근거·탐색 범위를 출력한다."""
+def _log_selected_action(request: OptimizationRequest) -> None:
+    """Planner 가 고른 action 과 그 근거·탐색 범위를 출력한다.
+
+    "후보 목록 N개 중 하나"가 아니라 **이미 정해진 변경 하나**를 보고한다. 경쟁은
+    planner 안에서 끝났고, 밀린 후보는 runner-up 으로 따로 남긴다.
+    """
+    breakdown = request.action_score_breakdown
     print(
-        f"[Optimize] 후보 생성: {len(request.candidates)}개 "
-        f"(label={request.failure_label}, optimizer={request.optimizer})"
+        f"[Optimize] 선택된 action: {request.action_key or '-'} "
+        f"(지지 라벨 {len(request.supporting_labels)}개, "
+        f"probe {len(request.supporting_probes)}개, "
+        f"optimizer={request.optimizer})"
     )
-    distinct_reasons = list(
-        dict.fromkeys(
-            candidate.reason
-            for candidate in request.candidates
-            if candidate.reason
-        )
-    )
-    shared_reason = distinct_reasons[0] if len(distinct_reasons) == 1 else None
-    if shared_reason:
-        print(f"[Optimize] 후보 제안 근거: {shared_reason}")
-    for index, candidate in enumerate(request.candidates, 1):
-        reindex = bool(candidate.patch and candidate.patch.reindex_required)
-        patch = candidate.patch.changes if candidate.patch else {}
+    if breakdown:
         print(
-            f"[Optimize] 후보 {index}/{len(request.candidates)}: "
-            f"id={candidate.id}, status={candidate.status}, "
-            f"cost={candidate.cost!r}, "
-            f"patch={_fmt_mapping(patch)}, "
-            f"search_space={_fmt_mapping(candidate.search_space)}, "
-            f"reindex={_fmt_bool(reindex)}"
+            f"[Optimize] 선택 점수: {request.action_score:.3f} "
+            f"(가중 지지 {breakdown.get('weighted_probe_support')}, "
+            f"비용 {breakdown.get('base_cost')}, "
+            f"출처 {breakdown.get('cost_source')}/{breakdown.get('confidence_source')})"
         )
-        if candidate.reason and candidate.reason != shared_reason:
-            print(f"[Optimize]   제안 근거: {candidate.reason}")
+    print(
+        f"[Optimize] 탐색 범위: {_fmt_mapping(request.search_space)}, "
+        f"후보 {request.max_trials}개"
+    )
+    for runner_up in request.metadata.get("runner_up_actions", []):
+        print(
+            f"[Optimize]   밀린 action: {runner_up['action_key']} "
+            f"(점수 {runner_up['score']})"
+        )
+    for deferred in request.metadata.get("deferred_axes", []):
+        print(
+            f"[Optimize]   보류된 축: {deferred.get('axis')} "
+            f"({deferred.get('reason')})"
+        )
 
 
-def _log_candidate_review(result: OptimizationResult) -> None:
-    """Optimizer가 후보를 거르거나 선택한 결과와 이유를 출력한다."""
+def _log_action_review(result: OptimizationResult) -> None:
+    """Optimizer 의 실행 직전 재검증 결과를 출력한다."""
     for skipped in result.metadata.get("skipped_candidates", []):
         if not isinstance(skipped, dict):
             continue
         print(
-            f"[Optimize] 후보 SKIP: "
-            f"id={skipped.get('prescription_id') or '-'}, "
+            f"[Optimize] action SKIP: "
+            f"{skipped.get('action_key') or skipped.get('prescription_id') or '-'}, "
             f"reason={skipped.get('reason') or 'unknown'}"
         )
 
-    selected = result.selected_candidate
+    selected = result.selected_action
     if result.status == "failed":
         reason = result.metadata.get("error_code") or result.error or result.message
         if selected is None:
             print(f"[Optimize] 요청 FAIL: reason={reason or 'unknown'}")
         else:
             print(
-                f"[Optimize] 후보 FAIL: id={selected.id}, "
+                f"[Optimize] action FAIL: {selected.action_key or '-'}, "
                 f"reason={reason or 'unknown'}"
             )
         return
@@ -488,15 +493,14 @@ def _log_candidate_review(result: OptimizationResult) -> None:
         if selected is None:
             print(f"[Optimize] 요청 SKIP: reason={reason or 'unknown'}")
             return
-        prescription_id = selected.id
         print(
-            f"[Optimize] 후보 SKIP: id={prescription_id}, "
+            f"[Optimize] action SKIP: {selected.action_key or '-'}, "
             f"reason={reason or 'unknown'}"
         )
         return
 
     if selected is not None:
-        print(f"[Optimize] 후보 SELECT: id={selected.id}")
+        print(f"[Optimize] action SELECT: {selected.action_key or '-'}")
 
 
 def _log_optimize_transition(
@@ -534,14 +538,14 @@ def _log_optimize_application(
     changed_keys: list[str],
     prescription_id: str | None,
 ) -> None:
-    selected = result.selected_candidate
+    selected = result.selected_action
     print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations} (처방 적용 후)")
     print(
         f"[Optimize] action 적용: {request.action_key or '-'}, "
         f"처방={prescription_id or '-'}"
     )
     if selected is not None:
-        reason = result.message or selected.reason or request.reason
+        reason = result.message or selected.description or request.reason
         if reason:
             print(f"[Optimize] 선택 근거: {reason}")
     _log_optimize_transition(
@@ -796,7 +800,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     deferred_runtime,
                 )
                 return state
-            _log_candidate_list(request)
+            _log_selected_action(request)
 
             # iteration 은 "새 ActionStudy 를 적용한 횟수"다(구현계획 §5.3).
             # study key 는 baseline fingerprint 를 담고 있으므로
@@ -846,7 +850,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 return state
 
             result = optimizer.run(request)
-            _log_candidate_review(result)
+            _log_action_review(result)
             # skipped action(baseline 무개선·적용 불가 경로·빈 search space)이면 포기하지
             # 않고 그 탐색을 소진 처리한 뒤 다음 순위 action 으로 넘어간다. 한 축이
             # 막혀도(예: enable_hybrid 는 이미 hybrid 라 no-op) 다른 actionable finding 이
@@ -854,11 +858,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             if result.status != "skipped":
                 break
 
-            prescription_id = (
-                result.selected_candidate.id
-                if result.selected_candidate
-                else (request.candidates[0].id if request.candidates else None)
-            )
+            prescription_id = request.prescription_id
             rejected_action = request.action_key
             if not rejected_action or rejected_action in visit_exclusions:
                 state.status = "rolled_back" if rolled_back else "skipped"
@@ -893,7 +893,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 deferred_runtime.append(
                     {
                         "action_key": rejected_action,
-                        "failure_label": request.failure_label,
+                        "failure_label": next(iter(request.supporting_labels), ""),
                         "prescription_id": prescription_id,
                         "reason": (
                             error_code
@@ -920,7 +920,9 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 if rejected_study is not None:
                     state.completed_action_studies.add(rejected_study)
                 if prescription_id:
-                    state.blacklist.add((request.failure_label, prescription_id))
+                    label = next(iter(request.supporting_labels), "")
+                    if label:
+                        state.blacklist.add((label, prescription_id))
 
         if result.status != "proposed" or result.config_patch is None:
             # optimizer 가 적용 가능한 patch 를 못 만듦(skipped/failed)
@@ -968,9 +970,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         state.reindex_required = bool(result.needs_reindex) or rollback_reindex_required
 
         # pending 이력 생성(다음 방문에서 finalize) + iteration 1회 증가
-        prescription_id = (
-            result.selected_candidate.id if result.selected_candidate else None
-        )
+        prescription_id = request.prescription_id
         item = history.create_pending_item(
             state,
             request,
@@ -1039,7 +1039,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 "action_key": request.action_key,
                 "supporting_labels": list(request.supporting_labels),
                 # 구버전 리포트 소비처 호환. 단계 7 에서 action 표시로 전환한다.
-                "failure_label": request.failure_label,
+                "failure_label": next(iter(request.supporting_labels), ""),
                 "selected_prescription": prescription_id,
                 "reindex_required": bool(result.needs_reindex),
             }
@@ -1114,7 +1114,7 @@ def _continue_internal_study(
         },
     )
     result = optimizer.run(resumed_request)
-    _log_candidate_review(result)
+    _log_action_review(result)
     item.metadata["trial_results"] = list(
         result.metadata.get("trial_results", observed_trials)
     )

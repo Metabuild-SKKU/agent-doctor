@@ -623,9 +623,9 @@ rollback cache·reindex 요구, `graph.py` route 무변경.
 | ~~**5**~~ | ~~history·blacklist·iteration 전환~~ | ✅ 16건 해소 (§8.2 결과) |
 | ~~**6**~~ | ~~reranker·adapter guardrail 이관~~ | ✅ 5건 해소 (§8.3 결과) |
 | ~~**7**~~ | ~~reporter·serve 전환~~ | ✅ §8.4 결과 |
-| **8** | compatibility 제거·문서 갱신 | §8.5 |
+| ~~**8**~~ | ~~compatibility 제거·문서 갱신~~ | ✅ §8.5 결과 |
 
-알려진 실패 21건은 전부 해소됐다. 현재 **1066 tests 전부 통과**
+**전환 완료.** 알려진 실패 21건은 전부 해소됐고 현재 **1064 tests 전부 통과**
 (환경 사유 4개 모듈 `test_pipeline`·`test_ragas_eval`·`test_oauth`·`test_eval` 제외).
 
 ### 8.1 중단 기준 판정 결과 (단계 3)
@@ -830,6 +830,36 @@ tests/test_optimizer.py, test_optimize_agent.py, test_ragbuilder_adapter.py
 
 **저장 state 호환 요구를 먼저 확인한다.** 이전 실행의 `optimization_history` 를 읽어야
 하면 구버전 필드 reader 를 남긴다.
+
+#### 단계 8 결과
+
+**저장 state 호환 요구는 없었다.** `AgentDoctorState` 는 디스크로 직렬화되지 않는다
+(Serve 가 저장하는 것은 chunks 뿐이고, Eval·Index 는 `optimization_history` 에서
+`metadata` 만 읽는다). 즉 한 프로세스 실행 안에서 구·신 이력이 섞일 수 없다.
+단계 7 에서 넣은 fallback 은 그대로 두되(비용이 없다) 실행을 좌우하지는 않는다.
+
+제거한 것:
+
+| 대상 | 대체 |
+| --- | --- |
+| `PrescriptionCandidate` | `SelectedAction` — optimizer 가 재검증을 마친 변경 하나 |
+| `OptimizationResult.selected_candidate` | `selected_action` |
+| `OptimizationRequest.candidates` | 없음. 요청이 곧 선택 하나다 |
+| `OptimizationRequest.failure_label` / `related_failure_labels` | `supporting_labels` |
+| planner 의 라벨 우선 선택 경로 14개 함수 | action_aggregator |
+
+**optimizer 에서 후보 순회가 사라졌다.** 전환 전에는 planner 가 후보 목록을 넘기고
+optimizer 가 선언 순서대로 훑어 첫 실행 가능 후보를 골랐다 — 선택 책임이 두 계층에
+흩어져 있었다. 이제 경쟁은 planner 안에서 끝나고 optimizer 는 넘어온 변경 하나를
+재검증만 한다. 실행 불가면 대신 고르는 게 아니라 skip 을 돌려주고, 다음 action 선택은
+agent 가 planner 를 다시 불러서 한다. 후보별/요청 수준 search_space 이중 계약도
+함께 사라졌다.
+
+**dormant 기능을 버리지 않았다.** topic_cluster `applies_when` 신호 소비는 의도적으로
+꺼 둔 기능이지 죽은 코드가 아니다(임계값 캘리브레이션과 임베딩 교체 활성화 대기 중).
+planner 를 지우면서 함께 사라지면 조용한 기능 상실이므로 §3.3 이 지정한 자리인
+`build_action_supports` 로 옮겼다 — 완화 규칙(신호가 전부 걸러내면 조건을 푼다)까지
+그대로. 소비 ON/OFF 두 계약을 고정한 테스트도 함께 이동했다.
 
 ### 단계 0 결과 (완료)
 

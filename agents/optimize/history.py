@@ -416,7 +416,7 @@ def create_pending_item(
         trial_id=str(uuid.uuid4()),
         request_id=request.request_id,
         iteration=state.iteration,
-        failure_labels=[request.failure_label],
+        failure_labels=list(request.supporting_labels),
         optimizer=request.optimizer,
         status="applied",   # config 적용됨, 다음 Eval 검증 대기 (AGENTS.md §8)
         selected_prescription_id=prescription_id,

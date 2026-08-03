@@ -118,59 +118,28 @@ class ConfigPatch:
 
 
 @dataclass
-class PrescriptionCandidate:
-    """
-    하나의 진단 라벨에 대해 시도할 수 있는 처방 후보.
+class SelectedAction:
+    """optimizer 가 실행 직전 검증까지 마치고 준비한 **변경 하나**.
 
-    rules.py의 raw dict 처방을 optimizer/adapter가 쓰기 쉬운 형태로 감싼다.
-    한 라벨에 여러 후보가 있을 수 있으며, planner나 optimizer는 priority,
-    cost, patch.reindex_required 등을 보고 어떤 후보를 먼저 적용할지 결정한다.
+    `PrescriptionCandidate`(라벨별 처방 후보 목록)를 대체한다. 선택 단위가 action 이
+    된 뒤 planner 는 이미 하나를 고른 상태로 요청을 보내므로, optimizer 가 후보
+    목록을 순회하며 "어떤 처방을 먼저 시도할지" 다시 정하는 계층이 사라졌다.
+    남은 책임은 "이 변경이 지금 실행 가능한가"의 재검증뿐이다.
 
     Attributes:
-        id: 처방 식별자. 예: "enable_reranker", "increase_top_k".
-        failure_label: 이 처방이 대응하는 진단 라벨.
-        group: 라벨 그룹. A=검색, B=생성, C=context 구조, D=데이터/평가 문제.
-        status: ready, draft, manual 등 현재 처방 실행 가능 상태.
-        patch: 실제 config 변경 내용. 수동 조치 라벨이면 None일 수 있다.
-        search_space: RAGBuilder/AutoRAG에 넘길 탐색 후보 영역.
-        cost: 처방 비용. 낮을수록 우선 시도하기 쉽다.
-        priority: planner가 계산한 후보 우선순위 점수.
-        target_metrics: 이 처방으로 개선하려는 주요 지표 목록.
-        applies_when: 이 처방이 적용되는 조건(신호 기반 택1).
-            예: {"topic_cluster": ["spread", "concentrated"]}.
-            ⚠️ 현재 이 태그의 소비는 꺼져 있다(planner._CONSUME_TOPIC_CLUSTER_SIGNAL=False)
-            — 관측용 신호로만 유지. Eval 은 finding.metadata 에 신호를 계속 기록하지만
-            planner 는 아직 그 값으로 후보를 거르지 않는다(전 처방 순차 시도). 소비를
-            유예한 이유: 신호가 고르는 swap_embedding_model 이 optimizer capability
-            (embedding_model=False)로 항상 거절되고, 임계값도 캘리브레이션 전이라
-            노이즈로 비싼 재색인을 잘못 발동시킬 위험이 있기 때문. 자세한 배경은
-            planner 의 _CONSUME_TOPIC_CLUSTER_SIGNAL 정의부 주석 참고.
-
-            (소비 ON 일 때의 계약) Eval이 finding.metadata로 주는 신호와 planner가
-            대조해 후보를 거른다(planner._prescription_applies). 비어있으면(또는 신호
-            미측정이면) 신호 판단 없이 순서대로 순차 시도(fallback). optimizer 는 걸러진
-            뒤의 search_space 만 소비하며 applies_when 을 직접 보지 않는다.
-            신호는 '선호'이지 '차단'이 아니다 — 걸러서 후보가 0개가 되면 planner 가
-            조건을 완화해 블랙리스트만 적용한다. 신호 때문에 라벨이 통째로 스킵돼
-            고칠 기회를 잃는 일을 막기 위해서다(planner._available_prescriptions).
-        reason: 이 처방을 제안한 이유.
-        tradeoffs: latency, cost, precision 하락 등 예상되는 부작용.
-        metadata: 실험적 신호나 원본 rule dict 같은 확장 정보.
+        action_key: 실제 config 변경의 canonical 식별자.
+        prescription_id: 이 변경을 선언한 rules.py 처방 id. 리포트가 선언으로
+            되짚기 위한 표시용이며 실행 제어에는 쓰지 않는다.
+        description: 사람이 읽는 변경 설명.
+        reindex_required: 적용 후 재색인이 필요한지.
+        search_space: constraint·no-op 필터를 통과한 최종 후보값. 단일 축이다.
     """
 
-    id: str
-    failure_label: str
-    group: FailureGroup
-    status: PrescriptionStatus
-    patch: ConfigPatch | None = None
-    search_space: dict[str, Any] = field(default_factory=dict)
-    cost: float | None = None
-    priority: float = 0.0
-    target_metrics: list[str] = field(default_factory=list)
-    applies_when: dict[str, Any] = field(default_factory=dict)
-    reason: str = ""
-    tradeoffs: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    action_key: str | None = None
+    prescription_id: str | None = None
+    description: str = ""
+    reindex_required: bool = False
+    search_space: dict[str, list[Any]] = field(default_factory=dict)
 
 
 # ── Action 중심 모델 ──────────────────────────────────────────────
@@ -475,10 +444,9 @@ class OptimizationRequest:
         request_id: 최적화 요청 고유 ID.
         iteration: 현재 optimize 반복 회차.
         baseline_config: 변경 전 기준 config.
-        failure_label: 이번 요청에서 해결하려는 대표 진단 라벨.
-        related_failure_labels: 같은 Eval report에서 함께 관찰된 관련 라벨 목록.
-        candidates: planner가 선정한 처방 후보 목록.
-        search_space: optimizer가 탐색할 수 있는 config 후보 범위.
+        action_key: 이번 요청이 적용하려는 실제 config 변경. 선택의 단위다.
+        supporting_labels: 그 변경을 지지한 진단 라벨 전체.
+        search_space: optimizer가 탐색할 수 있는 config 후보 범위. 단일 축이다.
         fixed_config: 최적화 중 고정해야 하는 config 값.
         target_metrics: 개선해야 하는 목표 지표 목록.
         target_profile: 사용자의 최적화 성향. 예: accuracy, speed, cost, balanced.
@@ -487,17 +455,12 @@ class OptimizationRequest:
         reason: 요청 생성 이유.
         propose_only: True이면 실제 적용하지 않고 제안만 생성한다.
         metadata: adapter별 추가 입력이나 실험 정보를 담는 확장 필드.
+        prescription_id: 이 변경을 선언한 rules.py 처방 id(표시용).
     """
 
     request_id: str
     iteration: int
     baseline_config: dict[str, Any]
-    # DEPRECATED: 선택 단위가 action 으로 옮겨져 "대표 라벨" 개념은 설명용으로만 남는다.
-    #   action_key / supporting_labels 를 읽어야 한다. 소비처 전환이 끝나면 제거한다.
-    failure_label: str
-    related_failure_labels: list[str] = field(default_factory=list)
-    # DEPRECATED: 실행 선택 단위는 action 하나다. 이 목록은 하위 호환용 파생값이다.
-    candidates: list[PrescriptionCandidate] = field(default_factory=list)
     search_space: dict[str, Any] = field(default_factory=dict)
     fixed_config: dict[str, Any] = field(default_factory=dict)
     target_metrics: list[str] = field(default_factory=list)
@@ -509,7 +472,7 @@ class OptimizationRequest:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     # ── action 중심 필드 ──────────────────────────────────────────
-    # 이 요청이 적용하려는 실제 config 변경. 위의 label 필드들은 여기서 파생된다.
+    # 이 요청이 적용하려는 실제 config 변경. 선택의 단위이자 이력·차단의 identity 다.
     action_key: str | None = None
     action: ActionCandidate | None = None
     # 이 action 을 지지한 라벨과 고유 probe. 대표 라벨 하나가 아니라 전체다.
@@ -520,6 +483,9 @@ class OptimizationRequest:
     # 선택 근거. 사용자에게 "왜 이걸 골랐는지" 설명하는 데 쓴다.
     action_score: float | None = None
     action_score_breakdown: dict[str, Any] = field(default_factory=dict)
+    # 이 변경을 선언한 rules.py 처방 id. 리포트가 선언으로 되짚기 위한 표시용이며
+    # 실행 제어에는 쓰지 않는다(구현계획 §8.2 완료 조건).
+    prescription_id: str | None = None
 
 
 @dataclass
@@ -535,7 +501,7 @@ class OptimizationResult:
         request_id: 이 결과가 대응하는 OptimizationRequest ID.
         status: proposed, applied, manual_required, failed 등 결과 상태.
         optimizer: 실제 실행한 backend 이름.
-        selected_candidate: 최종 선택된 처방 후보.
+        selected_action: optimizer 가 실행 직전 검증을 마치고 준비한 변경 하나.
         config_patch: 현재 config에 병합할 변경 조각.
         best_config: 외부 optimizer가 반환한 전체 최적 config.
         before_metrics: 적용 전 평가 지표.
@@ -550,7 +516,7 @@ class OptimizationResult:
     request_id: str
     status: OptimizationStatus
     optimizer: OptimizerBackend
-    selected_candidate: PrescriptionCandidate | None = None
+    selected_action: SelectedAction | None = None
     config_patch: ConfigPatch | None = None
     best_config: dict[str, Any] | None = None
     before_metrics: dict[str, Any] = field(default_factory=dict)
