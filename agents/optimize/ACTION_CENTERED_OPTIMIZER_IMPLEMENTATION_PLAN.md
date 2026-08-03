@@ -51,49 +51,59 @@ action은 **우선순위 경쟁·후보값·적용·이력·차단**의 중심�
 
 ## 2. 현황
 
-> ⚠️ 아래 수치는 `885490f` 기준이며 **초판 이후 세 번 낡았다**
-> (`a35677f` → `23a6fe7` → `885490f`). 착수 시점에 §2.2의 집계를 다시 돌린다.
+> ⚠️ 아래 수치는 **`origin/main` 머지 시점(#70·#72·#73·#76·#78 반영)** 집계다.
+> 초판 이후 네 번 갱신했다. 착수 후에도 main이 움직이면 §2.2의 집계를 다시 돌린다.
 
-ready 라벨 **19개**, 실행 가능 action **18개**, 그중 **12개가 복수 라벨 지지**.
+전체 라벨 **30개** (ready 19 / draft 7 / manual 4).
+실행 가능 action **18개**, 그중 **12개가 복수 라벨 지지**. 차단 **9개**.
 
-| action | 지지 | tier | 비고 |
-| --- | --- | --- | --- |
-| `chunker.chunk_size:increase` | 3 | A | |
-| `chunker.chunk_size:decrease` | 3 | A·C | 증가와 경쟁 |
-| `generation.require_citation:enable` | 3 | B | |
-| `generation.abstention_strict:enable` | 3 | B | |
-| `chunker.chunk_overlap:increase` | 2 | A | |
-| `chunker.strategy:replace` | 2 | A | 후보 `[recursive_sentence, markdown_recursive]` |
-| `generation.temperature:decrease` | 2 | B | |
-| `retriever.mmr:enable` | 2 | A·C | |
-| `retriever.top_k:increase` | 2 | A | |
-| `retriever.top_k:decrease` | 2 | C | 증가와 경쟁 |
-| `reranker.enabled:enable` | 2 | A | |
-| `reranker.enabled:disable` | 1 | A | enable과 배타(§4.4) |
-| `reranker.candidate_count:increase` | 1 | A | |
-| `retriever.hybrid_dense_weight:adjust` | 1 | A | 방향이 실측으로 결정(§3.2) |
-| `retriever.search_type:replace` | 1 | A | |
-| `generation.completeness_mode:enable` | 1 | B | |
-| `generation.restate_question:enable` | 1 | B | |
+| action | 지지 | tier | 재색인 | backend | 비고 |
+| --- | --- | --- | --- | --- | --- |
+| `chunker.chunk_size:increase` | 3 | A | ✔ | internal | |
+| `chunker.chunk_size:decrease` | 3 | A·C | ✔ | internal | 증가와 경쟁 |
+| `generation.require_citation:enable` | 3 | B | | rules | |
+| `generation.abstention_strict:enable` | 3 | B | | rules | |
+| `chunker.chunk_overlap:increase` | 2 | A | ✔ | internal | |
+| `chunker.strategy:replace` | 2 | A | ✔ | **internal** | 후보 2개 — #73으로 sweep 지원 |
+| `context.compression.enabled:enable` | 2 | C | | rules | **신규 활성화** |
+| `generation.temperature:decrease` | 2 | B | | rules | |
+| `retriever.mmr:enable` | 2 | A·C | | rules | |
+| `retriever.top_k:increase` | 2 | A | | internal | |
+| `retriever.top_k:decrease` | 2 | C | | internal | 증가와 경쟁 |
+| `reranker.enabled:enable` | 2 | A | | rules | |
+| `reranker.enabled:disable` | 1 | A | | rules | enable과 배타(§4.4) |
+| `reranker.candidate_count:increase` | 1 | A | | rules | |
+| `retriever.hybrid_dense_weight:adjust` | 1 | A | | internal | 방향이 실측으로 결정(§3.2) |
+| `retriever.search_type:replace` | 1 | A | | rules | |
+| `generation.completeness_mode:enable` | 1 | B | | rules | |
+| `generation.restate_question:enable` | 1 | B | | rules | |
 
 **차단된 action 9개** — catalog에 blocked reason과 함께 등록한다.
 
 | 사유 | action | 해제 조건 |
 | --- | --- | --- |
-| `not_state_mappable` | `query_rewrite`, `adaptive_retrieval`, `answer_checklist_review`, `conflict_resolution_prompt`, `context_ordering`, `noise_filter` | mapper 계약 + 소비 노드 추가 |
-| `capability_off` | `context.compression.enabled`, `embedding.model`, `generation.model` | `DEFAULT_CAPABILITIES` 값 변경 |
+| `not_state_mappable` | `query_rewrite`, `adaptive_retrieval`, `answer_checklist_review`, `conflict_resolution_prompt`, `context_ordering`, `noise_filter`, `reranker_model` | mapper 계약 + 소비 노드 추가 |
+| `capability_off` | `embedding.model`, `generation.model` | `DEFAULT_CAPABILITIES` 값 변경 (둘 다 "검증된 후보 부재") |
 
-### 2.1 sweep 지원 축은 4개뿐
+머지 시점에 달라진 것:
+
+- `context.compression.enabled` — `capability_off` → **활성화**
+  (`too_long_context`, `context_noise_interference`가 지지)
+- `reranker_model:replace` — 차단 목록에 **신규**
+  (`retrieval_reranker_demotion`의 두 번째 처방, mapper 미등록)
+- `bad_gold_chunk` 라벨 추가(#70) — D그룹 `manual`이라 **action 지형에 영향 없음**
+
+### 2.1 sweep 지원 축은 5개
 
 ```python
 BACKEND_SUPPORTED_PATHS["internal"] = {
     "retriever.top_k", "retriever.hybrid_dense_weight",
     "chunker.chunk_size", "chunker.chunk_overlap",
+    "chunker.strategy",          # ← #73으로 추가됨
 }
 ```
 
-나머지 14개는 `rules` backend로 **1회 적용**된다. `chunker.strategy`는 후보가 2개인데
-sweep 대상이 아니어서 **선행 PR ②**로 축을 추가한다.
+나머지 13개는 `rules` backend로 **1회 적용**된다.
 
 ### 2.2 집계표를 손으로 유지하지 않는다
 
@@ -604,7 +614,7 @@ rollback cache·reindex 요구, `graph.py` route 무변경.
 
 | 단계 | 내용 | 완료 조건 |
 | --- | --- | --- |
-| **0-A** | 선행 PR ①② 병합 | 각 PR의 완료 기준 충족 |
+| ~~**0-A**~~ | ~~선행 PR ①② 병합~~ | ✅ **완료** — #76(마진), #73(sweep 축) 병합 |
 | **0** | Baseline 고정 — 테스트 실행, action inventory fixture, characterization | 동점/비동점 fixture 분리(아래) |
 | **1** | schema + action catalog + label rule이 action key 참조 | 기존 동작 변화 없음, catalog 무결성 통과 |
 | **2** | candidate value 로직 분리 | 기존 planner/chunk 테스트 동일 결과 |
