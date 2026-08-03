@@ -1589,12 +1589,20 @@ def _answer_reason(record: EvalRecord) -> str:
 
     f1 만 적으면 오독을 부른다: 판정은 f1 단독이 아니라 혼합 점수(_answer_ok)라, f1 이 문턱
     아래인데 통과한(또는 f1 이 문턱 위인데 실패한) 라벨의 근거가 로그에서 사라진다.
-    의미축 미측정(DEEP 미만)이면 lexical 단독 판정이므로 f1 만 적는다."""
+    의미축 미측정(DEEP 미만)이면 lexical 단독 판정이므로 f1 만 적는다.
+
+    단 의미축이 '심판 degrade' 로 빠진 경우는 그 값을 드러낸다 — degrade + 낮은 ac 는
+    _degraded_near_miss 로 판정을 오답으로 뒤집는데(어휘 f1 이 높아도), 그 신호가 안 보이면
+    'f1 완벽인데 실패'가 로그로 설명되지 않는다(실측: probe_qa_26360 계열). 미측정이 degrade
+    때문인지(ac_degraded) 단순 저모드인지(f1 만)를 가른다."""
     semantic = record.answer_semantic
-    if semantic is None:
-        return f"f1={_v(record.f1_score)}"
-    return (f"answer={_v(record.answer_score)}"
-            f"(f1 {_v(record.f1_score)}·의미 {_v(semantic)})")
+    if semantic is not None:
+        return (f"answer={_v(record.answer_score)}"
+                f"(f1 {_v(record.f1_score)}·의미 {_v(semantic)})")
+    if record.ragas.get("answer_correctness_degraded"):
+        return (f"f1={_v(record.f1_score)}·의미측정실패"
+                f"(ac_degraded={_v(record.ragas_answer_correctness)})")
+    return f"f1={_v(record.f1_score)}"
 
 
 def _rollup_reason(record: EvalRecord) -> str:

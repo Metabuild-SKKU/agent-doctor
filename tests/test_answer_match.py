@@ -316,5 +316,41 @@ class TestDegradeDoesNotFlipExactMatch(unittest.TestCase):
             metrics_common.set_mode(Mode.FAST)
 
 
+class TestAnswerReasonObservability(unittest.TestCase):
+    """관측성: reason 문자열이 판정을 뒤집은 실제 근거를 드러낸다 — degrade 로 의미축이
+    빠져 오답 처리됐는데 로그엔 'f1=1.00'만 찍혀 'f1 완벽인데 실패'가 설명 안 되던 문제."""
+
+    def _record(self, *, f1, ragas):
+        probe = Probe(probe_id="p1", question="q", source="taxonomy",
+                      gold_chunk_ids=["g_a"], ground_truth="정답")
+        rec = EvalRecord(probe=probe)
+        rec.recall_at_k, rec.f1_score = 1.0, f1
+        rec.ragas, rec.ragas_done = dict(ragas), True
+        return rec
+
+    def test_degrade_surfaces_ac_value(self):
+        # degrade 로 의미축 빠짐 → f1 뿐 아니라 판정을 뒤집은 ac_degraded 를 드러낸다.
+        rec = self._record(f1=1.0, ragas={
+            "faithfulness": 1.0, "answer_correctness": 0.1,
+            "answer_correctness_degraded": True})
+        reason = diagnose._answer_reason(rec)
+        self.assertIn("의미측정실패", reason)
+        self.assertIn("ac_degraded=0.100", reason)
+
+    def test_low_mode_unmeasured_stays_f1_only(self):
+        # degrade 가 아닌 단순 미측정(저모드)은 기존대로 f1 만 — 숨은 신호가 없다.
+        rec = self._record(f1=0.42, ragas={})
+        self.assertEqual(diagnose._answer_reason(rec), "f1=0.420")
+
+    def test_measured_semantic_shows_blend(self):
+        # 의미축이 측정된 정상 경로는 혼합 점수와 두 축을 모두 보인다(기존 형식).
+        rec = self._record(f1=0.49, ragas={
+            "faithfulness": 0.9, "answer_correctness": 0.73})
+        reason = diagnose._answer_reason(rec)
+        self.assertIn("answer=", reason)
+        self.assertIn("f1 0.490", reason)
+        self.assertIn("의미 0.730", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
