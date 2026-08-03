@@ -362,7 +362,7 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
               f"판정기(TP/FP/FN 분류) 실패로 의미유사도 단독 계산. 근접 오답을 못 걸렀을 수 있음")
     rerank = (report.runtime_summary or {}).get("reranker") or {}
     if rerank.get("pairs"):   # 리랭크 비용 — chunk_size 처방이 검색 시간에 준 영향을 드러낸다
-        print(f"  리랭커 {rerank['seconds']}초 · {rerank['pairs']}쌍"
+        print(f"  리랭커 {rerank['seconds']}초 · {rerank['pairs']}쌍 "
               f"(쌍당 {rerank['ms_per_pair']}ms) · applied {rerank['applied']}/{len(records)}")
     if report.findings:
         # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N

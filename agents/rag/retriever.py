@@ -499,8 +499,12 @@ class Retriever:
         # 리랭크 실측 시간·쌍 수를 결과에 싣는다 — 검색 시간의 대부분이 여기서 나오는데
         # (쌍 수 × 쌍당 텍스트 길이), 지금까지 리포트에는 실행 여부만 있고 비용이 없었다.
         # chunk_size 처방으로 쌍당 비용이 뛰어도 Optimize 가 그걸 못 보고 품질만 비교한다.
-        # 쌍 수는 리랭크가 실제로 돈 경우(applied)만 센다 — 로드 실패·쿨다운이면 predict 가
-        # 아예 안 돌아서 시간은 0 인데 쌍만 잡히고, 리포트의 ms_per_pair 가 그만큼 희석된다.
+        # 시간·쌍 수는 리랭크가 실제로 돈 경우(applied)만, 반드시 **함께** 센다. 둘의 기준이
+        # 어긋나면 집계 ms_per_pair(=Σseconds/Σpairs)가 양쪽으로 왜곡된다:
+        #   로드 실패·쿨다운 — predict 가 아예 안 돌아 시간 0, 쌍만 잡히면 아래로 희석
+        #   inference_failed — predict 는 끝까지 돌고 결과 검증에서 실패, 시간만 잡히면 위로 부풀림
+        # 실패한 시도의 벽시계는 버린다(그 사실은 reranker_status/failed 집계가 이미 알린다) —
+        # 이 지표의 질문은 '실제로 재정렬한 1쌍이 얼마였나'뿐이다.
         rerank_seconds = 0.0
         rerank_pairs = 0
         if reranker_attempted:
@@ -512,8 +516,9 @@ class Retriever:
                 model_name=self.settings.reranker_model,
                 top_k=rerank_top_k,
             )
-            rerank_seconds = time.monotonic() - rerank_started
+            elapsed = time.monotonic() - rerank_started
             reranked = reranker_status == "applied"
+            rerank_seconds = elapsed if reranked else 0.0
             rerank_pairs = attempted_pairs if reranked else 0
 
         mmr_applied = False

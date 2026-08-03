@@ -164,9 +164,10 @@ class RerankerExecutionTest(unittest.TestCase):
         self.assertEqual(result["rerank_pairs"], 3)
         self.assertGreaterEqual(result["rerank_seconds"], 0.0)
 
-    def test_rerank_pairs_not_counted_when_rerank_did_not_run(self):
-        """로드 실패·쿨다운이면 predict 가 안 돌아 시간은 0 인데 쌍만 잡힌다 —
-        ms_per_pair 가 희석되지 않게 applied 일 때만 센다."""
+    def test_rerank_cost_not_counted_when_rerank_did_not_run(self):
+        """실패한 시도는 시간·쌍 어느 쪽도 세지 않는다. 한쪽만 세면 집계 ms_per_pair 가
+        왜곡된다 — inference_failed 는 predict 가 끝까지 돌아 시간만 잡히면 위로 부풀고,
+        로드 실패는 시간이 0 이라 쌍만 잡히면 아래로 희석된다."""
         chunks = [
             {"chunk_id": f"c{i}", "doc_id": "d1", "text": f"alpha 문서 {i}", "metadata": {}}
             for i in range(3)
@@ -185,6 +186,7 @@ class RerankerExecutionTest(unittest.TestCase):
 
         self.assertEqual(result["reranker_status"], "inference_failed")
         self.assertEqual(result["rerank_pairs"], 0)
+        self.assertEqual(result["rerank_seconds"], 0.0)
 
     def test_search_reports_zero_rerank_cost_when_disabled(self):
         chunks = [{"chunk_id": "c1", "doc_id": "d1", "text": "alpha", "metadata": {}}]
