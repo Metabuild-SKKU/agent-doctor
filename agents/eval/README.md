@@ -280,8 +280,13 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
   순서가 성립한다). 성공 probe 는 `oracle_answer=None` 으로 남고 probe 로그의 oracle 칸은 `-` 다.
   `report._oracle_accuracy` 는 그 미측정분(`oracle_answer is None` + `findings` 없음)을 통과로
   추론해 분모를 유지하고(성공 전제가 recall=1 이라 gold 는 이미 context 안에 있었다), 실측 표본 수는
-  `ragas_scores.oracle_measured` 로 남긴다. `mean_oracle_f1` 은 실측분 평균이라 **이 변경 이전
-  실행과 직접 비교하면 안 된다**(재베이스라인 대상).
+  `ragas_scores.oracle_measured` 로 남긴다. `mean_oracle_f1` 과 `oracle_accuracy` 는 **이 변경 이전
+  실행과 직접 비교하면 안 된다**(재베이스라인 대상) — 전자는 분모가 실측분으로 좁아졌고, 후자는
+  분자가 바뀌었다(예전엔 성공 probe 의 오라클 실패도 감점됐지만 이제 그 몫은 통과로 추론된다).
+- STEP3 의 실패 판정은 `agent.run()` 이 진입부에서 `set_mode(mode)` 를 부른 뒤에 돈다. 안 부르면
+  전역 tier 가 모듈 기본값(`FAST`)이라 `_grounded_ok`·`_abstained` 의 tier3 축이 통째로 빠져,
+  근거성만으로 실패하는 probe 가 STEP3 에선 성공·STEP4 diagnose 에선 실패로 갈린다(그 probe 는
+  오라클 답변을 못 받고, 지연 계산으로도 복구되지 않는다).
 - tier2 측정(`_gold_ranks`/`_bm25_hits_gold`/`_gold_in_corpus`)은 **구현·배선 완료**돼 있다 —
   `agent.py::run()`이 `set_diag_context(retrieve_fn=..., keyword_fn=..., ragas_fn=...)` 로 자원을
   주입한다. `EVAL_MODE`가 self-gate 를 통과할 만큼(standard 이상) 높아야 실제로 호출된다 —

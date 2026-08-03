@@ -64,6 +64,7 @@ from agents.eval.metrics_common import (
     DEFAULT_RERANK_CANDIDATES,
     missed_gold_ids,
     set_context as set_diag_context,
+    set_mode,
 )
 from agents.eval import topic_cluster
 from agents.eval.metrics_basic import _compute_metrics
@@ -408,6 +409,12 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     # 진단 모드(비용 tier 상한): EVAL_MODE 환경변수. STEP3-2/STEP4/리포트가 이 값으로 게이팅된다.
     mode = resolve_mode()
+    # 측정 self-gate 의 전역 tier 도 여기서 맞춘다 — 예전엔 diagnose() 진입점만 set_mode 를 불러,
+    # STEP3 의 실패 판정이 모듈 기본값(FAST)으로 돌았다. 그러면 _grounded_ok/_abstained 의 tier3
+    # 축이 통째로 빠져(_faith 가 None) 근거성만으로 실패하는 probe 가 성공으로 분류되고, 그
+    # probe 는 오라클 답변 생성 대상에서 빠진다(STEP4 diagnose 는 DEEP 으로 실패 판정 → 불일치).
+    # 매 run 마다 다시 세팅하므로 이전 iteration 의 전역이 새 실행에 새는 것도 함께 막는다.
+    set_mode(mode)
     # state.iteration 은 raw 값을 그대로 찍는다(graph.py Orchestrator 로그와 표시 일치).
     # 예전엔 +1 을 더해 "다음 Optimize 방문에서 증가할 값"을 미리 보여줬는데, 같은 라벨이
     # 이어지는 방문(starts_new_label=False)에서는 실제로 증가하지 않아 Eval 로그만 매번
