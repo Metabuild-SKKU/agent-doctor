@@ -121,7 +121,13 @@ def _applicable_prescriptions(
     사라지는데, 임계값이 아직 캘리브레이션 전 임의값이라 더욱 — 신호 때문에 고칠
     기회를 잃는 쪽보다 덜 맞는 처방이라도 시도하는 쪽이 안전하다.
     """
-    prescriptions = rule.get("prescriptions") or []
+    prescriptions = list(rule.get("prescriptions") or [])
+    if rule.get("status") == "ready":
+        prescriptions = [
+            prescription
+            for prescription in prescriptions
+            if rules.is_prescription_ready(rule, prescription)
+        ]
     if not CONSUME_APPLIES_WHEN_SIGNAL:
         return list(prescriptions)
     preferred = [p for p in prescriptions if _prescription_applies(p, findings)]

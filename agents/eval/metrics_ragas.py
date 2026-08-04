@@ -529,6 +529,12 @@ def _fused_prompt(blocks: list[str], question: str, answer: str,
         + "-----------------------------\n\n"
           "Now perform the same with the following input\n"
         + f"input: {json.dumps(input_obj, indent=4, ensure_ascii=False)}\n"
+        # json_object 모드는 유효한 JSON 만 보장하고 스키마는 강제하지 않는다. 블록이 7개까지
+        # 늘면 모델이 뒤쪽 키를 빠뜨린 채 JSON 을 닫아버리는 일이 실제로 있었다(실측: 마지막
+        # 블록인 recall_classifications 가 30회 중 7회 누락). 스키마의 required 는 프롬프트
+        # 중간에 묻히므로 끝에서 키 목록을 한 번 더 못박는다.
+        + "IMPORTANT: the JSON object MUST contain ALL of these top-level keys, even if an "
+          f"array would be empty: {json.dumps(required)}. Do not omit any of them.\n"
           "Output: "
     )
 
@@ -538,7 +544,7 @@ def _fused_prompt(blocks: list[str], question: str, answer: str,
 # ══════════════════════════════════════════════════════════════════
 
 def _judge():
-    """평가(심판) LLM 사용 가능 여부(OpenAI/Gemini/GitHub Models, EVAL_LLM_PROVIDER로 선택). 키 없으면 None."""
+    """평가(심판) LLM 사용 가능 여부(OpenAI/Gemini/GitHub Models/OpenRouter, EVAL_LLM_PROVIDER로 선택). 키 없으면 None."""
     if not llm_provider.has_key():
         return None
     # 설계 원칙: 응답 모델과 다른 모델로 채점 (모델 선택은 llm_provider 내부에서 처리)
@@ -630,6 +636,42 @@ def _fused_oracle_track(judge, record: EvalRecord) -> dict:
                         record.probe.ground_truth, with_retrieval=False)
 
 
+def _fused_required_keys(blocks: list[str]) -> list[str]:
+    """blocks 가 요구하는 최상위 키 목록(_fused_prompt 의 required 와 같은 규칙)."""
+    return [k for name in blocks
+            for k in (("generated_questions", "noncommittal") if name == "relevancy" else (name,))]
+
+
+def _refetch_fused_if_incomplete(judge, d: dict, prompt: str, blocks: list[str]) -> dict:
+    """필수 키가 빠졌으면 같은 프롬프트로 딱 1회 다시 받아 채운다.
+
+    누락은 모델의 간헐적 비준수다 — json_object 모드가 스키마를 강제하지 않아서, 같은
+    입력으로 다시 물으면 대개 온전한 응답이 온다(실측: 30여 회 중 부분 누락 재현 불가,
+    실행 로그에서는 30 probe 중 7회).
+
+    개별 지표 보수(_fused_repair)보다 먼저 두는 이유는 비용이다. 보수는 지표마다 따로
+    호출하고 그중 response_relevancy 는 strictness 만큼(기본 3회) 더 부른다 —
+    {faithfulness, relevancy, correctness} 3개가 빠지면 5회다. fused 재요청은 1회로
+    전부 되찾을 수 있다. 그래도 남는 지표는 기존 보수 경로가 받는다.
+
+    재시도는 1회 고정이다. 반복 비준수에 계속 돈을 태우지 않는다."""
+    if not blocks or not _fused_repair_enabled():
+        return d
+    absent = [k for k in _fused_required_keys(blocks) if k not in d]
+    if not absent:
+        return d
+    print(f"[Eval] RAGAS fused 응답에 키 누락 {absent} → 같은 프롬프트로 1회 재요청")
+    retry = _chat(judge, prompt, max_output_tokens=_fused_max_tokens(),
+                  label="fused.refetch")
+    if not retry:
+        return d
+    # 재요청분으로 빈 자리만 메운다 — 처음 받은 값이 더 신뢰할 근거는 없지만, 바꿔 끼우면
+    # 같은 트랙 안에서 두 응답이 섞여 판정 근거가 일관되지 않는다.
+    merged = dict(retry)
+    merged.update(d)
+    return merged
+
+
 def _fused_track(judge, question: str, answer: str, contexts: list[str], reference: str,
                  *, with_retrieval: bool) -> dict:
     """재료가 있는 지표의 판정을 chat 1회로 받아 점수로 환산한다.
@@ -660,8 +702,10 @@ def _fused_track(judge, question: str, answer: str, contexts: list[str], referen
     if want_prec:
         blocks.append("recall_classifications")
 
-    d = _chat(judge, _fused_prompt(blocks, question, answer, contexts, reference),
-              max_output_tokens=_fused_max_tokens(), label="fused") if blocks else {}
+    prompt = _fused_prompt(blocks, question, answer, contexts, reference)
+    d = _chat(judge, prompt, max_output_tokens=_fused_max_tokens(),
+              label="fused") if blocks else {}
+    d = _refetch_fused_if_incomplete(judge, d, prompt, blocks)
 
     out: dict = {}
     if not has_answer:
@@ -1011,7 +1055,15 @@ def _response_relevancy(judge, question: str, answer: str):
         print(f"[Eval] response_relevancy 0 — 질문 생성 {RELEVANCY_STRICTNESS}회 모두 실패")
         return 0.0
     all_noncommittal = all(n == 1 for n in noncommittal) # noncommittal: 답변이 회피형(잘모르겠다.)인지 판별
-    vecs = _embed(judge, [question] + gen_qs)  # Embedding
+    # 임베딩 실패는 이 지표만 결측으로 만든다. 예전엔 예외가 그대로 올라가 parallel_map →
+    # evaluate_real_track → _ragas_track 순으로 전파돼 트랙 전체가 {} 가 됐다 —
+    # 임베딩이 없는 provider(OpenRouter 등)에서 faithfulness·context_* 까지 통째로
+    # 사라지고 심판 호출 비용만 버려졌다. 나머지 두 임베딩 호출부(_answer_correctness 등)는
+    # 이미 같은 방식으로 가드하고 있어, 여기만 빠져 있던 것.
+    try:
+        vecs = _embed(judge, [question] + gen_qs)  # Embedding
+    except Exception:
+        return None
     if not vecs or len(vecs) < 2:
         return None
     sims = [_cosine(vecs[0], v) for v in vecs[1:]] # Cosine Similarity

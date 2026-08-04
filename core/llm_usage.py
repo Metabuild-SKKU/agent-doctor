@@ -22,7 +22,8 @@ from contextlib import contextmanager
 # USD per 1M tokens (input, output). 유료 티어 텍스트 기준, 2026-07 요금표.
 # 출처: ai.google.dev/gemini-api/docs/pricing, openai.com/api/pricing
 # 미등록 모델은 비용을 계산하지 않고 호출 수를 별도로 표시한다.
-# "publisher/model" 형식(GitHub Models)은 단가가 0인 무료 모델로 취급한다.
+# GitHub Models(무료)·OpenRouter(유료)처럼 단가를 transport 가 아는 경로는 이 표를 타지
+# 않고 log_usage(cost_usd=...) 로 실제 값이 들어온다 (core/llm_clients.py 참고).
 _PRICES_USD_PER_1M = {
     "gemini-3.5-flash": (1.50, 9.00),
     "gemini-3.1-flash-lite": (0.25, 1.50),
@@ -81,9 +82,12 @@ def _enabled() -> bool:
 
 
 def _estimate_cost_usd(model: str, prompt_tokens: int, output_tokens: int) -> float | None:
-    """토큰 수 → 추정 비용(USD). GitHub Models(publisher/model)는 0, 단가 미등록이면 None."""
-    if "/" in model:
-        return 0.0
+    """토큰 수 → 추정 비용(USD). 단가 미등록이면 None.
+
+    예전엔 "publisher/model" 형식이면 0.0(GitHub Models = 무료)으로 단정했다. OpenRouter가
+    같은 형식을 쓰면서 그 규칙은 유료 호출을 전부 $0으로 기록하는 버그가 됐다 — 경고도
+    에러도 없이 비용 표만 거짓말을 한다. 지금은 엔드포인트를 아는 transport 가
+    log_usage(cost_usd=...) 로 실제 값을 넘기고, 여기는 단가표만 본다."""
     for key in sorted(_PRICES_USD_PER_1M, key=len, reverse=True):
         if model.startswith(key):
             in_rate, out_rate = _PRICES_USD_PER_1M[key]
@@ -103,8 +107,19 @@ def snapshot_usage() -> dict[str, int | float]:
         return dict(_totals)
 
 
-def log_usage(model: str, prompt_tokens, output_tokens, tag: str = "LLM") -> None:
+def log_usage(
+    model: str,
+    prompt_tokens,
+    output_tokens,
+    tag: str = "LLM",
+    *,
+    cost_usd: float | None = None,
+) -> None:
     """호출 1건의 사용량을 기록한다. tag 는 호출 주체 표시용([Eval]/[RAG]).
+
+    cost_usd 를 주면 그 값을 그대로 쓴다 — GitHub Models(무료 0.0)나 OpenRouter(응답이
+    실제 과금액을 알려줌)처럼 transport 가 비용을 아는 경우. None 이면 단가표로 추정하고,
+    단가표에도 없으면 "단가 미등록"으로 센다.
 
     출력은 하지 않는다 — 열려 있는 스텝에 누적만 하고, 요약은 step() 이
     구간 끝에서 한 줄로 찍는다.
@@ -112,7 +127,7 @@ def log_usage(model: str, prompt_tokens, output_tokens, tag: str = "LLM") -> Non
     if not _enabled():
         return
     p, o = int(prompt_tokens or 0), int(output_tokens or 0)
-    cost = _estimate_cost_usd(model, p, o)
+    cost = cost_usd if cost_usd is not None else _estimate_cost_usd(model, p, o)
     with _lock:
         _totals["calls"] += 1
         _totals["prompt"] += p

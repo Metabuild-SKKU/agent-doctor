@@ -21,8 +21,12 @@ class EstimateCostUsdTest(unittest.TestCase):
         cost = _estimate_cost_usd("gemini-3.1-flash-lite", 1_000_000, 0)
         self.assertAlmostEqual(cost, 0.25)
 
-    def test_github_models_publisher_slash_model_is_free(self):
-        self.assertEqual(_estimate_cost_usd("openai/gpt-4o-mini", 1_000_000, 1_000_000), 0.0)
+    def test_publisher_slash_model_is_no_longer_assumed_free(self):
+        # 예전엔 "publisher/model" 이면 무조건 0.0(GitHub Models=무료)이었다. OpenRouter가
+        # 같은 형식의 유료 모델을 쓰면서 그 규칙은 유료 호출을 $0 으로 기록하는 버그가 됐다.
+        # 이제 단가는 transport 가 log_usage(cost_usd=...) 로 넘기고, 표에 없으면 미등록이다.
+        self.assertIsNone(_estimate_cost_usd("openai/gpt-4o-mini", 1_000_000, 1_000_000))
+        self.assertIsNone(_estimate_cost_usd("anthropic/claude-sonnet-4.5", 1_000, 1_000))
 
     def test_unregistered_model_returns_none(self):
         self.assertIsNone(_estimate_cost_usd("some-unlisted-model", 1_000, 1_000))
@@ -114,7 +118,9 @@ class StageSummaryTest(unittest.TestCase):
     def test_unregistered_model_is_distinguished_from_free_model(self):
         started = llm_usage.snapshot_usage()
         llm_usage.log_usage("some-unlisted-model", 1_000, 100)
-        llm_usage.log_usage("openai/gpt-4o-mini", 1_000, 100)
+        # 무료(GitHub Models)는 transport 가 cost_usd=0.0 으로 알려준다 — 모델명의
+        # 슬래시로 추측하지 않는다(OpenRouter 가 같은 형식의 유료 모델을 쓴다).
+        llm_usage.log_usage("openai/gpt-4o-mini", 1_000, 100, cost_usd=0.0)
 
         buf = StringIO()
         with redirect_stdout(buf):
@@ -126,6 +132,45 @@ class StageSummaryTest(unittest.TestCase):
         self.assertIn("누적 단가 미등록 1회", line)
         self.assertEqual(llm_usage.snapshot_usage()["prompt"], 2_000)
         self.assertEqual(llm_usage.snapshot_usage()["output"], 200)
+
+    def test_transport_reported_cost_overrides_price_table(self):
+        # OpenRouter 경로: 단가표에 없는 모델이어도 응답이 알려준 실제 비용이 그대로 잡히고
+        # "단가 미등록"으로 세지 않는다.
+        started = llm_usage.snapshot_usage()
+        llm_usage.log_usage("anthropic/claude-sonnet-4.5", 1_000, 100, cost_usd=0.0123)
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            llm_usage.print_summary(tag="Eval", stage="RAGAS", since=started)
+
+        line = buf.getvalue()
+        self.assertIn("비용 ≈ $0.0123", line)
+        self.assertIn("단가 미등록 0회", line)
+
+    def test_missing_transport_cost_counts_as_unpriced_not_free(self):
+        # OpenRouter 가 cost 를 안 돌려준 경우(cost_usd=None) — $0 으로 뭉개지 않고
+        # "단가 미등록"으로 드러나야 한다.
+        started = llm_usage.snapshot_usage()
+        llm_usage.log_usage("anthropic/claude-sonnet-4.5", 1_000, 100)
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            llm_usage.print_summary(tag="Eval", stage="RAGAS", since=started)
+
+        self.assertIn("단가 미등록 1회", buf.getvalue())
+
+    def test_github_models_free_cost_is_passed_by_transport(self):
+        # GitHub Models 무료(0.0)는 transport 가 명시적으로 넘긴다 — 모델명 추측이 아니라.
+        started = llm_usage.snapshot_usage()
+        llm_usage.log_usage("openai/gpt-4o-mini", 1_000, 100, cost_usd=0.0)
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            llm_usage.print_summary(tag="Eval", stage="STEP2", since=started)
+
+        line = buf.getvalue()
+        self.assertIn("비용 ≈ $0.000000", line)
+        self.assertIn("단가 미등록 0회", line)
 
     def test_step_reports_timing_separately_from_single_llm_summary(self):
         buf = StringIO()
