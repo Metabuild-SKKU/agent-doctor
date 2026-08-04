@@ -174,10 +174,15 @@ def openai_chat(
     if reasoning and temperature != 1.0:
         _warn_temperature_ignored_once(model, temperature, tag)
 
+    # 추론을 꺼둔 호출에는 큰 출력 예산을 주지 않는다 — 그 승급은 추론 토큰이 상한을
+    # 먹어 본문이 잘리는 걸 막으려던 것이고, 추론이 없으면 근거가 사라진다. 남겨두면
+    # 호출부가 정한 상한(RAG 답변 4096 등)이 조용히 25K 로 덮여 폭주 여지만 커진다.
+    reasoning_off = (base_url == OPENROUTER_BASE_URL
+                     and _openrouter_reasoning_disabled())
     cap = max_output_tokens
     if reasoning:
         cap = max(cap, _REASONING_MIN_OUTPUT_TOKENS)
-    elif _needs_large_output(model):
+    elif _needs_large_output(model) and not reasoning_off:
         cap = max(cap, _LARGE_OUTPUT_MIN_TOKENS)
 
     def _call(limit: int):
