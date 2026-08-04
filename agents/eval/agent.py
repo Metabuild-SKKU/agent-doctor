@@ -405,6 +405,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     # 헛돌린다. (Index→Eval 엣지가 무조건이라 에러 상태도 이 노드에 들어온다.)
     if state.status == "error":
         print(f"[Eval] 상위 실패 감지 → 건너뜀 (error 유지: {state.error})")
+        # 아래 except 와 같은 이유로 직전 회차 report 를 비운다 — 2회차 재색인이 Index 에서
+        # 죽으면(status=error) 여기 진입 시 chunks·report 는 1회차 값(stale)으로 남고,
+        # 이 가드가 except 보다 먼저 short-circuit 하므로 except 의 report=None 이 실행되지
+        # 않는다. 그대로 두면 Serve 가드가 stale report 를 보고 실패를 done 으로 확정한다.
+        # (Optimize 의 비치명 error 는 route_after_optimize 가 Eval 을 건너뛰고 곧장 Serve 로
+        #  가므로 이 경로엔 오지 않는다 — 여기 오는 error 는 항상 상위 실패다.)
+        state.report = None
         return state
 
     if not state.chunks:

@@ -131,6 +131,26 @@ class ServeErrorGateChunksTest(unittest.TestCase):
         self.assertIn("API 인증 실패", result.error)
         self.assertIsNone(result.mcp_endpoint)
 
+    def test_index_crash_midloop_clears_stale_report(self):
+        # 2회차 재색인이 Index 에서 죽는 경우(status=error 로 Eval 에 진입). 진입 가드가
+        # except 보다 먼저 short-circuit 하므로, 1회차 chunks·report(stale)가 남아 있으면
+        # Serve 가드를 뚫어 실패가 "완료"로 보고된다. 진입 가드가 report 를 비워 막는다.
+        state = AgentDoctorState(
+            source_url="x", source_type="local", iteration=2,
+            status="error", error="Index 실패: 리랭커 모델 로드 실패",
+            chunks=[Chunk(chunk_id="c1", doc_id="d1", text="stale 1회차 본문")],
+            report=DiagnosticReport(report_id="r1", overall_score=80.0, iteration=1),
+        )
+        state = _silent(eval_run, state)            # LLM 호출 없이 진입 가드만 탄다
+        self.assertEqual(state.status, "error")
+        self.assertEqual(state.error, "Index 실패: 리랭커 모델 로드 실패")  # 원인 유지
+        self.assertIsNone(state.report)             # 옛 회차 성적표를 들고 가지 않는다
+
+        self.assertEqual(_silent(graph.route_after_eval, state), "serve")
+        result = self._run_serve(state)
+        self.assertEqual(result.status, "error")    # "완료"로 뒤집히지 않는다
+        self.assertIsNone(result.mcp_endpoint)
+
     def test_serve_start_failure_keeps_prior_cause(self):
         # 비치명 error 를 안고 서빙하다 API 서버가 안 뜨면, 선행 사유도 함께 남는다.
         with patch.object(serve_agent.Path, "write_text"), \
