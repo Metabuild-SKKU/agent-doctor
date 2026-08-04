@@ -141,8 +141,14 @@ def _rerank_promoted_ids(record: EvalRecord):
     전체라 최종 목록보다 길다. 그대로 비교하면 '후보창 안에 있었음'만 확인하게 되어,
     리랭커가 하위 후보를 상위로 끌어올린 것과 원래 상위였던 것을 구분하지 못한다.
 
+    MMR 이 최종 컷을 맡았으면(mmr_applied) None 이다 — 리랭커는 후보풀 순서만 바꾸고 top_k
+    선택은 MMR 이 하므로(agents/rag/retriever.py) 올라온 청크를 리랭커 몫으로 셀 수 없다.
+    diagnose._rerank_cut_attributable 이 강등·못끌어올림 라벨에 거는 것과 같은 게이트다.
+
     옛 계약의 retriever(테스트 주입 등)는 키가 없어 None — 호출부가 '판정 불가'로 다룬다.
     """
+    if record.retrieval_details.get("mmr_applied"):
+        return None
     ids = record.retrieval_details.get("pre_rerank_ids")
     if not isinstance(ids, list) or not ids:
         return None

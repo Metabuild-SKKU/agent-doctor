@@ -20,7 +20,8 @@ Finding.type 필드에 라벨 그룹을 담고, Finding.label 필드에 세분�
   - diagnose() 진입 시 metrics_common.set_mode 로 현재 실행 모드를 설정한다.
   - 지정된 진단 모드 이하 tier인 진단만 수행할 수 있다.
   - 파이프라인 재실행으로 확정하던 경로는 Optimize 로 넘겼다. context 원인(C)은 실측 신호로
-    DEEP 에서 확정한다 — reranker_low_precision 만 인과 미측정이라 예비로 남는다.
+    DEEP 에서 확정한다 — reranker_low_precision 은 리랭크 전/후 기록이 있을 때만 확정이고,
+    없으면(옛 결과·MMR 이 최종 컷) 예비로 남는다.
 
 측정값·진단 자원(_ctx)·모드 상태는 tier 별 측정 파일에 존재한다:
   metrics_common(인프라) / metrics_basic(tier1) / metrics_search(tier2) / metrics_ragas(tier3).
@@ -1282,8 +1283,10 @@ def reranker_low_precision(record: EvalRecord) -> Optional[Finding]:
     리랭크가 새로 밀어 올린 청크가 있을 때만 리랭커에 책임을 묻는다.
 
     구성이 안 바뀌었으면(promoted 가 빈 리스트) 아예 발행하지 않는다 — 리랭크 전에도 같은
-    청크들이 들어 있었으므로 리랭커를 바꿔봐야 이 실패는 그대로다. 전/후 기록이 없는 옛
-    결과(promoted is None)는 판정할 근거가 없으니 종전대로 예비로 남긴다.
+    청크들이 들어 있었으므로 리랭커를 바꿔봐야 이 실패는 그대로다. 전/후 기록이 없거나
+    MMR 이 최종 컷을 맡은 결과(promoted is None)는 판정 근거가 없으니 예비로 남긴다.
+
+    확정으로 서도 길이·배치·노이즈 원인이 함께 실측되면 슬롯은 그쪽이 가져간다(_CONTEXT_CAUSE).
     """
     if not _context_failed(record):
         return None
@@ -1521,14 +1524,17 @@ _GENERATION_CAUSE = (
 # A 슬롯에만 두면 recall=1 인 경계 분할 실패에서 도달 자체가 불가능하다(_dedup 이 중복 제거).
 # 노이즈가 '청크 안'이면 underchunking, '청크 사이'면 reranker/noise_interference —
 # _chunk_noise_heavy 로 배타가 서서 순서에 기대지 않는다.
-# 단 reranker_low_precision 과 too_long_context/lost_in_the_middle 은 함께 성립할 수 있다
-# (리랭커가 gold 를 중간으로 밀면 둘 다 참). 이때는 _pick 이 확정을 먼저 뽑아 그쪽이 채택된다 —
-# reranker 는 인과(리랭크 전/후 대조)가 미측정이라 예비로 남기 때문이고, 순서가 아니라
-# confirmed 로 갈린다. 다른 확정이 없을 때만 reranker 가 슬롯을 가져간다.
+# 단 reranker_low_precision 은 too_long_context/lost_in_the_middle/context_noise_interference
+# 와 함께 성립할 수 있다(리랭커가 gold 를 중간으로 밀면 둘 다 참). 예전엔 reranker 만 예비라
+# confirmed 로 갈렸는데, 전/후 대조가 생겨 넷 다 확정으로 설 수 있게 됐다. 그래서 여기서만
+# 튜플 순서로 가른다 — reranker 를 뒤에 두고, 길이·배치·노이즈 근거가 실측되면 그쪽을 뿌리로
+# 본다. 그 셋은 '답이 어느 청크를 어떻게 썼나'까지 실측한 반면 reranker 는 '구성이 바뀌었다'
+# 까지만 말하기 때문이다. 셋 다 성립하지 않을 때만 reranker 가 슬롯을 가져간다.
 _CONTEXT_CAUSE = (
     bad_gold_answer, chunking_overchunking, chunking_context_mismatch,
-    chunking_underchunking, reranker_low_precision,
+    chunking_underchunking,
     too_long_context, lost_in_the_middle, context_noise_interference,
+    reranker_low_precision,
     context_failure
 )
 

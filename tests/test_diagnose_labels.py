@@ -1496,17 +1496,31 @@ class ContextLabelTest(_DiagnoseTestBase):
         self.assertFalse(finding.confirmed)                 # 전/후 순위 비교 불가 → C그룹 유일 예비
         self.assertEqual(finding.metadata["group"], "A")
 
-    def test_confirmed_length_cause_beats_preliminary_reranker(self):
-        """리랭커와 길이 원인이 함께 성립하면 확정 쪽을 채택한다 — 순서가 아니라 confirmed 로 갈린다.
+    def test_length_cause_beats_reranker_even_when_both_confirmed(self):
+        """리랭커와 길이 원인이 함께 확정으로 서면 길이 쪽이 슬롯을 가져간다.
 
-        예전엔 셋 다 예비라 튜플 순서(리랭커 우선)가 결정했다. 이제 리랭커만 예비로 남아
-        (인과 미측정) _pick 이 확정된 길이 원인을 먼저 뽑는다.
+        예전엔 리랭커가 예비라 confirmed 로 갈렸지만, 전/후 대조가 생겨 둘 다 확정으로 설 수
+        있게 됐다. 프로덕션 계약(pre_rerank_ids 실림)으로 재현한다 — 그 키를 빼면 리랭커가
+        예비로 떨어져 이 경합 자체가 성립하지 않는다.
         """
         rec = self._long_context(gold_at=0, precision=0.1)   # gold 양끝 + precision 낮음
-        rec.retrieval_details = {"reranked": True}
+        rec.retrieval_details = {"reranked": True,
+                                 "pre_rerank_ids": ["z0", "z1", "z2", "z3", "z4", "g_a"]}
         self.assertTrue(diagnose.too_long_context(rec).confirmed)
-        self.assertFalse(diagnose.reranker_low_precision(rec).confirmed)
+        self.assertTrue(diagnose.reranker_low_precision(rec).confirmed)
         self.assertEqual(diagnose._pick(rec, diagnose._CONTEXT_CAUSE).label, "too_long_context")
+
+    def test_placement_and_noise_causes_beat_confirmed_reranker(self):
+        """배치·노이즈 원인도 마찬가지다 — 셋 다 ready 라벨이라 리랭커에 슬롯을 뺏기면 안 된다."""
+        buried = self._long_context(gold_at=2, precision=0.1)
+        buried.retrieval_details = {"reranked": True,
+                                    "pre_rerank_ids": ["z0", "z1", "z2", "z3", "z4", "g_a"]}
+        self.assertEqual(diagnose._pick(buried, diagnose._CONTEXT_CAUSE).label,
+                         "lost_in_the_middle")
+
+        noisy = self._reranked_with_pre(["other", "g_a"])    # faith 0.9 → 노이즈 청크에 근거
+        self.assertEqual(diagnose._pick(noisy, diagnose._CONTEXT_CAUSE).label,
+                         "context_noise_interference")
 
     def test_reranker_owns_slot_when_no_confirmed_cause(self):
         """길이·배치가 성립하지 않으면(짧은 context) 예비 리랭커가 슬롯을 가져간다."""
@@ -1548,6 +1562,20 @@ class ContextLabelTest(_DiagnoseTestBase):
         rec = self._reranked_with_pre(["g_a", "other"])   # 리랭크 전에도 1위가 g_a
 
         self.assertIsNone(diagnose.reranker_low_precision(rec))
+
+    def test_reranker_stays_preliminary_when_mmr_made_the_final_cut(self):
+        """MMR 이 최종 top_k 를 골랐으면 올라온 청크를 리랭커 몫으로 셀 수 없다 → 예비.
+
+        리랭커는 후보풀 순서만 바꾸고 컷은 MMR 이 한다(agents/rag/retriever.py).
+        강등·못끌어올림 라벨이 _rerank_cut_attributable 로 거는 게이트와 같은 이유다.
+        """
+        rec = self._reranked_with_pre(["other", "g_a"])
+        rec.retrieval_details["mmr_applied"] = True
+        finding = diagnose.reranker_low_precision(rec)
+
+        self.assertIsNotNone(finding)
+        self.assertFalse(finding.confirmed)
+        self.assertNotIn("rerank_promoted_ids", finding.metadata)
 
     def test_reranker_stays_preliminary_without_pre_rerank_record(self):
         """전/후 기록이 없는 옛 결과는 판정 근거가 없으므로 종전대로 예비로 남긴다."""
