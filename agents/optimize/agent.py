@@ -38,7 +38,16 @@ from typing import Any
 
 from core.state import AgentDoctorState
 from core.schema import DiagnosticReport
-from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate, rules
+from agents.optimize import (
+    action_aggregator,
+    planner,
+    optimizer,
+    config_mapper,
+    history,
+    reporter,
+    gate,
+    rules,
+)
 from agents.optimize.schemas import (
     ConfigDiff,
     OptimizationHistoryItem,
@@ -509,6 +518,34 @@ def _log_excluded_actions(state: AgentDoctorState) -> None:
         print(f"[Optimize] 제외된 action: [{', '.join(blocked_keys)}]")
 
 
+# 처방 선택을 견제한 사유. eligibility 실패("이 파이프라인에서는 불가능")와 달리
+# "지금은 시도할 가치가 없다"는 판정이라, 로그에서 구분해 보여줘야 사용자가
+# "왜 뻔한 처방을 안 했나"를 되짚을 수 있다.
+_GUARD_REASONS = {
+    action_aggregator.REASON_NO_PROGRESS_CONFIG: "이미 측정한 config 로 되돌아감",
+    action_aggregator.REASON_KEEP_PROTECTED_AXIS: "유지 판정된 변경의 되돌리기",
+}
+
+
+def _log_guard_rejections(metadata: dict[str, Any]) -> None:
+    """무진전·되돌리기 견제로 제외된 action 을 출력한다."""
+    for entry in metadata.get("rejected_actions") or []:
+        headline = _GUARD_REASONS.get(entry.get("reason"))
+        if headline is None:
+            continue
+        detail = ""
+        protection = entry.get("keep_protection")
+        if protection:
+            detail = (
+                f", 지지 {protection.get('candidate_support')}"
+                f" ≤ 필요 {protection.get('required_support')}"
+            )
+        print(
+            f"[Optimize]   견제된 action: {entry.get('action_key') or '-'} "
+            f"({headline}{detail})"
+        )
+
+
 def _log_selected_action(request: OptimizationRequest) -> None:
     """Planner 가 고른 action 과 그 근거·탐색 범위를 출력한다.
 
@@ -543,6 +580,7 @@ def _log_selected_action(request: OptimizationRequest) -> None:
             f"[Optimize]   보류된 축: {deferred.get('axis')} "
             f"({deferred.get('reason')})"
         )
+    _log_guard_rejections(request.metadata)
 
 
 def _log_action_review(result: OptimizationResult) -> None:
@@ -705,6 +743,9 @@ def _log_optimize_decision(
     next_step = "Serve 이동" if decision.next_route == "serve" else decision.next_route
     action = "SKIP" if decision.status == "skipped" else decision.status.upper()
     print(f"[Optimize] 행동 결정: {action}, reason={decision.reason or '-'}")
+    # 요청이 만들어지지 않은 방문에서도 견제 사유는 남겨야 한다 — "처방 없음"만
+    # 보이면 견제 때문인지 후보가 없어서인지 구분되지 않는다.
+    _log_guard_rejections(decision.metadata)
     _log_manual_prescriptions(decision)
 
     _log_optimize_transition(

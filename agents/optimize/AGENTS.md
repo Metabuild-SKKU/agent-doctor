@@ -64,6 +64,10 @@ AgentDoctor의 차별점은 brute-force로 최적값만 찾는 것이 아니라 
 - 성공하면 유지하고 다음 진단으로 진행한다. 무개선·악화 또는 전역 하한선 위반이면
   이전 config로 rollback하고 그 **정확한 전이**(`ActionAttemptKey`)를 차단한 뒤 다음
   action 을 시도한다. 차단은 baseline 별이라 config 가 바뀌면 같은 축을 다시 볼 수 있다.
+- 유지(KEEP) 판정은 다음 선택의 입력이다. 그 변경을 되돌리는 action 은 원래 처방보다
+  **넓은 지지**를 받을 때만 후보가 된다(`history.reversal_guard_thresholds`). 변경 하나가
+  probe 여럿을 살리며 한둘을 새로 망가뜨리는 일은 흔한데, 견제가 없으면 그 부작용
+  라벨이 곧바로 전체 이득을 되돌린다.
 - `diagnosis_confidence`는 진단 신호의 명확도를 나타내는 규칙 상수이고, `impact`는
   처방 후 실측되는 효과다. 두 값을 같은 변수나 의미로 사용하지 않는다.
 - RAGBuilder가 반환한 best config는 대리 파이프라인의 유망 후보일 뿐이다.
@@ -201,6 +205,11 @@ RAGBuilder 연동에서는 다음 경계를 지킨다.
   않으므로 "상류를 고친 뒤 하류를 재평가한다"는 A>C>B 설계 의도가 유지된다. 무한
   순환은 정확 전이 차단 + 후보 소진 + 예산(`max_iterations`/`optimize_visit_count`) +
   개선 마진이 함께 막는다. 결론이 난 탐색은 `ActionStudyKey` 로 기록한다.
+- 전이 차단만으로는 **도착 지점이 같은 다른 전이**를 막지 못한다(리랭커를 끄면 후보창
+  값과 무관하게 같은 동작으로 수렴하는데, baseline 지문이 달라 차단이 풀린다). 그래서
+  이번 실행에서 측정한 config 와 점수를 도착 지점 기준으로 기억하고
+  (`history.measured_config_scores`), 개선 마진을 넘지 못했던 config 로 되돌아가는
+  후보값은 뺀다. 기억은 금지 목록이 아니다 — 더 좋았던 config 로 가는 길은 열려 있다.
 - rollback 비교는 반올림하지 않은 원값을 사용한다. 사용자 표시 점수만 반올림하고
   참고용 추정치임을 밝힌다.
 - reporter는 원인, 제안/적용 처방, 실제 변경과 무시된 key, 예상 trade-off, 수동 조치,

@@ -170,6 +170,21 @@ def map_changes_to_index_config(
     return mapped_changes, ignored_keys, warnings
 
 
+def project_changes(
+    index_config: dict[str, Any],
+    changes: dict[str, Any],
+) -> dict[str, Any]:
+    """이 변경을 적용하면 나올 config 를 원본을 건드리지 않고 계산한다.
+
+    "적용해 보기 전에 도착 지점을 알아야 하는" 판정에 쓴다(예: 이미 측정해 본
+    config 로 되돌아가는 처방인지). apply_config_patch 와 같은 매핑을 거치므로
+    상호배제 플래그 정리까지 실제 적용과 동일하게 반영된다.
+    """
+
+    mapped_changes, _ignored_keys, _warnings = map_changes_to_index_config(changes)
+    return {**(index_config or {}), **mapped_changes}
+
+
 # ConfigPatch/best_config 적용 ----------------------------------------------
 def apply_config_patch(
     index_config: dict[str, Any],
