@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import graph
 from agents.index.agent import run as index_run
+from agents.eval import agent as eval_agent
 from agents.eval.agent import run as eval_run
 from agents.serve import agent as serve_agent
 from agents.serve.agent import run as serve_run
@@ -109,6 +110,36 @@ class ServeErrorGateChunksTest(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertEqual(result.error, "평가 실패: GEMINI API 인증 실패")
         self.assertIsNone(result.mcp_endpoint)
+
+    def test_eval_crash_clears_stale_report(self):
+        # 재색인 뒤 2회차 Eval 크래시 — 1회차 report 가 남아 있으면 가드가 "서빙할 진단서
+        # 있음"으로 오판한다. Eval 이 실패하면서 report 를 비우므로 그 경로가 막힌다.
+        state = AgentDoctorState(
+            source_url="x", source_type="gdrive", iteration=2,
+            chunks=[Chunk(chunk_id="c1", doc_id="d1", text="본문")],
+            report=DiagnosticReport(report_id="r1", overall_score=80.0, iteration=1),
+        )
+        crash = RuntimeError("API 인증 실패")
+        with patch.object(eval_agent, "load_probes", side_effect=crash), \
+             patch.object(eval_agent, "generate_probes", side_effect=crash):
+            state = _silent(eval_run, state)
+        self.assertEqual(state.status, "error")
+        self.assertIsNone(state.report)          # 옛 회차 성적표를 들고 가지 않는다
+
+        result = self._run_serve(state)
+        self.assertEqual(result.status, "error")  # "완료"로 뒤집히지 않는다
+        self.assertIn("API 인증 실패", result.error)
+        self.assertIsNone(result.mcp_endpoint)
+
+    def test_serve_start_failure_keeps_prior_cause(self):
+        # 비치명 error 를 안고 서빙하다 API 서버가 안 뜨면, 선행 사유도 함께 남는다.
+        with patch.object(serve_agent.Path, "write_text"), \
+             patch.object(serve_agent, "write_serve_config", return_value={}), \
+             patch.object(serve_agent, "_start_api_server", return_value=False):
+            result = _silent(serve_run, self._served_error_state())
+        self.assertEqual(result.status, "error")
+        self.assertIn("Serve 실패", result.error)
+        self.assertIn("sweep 판정 불가", result.error)
 
     def test_router_then_serve_serves_abort_with_chunks(self):
         # 라우터(→serve)와 Serve 가드가 함께 동작하는지 — sweep 판정 불가(error)라도

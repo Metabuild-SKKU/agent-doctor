@@ -284,9 +284,11 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         #    지문을 넘겨, 이미 실행 중인 서버가 낡은 코퍼스면 /reload 로 갱신한다.
         if not _start_api_server(_corpus_fingerprint(state)):
             state.status = "error"
+            # 비치명 error 를 안고 들어왔으면 그 사유도 같이 남긴다(덮지 않는다).
+            prior = f" (선행: {state.error})" if state.error else ""
             state.error = (
                 f"Serve 실패: API 서버가 시작되지 않았습니다 (port {API_PORT}) "
-                f"— {API_LOG_FILE} 확인"
+                f"— {API_LOG_FILE} 확인{prior}"
             )
             return state
 
@@ -307,7 +309,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     except Exception as e:
         state.status = "error"
-        state.error  = f"Serve 실패: {e}"
+        prior = f" (선행: {state.error})" if state.error else ""
+        state.error  = f"Serve 실패: {e}{prior}"
         print(f"[Serve] 오류: {e}")
 
     return state

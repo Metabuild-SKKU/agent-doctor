@@ -642,6 +642,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     except Exception as e:  # 계약: 예외를 밖으로 던지지 않는다
         state.status = "error"
         state.error = f"평가 실패: {e}"
+        # 직전 회차 report 를 남기면 안 된다 — 재색인 뒤 회차가 죽었을 때 그건 바뀌기 전
+        # config 의 성적표이고, Serve 가드가 그걸 보고 "서빙할 진단서 있음"으로 오판해
+        # 실패를 done 으로 확정한다. 사유는 state.error 에 남는다.
+        state.report = None
         print(f"[Eval] 오류: {e}")
     finally:
         print_summary(tag="Eval", stage="전체", since=run_usage)
