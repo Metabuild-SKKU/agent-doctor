@@ -246,7 +246,7 @@ state.index_config["recreate_collection_on_dimension_mismatch"] = True
 
 ```powershell
 python -m unittest tests.test_index_unit -v
-python tests/test_index.py
+python tests/check_index.py
 ```
 
 단위 테스트는 임베딩 모델을 mock 처리하므로 BGE-M3를 다운로드하지 않는다.

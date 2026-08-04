@@ -108,6 +108,12 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     if repaired:
         scores["fused_repaired"] = repaired
 
+    # 골드 라벨 오류로 채점에서 빠진 probe 수. 제외를 조용히 하면 '30문항 중 몇 개가 애초에
+    # 채점 불가였나'를 알 수 없어 점수 해석과 정답셋 검수 우선순위가 둘 다 흐려진다.
+    gold_errors = sum(1 for r in records if is_gold_labeling_error(r))
+    if gold_errors:
+        scores["gold_labeling_errors"] = gold_errors
+
     # 임베딩 출처(api|local|none) — response_relevancy·answer_correctness 유사도 성분이
     # 어떤 벡터 공간에서 나왔는지. 모델이 다르면 코사인 분포가 달라 실행 간 점수를
     # 그대로 비교할 수 없으므로, 나중에 성적표만 보고 구분할 수 있게 남긴다.
@@ -152,6 +158,12 @@ def _failed_questions(records: list[EvalRecord]) -> list[dict]:
 
     EvalRecord는 Eval 실행이 끝나면 사라지므로 UI가 재구성하지 않고 실제 생성 답변을
     표시할 수 있게 필요한 원문만 직렬화 가능한 dict로 남긴다.
+
+    골드 라벨 오류(is_gold_labeling_error)는 뺀다 — 파이프라인이 실제 근거를 찾아 정답을
+    낸 probe 라 '실패한 검증 질문'이 아니고, 점수에서도 이미 빠져 있다(scorable). 남기면
+    사람이 볼 실패 목록이 고칠 수 없는 항목으로 채워져 진짜 실패가 묻힌다. 이 probe 들은
+    사라지지 않는다 — findings_summary 의 bad_gold_* 집계와 Serve 의 수동 권고(골드 재지정)가
+    질문 목록과 조치 방법을 따로 싣는다.
     """
     return [
         {
@@ -161,7 +173,7 @@ def _failed_questions(records: list[EvalRecord]) -> list[dict]:
             "actual_answer": record.generated_answer or "",
         }
         for record in records
-        if record.findings
+        if record.findings and not is_gold_labeling_error(record)
     ]
 
 
@@ -436,6 +448,9 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
         if "mean_answer_score" in rs:   # 실제 판정 기준(혼합 점수) 평균
             line += f"  판정점수={rs['mean_answer_score']:.3f}"
         print(line)
+    if rs.get("gold_labeling_errors"):
+        print(f"  · 골드 검수 {rs['gold_labeling_errors']}건 — 답은 맞았는데 골드 라벨이 틀려 "
+              f"채점에서 제외(실패 아님). 정답셋 수정 대상")
     if rs.get("semantic_rescued"):
         print(f"  · lexical 미달인데 의미축으로 통과 {rs['semantic_rescued']}건 — "
               f"gold 가 질문이 안 물은 요소까지 담았는지 검수 후보(정답셋 품질)")

@@ -412,12 +412,12 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 ## 테스트
 
 ```bash
-python tests/test_eval.py       # mock chunks 5개로 STEP1~5 단독 실행 (Index 없이).
+python tests/check_eval.py       # mock chunks 5개로 STEP1~5 단독 실행 (Index 없이).
                                  # Probe(질문/정답) + STEP2 검색결과·생성답변까지 콘솔에 출력한다.
-python tests/test_ragas_eval.py # 실제 OpenAI API로 RAGAS 4지표 실측 검증 (키 없으면 자동 스킵)
+python tests/check_ragas_eval.py # 실제 OpenAI API로 RAGAS 4지표 실측 검증 (키 없으면 자동 스킵)
 ```
 
-`test_eval.py`는 `EVAL_LLM_PROVIDER`(`.env`)를 그대로 읽으므로, `github`/`gemini` 로 설정해두면
+`check_eval.py`는 `EVAL_LLM_PROVIDER`(`.env`)를 그대로 읽으므로, `github`/`gemini` 로 설정해두면
 실제 무료 LLM이 만든 질문·답변이 출력된다(미설정 시 키 없음 폴백 경로로 결정적 동작).
 
 첫 실행 후 프로젝트 루트에 `eval_probes.json`(Probe 캐시, STEP1 참고)이 생긴다 —
