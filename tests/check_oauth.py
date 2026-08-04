@@ -24,4 +24,4 @@ token = get_notion_token(user_id="test_user", use_oauth=True)
 
 print(f"\n토큰 앞 20자: {token[:20]}...")
 print(f"저장 확인:    {load_token('test_user')[:20]}...")
-print("\n✅ OAuth 성공 — 이제 tests/test_ingest.py 돌려봐")
+print("\n✅ OAuth 성공 — 이제 tests/check_ingest.py 돌려봐")

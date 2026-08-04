@@ -15,6 +15,8 @@ from agents.rag.retriever import Retriever
 from core.llm_clients import (
     GITHUB_MODELS_BASE_URL,
     OPENROUTER_BASE_URL,
+    PROVIDER_ALIASES,
+    normalize_provider,
     gemini_chat,
     openai_chat,
 )
@@ -383,13 +385,7 @@ def _config_value(config: dict | None, *names: str) -> Any:
 # (tests/test_provider_notices.py 가 두 표의 일치를 핀으로 잡는다).
 # 한쪽만 받아주면 "OpenRouter 로 다 바꿨다"고 믿은 실행에서 심판은 OpenRouter 로 돌고
 # 답변 생성만 extractive 로 저하돼, 평가가 저하된 RAG 를 재는 상태가 된다.
-_PROVIDER_ALIASES = {
-    "github_models": "github",
-    "open_router": "openrouter",
-    "open-router": "openrouter",
-    "openrouter_ai": "openrouter",
-    "openrouter.ai": "openrouter",
-}
+_PROVIDER_ALIASES = PROVIDER_ALIASES
 
 
 # LLM provider 결정

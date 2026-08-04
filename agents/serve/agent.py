@@ -254,6 +254,16 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     쓰기: state.mcp_endpoint, state.status, state.error
     """
     state.current_agent = "serve"
+
+    # 상위가 실패했어도(status=error) 청크와 진단서가 둘 다 있으면 서빙한다 — 색인·평가는
+    # 성공했는데 sweep 하나를 판정 못 한 경우(_fail_active_study 의 no-change 종료)라
+    # 서빙할 것도 보여줄 것도 멀쩡하다. 반대로 진단서가 없으면 Eval 이 실제로 죽은 것이므로
+    # (인덱스가 남아 있어도) 서빙하지 않고 error 를 유지한다 — 여기서 done 으로 덮으면
+    # 진짜 실패가 "완료" 로 보고된다.
+    if state.status == "error" and not (state.chunks and state.report):
+        print(f"[Serve] 상위 실패(치명) → 생략 (error 유지: {state.error})")
+        return state
+
     print(f"[Serve] 청크 {len(state.chunks)}개 처리 중")
 
     if not state.chunks:
@@ -274,16 +284,20 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         #    지문을 넘겨, 이미 실행 중인 서버가 낡은 코퍼스면 /reload 로 갱신한다.
         if not _start_api_server(_corpus_fingerprint(state)):
             state.status = "error"
+            # 비치명 error 를 안고 들어왔으면 그 사유도 같이 남긴다(덮지 않는다).
+            prior = f" (선행: {state.error})" if state.error else ""
             state.error = (
                 f"Serve 실패: API 서버가 시작되지 않았습니다 (port {API_PORT}) "
-                f"— {API_LOG_FILE} 확인"
+                f"— {API_LOG_FILE} 확인{prior}"
             )
             return state
 
         # 3. Claude Desktop 설정 자동 등록
         _register_to_claude_desktop()
 
-        # 4. 완료
+        # 4. 완료 — 상위의 비치명적 error(판정 불가 sweep 등)를 안고 들어왔더라도
+        #    서빙이 성공했으면 done 으로 확정한다. 사유(state.error)는 지우지 않는다 —
+        #    web_api 는 status 로만 분기하므로 남겨도 500 이 나지 않고, 지우면 유일한 증거가 사라진다.
         state.mcp_endpoint = f"http://localhost:{API_PORT}"
         state.status = "done"
 
@@ -295,7 +309,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
     except Exception as e:
         state.status = "error"
-        state.error  = f"Serve 실패: {e}"
+        prior = f" (선행: {state.error})" if state.error else ""
+        state.error  = f"Serve 실패: {e}{prior}"
         print(f"[Serve] 오류: {e}")
 
     return state

@@ -92,7 +92,8 @@ http://localhost:8766/answer?query=재택근무  # 검색 + LLM 답변 생성
 | `overall_score` | 0–1 | 품질 단일 축 — Optimize의 탐색 신호 |
 | `composite_score` | 0–100 | 품질 × 신뢰도의 조화 평균 — **통과 판정·리포트 헤드라인** |
 
-`composite_score ≥ 80`이면 통과해 Serve로 이동하고, 미달이면 Optimize가 개입합니다.
+`composite_score ≥ 90`이고 `mean_recall_at_k ≥ 0.6`이면 통과해 Serve로 이동하고, 미달이면 Optimize가 개입합니다.
+근거가 없는 축은 막지 않습니다 — `mean_recall_at_k`가 없으면(gold 청크 미지정) 바닥선을 적용하지 않고, `composite_score`가 없으면(구버전·평가 신호 없음) Eval의 `pass_threshold`를 대신 씁니다.
 
 ### 최적화 (Optimize)
 
@@ -174,16 +175,16 @@ MCP 서버(stdio)는 검색을 로컬 FastAPI 서버에 위임합니다.
 
 ```bash
 # 에이전트 단독 (mock 데이터, 외부 의존성 없음)
-python tests/test_eval.py               # Eval STEP1~5
-python tests/test_index.py              # Index
+python tests/check_eval.py               # Eval STEP1~5
+python tests/check_index.py              # Index
 
 # unittest 계열
 python -m unittest tests.test_index_unit -v
 python -m unittest tests.test_optimizer tests.test_optimize_agent tests.test_config_mapper tests.test_ragbuilder_adapter
 
 # 외부 API 필요 (없으면 자동 스킵)
-python tests/test_ragas_eval.py         # RAGAS 실측 (OpenAI 키, ~$0.01–0.05)
-python tests/test_pipeline.py           # Ingest → Index → Serve (실제 Notion)
+python tests/check_ragas_eval.py         # RAGAS 실측 (OpenAI 키, ~$0.01–0.05)
+python tests/check_pipeline.py           # Ingest → Index → Serve (실제 Notion)
 ```
 
 ---

@@ -136,7 +136,7 @@ LLM (Claude API / OpenAI)
 ## 테스트
 
 ```bash
-python tests/test_pipeline.py
+python tests/check_pipeline.py
 ```
 
 Notion 수집 → 인덱싱 → Serve까지 전체 실행. 완료 후 Claude Desktop 재시작하면 연결됨.

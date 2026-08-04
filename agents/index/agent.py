@@ -1301,13 +1301,24 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
 
 
 # Eval/Optimize가 config를 바꿔 다시 호출하는 흐름을 전제로 둔 Index 본체.
+# tools 준비는 상위 실패 가드 뒤에 둔다 — 건너뛸 회차에 모델을 올리지 않기 위함.
 def _run(
     state: AgentDoctorState,
     tools: IndexTools | None,
     timer: StageTimer,
 ) -> AgentDoctorState:
-    tools = tools or _default_tools()
     state.current_agent = "index"
+
+    # 상위 노드(Ingest 등)가 이미 실패했으면 그대로 통과시킨다. 여기서 error 를
+    # 지우고 자체 "문서가 없습니다" 로 덮으면 진짜 실패 원인(예: 'gdrive 미구현',
+    # 잘못된 소스 URL)이 사라져, 최종 상태를 읽는 web_api 가 일반 메시지만 표시한다.
+    # (Ingest→Index 엣지가 무조건이라, 에러 상태도 물리적으로 이 노드에 들어온다.)
+    # 가드를 tools 준비보다 먼저 둬, 건너뛸 회차에 불필요한 준비를 하지 않는다.
+    if state.status == "error":
+        print(f"[Index] 상위 실패 감지 → 건너뜀 (error 유지: {state.error})")
+        return state
+
+    tools = tools or _default_tools()
     state.error = None
     print(f"[Index] 문서 {len(state.documents)}개 처리 시작")
 
@@ -1537,7 +1548,9 @@ def _run(
             state.index_config["recreate_collection_on_dimension_mismatch"] = False
 
         state.chunks = all_chunks
-        if config.get("graph_enabled", True):
+        # 기본값은 core/state.py 의 index_config 와 같은 False 여야 한다 — 부분 config 를
+        # 넘기는 호출부가 생기면 여기 기본값이 그 설정을 조용히 뒤집는다.
+        if config.get("graph_enabled", False):
             graph_usage = snapshot_usage()
             try:
                 with timer.measure("그래프 생성"):

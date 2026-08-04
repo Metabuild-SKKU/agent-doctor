@@ -70,7 +70,7 @@ from agents.eval.metrics_common import (
 from agents.eval import topic_cluster
 from agents.eval.metrics_basic import _compute_metrics
 from agents.eval.diagnose import diagnose, _is_success
-from agents.eval.report import build_report, is_bad_gold_probe
+from agents.eval.report import build_report, is_bad_gold_probe, is_gold_labeling_error
 
 
 _EVAL_CACHE_ENV_KEYS = (
@@ -94,6 +94,11 @@ _EVAL_CACHE_ENV_KEYS = (
     "RAG_GEMINI_MODEL",
     "RAG_GITHUB_MODEL",
     "RAG_OPENROUTER_MODEL",
+    # 답변 잘림 여부를 바꾸므로 faithfulness·answer_correctness 가 따라 바뀐다.
+    "RAG_MAX_OUTPUT_TOKENS",
+    # 심판 동작을 바꾸는 스위치라 EVAL_JUDGE_MODEL 과 같은 급이다 — 빠지면
+    # 토글해도 캐시가 히트해 "켜서 비교" 자체가 불가능해진다.
+    "OPENROUTER_REASONING",
 )
 _EVAL_CACHE_SECRET_KEYS = (
     "OPENAI_API_KEY",
@@ -413,6 +418,20 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
     """Eval STEP1~5 본체."""
     state.current_agent = "eval"
 
+    # 상위 노드(Ingest/Index)가 이미 실패했으면 그대로 통과시킨다. 자체 "청크가
+    # 없습니다" 로 덮으면 진짜 원인이 사라지고, 빈 상태에서 Eval(LLM 호출 포함)을
+    # 헛돌린다. (Index→Eval 엣지가 무조건이라 에러 상태도 이 노드에 들어온다.)
+    if state.status == "error":
+        print(f"[Eval] 상위 실패 감지 → 건너뜀 (error 유지: {state.error})")
+        # 아래 except 와 같은 이유로 직전 회차 report 를 비운다 — 2회차 재색인이 Index 에서
+        # 죽으면(status=error) 여기 진입 시 chunks·report 는 1회차 값(stale)으로 남고,
+        # 이 가드가 except 보다 먼저 short-circuit 하므로 except 의 report=None 이 실행되지
+        # 않는다. 그대로 두면 Serve 가드가 stale report 를 보고 실패를 done 으로 확정한다.
+        # (Optimize 의 비치명 error 는 route_after_optimize 가 Eval 을 건너뛰고 곧장 Serve 로
+        #  가므로 이 경로엔 오지 않는다 — 여기 오는 error 는 항상 상위 실패다.)
+        state.report = None
+        return state
+
     if not state.chunks:
         state.status = "error"
         state.error = "청크가 없습니다. Index Agent 완료 여부를 확인하세요."
@@ -679,6 +698,10 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
     except Exception as e:  # 계약: 예외를 밖으로 던지지 않는다
         state.status = "error"
         state.error = f"평가 실패: {e}"
+        # 직전 회차 report 를 남기면 안 된다 — 재색인 뒤 회차가 죽었을 때 그건 바뀌기 전
+        # config 의 성적표이고, Serve 가드가 그걸 보고 "서빙할 진단서 있음"으로 오판해
+        # 실패를 done 으로 확정한다. 사유는 state.error 에 남는다.
+        state.report = None
         print(f"[Eval] 오류: {e}")
     return state
 
@@ -753,12 +776,17 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
 
 
 def _log_diagnosis_summary(records: list[EvalRecord]) -> None:
-    """STEP4 마감 요약 — 성공/실패 probe 수와 Finding 확정·예비 내역."""
+    """STEP4 마감 요약 — 성공/실패/골드 검수 probe 수와 Finding 확정·예비 내역."""
     findings = [f for r in records for f in r.findings]
-    failed = sum(1 for r in records if r.findings)
+    # probe 줄과 같은 3분할. 여기만 2분할로 두면 probe 는 🔍 로 찍히는데 마감 요약은
+    # 그 건수를 실패에 얹어, 같은 STEP 안에서 실패 수가 어긋난다.
+    gold_errors = sum(1 for r in records if is_gold_labeling_error(r))
+    failed = sum(1 for r in records if r.findings) - gold_errors
     confirmed = sum(1 for f in findings if f.confirmed)
     # '↳' 는 step() 의 마감줄 전용 — 여기서 같이 쓰면 STEP4 끝에 화살표 두 줄이 붙는다.
-    line = f"  판정: 성공 {len(records) - failed} / 실패 {failed}"
+    line = f"  판정: 성공 {len(records) - failed - gold_errors} / 실패 {failed}"
+    if gold_errors:
+        line += f" / 골드 검수 {gold_errors}"
     if findings:
         line += (f" · Finding {len(findings)}건 "
                  f"(확정 {confirmed} · 예비 {len(findings) - confirmed})")
@@ -828,18 +856,27 @@ def _colliding_short_cids(*cid_groups: list[str]) -> set[str]:
     return {short for short, docs in docs_by_short.items() if len(docs) > 1}
 
 
-def _mark(ok: bool) -> str:
-    """성공/실패 마크. 콘솔이 이모지를 못 그리면(Windows cp949 등) ASCII 로 폴백한다 —
-    run_logger 의 Tee 가 '?' 로 치환하면 성공/실패 구분이 사라지기 때문.
+# 판정 마크 — (글리프, ASCII 폴백). None 은 '골드 라벨이 틀려 파이프라인을 채점할 수
+# 없음'이라 성공도 실패도 아니다(_GOLD_ERROR_LABELS).
+_MARKS: dict[bool | None, tuple[str, str]] = {
+    True: ("✅", "[OK]"),
+    False: ("❌", "[FAIL]"),
+    None: ("🔍", "[검수]"),
+}
+
+
+def _mark(ok: bool | None) -> str:
+    """성공/실패/검수 마크. 콘솔이 이모지를 못 그리면(Windows cp949 등) ASCII 로 폴백한다 —
+    run_logger 의 Tee 가 '?' 로 치환하면 구분이 사라지기 때문.
 
     getattr 로 encoding 을 읽는 이유: run_logger._Tee 로 교체된 stdout 에는 encoding
     속성이 아예 없다. 속성 접근을 그대로 두면 AttributeError 가 run() 의 except 로
     올라가, 정상 진행된 평가가 통째로 error 로 뒤집힌다(실제로 그랬다)."""
-    glyph = "✅" if ok else "❌"
+    glyph, fallback = _MARKS[ok]
     try:
         glyph.encode(getattr(sys.stdout, "encoding", None) or "utf-8")
     except (UnicodeEncodeError, LookupError):
-        return "[OK]" if ok else "[FAIL]"
+        return fallback
     return glyph
 
 
@@ -858,7 +895,14 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
     retrieved = _fmt_cids(rec.retrieved_chunk_ids, colliding)
     gold = _fmt_cids(p.gold_chunk_ids, colliding)
     # 판정은 finding 유무로 — diagnose 가 원인을 하나도 못 붙였으면 정상 처리된 probe 다.
-    status = _mark(not rec.findings) + (f" {len(rec.findings)}건" if rec.findings else "")
+    # 단 골드 라벨 오류(정답 텍스트·근거 청크)는 실패로 찍지 않는다. 파이프라인은 실제 근거를
+    # 찾아 정답을 냈는데 골드가 엉뚱한 곳을 가리켜 recall 이 0 이 된 경우라, ❌ 로 찍으면
+    # '맞은 답을 틀렸다고 한다'가 되고 검수해야 할 probe 가 진짜 실패 사이에 묻힌다.
+    # 점수 제외는 report.build_report 가 같은 판정(is_gold_labeling_error)으로 이미 한다.
+    if is_gold_labeling_error(rec):
+        status = _mark(None) + f" 골드 검수 {len(rec.findings)}건"
+    else:
+        status = _mark(not rec.findings) + (f" {len(rec.findings)}건" if rec.findings else "")
 
     print(f"  [{idx}/{total}] {p.probe_id}  ({meta})  {status}")
     print(f"    Q: {_full_log_text(p.question)}")

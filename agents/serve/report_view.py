@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+from agents.optimize import gate
 from core.state import AgentDoctorState
 
 _EVAL_MODE_LABELS = {
@@ -121,6 +122,7 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
     # 헤드라인 '종합 점수' = 설계 종합점수(composite, 0~100). 없으면 overall×100 폴백.
     headline_after = _headline_score(report)
     headline_before = _first_headline(history, headline_after)
+    gate_summary = _gate_summary(report)
 
     depth_key = (depth or os.getenv("EVAL_MODE", "")).strip().lower()
     return {
@@ -134,7 +136,10 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
             "before": headline_before,
             "after": headline_after,
             "delta": round(headline_after - headline_before, 1),
-            "pass_threshold": bool(report and report.pass_threshold),
+            # 통과 배지 기준은 Eval 원시 판정이 아니라 Optimize gate(= graph 라우팅과 동일).
+            # Eval 판정은 gate.eval_pass_threshold 로 따로 남긴다.
+            "pass_threshold": gate_summary["pass"],
+            "gate": gate_summary,
             "findings_count": len(findings),
             "kept": kept,
             "rolled": rolled,
@@ -191,6 +196,18 @@ def _headline_score(report) -> float:
         return total
     overall = report.overall_score if report and report.overall_score is not None else 0.0
     return _to_100(overall)
+
+
+def _gate_summary(report) -> dict[str, Any]:
+    """Optimize gate 판정과 근거. 판정 규칙은 gate.explain_report 가 단독으로 갖고,
+    여기서는 표시용 반올림과 Eval 원시 판정(비교용)만 얹는다."""
+    summary = dict(gate.explain_report(report))
+    summary["eval_pass_threshold"] = bool(getattr(report, "pass_threshold", False))
+    if summary["composite_total"] is not None:
+        summary["composite_total"] = round(summary["composite_total"], 1)
+    if summary["mean_recall_at_k"] is not None:
+        summary["mean_recall_at_k"] = round(summary["mean_recall_at_k"], 4)
+    return summary
 
 
 def _first_headline(history: list, fallback: float) -> float:
@@ -500,11 +517,13 @@ _REC_TITLES = {
     "corpus_gap": "코퍼스에 근거가 없는 질문 {n}건",
     "corpus_gap_partial_hop": "일부 단계 근거가 없는 질문 {n}건",
     "bad_gold_answer": "정답셋이 의심되는 질문 {n}건",
+    "bad_gold_chunk": "답은 맞았지만 근거 지정이 틀린 질문 {n}건",
 }
 _REC_CTAS = {
     "corpus_gap": "문서 보강 필요",
     "corpus_gap_partial_hop": "문서 보강 필요",
     "bad_gold_answer": "probe 재생성 필요",
+    "bad_gold_chunk": "골드 청크 재지정 필요",
 }
 # manual finding.metadata["group"] → 배지. D 이외(예비가 A/B/C일 수 있음)는 prelim에서 처리.
 _REC_GROUP_BADGES = {"D": ["data", "D · 데이터"]}
@@ -545,7 +564,7 @@ _BAD_GOLD_DEFAULT_ACTION = "자동 생성 probe — 재생성 후 재평가 대�
 
 def _rec_items(label: str, findings: list, probes_by_id: dict) -> list[dict[str, str]]:
     """이 권고가 걸린 질문들을 '어디가 문제인지'와 함께 per-probe 로.
-    corpus_gap 계열은 근거 문서를, bad_gold_answer 는 기대 정답 + 소스별 조치를 보여준다."""
+    corpus_gap 계열은 근거 문서를, bad_gold 계열은 기대 정답과 조치를 보여준다."""
     items: list[dict[str, str]] = []
     seen: set[str] = set()
     for f in findings:
@@ -556,7 +575,17 @@ def _rec_items(label: str, findings: list, probes_by_id: dict) -> list[dict[str,
             probe = probes_by_id.get(pid)
             if probe is None:
                 continue
-            if label == "bad_gold_answer":
+            if label == "bad_gold_chunk":
+                # 이 probe 는 '실패한 검증 질문'에서 빠지므로(Eval report) 리포트에서 여기가
+                # 유일한 노출 지점이다. 고칠 대상이 청크라 지금 지정된 골드를 그대로 싣고,
+                # 정답 텍스트는 '어느 청크로 옮길지' 찾는 단서라 함께 남긴다.
+                cids = list(getattr(probe, "gold_chunk_ids", None) or [])
+                items.append({
+                    "q": probe.question,
+                    "where": ("현재 골드 청크: " + ", ".join(cids)) if cids else "골드 청크 미지정",
+                    "gold": probe.ground_truth or "",
+                })
+            elif label == "bad_gold_answer":
                 action = _BAD_GOLD_BY_SOURCE.get(getattr(probe, "source", ""), _BAD_GOLD_DEFAULT_ACTION)
                 items.append({
                     "q": probe.question,

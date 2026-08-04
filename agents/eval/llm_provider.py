@@ -23,6 +23,8 @@ from core.llm_clients import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     GITHUB_MODELS_BASE_URL,
     OPENROUTER_BASE_URL,
+    PROVIDER_ALIASES,
+    normalize_provider,
     gemini_chat,
     gemini_embed,
     openai_chat,
@@ -38,13 +40,7 @@ _KNOWN_PROVIDERS = {"openai", "gemini", "github", "openrouter"}
 # 같은 문자열을 EVAL_LLM_PROVIDER 와 RAG_LLM_PROVIDER 어느 쪽에 넣어도 동작하도록 맞춘
 # 철자표. agents/rag/generator.py 의 _PROVIDER_ALIASES 와 항상 같은 값을 유지할 것
 # (tests/test_provider_notices.py 가 두 표의 일치를 핀으로 잡는다).
-_PROVIDER_ALIASES = {
-    "github_models": "github",
-    "open_router": "openrouter",
-    "open-router": "openrouter",
-    "openrouter_ai": "openrouter",
-    "openrouter.ai": "openrouter",
-}
+_PROVIDER_ALIASES = PROVIDER_ALIASES
 # 이미 경고한 미지원 provider 값(Eval 은 스레드로 병렬 호출하므로 lock 으로 보호).
 _warned_providers: set[str] = set()
 _warned_providers_lock = threading.Lock()
@@ -66,7 +62,7 @@ def _provider() -> str:
     raw = os.getenv("EVAL_LLM_PROVIDER", "openai").strip().lower()
     if not raw:  # 빈 값은 "기본값" 의사표시로 보고 경고하지 않는다.
         return "openai"
-    raw = _PROVIDER_ALIASES.get(raw, raw)
+    raw = normalize_provider(raw)
     if raw not in _KNOWN_PROVIDERS:
         _warn_unknown_provider_once(raw)
         return "openai"

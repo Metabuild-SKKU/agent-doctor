@@ -64,6 +64,66 @@ class ReportViewCompositeTest(unittest.TestCase):
         self.assertEqual(view["score"]["before"], view["score"]["after"])
         self.assertEqual(view["score"]["delta"], 0.0)
 
+    def test_pass_badge_uses_optimize_gate_not_eval_threshold(self):
+        report = make_report(overall=0.95, composite_total=12, pass_threshold=True)
+        report.ragas_scores["mean_recall_at_k"] = 0.9
+
+        score = build_report_view(make_state(report))["score"]
+
+        self.assertFalse(score["pass_threshold"])
+        self.assertTrue(score["gate"]["eval_pass_threshold"])
+        self.assertEqual(score["gate"]["reason"], "composite_below_threshold")
+
+    def test_high_composite_can_pass_even_if_eval_threshold_is_false(self):
+        report = make_report(overall=0.40, composite_total=92, pass_threshold=False)
+        report.ragas_scores["mean_recall_at_k"] = 0.9
+
+        score = build_report_view(make_state(report))["score"]
+
+        self.assertTrue(score["pass_threshold"])
+        self.assertFalse(score["gate"]["eval_pass_threshold"])
+        self.assertEqual(score["gate"]["reason"], "passed")
+
+    def test_recall_floor_failure_is_visible_in_gate_summary(self):
+        report = make_report(overall=0.95, composite_total=92, pass_threshold=True)
+        report.ragas_scores["mean_recall_at_k"] = 0.4
+
+        score = build_report_view(make_state(report))["score"]
+
+        self.assertFalse(score["pass_threshold"])
+        self.assertEqual(score["gate"]["reason"], "recall_below_floor")
+        self.assertEqual(score["gate"]["mean_recall_at_k"], 0.4)
+
+    def test_missing_composite_inherits_eval_threshold(self):
+        # composite 미측정이면 gate 가 Eval 판정을 승계한다(근거 없는 축은 막지 않음).
+        score = build_report_view(make_state(
+            make_report(composite_total=None, pass_threshold=True)))["score"]
+
+        self.assertTrue(score["pass_threshold"])
+        self.assertEqual(score["gate"]["score_source"], "report.pass_threshold")
+        self.assertEqual(score["gate"]["reason"], "passed")
+
+        score = build_report_view(make_state(
+            make_report(composite_total=None, pass_threshold=False)))["score"]
+
+        self.assertFalse(score["pass_threshold"])
+        self.assertEqual(score["gate"]["reason"], "eval_pass_threshold_false")
+
+    def test_missing_recall_does_not_block_pass(self):
+        # gold 청크가 없어 recall 미측정이면 바닥선을 적용하지 않는다.
+        score = build_report_view(make_state(
+            make_report(composite_total=92, pass_threshold=False)))["score"]
+
+        self.assertTrue(score["pass_threshold"])
+        self.assertIsNone(score["gate"]["recall_pass"])
+        self.assertEqual(score["gate"]["reason"], "passed")
+
+    def test_missing_report_fails_gate(self):
+        score = build_report_view(AgentDoctorState(source_url="a.pdf"))["score"]
+
+        self.assertFalse(score["pass_threshold"])
+        self.assertEqual(score["gate"]["reason"], "report_missing")
+
 
 class TreatmentCourseViewTest(unittest.TestCase):
     @staticmethod
@@ -384,6 +444,22 @@ class ReportViewRecommendationsTest(unittest.TestCase):
         self.assertIn("검수", action("user_log"))
         self.assertNotIn("검수", action("taxonomy"))  # 우리가 만든 probe는 재생성 대상
         self.assertIn("재생성", action("taxonomy"))
+
+    def test_bad_gold_chunk_shows_the_gold_it_has_now(self):
+        """이 probe 는 '실패한 검증 질문'에서 빠지므로 남은 권고가 리포트의 유일한 노출
+        지점이다. 제목·CTA 가 비어 generic 문구로 뭉개지면 무슨 조치인지 알 수 없다."""
+        probe = Probe(probe_id="q1", question="2골 넣은 선수는?", source="taxonomy",
+                      ground_truth="아메드 무사", gold_chunk_ids=["chunk_010", "chunk_011"])
+        f = Finding(finding_id="q1:bad_gold_chunk", type="gap", severity="warning",
+                    description="[D그룹] bad_gold_chunk", label="bad_gold_chunk",
+                    confirmed=True, affected_probes=["q1"], metadata={"group": "D"})
+
+        rec = build_report_view(self._state([f], [probe]))["recommendations"][0]
+
+        self.assertIn("근거 지정이 틀린", rec["title"])
+        self.assertIn("재지정", rec["cta"])
+        self.assertIn("chunk_010", rec["items"][0]["where"])   # 고칠 대상은 청크
+        self.assertEqual(rec["items"][0]["gold"], "아메드 무사")  # 옮길 곳 찾는 단서
 
     def test_confirmed_actionable_excluded_from_recommendations(self):
         # 확정 자동처방 대상(retrieval_low_rank)은 dxs/rxs 몫 — 남은 권고에서 제외.

@@ -20,6 +20,24 @@ from core.llm_usage import log_usage
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# provider 철자표 — 같은 값을 EVAL_LLM_PROVIDER / RAG_LLM_PROVIDER / INDEX_LLM_PROVIDER
+# 어디에 넣어도 같게 해석되도록 한 곳에서 소유한다. 예전엔 Eval·RAG 가 각자 복사본을
+# 두고 테스트로 대칭만 고정했는데, 나중에 붙은 Index 가 세 번째 표 없이 원문 비교만 해서
+# 같은 값이 두 곳은 OpenRouter, Index 만 keyword 로 갈렸다.
+PROVIDER_ALIASES = {
+    "github_models": "github",
+    "open_router": "openrouter",
+    "open-router": "openrouter",
+    "openrouter_ai": "openrouter",
+    "openrouter.ai": "openrouter",
+}
+
+
+def normalize_provider(raw: str | None) -> str:
+    """provider 문자열을 정규 표기로. 공백·대소문자·별칭을 흡수한다(미지원 값은 그대로)."""
+    value = str(raw or "").strip().lower()
+    return PROVIDER_ALIASES.get(value, value)
+
 # 출력 토큰 기본 상한. 상한이 없으면 모델이 같은 문장을 반복 생성하며 최대치(64K)까지
 # 달려도 아무도 막지 않는다 — 실제로 한 번 일어났고(응답 65,521 토큰, 그 1회로 $0.10),
 # 잘린 응답이 JSON 파싱에 실패해 호출부가 조용히 휴리스틱으로 폴백하면서 쓰레기 Probe 를
@@ -50,7 +68,9 @@ _REASONING_MIN_OUTPUT_TOKENS = 25_000
 # 상한을 낮추면 그 상한을 넘는 호출이 "잘린 응답 값 + 재시도 값" 을 모두 지불하게 되어,
 # 정작 상한이 막으려던 폭주 시나리오에서 더 비싸진다(8K+25K=33K > 25K). 상한은
 # 실사용분만 과금되므로 정상 호출의 비용은 값과 무관하고, 낮춰서 얻는 이득이 없다.
-# 이 값으로 시작하면 retry_cap > cap 이 거짓이라 재시도 경로 자체가 열리지 않는다.
+# 이 값으로 시작하는 호출은 retry_cap > cap 이 거짓이라 재시도 경로가 열리지 않는다.
+# json_mode 가 아닌 OpenRouter+추론off 호출은 이 승급을 건너뛰므로(위 openai_chat 참고)
+# 그쪽은 재시도가 열려 있다 — 산문은 잘려도 부분 답변이 쓸모 있다는 판단이다.
 #
 # 실측(deepseek-v4-flash-0731, 한국어 RAGAS fused 판정 1회, top_k=5):
 #   입력 2,514 / 출력 2,708 토큰 — 추론 토큰 포함. 기본 2048 로는 잘렸다.
@@ -174,15 +194,21 @@ def openai_chat(
     if reasoning and temperature != 1.0:
         _warn_temperature_ignored_once(model, temperature, tag)
 
-    # 추론을 꺼둔 호출에는 큰 출력 예산을 주지 않는다 — 그 승급은 추론 토큰이 상한을
+    # 추론을 꺼둔 호출에는 큰 출력 예산 승급을 건너뛴다 — 그 승급은 추론 토큰이 상한을
     # 먹어 본문이 잘리는 걸 막으려던 것이고, 추론이 없으면 근거가 사라진다. 남겨두면
     # 호출부가 정한 상한(RAG 답변 4096 등)이 조용히 25K 로 덮여 폭주 여지만 커진다.
+    #
+    # 단 json_mode 는 예외다. 잘린 JSON 은 파싱이 실패해 전량 손실이고, 아래 재시도가
+    # 반드시 걸려 "잘린 값 + 재시도 값" 을 둘 다 지불한다. 산문은 잘려도 부분 답변이
+    # 쓸모 있어 좁은 상한이 이득이지만, JSON 은 애초에 넉넉히 주는 쪽이 싸다.
+    # (실측: 이 예외 없이 fused RAGAS 를 돌리면 4096 에서 잘려 결손 13건·재시도 4건,
+    #  재시도 1건당 4,096+25,000=29,096 토큰. 승급하면 잘림 0건.)
     reasoning_off = (base_url == OPENROUTER_BASE_URL
                      and _openrouter_reasoning_disabled())
     cap = max_output_tokens
     if reasoning:
         cap = max(cap, _REASONING_MIN_OUTPUT_TOKENS)
-    elif _needs_large_output(model) and not reasoning_off:
+    elif _needs_large_output(model) and (json_mode or not reasoning_off):
         cap = max(cap, _LARGE_OUTPUT_MIN_TOKENS)
 
     def _call(limit: int):

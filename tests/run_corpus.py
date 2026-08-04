@@ -312,8 +312,6 @@ def write_report(state, corpus_dir: Path) -> tuple[Path, dict]:
 
 
 def print_summary(state, view: dict, html_path: Path):
-    from agents.optimize import gate
-
     score = view.get("score", {})
     doc_label = Path(state.source_url).name if state.source_url else "문서"
     print("\n" + "=" * 56)
@@ -323,8 +321,15 @@ def print_summary(state, view: dict, html_path: Path):
     print(f"종합 점수      : {score.get('before')} → {score.get('after')} "
           f"(delta {score.get('delta')})")
     if state.report:
+        gate_info = score.get("gate") or {}
         print(f"overall_score  : {state.report.overall_score}  "
-              f"gate_pass={gate.passes_report(state.report)}")
+              f"gate_pass={gate_info.get('pass')}")
+        print(f"composite_gate : {gate_info.get('composite_total')} / "
+              f"{gate_info.get('composite_threshold')} "
+              f"({gate_info.get('score_source')})")
+        print(f"recall_gate    : {gate_info.get('mean_recall_at_k')} / "
+              f"{gate_info.get('recall_floor')} "
+              f"reason={gate_info.get('reason')}")
         print(f"findings       : {state.report.findings_summary}")
     print(f"처방 keep/roll : {score.get('kept')} / {score.get('rolled')}")
     print(f"index_config   : {state.index_config}")
