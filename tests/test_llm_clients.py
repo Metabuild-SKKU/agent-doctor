@@ -257,3 +257,37 @@ class TruncationRetryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReasoningOffSkipsLargeCapTest(unittest.TestCase):
+    """추론을 끈 호출에는 큰 출력 예산 승급을 적용하지 않는다.
+
+    승급의 근거가 "추론 토큰이 상한을 먹는다" 인데, 추론이 없으면 근거가 사라진다.
+    남겨두면 호출부가 정한 상한(RAG 답변 4096 등)이 조용히 25K 로 덮인다."""
+
+    def setUp(self):
+        FakeOpenAI.last_kwargs = {}
+        FakeOpenAI.calls = []
+        FakeOpenAI.finish_reason = "stop"
+        FakeOpenAI.content = "응답"
+        FakeOpenAI.script = None
+
+    def test_caller_cap_survives_when_reasoning_is_off(self):
+        with patch.dict(os.environ, {"OPENROUTER_REASONING": "0"}, clear=False):
+            call("deepseek/deepseek-v4-flash-0731", max_output_tokens=4096,
+                 base_url=llm_clients.OPENROUTER_BASE_URL)
+        self.assertEqual(FakeOpenAI.last_kwargs["max_tokens"], 4096)
+
+    def test_cap_is_raised_again_when_reasoning_is_on(self):
+        with patch.dict(os.environ, {"OPENROUTER_REASONING": "1"}, clear=False):
+            call("deepseek/deepseek-v4-flash-0731", max_output_tokens=4096,
+                 base_url=llm_clients.OPENROUTER_BASE_URL)
+        self.assertEqual(FakeOpenAI.last_kwargs["max_tokens"],
+                         llm_clients._LARGE_OUTPUT_MIN_TOKENS)
+
+    def test_non_openrouter_endpoint_keeps_the_bump(self):
+        # 추론 끄기는 OpenRouter 전용 파라미터라, 다른 엔드포인트에선 추론이 살아 있다.
+        with patch.dict(os.environ, {"OPENROUTER_REASONING": "0"}, clear=False):
+            call("deepseek/deepseek-v4-flash-0731", max_output_tokens=4096)
+        self.assertEqual(FakeOpenAI.last_kwargs["max_tokens"],
+                         llm_clients._LARGE_OUTPUT_MIN_TOKENS)
