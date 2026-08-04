@@ -559,6 +559,7 @@ def _llm_generate_single_hop(chunk_text: str) -> tuple[str, str] | None:
                     "반드시 {\"question\": str, \"ground_truth\": str} 형태의 JSON으로만 답하라."),
             user=f"[컨텍스트]\n{chunk_text}",
             max_output_tokens=_SYNTHESIS_MAX_OUTPUT_TOKENS,
+            label="probe.single_hop",
         )
         question = (data.get("question") or "").strip()
         ground_truth = (data.get("ground_truth") or "").strip()
@@ -1407,6 +1408,7 @@ def _llm_topic(chunk_text: str) -> str | None:
                     "URL·표·수식 잔여물은 제외하고 본문 주제만 뽑아라. "
                     "반드시 {\"topic\": str} 형태의 JSON으로만 답하라."),
             user=f"[컨텍스트]\n{chunk_text}",
+            label="probe.topic",
         )
         topic = (data.get("topic") or "").strip()
         # LLM 결과에도 furniture 가 섞일 수 있으니 게이트를 태워 걸러낸다(잔여물이면 폐기 → 폴백).
@@ -1478,6 +1480,7 @@ def _false_premise_question(chunk_text: str) -> str | None:
                         "(예: 컨텍스트에 없는 제도가 있다고 가정하고 조건을 묻기). "
                         "반드시 {\"question\": str} 형태의 JSON으로만 답하라."),
                 user=f"[컨텍스트]\n{chunk_text}",
+                label="probe.adversarial",
             )
             question = (data.get("question") or "").strip()
             if question:
@@ -1664,6 +1667,7 @@ def _llm_synthesize_query(
                      "형태의 JSON으로만 답하라."),
             user=f"[컨텍스트]\n{_format_sources_for_llm(nodes)}",
             max_output_tokens=_SYNTHESIS_MAX_OUTPUT_TOKENS,
+            label="probe.quadrant",
         )
         question = (data.get("question") or "").strip()
         ground_truth = (data.get("ground_truth") or "").strip()

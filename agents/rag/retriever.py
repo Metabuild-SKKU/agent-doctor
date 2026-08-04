@@ -13,6 +13,7 @@ import hashlib
 import math
 import os
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -33,6 +34,7 @@ from agents.index.qdrant_store import (
     hybrid_search,
     keyword_search,
     rerank_with_status,
+    reranker_max_length,
     search as dense_search,
     upsert_chunks,
 )
@@ -246,6 +248,34 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
+def _dedup_by_chunk_id(results: list[dict]) -> list[dict]:
+    """같은 chunk_id 는 첫 등장(=상위 순위)만 남긴다.
+
+    중복이 남으면 같은 본문이 top_k 슬롯을 두 번 먹는다(실측: top-5 에 chunk_005 가 두 번
+    잡혀 실제 후보가 4개). 리랭커·MMR 도 같은 쌍을 두 번 계산하고, Eval 의 recall·중복 신호가
+    그만큼 왜곡된다. 융합(hybrid)은 chunk_id 로 접지만, 네이티브 RRF·keyword 폴백처럼 접지
+    않는 경로가 있어 최종 결과 쪽에서 한 번 더 보장한다.
+
+    id 가 비어 있는 항목(payload 결측 → _hit_to_result·keyword_search 가 "" 로 채움)은 접지
+    않고 그대로 통과시킨다 — 서로 다른 청크인데 id 만 없는 것들이 "" 하나로 뭉쳐 조용히
+    버려지는 걸 막는다(중복 제거의 근거는 '같은 id'이지 '둘 다 id 가 없음'이 아니다).
+    """
+    seen: set[str] = set()
+    deduped = []
+    for item in results:
+        chunk_id = item.get("chunk_id")
+        if chunk_id:
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+        deduped.append(item)
+    # 정상 경로에선 chunk_id 가 f"{doc_id}_chunk_{idx:03d}" 라 중복이 안 생긴다. 그래서 여기서
+    # 뭔가 접혔다면 상류(Index) 쪽 중복이고, 조용히 접으면 그 원인이 로그에서 사라진다.
+    if len(deduped) < len(results):
+        print(f"[Retriever] 중복 chunk_id {len(results) - len(deduped)}건 제거 — 상류 중복 의심")
+    return deduped
+
+
 def _mmr_select(
     results: list[dict], top_k: int, lambda_: float, embeddings: list[list[float] | None]
 ) -> list[dict] | None:
@@ -296,7 +326,10 @@ class Retriever:
         client: QdrantClient | None = None,
     ) -> None:
         self.settings = settings
-        self.chunks = [_chunk_to_dict(chunk) for chunk in chunks]
+        # 같은 chunk_id 가 두 번 들어오면 lexical 경로(keyword_search·BM25 융합)가 같은 본문을
+        # 두 번 후보로 올려 top_k 슬롯을 먹는다. 검색 결과 쪽에서 접으면 자른 뒤라 후보가
+        # 그만큼 비므로, 입력에서 한 번 접어 슬롯 수를 유지한다.
+        self.chunks = _dedup_by_chunk_id([_chunk_to_dict(chunk) for chunk in chunks])
         self.client = client
         self.chunk_ids = {
             chunk.get("chunk_id", "")
@@ -353,10 +386,11 @@ class Retriever:
         return max(candidate_k, min(max(len(self.chunks), candidate_k * 8), 200))
 
     def _current_results(self, results: list[dict]) -> list[dict]:
+        """검색 결과를 현재 청크 집합 기준으로 좁히고 payload 를 현재 값으로 덮는다."""
         if not self.chunk_ids:
-            return results
+            return _dedup_by_chunk_id(results)
         current_results = []
-        for item in results:
+        for item in _dedup_by_chunk_id(results):
             chunk = self._chunks_by_id.get(item.get("chunk_id"))
             if chunk is None:
                 continue
@@ -393,6 +427,10 @@ class Retriever:
         top_k: int | None = None,
         apply_rerank: bool | None = None,
     ) -> dict:
+        # 검색 한 건의 총시간. 리랭크 시간(rerank_seconds)과 함께 실어야 '느린 게 검색이냐
+        # 생성이냐, 검색이면 그중 리랭크가 얼마냐'가 한 번의 실행으로 갈린다 — 지금까지는
+        # 분자(리랭크)만 있고 분모(검색 총시간)가 없어 콘솔 로그를 눈으로 대조해야 했다.
+        search_started = time.monotonic()
         use_reranker = (
             self.settings.use_reranker if apply_rerank is None else bool(apply_rerank)
         )
@@ -416,6 +454,9 @@ class Retriever:
                 # 정상 경로와 키 집합을 맞춘다 — 소비처(Eval 진단)가 키 유무로 분기한다.
                 "rerank_candidate_count": 0,
                 "pre_rerank_ids": [],
+                "rerank_seconds": 0.0,
+                "rerank_pairs": 0,
+                "search_seconds": round(time.monotonic() - search_started, 3),
                 "results": [],
             }
 
@@ -473,6 +514,8 @@ class Retriever:
         if not results:
             mode = "keyword"
             fallback_used = True
+            # self.chunks 가 이미 chunk_id 로 접혀 있어 여기서 중복이 생기지 않는다
+            # (접는 자리를 입력으로 올린 이유는 __init__ 주석 참고 — 자른 뒤 접으면 슬롯이 빈다).
             results = keyword_search(self.chunks, query, top_k=candidate_k)
 
         # 리랭크 직전 후보 순서. Eval 이 "리랭커가 gold 를 봤나(후보창 안)"와
@@ -493,14 +536,31 @@ class Retriever:
         )
         # MMR 이 최종 top_k 선택을 맡으면 리랭커는 후보풀을 유지한다(그래야 다양화 여지가 남음).
         rerank_top_k = candidate_k if self.settings.use_mmr else requested_top_k
+        # 리랭크 실측 시간·쌍 수를 결과에 싣는다 — 검색 시간의 대부분이 여기서 나오는데
+        # (쌍 수 × 쌍당 텍스트 길이), 지금까지 리포트에는 실행 여부만 있고 비용이 없었다.
+        # chunk_size 처방으로 쌍당 비용이 뛰어도 Optimize 가 그걸 못 보고 품질만 비교한다.
+        # 시간·쌍 수는 리랭크가 실제로 돈 경우(applied)만, 반드시 **함께** 센다. 둘의 기준이
+        # 어긋나면 집계 ms_per_pair(=Σseconds/Σpairs)가 양쪽으로 왜곡된다:
+        #   로드 실패·쿨다운 — predict 가 아예 안 돌아 시간 0, 쌍만 잡히면 아래로 희석
+        #   inference_failed — predict 는 끝까지 돌고 결과 검증에서 실패, 시간만 잡히면 위로 부풀림
+        # 실패한 시도의 벽시계는 버린다(그 사실은 reranker_status/failed 집계가 이미 알린다) —
+        # 이 지표의 질문은 '실제로 재정렬한 1쌍이 얼마였나'뿐이다.
+        rerank_seconds = 0.0
+        rerank_pairs = 0
         if reranker_attempted:
-            results, reranker_status = rerank_with_status(
+            attempted_pairs = len(results)
+            # 시간은 rerank_with_status 가 추론 구간만 재서 돌려준다 — 여기서 감싸면 모델
+            # 로드가 섞이고, 사전 로드를 따로 부르면 그게 별도 seam 이 돼 이 함수를 패치한
+            # 테스트가 실모델을 내려받는다(둘 다 겪었다).
+            results, reranker_status, measured = rerank_with_status(
                 query,
                 results,
                 model_name=self.settings.reranker_model,
                 top_k=rerank_top_k,
             )
             reranked = reranker_status == "applied"
+            rerank_seconds = measured if reranked else 0.0
+            rerank_pairs = attempted_pairs if reranked else 0
 
         mmr_applied = False
         if self.settings.use_mmr and len(results) > requested_top_k:
@@ -535,6 +595,14 @@ class Retriever:
             "fallback_used": fallback_used,
             "rerank_candidate_count": candidate_k,
             "pre_rerank_ids": pre_rerank_ids,
+            "rerank_seconds": round(rerank_seconds, 3),
+            "rerank_pairs": rerank_pairs,
+            # 상한이 실제로 걸린 채 돌았는지 — 폴백으로 빠진 실행과 구분해야 다음 처방 판정이
+            # capped/uncapped 를 같은 실행으로 묶지 않는다.
+            "rerank_max_length": (
+                reranker_max_length(self.settings.reranker_model) if reranked else None
+            ),
+            "search_seconds": round(time.monotonic() - search_started, 3),
             "results": results,
         }
 

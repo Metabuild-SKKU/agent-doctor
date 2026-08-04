@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import sys
 import threading
 import time
@@ -29,8 +30,11 @@ from core.state import AgentDoctorState
 
 
 class _FakeCrossEncoder:
-    def __init__(self, scores):
+    # 실제 CrossEncoder 처럼 max_length 등 키워드를 받는다 — 못 받으면 프로덕션이
+    # 상한 없이 로드하는 폴백 경로로 새서, 테스트가 실제 경로를 검증하지 못한다.
+    def __init__(self, scores, **kwargs):
         self.scores = scores
+        self.kwargs = kwargs
         self.calls = []
 
     def predict(self, pairs):
@@ -42,6 +46,7 @@ class RerankerExecutionTest(unittest.TestCase):
     def tearDown(self):
         qdrant_store._rerankers.clear()
         qdrant_store._failed_rerankers.clear()
+        qdrant_store._reranker_max_lengths.clear()
 
     def test_none_metadata_uses_default_reranker_model(self):
         settings = resolve_retrieval_settings(
@@ -98,6 +103,281 @@ class RerankerExecutionTest(unittest.TestCase):
             ["c3", "c2"],
         )
 
+    def test_loader_caps_reranker_input_length(self):
+        """리랭크 1쌍의 비용은 청크 길이에 비례한다 — 상한이 없으면 chunk_size 처방 하나로
+        검색 시간이 몇 배가 된다(모델 tokenizer 기본 상한은 8192)."""
+        model_name = "test/max-length-reranker"
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = lambda _name, **kw: _FakeCrossEncoder([0.1], **kw)
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+            model, status = qdrant_store._load_reranker(model_name)
+
+        self.assertEqual(status, "ready")
+        self.assertEqual(model.kwargs["max_length"], qdrant_store._RERANKER_MAX_LENGTH)
+
+    def test_loader_falls_back_when_max_length_unsupported(self):
+        """상한 인자를 못 받는 구현이어도 리랭킹 자체는 죽지 않는다(상한만 빠진다).
+        판정은 시그니처로 한다 — 예외로 떠보면 생성자 내부의 무관한 TypeError 까지
+        '상한 미지원'으로 오진하고 대형 모델을 한 번 더 로드한다."""
+        model_name = "test/no-max-length-reranker"
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = lambda _name: _FakeCrossEncoder([0.1])
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+            model, status = qdrant_store._load_reranker(model_name)
+
+        self.assertEqual(status, "ready")
+        self.assertEqual(model.kwargs, {})
+
+    def test_loader_does_not_retry_on_unrelated_type_error(self):
+        """생성자 내부의 무관한 TypeError 는 '상한 미지원' 으로 오진하지 않는다 —
+        폴백으로 재시도하면 2GB 대 모델을 한 번 더 로드한다."""
+        model_name = "test/unrelated-type-error"
+        loads = []
+
+        class _BrokenInside:
+            def __init__(self, _name, max_length=None):
+                loads.append(max_length)
+                raise TypeError("내부 구현 오류")
+
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = _BrokenInside
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+            model, status = qdrant_store._load_reranker(model_name)
+
+        self.assertIsNone(model)
+        self.assertEqual(status, "model_load_failed")
+        self.assertEqual(len(loads), 1)                 # 재시도 없음
+
+    def test_cap_disabled_by_env_zero(self):
+        """INDEX_RERANKER_MAX_LENGTH<=0 이면 상한 없이 로드하고, 그 사실이 조회로 남는다."""
+        model_name = "test/uncapped-reranker"
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = lambda _name, **kw: _FakeCrossEncoder([0.1], **kw)
+
+        with patch.object(qdrant_store, "_RERANKER_MAX_LENGTH", 0):
+            with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+                model, status = qdrant_store._load_reranker(model_name)
+
+        self.assertEqual(status, "ready")
+        self.assertEqual(model.kwargs, {})                       # max_length 안 넘김
+        self.assertIsNone(qdrant_store.reranker_max_length(model_name))
+
+    def test_applied_cap_is_queryable(self):
+        model_name = "test/capped-reranker"
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = lambda _name, **kw: _FakeCrossEncoder([0.1], **kw)
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+            qdrant_store._load_reranker(model_name)
+
+        self.assertEqual(
+            qdrant_store.reranker_max_length(model_name),
+            qdrant_store._RERANKER_MAX_LENGTH,
+        )
+
+    def test_fallback_survives_cp949_console(self):
+        """폴백 경고가 cp949 로 인코딩 안 되는 문자를 쓰면, 그 UnicodeEncodeError 를
+        _load_reranker 의 except 가 '로드 실패'로 삼켜 폴백 자체가 무력화된다(+쿨다운 등록).
+        pytest 는 stdout 을 utf-8 로 캡처해 이 경로를 못 잡으므로 여기서 직접 cp949 로 건다."""
+        model_name = "test/cp949-console-reranker"
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = lambda _name: _FakeCrossEncoder([0.1])
+        cp949_stdout = io.TextIOWrapper(io.BytesIO(), encoding="cp949", errors="strict")
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+            with patch("sys.stdout", cp949_stdout):
+                model, status = qdrant_store._load_reranker(model_name)
+
+        self.assertEqual(status, "ready")
+        self.assertIsNotNone(model)
+        self.assertNotIn(model_name, qdrant_store._failed_rerankers)
+
+    def test_patching_rerank_seam_avoids_model_load(self):
+        """rerank_with_status 하나만 패치하면 실모델 로드가 일어나지 않아야 한다.
+
+        사전 로드를 호출부에 따로 두면 그게 별도 seam 이 돼 이 패치를 우회하고, 단위 테스트가
+        2GB 대 모델을 내려받는다(실측: 이 파일 0.8초 → 12초). 시간 계측을 rerank_with_status
+        안으로 넣어 seam 을 하나로 유지하는 이유다."""
+        chunks = [
+            {"chunk_id": f"c{i}", "doc_id": "d1", "text": f"alpha 문서 {i}", "metadata": {}}
+            for i in range(3)
+        ]
+        retriever = Retriever(
+            chunks,
+            RetrievalSettings(
+                use_reranker=True, reranker_model="test/never-loaded", rerank_candidates=3
+            ),
+            client=None,
+        )
+
+        with patch.object(qdrant_store, "_load_reranker") as loader:
+            with patch(
+                "agents.rag.retriever.rerank_with_status",
+                side_effect=lambda q, r, model_name, top_k: (r[:top_k], "applied", 0.5),
+            ):
+                result = retriever.search_with_details("alpha", top_k=2)
+
+        loader.assert_not_called()
+        self.assertEqual(result["rerank_seconds"], 0.5)
+        self.assertEqual(result["rerank_pairs"], 3)
+
+    def test_search_reports_rerank_cost(self):
+        """리랭크 소요 시간·쌍 수를 검색 결과에 실어 리포트가 비용을 집계할 수 있게 한다."""
+        chunks = [
+            {"chunk_id": f"c{i}", "doc_id": "d1", "text": f"alpha 문서 {i}", "metadata": {}}
+            for i in range(4)
+        ]
+        model_name = "test/cost-reranker"
+        qdrant_store._rerankers[model_name] = _FakeCrossEncoder([0.1, 0.2, 0.3])
+        retriever = Retriever(
+            chunks,
+            RetrievalSettings(
+                use_reranker=True, reranker_model=model_name, rerank_candidates=3
+            ),
+            client=None,
+        )
+
+        result = retriever.search_with_details("alpha", top_k=2)
+
+        self.assertEqual(result["rerank_pairs"], 3)
+        self.assertGreaterEqual(result["rerank_seconds"], 0.0)
+        # 검색 총시간도 함께 실린다 — 리랭크 시간만으로는 '느린 게 검색이냐 생성이냐'가 안 갈린다.
+        self.assertGreaterEqual(result["search_seconds"], result["rerank_seconds"])
+
+    def test_timers_measure_their_own_spans(self):
+        """측정 계층 고정 — search_seconds 는 검색 전 구간, rerank_seconds 는 추론 구간.
+
+        집계 테스트는 손으로 적은 값을 더하므로 원천이 틀려도 초록이다. 예를 들어
+        search_seconds 에 리랭크 시간을 실어버리면 '검색의 100%가 리랭크'가 찍히는데,
+        이 계측이 리랭커냐 아니냐를 가릴 심판이라 원천이 틀리면 결론째 뒤집힌다.
+        시계를 고정해 두 구간이 각자 제 몫만 재는지 본다."""
+        chunks = [
+            {"chunk_id": f"c{i}", "doc_id": "d1", "text": f"alpha 문서 {i}", "metadata": {}}
+            for i in range(3)
+        ]
+        model_name = "test/clock-reranker"
+        qdrant_store._rerankers[model_name] = _FakeCrossEncoder([0.1, 0.2, 0.3])
+        retriever = Retriever(
+            chunks,
+            RetrievalSettings(
+                use_reranker=True, reranker_model=model_name, rerank_candidates=3
+            ),
+            client=None,
+        )
+        # 검색시작 100 · 리랭크시작 105 · 리랭크끝 107 · 검색끝 110 → 검색 10초 / 리랭크 2초
+        ticks = iter([100.0, 105.0, 107.0, 110.0])
+
+        with patch("time.monotonic", side_effect=lambda: next(ticks)):
+            result = retriever.search_with_details("alpha", top_k=2)
+
+        self.assertEqual(result["search_seconds"], 10.0)
+        self.assertEqual(result["rerank_seconds"], 2.0)
+        self.assertEqual(next(ticks, None), None)      # 시계 호출 횟수까지 고정
+
+    def test_rerank_timer_excludes_model_load(self):
+        """모델 로드는 rerank_seconds 에서 빠지고 search_seconds 에만 남는다.
+
+        타이머가 _load_reranker 위로 올라가면 쿨다운 만료 직후 첫 쿼리가 2GB 대 재로드를
+        '쌍당 비용'으로 뒤집어쓴다. 로드가 시계를 감는 더블로 그 위치를 고정한다."""
+        chunks = [{"chunk_id": "c1", "doc_id": "d1", "text": "alpha", "metadata": {}}]
+        retriever = Retriever(
+            chunks,
+            RetrievalSettings(
+                use_reranker=True, reranker_model="test/slow-load", rerank_candidates=1
+            ),
+            client=None,
+        )
+        clock = {"now": 100.0}
+
+        def slow_load(_model_name):
+            clock["now"] += 50.0                        # 로드에 50초
+            return _FakeCrossEncoder([0.4]), "ready"
+
+        def tick():
+            clock["now"] += 1.0                         # 그 외 구간은 호출당 1초
+            return clock["now"]
+
+        with patch.object(qdrant_store, "_load_reranker", side_effect=slow_load):
+            with patch("time.monotonic", side_effect=tick):
+                result = retriever.search_with_details("alpha", top_k=1)
+
+        self.assertEqual(result["rerank_seconds"], 1.0)          # 로드 50초 제외
+        self.assertGreaterEqual(result["search_seconds"], 50.0)  # 검색 총시간에는 포함
+
+    def test_rerank_status_reports_zero_seconds_on_failure(self):
+        """실패 경로의 0초는 호출부 가드가 아니라 여기(측정 원천)에서 나온다.
+
+        추론이 오래 돌다 실패하면 그 벽시계가 쌍당 비용으로 새면 안 된다 — 쌍은 0 인데
+        시간만 잡히면 집계 ms_per_pair 가 위로 부푼다."""
+        model_name = "test/failing-seconds"
+        qdrant_store._rerankers[model_name] = _FakeCrossEncoder([])   # 점수 개수 불일치
+        results = [{"chunk_id": "c1", "text": "본문", "score": 0.5}]
+        # started / elapsed 계산 / 쿨다운 기록 — 실패 경로가 시계를 세 번 본다
+        ticks = iter([100.0, 160.0, 160.0])   # 추론이 60초 돌다 실패
+
+        with patch("time.monotonic", side_effect=lambda: next(ticks)):
+            _out, status, seconds = qdrant_store.rerank_with_status(
+                "질문", results, model_name=model_name, top_k=1
+            )
+
+        self.assertEqual(status, "inference_failed")
+        self.assertEqual(seconds, 0.0)
+
+    def test_cost_aggregation_ignores_non_numeric_details(self):
+        """옛 계약·불량 값(None·bool)이 섞여도 집계가 죽지 않고 그 건만 빠진다."""
+        records = [
+            EvalRecord(
+                probe=Probe("p1", "질문", "test"),
+                retrieval_details={
+                    "reranker_enabled": True, "reranker_attempted": True,
+                    "reranked": True, "reranker_status": "applied",
+                    "search_seconds": None, "rerank_seconds": True, "rerank_pairs": "3",
+                },
+            ),
+        ]
+
+        report = build_report(records, iteration=1)
+
+        self.assertEqual(report.runtime_summary["search"]["seconds"], 0.0)
+        self.assertEqual(report.runtime_summary["reranker"]["seconds"], 0.0)
+        self.assertEqual(report.runtime_summary["reranker"]["pairs"], 0)
+
+    def test_rerank_cost_not_counted_when_rerank_did_not_run(self):
+        """실패한 시도는 시간·쌍 어느 쪽도 세지 않는다. 한쪽만 세면 집계 ms_per_pair 가
+        왜곡된다 — inference_failed 는 predict 가 끝까지 돌아 시간만 잡히면 위로 부풀고,
+        로드 실패는 시간이 0 이라 쌍만 잡히면 아래로 희석된다."""
+        chunks = [
+            {"chunk_id": f"c{i}", "doc_id": "d1", "text": f"alpha 문서 {i}", "metadata": {}}
+            for i in range(3)
+        ]
+        model_name = "test/failing-cost-reranker"
+        qdrant_store._rerankers[model_name] = _FakeCrossEncoder([])   # 점수 개수 불일치 → 실패
+        retriever = Retriever(
+            chunks,
+            RetrievalSettings(
+                use_reranker=True, reranker_model=model_name, rerank_candidates=3
+            ),
+            client=None,
+        )
+
+        result = retriever.search_with_details("alpha", top_k=2)
+
+        self.assertEqual(result["reranker_status"], "inference_failed")
+        self.assertEqual(result["rerank_pairs"], 0)
+        self.assertEqual(result["rerank_seconds"], 0.0)
+
+    def test_search_reports_zero_rerank_cost_when_disabled(self):
+        chunks = [{"chunk_id": "c1", "doc_id": "d1", "text": "alpha", "metadata": {}}]
+        retriever = Retriever(chunks, RetrievalSettings(use_reranker=False), client=None)
+
+        result = retriever.search_with_details("alpha", top_k=1)
+
+        self.assertEqual(result["rerank_pairs"], 0)
+        self.assertEqual(result["rerank_seconds"], 0.0)
+
     def test_inference_failure_keeps_original_order_and_reports_not_reranked(self):
         chunks = [
             {
@@ -146,7 +426,7 @@ class RerankerExecutionTest(unittest.TestCase):
         count_lock = threading.Lock()
 
         class _ConcurrentCrossEncoder:
-            def __init__(self, _model_name):
+            def __init__(self, _model_name, **_kwargs):
                 nonlocal load_count
                 with count_lock:
                     load_count += 1
@@ -185,7 +465,7 @@ class RerankerCapabilityTest(unittest.TestCase):
     def test_smoke_inference_marks_model_verified(self):
         model_name = "test/verified-reranker"
         fake_module = types.ModuleType("sentence_transformers")
-        fake_module.CrossEncoder = lambda _name: _FakeCrossEncoder([0.7])
+        fake_module.CrossEncoder = lambda _name, **kw: _FakeCrossEncoder([0.7], **kw)
 
         with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
             capability = qdrant_store.probe_reranker_capability(model_name)
@@ -208,7 +488,7 @@ class RerankerCapabilityTest(unittest.TestCase):
         model_name = "test/load-failure"
 
         class _BrokenCrossEncoder:
-            def __init__(self, _name):
+            def __init__(self, _name, **_kwargs):
                 raise OSError("download failed")
 
         fake_module = types.ModuleType("sentence_transformers")
@@ -223,7 +503,7 @@ class RerankerCapabilityTest(unittest.TestCase):
     def test_smoke_failure_marks_model_unavailable(self):
         model_name = "test/smoke-failure"
         fake_module = types.ModuleType("sentence_transformers")
-        fake_module.CrossEncoder = lambda _name: _FakeCrossEncoder([])
+        fake_module.CrossEncoder = lambda _name, **kw: _FakeCrossEncoder([], **kw)
 
         with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
             capability = qdrant_store.probe_reranker_capability(model_name)
@@ -304,6 +584,60 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
             affected_probes=["p1"],
         )
 
+    def _cost_record(self, probe_id, *, search, rerank, pairs, status="applied",
+                     max_length=1024):
+        return EvalRecord(
+            probe=Probe(probe_id, "질문", "test"),
+            retrieval_details={
+                "reranker_enabled": True,
+                "reranker_attempted": True,
+                "reranked": status == "applied",
+                "reranker_status": status,
+                "search_seconds": search,
+                "rerank_seconds": rerank,
+                "rerank_pairs": pairs,
+                "rerank_max_length": max_length if status == "applied" else None,
+            },
+        )
+
+    def test_report_aggregates_search_and_rerank_cost(self):
+        """비영값 집계 경로 — 검색 총시간·건수·리랭크 몫·쌍당 비용이 실제로 계산되나."""
+        records = [
+            self._cost_record("p1", search=2.0, rerank=1.5, pairs=10),
+            self._cost_record("p2", search=3.0, rerank=2.5, pairs=15),
+        ]
+
+        report = build_report(records, iteration=1)
+
+        search = report.runtime_summary["search"]
+        rerank = report.runtime_summary["reranker"]
+        self.assertEqual(search["seconds"], 5.0)
+        self.assertEqual(search["searches"], 2)
+        self.assertEqual(search["rerank_share"], round(4.0 / 5.0, 3))
+        self.assertEqual(rerank["pairs"], 25)
+        self.assertEqual(rerank["ms_per_pair"], round(4.0 * 1000 / 25, 1))
+        self.assertEqual(rerank["max_lengths"], [1024])
+
+    def test_report_search_count_ignores_legacy_records(self):
+        """search_seconds 를 안 싣는 옛 계약 레코드는 건수 분모에서 뺀다(건당 시간 희석 방지)."""
+        legacy = EvalRecord(
+            probe=Probe("p0", "질문", "test"),
+            retrieval_details={"reranker_enabled": False, "reranker_status": "disabled"},
+        )
+        records = [legacy, self._cost_record("p1", search=2.0, rerank=1.0, pairs=5)]
+
+        report = build_report(records, iteration=1)
+
+        self.assertEqual(report.runtime_summary["search"]["searches"], 1)
+
+    def test_report_marks_uncapped_reranker_run(self):
+        """상한 없이 로드된 실행은 capped 실행과 구분돼 남는다."""
+        records = [self._cost_record("p1", search=2.0, rerank=1.0, pairs=5, max_length=None)]
+
+        report = build_report(records, iteration=1)
+
+        self.assertEqual(report.runtime_summary["reranker"]["max_lengths"], [None])
+
     def test_report_counts_actual_reranker_execution(self):
         records = [
             EvalRecord(
@@ -336,6 +670,10 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
                 "attempted": 2,
                 "applied": 1,
                 "failed": 1,
+                "seconds": 0.0,
+                "pairs": 0,
+                "ms_per_pair": None,
+                "max_lengths": [],
                 "status_counts": {
                     "load_failed": 1,
                     "applied": 1,
