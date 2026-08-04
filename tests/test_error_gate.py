@@ -16,7 +16,7 @@ from agents.index.agent import run as index_run
 from agents.eval.agent import run as eval_run
 from agents.serve import agent as serve_agent
 from agents.serve.agent import run as serve_run
-from core.schema import Chunk
+from core.schema import Chunk, DiagnosticReport
 from core.state import AgentDoctorState
 
 _REAL_ERROR = "gdrive 수집은 아직 미구현입니다."
@@ -60,18 +60,19 @@ class ErrorGateNodePassthroughTest(unittest.TestCase):
 
 
 class ServeErrorGateChunksTest(unittest.TestCase):
-    """Serve 가드는 '서빙할 청크 유무'로 갈린다 — error 라도 청크가 있으면 서빙(High).
+    """Serve 가드는 '청크 + 진단서' 유무로 갈린다.
 
-    색인·평가는 성공했는데 sweep 하나를 판정 못 해(_fail_active_study no-change) status 가
-    error 로 남는 정상 종료 경로가 있다. 그 경우 진단서·인덱스는 멀쩡하므로 서빙해야
-    web_api 가 진단서를 보여준다 — error 를 이유로 통째로 건너뛰면 안 된다.
+    비치명(sweep 판정 불가, _fail_active_study no-change)이면 청크·진단서가 둘 다 남아
+    있으니 서빙한다. Eval 이 실제로 죽었으면 인덱스가 남아 있어도 진단서가 없으므로
+    서빙하지 않고 error 를 유지한다 — 여기서 done 으로 덮으면 실패가 "완료" 로 보고된다.
     """
 
     def _served_error_state(self):
-        # 상위가 비치명적 error 인데 서빙할 청크는 보유한 상태.
+        # 비치명적 error — 청크와 진단서를 모두 보유한 상태.
         return AgentDoctorState(
             status="error", error="sweep 판정 불가(measurement)",
             chunks=[Chunk(chunk_id="c1", doc_id="d1", text="본문")],
+            report=DiagnosticReport(report_id="r1", overall_score=80.0),
         )
 
     def _run_serve(self, state):
@@ -82,11 +83,13 @@ class ServeErrorGateChunksTest(unittest.TestCase):
              patch.object(serve_agent, "_register_to_claude_desktop"):
             return _silent(serve_run, state)
 
-    def test_serves_when_error_but_chunks_present(self):
+    def test_serves_when_error_but_chunks_and_report_present(self):
         result = self._run_serve(self._served_error_state())
         self.assertEqual(result.status, "done")          # error 로 막히지 않고 서빙됨
-        self.assertIsNone(result.error)                  # 정상 종료로 error 정리
         self.assertIsNotNone(result.mcp_endpoint)        # 엔드포인트가 뜬다
+        # 사유는 지우지 않는다 — web_api 는 status 로만 분기하므로 남겨도 500 이 아니고,
+        # 지우면 왜 error 였는지 볼 방법이 사라진다.
+        self.assertEqual(result.error, "sweep 판정 불가(measurement)")
 
     def test_skips_when_error_and_no_chunks(self):
         # 서빙할 게 없는 진짜 상위 실패는 종전대로 error 유지한 채 건너뛴다.
@@ -94,6 +97,17 @@ class ServeErrorGateChunksTest(unittest.TestCase):
         result = self._run_serve(state)
         self.assertEqual(result.status, "error")
         self.assertEqual(result.error, _REAL_ERROR)
+        self.assertIsNone(result.mcp_endpoint)
+
+    def test_skips_when_eval_crashed_even_with_chunks(self):
+        # Eval 크래시(진단서 없음) — 인덱스가 남아 있어도 서빙하지 않고 실패로 보고한다.
+        state = AgentDoctorState(
+            status="error", error="평가 실패: GEMINI API 인증 실패",
+            chunks=[Chunk(chunk_id="c1", doc_id="d1", text="본문")],
+        )
+        result = self._run_serve(state)
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.error, "평가 실패: GEMINI API 인증 실패")
         self.assertIsNone(result.mcp_endpoint)
 
     def test_router_then_serve_serves_abort_with_chunks(self):

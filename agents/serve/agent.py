@@ -255,15 +255,13 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     """
     state.current_agent = "serve"
 
-    # 상위가 실패했어도(status=error) 서빙할 청크가 있으면 서빙한다 — 색인·평가는
-    # 성공했는데 sweep 하나를 판정 못 했거나(_fail_active_study 의 no-change 종료),
-    # 후반 Eval 이 한 번 흔들린 경우, 진단서와 인덱스는 멀쩡하므로 그걸 서빙해야
-    # 사용자가 진단서를 본다(서빙 성공 시 아래에서 status="done" 으로 확정).
-    # 서빙할 게 정말 없을 때만(진짜 상위 실패: gdrive 미구현·잘못된 소스 URL 등)
-    # error 를 유지한 채 건너뛴다 — 자체 "청크가 없습니다" 로 덮으면 최종 상태를
-    # 읽는 web_api 가 실제 원인 대신 일반 메시지를 표시한다.
-    if state.status == "error" and not state.chunks:
-        print(f"[Serve] 상위 실패 + 서빙할 청크 없음 → 생략 (error 유지: {state.error})")
+    # 상위가 실패했어도(status=error) 청크와 진단서가 둘 다 있으면 서빙한다 — 색인·평가는
+    # 성공했는데 sweep 하나를 판정 못 한 경우(_fail_active_study 의 no-change 종료)라
+    # 서빙할 것도 보여줄 것도 멀쩡하다. 반대로 진단서가 없으면 Eval 이 실제로 죽은 것이므로
+    # (인덱스가 남아 있어도) 서빙하지 않고 error 를 유지한다 — 여기서 done 으로 덮으면
+    # 진짜 실패가 "완료" 로 보고된다.
+    if state.status == "error" and not (state.chunks and state.report):
+        print(f"[Serve] 상위 실패(치명) → 생략 (error 유지: {state.error})")
         return state
 
     print(f"[Serve] 청크 {len(state.chunks)}개 처리 중")
@@ -296,10 +294,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         _register_to_claude_desktop()
 
         # 4. 완료 — 상위의 비치명적 error(판정 불가 sweep 등)를 안고 들어왔더라도
-        #    서빙이 성공했으면 정상 종료로 확정한다(error 를 남기면 web_api 가 500).
+        #    서빙이 성공했으면 done 으로 확정한다. 사유(state.error)는 지우지 않는다 —
+        #    web_api 는 status 로만 분기하므로 남겨도 500 이 나지 않고, 지우면 유일한 증거가 사라진다.
         state.mcp_endpoint = f"http://localhost:{API_PORT}"
         state.status = "done"
-        state.error = None
 
         print("\n" + "=" * 50)
         print(f"[Serve] 완료!")
