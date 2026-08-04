@@ -13,6 +13,7 @@ Optimize 노드의 진입점(오케스트레이션 계층).
 [읽는 것]  state.report, state.index_config, state.iteration, state.max_iterations,
            state.optimize_visit_count, state.max_optimize_visits,
            state.blacklist, state.completed_prescriptions, state.optimization_history,
+           state.excluded_actions,
            state.active_index_key, state.active_eval_key,
            state.runtime_capabilities(Planner request를 통해 소비)
 [쓰는 것]  state.index_config, state.iteration, state.optimize_visit_count,
@@ -437,6 +438,11 @@ def _log_optimize_input(state: AgentDoctorState) -> None:
     )
     if blocked_keys:
         print(f"[Optimize] 제외된 action: [{', '.join(blocked_keys)}]")
+    # 실행 정책 제외는 위와 분리해 찍는다 — 섞으면 "해봤더니 나빠서 막힌 것"과
+    # "처음부터 비교 대상이 아닌 것"을 리포트에서 구분할 수 없다.
+    if state.excluded_actions:
+        excluded = ", ".join(sorted(str(key) for key in state.excluded_actions))
+        print(f"[Optimize] 실행 정책 제외: [{excluded}]")
 
 
 def _log_selected_action(request: OptimizationRequest) -> None:
@@ -746,6 +752,8 @@ def _run(state: AgentDoctorState, timer: StageTimer) -> AgentDoctorState:
         #   action key 문자열 → 이번 방문에서만 막는 visit-local 제외
         visit_exclusions: set[Any] = set(state.blocked_action_attempts)
         visit_exclusions.update(state.completed_action_studies)
+        # 실행 정책상 제외한 축. 위 둘과 달리 baseline 이 바뀌어도 계속 막힌다.
+        visit_exclusions.update(state.excluded_actions)
         visit_exclusions.update(
             _unjudgeable_exclusions(state.optimization_history)
         )

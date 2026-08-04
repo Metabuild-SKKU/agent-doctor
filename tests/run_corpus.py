@@ -151,12 +151,39 @@ def run_pipeline_for(
     state = AgentDoctorState()
     state.source_type = "korquad" if korquad else "file"
     state.source_url = source_url if korquad else str(source_doc)
+    if korquad:
+        _fix_reranker_baseline(state)
 
     if loop:
         # 품질 미달이면 Optimize→재색인→재평가를 예산까지 반복(graph.py 와 동일 라우팅).
         # Serve 는 건너뛰도록 서브그래프가 아니라 노드 직접 호출 루프를 쓴다.
         return _run_with_loop(state)
     return _run_once(state)
+
+
+def _fix_reranker_baseline(state) -> None:
+    """reranker 를 기준선에 고정하고 reranker 축 처방은 비교 대상에서 뺀다.
+
+    reranker 를 켠 상태 자체를 기준선으로 두고 **다른 축의 처방만** 비교하려는 실행이다.
+    켜기만 하고 처방을 남겨두면 Optimize 가 이미 켜진 축을 다시 켜려다 no-op 으로
+    skip 하며 방문을 소비하고, 그 축이 처방 리포트에 섞여 비교를 흐린다.
+    """
+    from agents.optimize.agent import _RERANKER_ACTION_KEYS
+
+    state.index_config.update({
+        "use_reranker": True,
+        # eager: Index 가 모델을 실제로 로드·추론해 runtime capability 를 만든다.
+        # lazy 면 Eval 에서 처음 로드하다 실패해도 기준선이 조용히 reranker 없는
+        # 상태로 측정된다.
+        "reranker_preflight": "eager",
+    })
+    state.excluded_actions.update(_RERANKER_ACTION_KEYS)
+    print(
+        "  초기 reranker: ON "
+        f"({state.index_config.get('reranker_model')}, "
+        f"후보 {state.index_config.get('rerank_candidates')}개)"
+    )
+    print(f"  reranker 처방 제외: {', '.join(sorted(_RERANKER_ACTION_KEYS))}")
 
 
 def _steps():

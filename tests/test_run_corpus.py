@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from core.schema import DiagnosticReport, Finding
 from core.state import AgentDoctorState
-from tests.run_corpus import find_source_doc, write_report
+from tests.run_corpus import _fix_reranker_baseline, find_source_doc, write_report
 
 
 def make_state():
@@ -119,6 +119,24 @@ class FindSourceDocTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             find_source_doc(self.dir)
         self.assertIn("원본 문서가 없습니다", str(ctx.exception))
+
+
+class RerankerBaselineTest(unittest.TestCase):
+    """--korquad 실행은 reranker 를 켠 상태를 기준선으로 고정한다."""
+
+    def test_reranker_is_on_from_the_baseline(self):
+        state = AgentDoctorState()
+        _fix_reranker_baseline(state)
+        self.assertTrue(state.index_config["use_reranker"])
+        # lazy 면 Eval 에서 처음 로드하다 실패해도 기준선이 조용히 reranker 없이 측정된다.
+        self.assertEqual(state.index_config["reranker_preflight"], "eager")
+
+    def test_reranker_actions_are_excluded(self):
+        from agents.optimize.agent import _RERANKER_ACTION_KEYS
+
+        state = AgentDoctorState()
+        _fix_reranker_baseline(state)
+        self.assertEqual(state.excluded_actions, set(_RERANKER_ACTION_KEYS))
 
 
 if __name__ == "__main__":

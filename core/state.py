@@ -229,6 +229,13 @@ class AgentDoctorState:
     #   sweep 정상 완료뿐 아니라 optimizer 가 "이 baseline 에서 적용 불가"로 판정한 경우도
     #   같은 탐색을 다시 시작하지 않도록 여기에 기록한다.
     completed_action_studies: set = field(default_factory=set)
+    # excluded_actions: 실행 정책상 아예 시도하지 않을 action key 문자열.
+    #   품질 실패(blocked_action_attempts)나 탐색 완료(completed_action_studies)와
+    #   구분한다 — 저 둘은 "해봤더니 아니었다"의 기록이고 이건 "처음부터 비교 대상이
+    #   아니다"의 선언이다. 어떤 축을 기준선에 고정해 두고 나머지만 비교하는 실험에서
+    #   쓴다(예: reranker 를 켠 채로 두고 reranker 처방은 빼는 KorQuAD 실행).
+    #   baseline 이 달라져도 풀리지 않는다 — 실행 내내 유효하다.
+    excluded_actions: set = field(default_factory=set)
     # optimization_report: 이번 Optimize 방문의 사용자용 처방 리포트.
     #   원소 타입은 OptimizationReport(agents/optimize/schemas.py). core가 optimize를
     #   import하지 않도록 타입은 느슨하게 둔다. Serve가 마지막 방문 리포트를 읽는다.
