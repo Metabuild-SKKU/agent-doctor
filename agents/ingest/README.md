@@ -86,10 +86,10 @@ NOTION_CLIENT_SECRET=xxx
 cd C:\SKKU\agent_doctor_v2
 
 # Access Token 방식 테스트
-python tests/test_ingest.py
+python tests/check_ingest.py
 
 # OAuth 방식 테스트
-python tests/test_oauth.py
+python tests/check_oauth.py
 ```
 
 ### OAuth 테스트 사전 준비

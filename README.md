@@ -174,16 +174,16 @@ MCP 서버(stdio)는 검색을 로컬 FastAPI 서버에 위임합니다.
 
 ```bash
 # 에이전트 단독 (mock 데이터, 외부 의존성 없음)
-python tests/test_eval.py               # Eval STEP1~5
-python tests/test_index.py              # Index
+python tests/check_eval.py               # Eval STEP1~5
+python tests/check_index.py              # Index
 
 # unittest 계열
 python -m unittest tests.test_index_unit -v
 python -m unittest tests.test_optimizer tests.test_optimize_agent tests.test_config_mapper tests.test_ragbuilder_adapter
 
 # 외부 API 필요 (없으면 자동 스킵)
-python tests/test_ragas_eval.py         # RAGAS 실측 (OpenAI 키, ~$0.01–0.05)
-python tests/test_pipeline.py           # Ingest → Index → Serve (실제 Notion)
+python tests/check_ragas_eval.py         # RAGAS 실측 (OpenAI 키, ~$0.01–0.05)
+python tests/check_pipeline.py           # Ingest → Index → Serve (실제 Notion)
 ```
 
 ---
