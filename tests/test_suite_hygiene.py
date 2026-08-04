@@ -46,6 +46,23 @@ def _has_collectable_test(tree: ast.AST) -> bool:
     return False
 
 
+# 최상위에서 허용하는 호출. 이 저장소의 test_*.py 가 실제로 쓰는 건 이거 하나뿐이라
+# (62개 중 44개, 다른 최상위 호출은 0개) 예외를 넓게 열 이유가 없다.
+_ALLOWED_TOPLEVEL_CALLS = ("sys.path.insert(",)
+
+
+def _toplevel_side_effects(tree: ast.Module) -> list[str]:
+    """import 만으로 실행되는 최상위 호출. `if __name__` 가드 안이나 함수 안은 안 센다."""
+    out: list[str] = []
+    for node in tree.body:
+        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)):
+            continue
+        src = ast.unparse(node.value)
+        if not src.startswith(_ALLOWED_TOPLEVEL_CALLS):
+            out.append(src.splitlines()[0][:50])
+    return out
+
+
 class TestFileNamingTest(unittest.TestCase):
     def test_every_test_file_actually_contains_tests(self):
         offenders: list[str] = []
@@ -61,6 +78,23 @@ class TestFileNamingTest(unittest.TestCase):
             " check_*.py 로 이름을 바꾸세요: " + ", ".join(offenders),
         )
 
+    def test_no_test_file_runs_anything_on_import(self):
+        """'테스트가 있나'만 보면 스크립트에 테스트 하나만 붙어도 다시 새어 들어온다.
+        수집을 유발하는 건 이름이지만 시간을 태우고 전역 상태를 더럽히는 건 최상위 실행이다."""
+        offenders: list[str] = []
+        for path in sorted(TESTS_DIR.glob("test_*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            calls = _toplevel_side_effects(tree)
+            if calls:
+                offenders.append(f"{path.name}({', '.join(calls[:2])})")
+
+        self.assertEqual(
+            offenders, [],
+            "import 만으로 실행되는 최상위 코드가 있습니다. `if __name__ == '__main__':` 안으로"
+            " 옮기거나, 수동 점검 스크립트라면 check_*.py 로 이름을 바꾸세요: "
+            + ", ".join(offenders),
+        )
+
     def test_detector_recognizes_both_styles(self):
         """탐지기가 조용히 '전부 통과'로 굳는 회귀를 막는다."""
         self.assertTrue(_has_collectable_test(ast.parse("def test_x():\n    pass\n")))
@@ -72,6 +106,18 @@ class TestFileNamingTest(unittest.TestCase):
     def test_detector_rejects_a_bare_script(self):
         self.assertFalse(_has_collectable_test(
             ast.parse("print('실행됨')\nrun_everything()\n")))
+
+    def test_side_effect_detector_catches_a_script_that_also_has_a_test(self):
+        """이 조합이 첫 탐지기의 구멍이다 — 테스트가 있어도 최상위는 그대로 돈다."""
+        tree = ast.parse("run_everything()\ndef test_x():\n    pass\n")
+        self.assertTrue(_has_collectable_test(tree))          # 첫 검사는 통과시킨다
+        self.assertEqual(_toplevel_side_effects(tree), ["run_everything()"])
+
+    def test_side_effect_detector_allows_the_repo_conventions(self):
+        self.assertEqual(_toplevel_side_effects(ast.parse(
+            "import sys\nsys.path.insert(0, '..')\n")), [])
+        self.assertEqual(_toplevel_side_effects(ast.parse(
+            "def main():\n    run()\nif __name__ == '__main__':\n    main()\n")), [])
 
     def test_scan_actually_reads_files(self):
         """glob 이 빈 목록이면 본 테스트가 무의미하게 통과한다."""

@@ -245,6 +245,31 @@ class GoldErrorProbeMarkTest(unittest.TestCase):
         self.assertIn("❌", header)
         self.assertNotIn("골드 검수", header)
 
+    def _summary_line(self, records):
+        import io
+        import contextlib
+        from agents.eval import agent as eval_agent
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            eval_agent._log_diagnosis_summary(records)
+        return buf.getvalue()
+
+    def test_step4_summary_splits_gold_review_out_of_failures(self):
+        """probe 줄은 🔍 인데 마감 요약만 실패에 얹으면 같은 STEP 안에서 수가 어긋난다."""
+        ok = EvalRecord(probe=Probe(probe_id="ok", question="q", source="taxonomy"))
+        line = self._summary_line([ok, self._rec_with("bad_gold_chunk"),
+                                   self._rec_with("retrieval_low_rank")])
+
+        self.assertIn("성공 1 / 실패 1 / 골드 검수 1", line)
+
+    def test_step4_summary_omits_the_slot_when_there_is_no_gold_error(self):
+        ok = EvalRecord(probe=Probe(probe_id="ok", question="q", source="taxonomy"))
+        line = self._summary_line([ok, self._rec_with("retrieval_low_rank")])
+
+        self.assertIn("성공 1 / 실패 1", line)
+        self.assertNotIn("골드 검수", line)
+
 
 if __name__ == "__main__":
     unittest.main()

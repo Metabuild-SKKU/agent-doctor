@@ -1,11 +1,11 @@
-# tests/test_ragas_eval.py
+# tests/check_ragas_eval.py
 # ragas_eval 을 **실제 LLM API** 로 검증. (모듈 코드 변경 없이 함수 직접 호출)
 #
 # 실행:
 #   1) .env 에 EVAL_LLM_PROVIDER 와 그 provider 의 키 설정
 #      (openai→OPENAI_API_KEY / gemini→GEMINI_API_KEY / github→GITHUB_TOKEN)
-#   2) python tests/test_ragas_eval.py
-#      - LLM 입출력을 보고 싶으면:  EVAL_DEBUG=1 python tests/test_ragas_eval.py
+#   2) python tests/check_ragas_eval.py
+#      - LLM 입출력을 보고 싶으면:  EVAL_DEBUG=1 python tests/check_ragas_eval.py
 #   ※ 실제 API 호출이라 provider 에 따라 소액 비용 발생. 키 없으면 자동 스킵.
 #
 # 검증 전략: LLM은 temperature=0 이어도 완벽 결정적이진 않으므로, 절대값 대신

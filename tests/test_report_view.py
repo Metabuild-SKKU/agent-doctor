@@ -385,6 +385,22 @@ class ReportViewRecommendationsTest(unittest.TestCase):
         self.assertNotIn("검수", action("taxonomy"))  # 우리가 만든 probe는 재생성 대상
         self.assertIn("재생성", action("taxonomy"))
 
+    def test_bad_gold_chunk_shows_the_gold_it_has_now(self):
+        """이 probe 는 '실패한 검증 질문'에서 빠지므로 남은 권고가 리포트의 유일한 노출
+        지점이다. 제목·CTA 가 비어 generic 문구로 뭉개지면 무슨 조치인지 알 수 없다."""
+        probe = Probe(probe_id="q1", question="2골 넣은 선수는?", source="taxonomy",
+                      ground_truth="아메드 무사", gold_chunk_ids=["chunk_010", "chunk_011"])
+        f = Finding(finding_id="q1:bad_gold_chunk", type="gap", severity="warning",
+                    description="[D그룹] bad_gold_chunk", label="bad_gold_chunk",
+                    confirmed=True, affected_probes=["q1"], metadata={"group": "D"})
+
+        rec = build_report_view(self._state([f], [probe]))["recommendations"][0]
+
+        self.assertIn("근거 지정이 틀린", rec["title"])
+        self.assertIn("재지정", rec["cta"])
+        self.assertIn("chunk_010", rec["items"][0]["where"])   # 고칠 대상은 청크
+        self.assertEqual(rec["items"][0]["gold"], "아메드 무사")  # 옮길 곳 찾는 단서
+
     def test_confirmed_actionable_excluded_from_recommendations(self):
         # 확정 자동처방 대상(retrieval_low_rank)은 dxs/rxs 몫 — 남은 권고에서 제외.
         finding = Finding(finding_id="p1:retrieval_low_rank", type="retrieval_failure",

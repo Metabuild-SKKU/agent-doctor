@@ -732,12 +732,17 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
 
 
 def _log_diagnosis_summary(records: list[EvalRecord]) -> None:
-    """STEP4 마감 요약 — 성공/실패 probe 수와 Finding 확정·예비 내역."""
+    """STEP4 마감 요약 — 성공/실패/골드 검수 probe 수와 Finding 확정·예비 내역."""
     findings = [f for r in records for f in r.findings]
-    failed = sum(1 for r in records if r.findings)
+    # probe 줄과 같은 3분할. 여기만 2분할로 두면 probe 는 🔍 로 찍히는데 마감 요약은
+    # 그 건수를 실패에 얹어, 같은 STEP 안에서 실패 수가 어긋난다.
+    gold_errors = sum(1 for r in records if is_gold_labeling_error(r))
+    failed = sum(1 for r in records if r.findings) - gold_errors
     confirmed = sum(1 for f in findings if f.confirmed)
     # '↳' 는 step() 의 마감줄 전용 — 여기서 같이 쓰면 STEP4 끝에 화살표 두 줄이 붙는다.
-    line = f"  판정: 성공 {len(records) - failed} / 실패 {failed}"
+    line = f"  판정: 성공 {len(records) - failed - gold_errors} / 실패 {failed}"
+    if gold_errors:
+        line += f" / 골드 검수 {gold_errors}"
     if findings:
         line += (f" · Finding {len(findings)}건 "
                  f"(확정 {confirmed} · 예비 {len(findings) - confirmed})")
