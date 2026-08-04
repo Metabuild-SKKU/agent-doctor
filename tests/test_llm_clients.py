@@ -153,6 +153,26 @@ class OpenAiChatParamsTest(unittest.TestCase):
         self.assertEqual(kwargs["temperature"], 0.3)
         self.assertNotIn("max_completion_tokens", kwargs)
 
+    def test_openrouter_disables_reasoning_by_default(self):
+        # 추론 토큰은 output 으로 과금된다. 기본은 끔.
+        with patch.dict(os.environ, {"OPENROUTER_REASONING": ""}, clear=False):
+            call("deepseek/deepseek-v4-flash-0731",
+                 base_url=llm_clients.OPENROUTER_BASE_URL)
+        extra = FakeOpenAI.last_kwargs["extra_body"]
+        self.assertEqual(extra["reasoning"], {"enabled": False})
+        self.assertEqual(extra["usage"], {"include": True})   # 비용 집계는 유지
+
+    def test_openrouter_reasoning_can_be_reenabled(self):
+        with patch.dict(os.environ, {"OPENROUTER_REASONING": "1"}, clear=False):
+            call("deepseek/deepseek-v4-flash-0731",
+                 base_url=llm_clients.OPENROUTER_BASE_URL)
+        self.assertNotIn("reasoning", FakeOpenAI.last_kwargs["extra_body"])
+
+    def test_non_openrouter_endpoints_are_untouched(self):
+        # OpenRouter 전용 파라미터라 순정 OpenAI·GitHub Models 로는 보내지 않는다.
+        call("gpt-4o")
+        self.assertNotIn("extra_body", FakeOpenAI.last_kwargs)
+
     def test_large_output_cap_does_not_open_a_retry_path(self):
         # 이 계열의 상한을 재시도 목표치보다 낮추면, 상한을 넘는 호출이 "잘린 응답 값 +
         # 재시도 값" 을 둘 다 지불한다(8K+25K=33K > 25K). 상한이 막으려던 폭주에서

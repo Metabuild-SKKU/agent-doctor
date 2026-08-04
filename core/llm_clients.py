@@ -63,6 +63,17 @@ _warned_ignored_temperature: set[str] = set()
 _warn_lock = threading.Lock()
 
 
+def _openrouter_reasoning_disabled() -> bool:
+    """OpenRouter 호출에서 추론 토큰을 끌지. 기본 끔(=True).
+
+    추론 토큰은 output 으로 과금되는데 RAGAS 판정에서 비용의 대부분을 차지한다.
+    끄면 싸지지만 판정 품질이 떨어질 수 있다 — 근거 뒷받침 여부를 따지는 작업이라
+    추론이 도움이 되는 쪽이다. 점수가 거칠어지면 OPENROUTER_REASONING=1 로 되살린다.
+    """
+    return (os.getenv("OPENROUTER_REASONING", "0").strip().lower()
+            not in {"1", "true", "yes", "on"})
+
+
 def _bare_model_name(model: str) -> str:
     """'publisher/model' 형식에서 모델명만. GitHub Models·OpenRouter 가 이 형식을 쓴다."""
     return model.rsplit("/", 1)[-1].strip().lower()
@@ -150,7 +161,14 @@ def openai_chat(
     base_kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
     if base_url == OPENROUTER_BASE_URL:
         # 응답 usage 에 실제 과금액(cost)을 함께 받는다 — 추가 비용·지연 없음.
-        base_kwargs["extra_body"] = {"usage": {"include": True}}
+        extra: dict = {"usage": {"include": True}}
+        if _openrouter_reasoning_disabled():
+            # 추론 토큰은 output 으로 과금된다. 실측(deepseek, RAGAS 판정 1회)에서 출력
+            # 2,708 토큰 중 대부분이 추론이었고 JSON 본문은 수백 토큰이었다.
+            # 주의: include_reasoning=false 는 "안 보여줄 뿐" 이라 여전히 과금된다.
+            # 실제로 끄려면 reasoning.enabled=false 여야 한다.
+            extra["reasoning"] = {"enabled": False}
+        base_kwargs["extra_body"] = extra
 
     reasoning = _is_reasoning_model(model)
     if reasoning and temperature != 1.0:
