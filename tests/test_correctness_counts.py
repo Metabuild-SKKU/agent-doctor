@@ -8,6 +8,8 @@ answer_correctness 의 TP/FP/FN 카운트 노출 계약 고정.
   2. degraded(factual 실패) 면 카운트가 없고, answer_correctness 점수 자체는 영향받지 않는다.
   3. 새 키가 리포트/스코어링 평균에 섞이지 않는다 (둘 다 키 allowlist 순회라는 보장).
 """
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -42,8 +44,10 @@ class _StubJudge:
         }
         self.statements = statements
         self.embed = embed
+        self.caps: dict = {}
 
-    def chat(self, judge, prompt):
+    def chat(self, judge, prompt, label="", max_output_tokens=None):
+        self.caps[label] = max_output_tokens                   # 호출별 적용 상한 기록
         if "statements" in prompt and "TP" not in prompt:      # StatementGenerator 호출
             return {"statements": ["s1", "s2"]} if self.statements else {}
         return self.payload
@@ -91,6 +95,62 @@ class CorrectnessCountsTest(_StubbedRagas):
         factual = 2 / (2 + 0.5 * (1 + 3))
         self.assertAlmostEqual(out["answer_correctness"],
                                (w_f * factual + w_s * 1.0) / (w_f + w_s))
+
+
+class JudgeOutputCapTest(_StubbedRagas):
+    """출력이 입력 크기에 비례하는 심판 호출에 상한이 실제로 실리는지 고정.
+
+    이 PR 의 유일한 동작 변경이라 되돌려도(4096→2048) 아무 테스트가 안 잡혔다.
+    상한이 빠지면 골드가 장문일 때 응답이 잘려 factual 성분이 죽는다(degrade).
+    """
+
+    def test_correctness_calls_carry_the_large_cap(self):
+        stub = _StubJudge(2, 1, 3)
+        self._run(stub)
+        cap = metrics_ragas._LARGE_JUDGE_MAX_OUTPUT_TOKENS
+        for label in ("correctness.answer_statements", "correctness.gold_statements",
+                      "correctness.classify"):
+            self.assertEqual(stub.caps.get(label), cap, f"{label} 에 상한이 안 실렸다")
+
+    def test_large_cap_is_above_the_provider_default(self):
+        """공용 기본값보다 커야 의미가 있다 — 같아지면 상향이 no-op 이 된다."""
+        from core.llm_clients import DEFAULT_MAX_OUTPUT_TOKENS
+        self.assertGreater(metrics_ragas._LARGE_JUDGE_MAX_OUTPUT_TOKENS,
+                           DEFAULT_MAX_OUTPUT_TOKENS)
+
+
+class DegradeReasonLogTest(_StubbedRagas):
+    """degrade·미측정의 '원인'이 로그로 남는지 — 리포트엔 건수만 남아 원인 추적이 안 됐다."""
+
+    def _log(self, stub):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            out = self._run(stub)
+        return out, buf.getvalue()
+
+    def test_classification_failure_reason_logged(self):
+        out, log = self._log(_StubJudge(0, 0, 0))
+        self.assertTrue(out["answer_correctness_degraded"])
+        self.assertIn("TP/FP/FN 분류 무응답", log)
+
+    def test_decomposition_empty_reason_logged_without_calling_it_a_failure(self):
+        """기권 답변은 0문장이 정상 분해 결과다 — '실패'로 단정하면 안 된다."""
+        out, log = self._log(_StubJudge(1, 0, 0, statements=False))
+        self.assertTrue(out["answer_correctness_degraded"])
+        self.assertIn("분해 결과 없음", log)
+        self.assertNotIn("분해 실패", log)
+
+    def test_both_components_failed_still_logs_cause(self):
+        """두 성분 다 죽으면 degraded 플래그가 안 붙어 리포트 집계에도 안 잡힌다 —
+        여기서 안 남기면 의미축이 왜 없는지 로그에서 아예 못 찾는다."""
+        out, log = self._log(_StubJudge(0, 0, 0, embed=False))
+        self.assertEqual(out, {})
+        self.assertIn("answer_correctness 미측정", log)
+        self.assertIn("임베딩 실패", log)
+
+    def test_measured_run_logs_nothing(self):
+        _, log = self._log(_StubJudge(2, 1, 3))
+        self.assertEqual(log, "")
 
 
 class CorrectnessCountsAccessorTest(unittest.TestCase):

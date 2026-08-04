@@ -61,7 +61,7 @@ class _Stub:
         self.chat_calls: list[str] = []
         self.embed_calls: list[list[str]] = []
 
-    def chat(self, judge, prompt, max_output_tokens=None):
+    def chat(self, judge, prompt, max_output_tokens=None, label=""):
         self.chat_calls.append(prompt)
         for marker, reply in _LEGACY_REPLIES:
             if marker in prompt:
@@ -205,7 +205,9 @@ class FusedRepairTest(_FusedTestBase):
         self.stub.fused_payload = payload
         out = metrics_ragas.evaluate_real_track(_record(), True)
         self.assertAlmostEqual(out["context_recall"], 0.5)          # 보수됨
-        self.assertEqual(len(self.stub.chat_calls), 2)              # fused 1 + recall 1
+        # fused 1 + fused 재요청 1 + recall 보수 1. 재요청도 같은 결손 응답을 돌려주는
+        # 스텁이라 개별 보수까지 간다 — 실제로는 재요청에서 채워지면 보수가 안 돈다.
+        self.assertEqual(len(self.stub.chat_calls), 3)
 
 
 class FusedMaterialGuardTest(_FusedTestBase):

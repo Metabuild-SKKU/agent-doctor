@@ -98,13 +98,16 @@ def chat_json(
     model: str | None = None,
     *,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    label: str = "",
 ) -> dict:
     """JSON 응답 강제 chat 호출 → dict. 실패 시 {} (API 예외는 호출부로 전파).
 
     빈 응답 / 파싱 실패 / 타입 불일치는 사유별 로그를 남기고 {} 를 돌려준다. Gemini 가
     dict 를 [ {…} ] 로 감싸 반환한 경우(길이 1 리스트)는 언랩해 dict 로 돌려준다.
     상한에 걸려 잘린 응답은 JSON 파싱에 실패해 {} 가 되므로, 구조가 큰 응답을 기대하는
-    쪽은 max_output_tokens 를 올려 잡을 것."""
+    쪽은 max_output_tokens 를 올려 잡을 것.
+
+    label 은 실패 로그에 찍히는 호출 이름(어느 지표가 죽었는지 구분용)."""
     def _do():
         provider = _provider()
         if provider == "gemini":
@@ -131,13 +134,20 @@ def chat_json(
     # 이 침묵이 Gemini 리스트 래핑을 "빈 응답"으로 오인해 쓰레기 Probe 폴백을 유발했다).
     # 사유별로 로그만 남기고 반환은 {} 로 유지한다 — 호출부 넷이 전부 {} 를 "결측"으로
     # 흡수하는 구조라, 예외로 바꾸면 그 넷을 다 손대야 한다.
+    where = f" [{label}]" if label else ""
     if not (raw or "").strip():
-        print("[Eval] chat_json 빈 응답 → {}")
+        print(f"[Eval] chat_json{where} 빈 응답 → {{}}")
         return {}
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError:
-        print(f"[Eval] chat_json JSON 파싱 실패(앞 80자: {raw[:80]!r}) → {{}}")
+        # 응답 길이와 그 호출에 적용된 상한을 함께 남긴다 — 상한 절단이면 끝이 잘린 채로
+        # 끝나므로 "모델이 JSON 을 못 만든 것"과 "만들다 잘린 것"을 로그만으로 가를 수 있다.
+        # 상한값을 같이 찍는 이유: 길이는 '문자 수'고 상한은 '토큰 수'라 길이만으로는
+        # 상한에 붙었는지 판정할 수 없다(한국어는 문자당 토큰 비율이 커서 더 그렇다).
+        print(f"[Eval] chat_json{where} JSON 파싱 실패({len(raw)}자, "
+              f"상한 {max_output_tokens}토큰, "
+              f"앞 80자: {raw[:80]!r}, 끝 40자: {raw[-40:]!r}) → {{}}")
         return {}
     if isinstance(obj, dict):
         return obj
@@ -147,7 +157,7 @@ def chat_json(
     # 않는다 — 잘못된 데이터를 정상인 척 통과시키지 않기 위해서다.
     if isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], dict):
         return obj[0]
-    print(f"[Eval] chat_json 타입 불일치({type(obj).__name__}"
+    print(f"[Eval] chat_json{where} 타입 불일치({type(obj).__name__}"
           f"{f', len={len(obj)}' if isinstance(obj, list) else ''}) → {{}}")
     return {}
 

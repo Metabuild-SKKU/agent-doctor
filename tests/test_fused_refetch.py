@@ -49,7 +49,7 @@ class RefetchTest(unittest.TestCase):
     def _run(self, first: dict, retry: dict | None = None):
         calls = []
 
-        def fake_chat(judge, prompt, max_output_tokens=None):
+        def fake_chat(judge, prompt, max_output_tokens=None, label=""):
             # 여기 오는 호출은 전부 재요청이다 — 첫 응답(first)은 인자로 이미 넘어온다.
             calls.append(prompt)
             return {} if retry is None else retry

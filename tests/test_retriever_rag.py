@@ -14,6 +14,7 @@ from agents.rag.retriever import (
     build_retriever,
     get_retriever,
     reset_retriever_cache,
+    _dedup_by_chunk_id,
     _mmr_select,
 )
 from agents.rag.generator import (
@@ -54,6 +55,37 @@ class RetrieverTests(unittest.TestCase):
         self.assertTrue(response["fallback_used"])
         self.assertEqual(response["search_mode"], "keyword")
         self.assertEqual(response["results"][0]["chunk_id"], "remote")
+
+    def test_dedup_keeps_first_occurrence_of_each_chunk_id(self):
+        deduped = _dedup_by_chunk_id([
+            {"chunk_id": "a", "score": 0.9},
+            {"chunk_id": "b", "score": 0.8},
+            {"chunk_id": "a", "score": 0.1},
+        ])
+        self.assertEqual([r["chunk_id"] for r in deduped], ["a", "b"])
+        self.assertEqual(deduped[0]["score"], 0.9)   # 상위 순위 쪽이 남는다
+
+    def test_dedup_does_not_collapse_items_missing_a_chunk_id(self):
+        """id 결측(payload 누락 → "")끼리는 서로 다른 청크다 — 접으면 조용히 버려진다."""
+        deduped = _dedup_by_chunk_id([
+            {"chunk_id": "", "text": "첫째"},
+            {"chunk_id": "", "text": "둘째"},
+            {"text": "id 키 자체가 없음"},
+        ])
+        self.assertEqual([r.get("text") for r in deduped], ["첫째", "둘째", "id 키 자체가 없음"])
+
+    def test_duplicate_input_chunks_do_not_consume_two_slots(self):
+        """중복 청크가 들어와도 후보 슬롯은 유지돼야 한다 — 검색 뒤에 접으면 그만큼 빈다."""
+        chunks = self._policy_chunks()
+        retriever = build_retriever(
+            [chunks[0], chunks[0], chunks[1]], config={"top_k": 2}
+        )
+
+        self.assertEqual([c["chunk_id"] for c in retriever.chunks], ["remote", "vacation"])
+
+        response = retriever.search_with_details("재택근무 연차", top_k=2)
+        self.assertEqual(response["search_mode"], "keyword")
+        self.assertEqual([r["chunk_id"] for r in response["results"]], ["remote", "vacation"])
 
     def _policy_chunks(self):
         return [
@@ -200,7 +232,7 @@ class RetrieverTests(unittest.TestCase):
             ]
 
         with patch("agents.rag.retriever.keyword_search", side_effect=fake_keyword_search):
-            with patch("agents.rag.retriever.rerank_with_status", side_effect=lambda q, r, model_name, top_k: (r[:top_k], "applied")):
+            with patch("agents.rag.retriever.rerank_with_status", side_effect=lambda q, r, model_name, top_k: (r[:top_k], "applied", 0.0)):
                 response = retriever.search_with_details("t=pi/4 일 때 x=2인지 확인하라", top_k=5)
 
         self.assertEqual(seen["top_k"], 20)

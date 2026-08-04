@@ -132,7 +132,8 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
         failed_questions=_failed_questions(records),
         findings_summary=_findings_summary(records, mode),
         ragas_scores=scores,
-        runtime_summary={"reranker": reranker_runtime},
+        runtime_summary={"reranker": reranker_runtime,
+                         "search": _search_runtime(records)},
         oracle_accuracy=oracle_acc,
         overall_score=overall_val,
         composite_score=compute_composite(scorable).as_dict(),  # 종합점수(0~100) — bad_gold 제외
@@ -281,6 +282,10 @@ def _reranker_runtime(records: list[EvalRecord]) -> dict:
         str(record.retrieval_details.get("reranker_status", "disabled"))
         for record in records
     )
+    # 비용도 함께 집계한다 — 검색 시간의 대부분이 리랭크(쌍 수 × 쌍당 텍스트 길이)에서 나오는데
+    # 실행 여부만 남기면 chunk_size 처방이 쌍당 비용을 몇 배로 올려도 아무 신호가 안 남는다.
+    seconds = sum(_num(r.retrieval_details.get("rerank_seconds")) for r in records)
+    pairs = int(sum(_num(r.retrieval_details.get("rerank_pairs")) for r in records))
     return {
         "enabled": enabled_probes > 0,
         "enabled_probes": enabled_probes,
@@ -288,7 +293,48 @@ def _reranker_runtime(records: list[EvalRecord]) -> dict:
         "applied": applied,
         "failed": max(0, attempted - applied),
         "status_counts": dict(status_counts),
+        "seconds": round(seconds, 2),
+        "pairs": pairs,
+        "ms_per_pair": round(seconds * 1000 / pairs, 1) if pairs else None,
+        # 상한이 걸린 채 돌았나 — 폴백으로 빠진 실행과 구분해야 다음 처방 판정이
+        # capped/uncapped 를 같은 조건으로 묶지 않는다. None = 상한 없이 돎.
+        "max_lengths": sorted(
+            {
+                r.retrieval_details.get("rerank_max_length")
+                for r in records
+                if r.retrieval_details.get("rerank_pairs")
+            },
+            key=lambda v: (v is None, v),
+        ),
     }
+
+
+def _search_runtime(records: list[EvalRecord]) -> dict:
+    """검색(STEP2 Phase A) 총시간과 그중 리랭크 몫. 느린 구간의 귀속을 한 번에 가른다.
+
+    리랭크 시간만 있으면 분자만 아는 셈이라 '검색이 느렸나, 생성이 느렸나'를 콘솔 로그와
+    눈으로 대조해야 한다. 검색 총시간을 함께 남기면 STEP2 소요에서 빼는 것만으로 생성 몫도
+    나온다(검색 = Σsearch_seconds / 생성 = STEP2 소요 - 검색).
+    """
+    seconds = sum(_num(r.retrieval_details.get("search_seconds")) for r in records)
+    rerank = sum(_num(r.retrieval_details.get("rerank_seconds")) for r in records)
+    return {
+        "seconds": round(seconds, 2),
+        # search_seconds 를 실은 레코드만 센다 — 옛 계약(키 없음) 레코드까지 세면
+        # 분자에 기여하지 않는 건이 분모에 들어가 건당 시간이 희석된다.
+        "searches": sum(
+            1 for r in records if r.retrieval_details.get("search_seconds") is not None
+        ),
+        "rerank_share": round(rerank / seconds, 3) if seconds > 0 else None,
+    }
+
+
+def _num(value) -> float:
+    """retrieval_details 에서 읽은 수치를 float 로. 없거나 형식 불량이면 0.0
+    (옛 계약의 retriever·테스트 주입 결과에는 키가 아예 없다)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value)
 
 
 def _ragas_means(records: list[EvalRecord]) -> dict:
@@ -399,6 +445,21 @@ def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     if rs.get("fused_repaired"):
         print(f"  ⚠ RAGAS fused 보수 {rs['fused_repaired']}건 — 통합 응답 결손으로 개별 호출 재실행. "
               f"EVAL_RAGAS_FUSED_MAX_TOKENS 를 올릴 신호")
+    runtime = report.runtime_summary or {}
+    search = runtime.get("search") or {}
+    rerank = runtime.get("reranker") or {}
+    # 검색 비용 — chunk_size 처방이 검색 시간에 준 영향과 그중 리랭크 몫을 한 줄로.
+    if search.get("seconds"):
+        line = f"  검색 {search['seconds']}초 (probe {search['searches']})"
+        if rerank.get("pairs"):
+            line += (f" · 리랭크 {rerank['seconds']}초 {rerank['pairs']}쌍 "
+                     f"(쌍당 {rerank['ms_per_pair']}ms, 검색의 {search['rerank_share']})")
+        # 실패한 리랭크의 벽시계는 쌍당 비용에서 빼지만(순도), 그 사실까지 지우면 안 된다 —
+        # 큰 청크로 추론이 오래 돌다 실패하면 그 시간은 검색 총시간에만 남아, 리랭크가 원인인데
+        # '검색이 느렸다'로 읽힌다.
+        if rerank.get("failed"):
+            line += f" · 리랭크 실패 {rerank['failed']}건(시간 미집계)"
+        print(line)
     if report.findings:
         # 타입·라벨 분포 모두 probe당 1로 정규화(가중): 한 probe 의 N개 finding → 각 1/N
         # (타입=처방 그룹 4종, 라벨=세분화 진단명. 타입만 보면 gap 처럼 뭉뚱그려져 원인이 안 보인다.)

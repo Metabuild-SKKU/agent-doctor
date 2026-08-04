@@ -158,7 +158,8 @@ AGENTS/README에 별도 처방 테이블을 복제하지 않는다.
 | 파일 | 책임 | 넣지 말아야 할 것 |
 | --- | --- | --- |
 | `agent.py` | planner → optimizer → mapper → history → reporter 연결, state 갱신 | 진단 규칙, backend 세부 구현 |
-| `planner.py` | finding 분류, `applies_when`, 우선순위, 단일 후보/request/decision 생성 | state 직접 수정, config 적용 |
+| `planner.py` | finding 분류, 우선순위, 단일 후보/request/decision 생성 | state 직접 수정, config 적용 |
+| `action_aggregator.py` | finding → ActionSupport 집계, `applies_when` 대조(planner 에서 이관) | state 직접 수정, 후보값 수학 |
 | `rules.py` | 라벨별 선언적 처방 데이터와 조회 함수 | 실행·탐색 로직 |
 | `schemas.py` | Optimize 내부 dataclass와 Literal 계약 | 실행 로직, 다른 Optimize 모듈 import |
 | `optimizer.py` | capability/constraint, backend 선택, 공통 결과 정규화와 안전 fallback | state 직접 수정 |
