@@ -56,6 +56,10 @@ _MAX_UNJUDGEABLE_ATTEMPTS = 1
 # baseline 관측값은 방문마다 갱신되므로 다음 Eval에서 성립할 수 있다. min_delta 도입
 # 전 이 실패는 retryable 경로로 2회까지 허용됐고, 그 예산을 그대로 유지한다.
 _MAX_MEASUREMENT_FAILURE_ATTEMPTS = 2
+# 품질 저하가 확인되어 롤백된 action 의 재선택 허용 횟수. 1회로 막으면 "다른 baseline
+# 에서는 다시 시도한다"(구현계획 §5.1)가 통째로 죽고, 제한이 없으면 baseline 이 조금만
+# 움직여도 같은 처방을 계속 재시도한다. 옮겨간 baseline 에서 한 번만 더 확인한다.
+_MAX_CONFIRMED_ROLLBACK_ATTEMPTS = 2
 _OPTIMIZE_VISIT_LIMIT_REASON = "Optimize 절대 방문 상한 도달"
 
 # ── reranker guardrail 의 대상 action ──────────────────────────────
@@ -272,48 +276,59 @@ def _unjudgeable_exclusions(
 def _rollback_action_cooldown_exclusions(
     optimization_history: list[OptimizationHistoryItem],
 ) -> set[str]:
-    """품질 저하로 롤백된 action 은 같은 optimize 실행 안에서 다시 고르지 않는다.
+    """품질 저하가 확인된 롤백이 쌓인 action 을 같은 실행 안에서 제외한다.
 
     ``blocked_action_attempts`` 는 의도적으로 baseline 이 바뀌면 풀리는 정확한 전이
-    차단이다. 그 의미는 유지하되, 이미 한 번 점수 하락이 확인된 action 을 작은
-    baseline 변화마다 바로 재시도하면 예산만 태우므로 history 기반 cooldown 을
-    별도로 얹는다.
+    차단이다. 그런데 baseline 지문이 config 전체를 보므로 무관한 축이 조금만 움직여도
+    풀려, 방금 점수를 떨어뜨린 처방이 곧바로 다시 선택된다. 그 의미는 그대로 두고
+    history 기반 횟수 제한을 따로 얹는다.
+
+    세는 대상은 **품질이 실제로 나빠진 롤백**뿐이다. 측정 불가(unjudgeable)·study
+    오류·방문 상한은 처방의 잘못이 아니고, 마진 미달(margin_rejected)은 점수가 오르긴
+    한 시도라 그 축이 나쁘다는 증거가 아니다.
     """
-    excluded: set[str] = set()
+    confirmed: Counter[str] = Counter()
     for item in optimization_history:
         action_key = item.action_key or ""
         if not action_key or item.status != "failed":
             continue
-        if item.metadata.get("unjudgeable"):
-            continue
-        if item.metadata.get("study_error") or item.metadata.get("visit_limit_reached"):
-            continue
         if item.rollback_reason is None:
             continue
-        excluded.add(action_key)
-    return excluded
+        metadata = item.metadata
+        if metadata.get("unjudgeable"):
+            continue
+        if metadata.get("study_error") or metadata.get("visit_limit_reached"):
+            continue
+        if metadata.get("margin_rejected"):
+            continue
+        confirmed[action_key] += 1
+    return {
+        key
+        for key, count in confirmed.items()
+        if count >= _MAX_CONFIRMED_ROLLBACK_ATTEMPTS
+    }
 
 
 def _active_excluded_action_keys(state: AgentDoctorState) -> set[str]:
-    """현재 baseline 에서 실제로 닫혀 있는 action key 를 로그용으로 모은다."""
+    """지금 baseline 에서 실제로 닫혀 있는 action key 를 로그용으로 모은다.
+
+    판정·롤백이 끝난 뒤에 불러야 한다. 롤백은 index_config 를 되돌리므로 그 전에
+    부르면 planner 가 서지도 않을 baseline 으로 지문을 비교하게 된다.
+    """
     active = set(_unjudgeable_exclusions(state.optimization_history))
     active.update(_rollback_action_cooldown_exclusions(state.optimization_history))
 
-    for key in state.blocked_action_attempts:
-        current = history.baseline_fingerprint(
-            state.index_config,
-            key.action_key,
-            state.runtime_capabilities,
-        )
-        if key.baseline_fingerprint == current:
-            active.add(key.action_key)
-
-    for key in state.completed_action_studies:
-        current = history.baseline_fingerprint(
-            state.index_config,
-            key.action_key,
-            state.runtime_capabilities,
-        )
+    # 지문은 action key 마다 한 번만 계산한다(sweep 이 후보마다 attempt key 를 쌓는다).
+    fingerprints: dict[str, str] = {}
+    for key in (*state.blocked_action_attempts, *state.completed_action_studies):
+        current = fingerprints.get(key.action_key)
+        if current is None:
+            current = history.baseline_fingerprint(
+                state.index_config,
+                key.action_key,
+                state.runtime_capabilities,
+            )
+            fingerprints[key.action_key] = current
         if key.baseline_fingerprint == current:
             active.add(key.action_key)
 
@@ -475,12 +490,20 @@ def _log_eval_line(report: DiagnosticReport | None) -> None:
 
 
 def _log_optimize_input(state: AgentDoctorState) -> None:
-    """이번 Optimize 방문의 진단 입력과 이미 소진된 action 을 출력한다."""
+    """이번 Optimize 방문의 진단 입력을 출력한다."""
     print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations} (진단 입력)")
     _log_eval_line(state.report)
     print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(state.report)}")
-    # baseline 이 바뀌어 이미 풀린 과거 차단은 표시하지 않는다. 로그에 찍힌 action 이
-    # 바로 아래에서 선택되면 원인 추적이 꼬이므로, 현재 baseline 기준으로만 보여준다.
+
+
+def _log_excluded_actions(state: AgentDoctorState) -> None:
+    """planner 를 부르기 직전, 이번 선택에서 닫혀 있는 action 을 출력한다.
+
+    baseline 이 바뀌어 이미 풀린 과거 차단은 빼고 보여준다 — 로그에 찍힌 action 이
+    바로 아래에서 선택되면 원인 추적이 꼬인다. 진단 입력 로그가 아니라 여기서 찍는
+    것은 롤백이 index_config 를 되돌린 **뒤**라야 비교 기준이 planner 와 같아지기
+    때문이다.
+    """
     blocked_keys = sorted(_active_excluded_action_keys(state))
     if blocked_keys:
         print(f"[Optimize] 제외된 action: [{', '.join(blocked_keys)}]")
@@ -834,6 +857,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
         # (2) 새 처방 선택. 저비용 사전검증에서 baseline이 이기면 현재 처방을
         # 소진 처리하고, 재색인·iteration 증가 없이 같은 방문에서 다음 처방을 고른다.
+        _log_excluded_actions(state)
         while True:
             request, decision = planner.plan(state, blacklist=visit_exclusions)
             # planner 가 실행 불가로 거른 것 중 runtime·선행조건 사유는 보류로 보고한다.
