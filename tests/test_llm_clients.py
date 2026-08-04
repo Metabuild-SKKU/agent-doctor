@@ -153,13 +153,12 @@ class OpenAiChatParamsTest(unittest.TestCase):
         self.assertEqual(kwargs["temperature"], 0.3)
         self.assertNotIn("max_completion_tokens", kwargs)
 
-    def test_large_output_cap_is_tighter_than_reasoning_cap(self):
-        # 폭주 시 최악값을 결정하는 방어선이다. o-series 기준(25K)을 그대로 쓰면
-        # 이 계열엔 과하다 — 실측 2,708 토큰(한국어 RAGAS fused 판정) 대비 약 3배로 잡았다.
-        self.assertLess(llm_clients._LARGE_OUTPUT_MIN_TOKENS,
-                        llm_clients._REASONING_MIN_OUTPUT_TOKENS)
-        self.assertGreater(llm_clients._LARGE_OUTPUT_MIN_TOKENS,
-                           llm_clients.DEFAULT_MAX_OUTPUT_TOKENS)
+    def test_large_output_cap_does_not_open_a_retry_path(self):
+        # 이 계열의 상한을 재시도 목표치보다 낮추면, 상한을 넘는 호출이 "잘린 응답 값 +
+        # 재시도 값" 을 둘 다 지불한다(8K+25K=33K > 25K). 상한이 막으려던 폭주에서
+        # 오히려 비싸지므로 낮추지 않는다 — 이 관계가 깨지면 이중 과금이 되살아난다.
+        self.assertGreaterEqual(llm_clients._LARGE_OUTPUT_MIN_TOKENS,
+                                llm_clients._REASONING_MIN_OUTPUT_TOKENS)
 
     def test_large_output_model_keeps_larger_requested_cap(self):
         # 호출부가 이미 더 큰 값을 줬으면(fused RAGAS 등) 그쪽을 존중한다.
@@ -226,26 +225,14 @@ class TruncationRetryTest(unittest.TestCase):
         self.assertEqual(FakeOpenAI.calls[0]["max_completion_tokens"],
                          llm_clients._REASONING_MIN_OUTPUT_TOKENS)
 
-    def test_large_output_model_starts_tight_then_escalates(self):
-        # deepseek 은 실측(2,708 토큰) 기준의 좁은 상한으로 시작한다 — 폭주 최악값을
-        # 낮추기 위함. 그래도 잘리면 그때만 추론 모델 예산까지 올려 1회 재시도한다.
-        FakeOpenAI.script = [("", "length"), ('{"ok":1}', "stop")]
-        out, _ = call("deepseek/deepseek-v4-flash-0731", json_mode=True,
-                      max_output_tokens=2048)
-        self.assertEqual(len(FakeOpenAI.calls), 2)
-        self.assertEqual(FakeOpenAI.calls[0]["max_tokens"],
-                         llm_clients._LARGE_OUTPUT_MIN_TOKENS)
-        self.assertEqual(FakeOpenAI.calls[1]["max_tokens"],
-                         llm_clients._REASONING_MIN_OUTPUT_TOKENS)
-        self.assertEqual(out, '{"ok":1}')
-
-    def test_large_output_model_does_not_retry_when_it_fits(self):
-        # 평소(안 잘림)엔 1회로 끝난다 — 좁은 상한이 추가 호출을 유발하지 않는다.
-        FakeOpenAI.script = [('{"ok":1}', "stop")]
+    def test_large_output_model_never_pays_twice(self):
+        # 목록에 잡힌 계열은 첫 호출부터 재시도 목표치로 시작하므로, 잘려도 재시도가
+        # 열리지 않는다 — 이중 과금(잘린 응답 + 재시도) 이 발생하면 안 된다.
+        FakeOpenAI.script = [("", "length")]
         call("deepseek/deepseek-v4-flash-0731", json_mode=True, max_output_tokens=2048)
         self.assertEqual(len(FakeOpenAI.calls), 1)
         self.assertEqual(FakeOpenAI.calls[0]["max_tokens"],
-                         llm_clients._LARGE_OUTPUT_MIN_TOKENS)
+                         llm_clients._REASONING_MIN_OUTPUT_TOKENS)
 
 
 if __name__ == "__main__":
