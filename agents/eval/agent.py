@@ -850,7 +850,14 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
             f"{str(bool(rec.retrieval_details.get('search_fallback_used'))).lower()}, "
             f"reranker={rec.retrieval_details.get('reranker_status', 'disabled')}"
         )
-    metric_line = f"    recall@k={recall}  f1={f1}  oracle_f1={oracle}"
+    # recall 은 gold_spans 가 있으면 span 커버리지(빈틈없이 덮어야 1점)라, 이름만 'recall@k' 로
+    # 찍으면 '골드 청크가 검색 목록에 있는데 recall=0' 이 모순처럼 보인다. 기준과 청크 적중수를
+    # 함께 남겨 그 착시를 없앤다.
+    recall_note = f"recall@k({rec.recall_basis})={recall}"
+    if p.gold_chunk_ids:
+        hit = len(set(p.gold_chunk_ids) & set(rec.retrieved_chunk_ids))
+        recall_note += f"  gold청크 {hit}/{len(p.gold_chunk_ids)} 검색"
+    metric_line = f"    {recall_note}  f1={f1}  oracle_f1={oracle}"
     # 판정 기준은 f1 단독이 아니라 혼합 점수(answer_score = lexical·의미 가중합)다 —
     # 그 값과 의미축을 함께 남기지 않으면 'f1 이 낮은데 왜 통과(또는 통과 못)했나'를 로그만
     # 보고 알 수 없다. 의미축은 DEEP 에서만 측정되므로 있을 때만 붙인다.
@@ -858,6 +865,10 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
         metric_line += (f"  answer={_fmt_metric(rec.answer_score)}"
                         f"(의미 {_fmt_metric(rec.answer_semantic)}"
                         f", 커버리지 {_fmt_metric(rec.gold_coverage)})")
+    elif p.ground_truth and rec.ragas.get("answer_correctness_degraded"):
+        # 의미축이 죽어 lexical 단독으로 판정된 probe. 이 줄이 없으면 'f1=1.00 인데 실패'가
+        # 설명 없이 남는다 — 판정을 뒤집은 게 어휘 점수가 아니라 판정기 실패라는 걸 못 본다.
+        metric_line += "  answer=f1 단독(의미축 degrade)"
     print(metric_line)
     # gold 용어 별칭(자산총계↔총자산 등)이 실제로 점수를 올렸을 때만 — gold 품질 검수 신호다.
     if p.ground_truth and rec.best_gold_answer_f1 > rec.raw_f1_score:
