@@ -200,7 +200,7 @@ class RetrieverTests(unittest.TestCase):
             ]
 
         with patch("agents.rag.retriever.keyword_search", side_effect=fake_keyword_search):
-            with patch("agents.rag.retriever.rerank_with_status", side_effect=lambda q, r, model_name, top_k: (r[:top_k], "applied")):
+            with patch("agents.rag.retriever.rerank_with_status", side_effect=lambda q, r, model_name, top_k: (r[:top_k], "applied", 0.0)):
                 response = retriever.search_with_details("t=pi/4 일 때 x=2인지 확인하라", top_k=5)
 
         self.assertEqual(seen["top_k"], 20)

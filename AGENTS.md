@@ -61,6 +61,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 - 문서 임베딩과 질의 임베딩은 반드시 같은 모델·차원을 사용해야 합니다. 기존 컬렉션과 차원이
   다르면 오류가 나며, 재생성을 허용하려면 `index_config["recreate_collection_on_dimension_mismatch"] = True`를
   명시적으로 설정합니다.
+- **`try` 블록 안의 `print()` 문구에는 cp949에 없는 기호(em-dash `—`, 이모지, `✓`, `⚠`, `↳` 등)를 쓰지 않습니다.** 진입점이 `core.console.force_utf8_stdio()`를 부르면 보호되지만, 그걸 거치지 않는 경로(모듈 단독 실행·import)에서는 한국어 Windows 콘솔에서 `UnicodeEncodeError`가 나고, 바깥 `except`가 그 예외를 삼켜 폴백·복구 경로까지 무력화됩니다(pytest는 stdout을 utf-8로 캡처해 이 경로를 못 잡습니다). 한글 본문과 `·`, `-`, `→`는 cp949에서 안전합니다. 주석·docstring은 무해합니다.
+- 리랭커 입력 토큰 상한은 `INDEX_RERANKER_MAX_LENGTH`(기본 1024, `0` 이하면 모델 기본값 8192)로 조절합니다. **폭주 차단용 안전망이지 비용 절감 장치가 아닙니다** — 기본 1024는 정책 내 구성(최대 1500자 ≈ 854토큰)에서는 발동하지 않고, 패딩이 batch-longest라 상한보다 짧은 입력의 계산량도 줄지 않습니다. 리랭크 비용을 실제로 줄이려면 `rerank_candidates`(쌍 수)를 낮추거나 리랭커를 끄세요.
 - 새 의존성을 추가하면 `requirements.txt`에 담당 에이전트 주석과 함께 기록합니다.
 - 폴백 설계를 유지합니다: 라이브러리 미설치·검색 실패 시 조용히 대체 경로로 넘어가는 기존 패턴(예: sentence-transformers 미설치 → random 벡터, 벡터 검색 실패 → 키워드 검색)을 깨지 마세요.
 - 개발 환경은 **Windows / PowerShell** 기준입니다. 경로 구분자와 셸 명령 구문에 유의하세요.
