@@ -35,6 +35,22 @@ MULTI_KEY_CONFIG_LOG = """
 [Optimize] 변경 후 config: reranker_threshold=0.5, rerank_candidates=60
 """
 
+SWEEP_LOG = """
+[Optimize] 처방 적용: id=dynamic_top_k, label=retrieval_low_rank
+[Optimize] 변경 전 config: top_k=5
+[Optimize] 변경 후 config: top_k=8
+[Optimize] 처방 적용: id=dynamic_top_k, label=retrieval_low_rank
+[Optimize] 변경 전 config: top_k=8
+[Optimize] 변경 후 config: top_k=12
+[Optimize] 처방 적용: id=dynamic_top_k, label=retrieval_low_rank
+[Optimize] 변경 전 config: top_k=12
+[Optimize] 변경 후 config: top_k=16
+[Optimize] 선택한 라벨: retrieval_low_rank
+[Optimize] 선택한 처방: dynamic_top_k
+[Optimize] 변경 전 config: top_k=16
+[Optimize] 변경 후 config: top_k=12
+"""
+
 ZERO_OVERALL_LOG = """
   종합점수 0/100 (품질 0 / 신뢰도 0) · overall 0.0 · pass ✗
 """
@@ -121,6 +137,29 @@ class EvalAblationReportTest(unittest.TestCase):
 
         self.assertEqual(sorted(actual - set(PRESCRIPTION_ACTIONS)), [])
         self.assertNotIn("disable_reranker", PRESCRIPTION_ACTIONS)
+        self.assertNotIn("relax_reranker_threshold", PRESCRIPTION_ACTIONS)
+
+    def test_sweep_candidates_are_counted_as_one_action(self):
+        parsed = parse_log_text(SWEEP_LOG, source="sweep.log")
+
+        self.assertEqual(len(parsed.actions), 1)
+        self.assertEqual(parsed.actions[0].prescription, "dynamic_top_k")
+        self.assertEqual(parsed.actions[0].label, "retrieval_low_rank")
+        self.assertEqual(parsed.actions[0].before_config, "top_k=16")
+        self.assertEqual(parsed.actions[0].after_config, "top_k=12")
+        self.assertEqual(parsed.actions[0].verdict, "KEEP")
+
+    def test_sweep_summary_uses_final_selected_config(self):
+        parsed = parse_log_text(SWEEP_LOG, source="sweep.log")
+
+        markdown = build_markdown([parsed])
+
+        self.assertIn("| top_k:increase | 1 | 1 | 0 | retrieval_low_rank=1 | - |", markdown)
+        self.assertIn(
+            "| sweep.log | 0 | retrieval_low_rank | dynamic_top_k | "
+            "top_k:increase | top_k=16 | top_k=12 | KEEP |",
+            markdown,
+        )
 
     def test_zero_overall_is_not_treated_as_missing(self):
         parsed = parse_log_text(ZERO_OVERALL_LOG, source="zero.log")

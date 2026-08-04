@@ -54,7 +54,6 @@ PRESCRIPTION_ACTIONS = {
     "increase_top_k": "top_k:increase",
     "llm_verification_pass": "verifier_on:enable",
     "lower_temperature": "generation.temperature:decrease",
-    "relax_reranker_threshold": "reranker_threshold:decrease",
     "reorder_context_edges": "context_ordering:most_relevant_edges",
     "require_citation": "generation.require_citation:enable",
     "require_numeric_citation": "numeric_citation_required:enable",
@@ -80,7 +79,12 @@ SCORE_LINE_RE = re.compile(
 )
 CONFIG_RE = re.compile(r"config:\s*(?P<config>.+)")
 ACTION_RE = re.compile(r"id=(?P<id>[^,\s]+),\s*label=(?P<label>[^,\s]+)")
-SELECTED_LABEL_RE = re.compile(r"(?:label|선택한 라벨):\s*(?P<label>[^,\s]+)")
+SELECTED_LABEL_RE = re.compile(
+    r"(?:label|selected label|선택한 라벨):\s*(?P<label>[^,\s]+)"
+)
+SELECTED_PRESCRIPTION_RE = re.compile(
+    r"(?:prescription|selected prescription|선택한 처방):\s*(?P<prescription>[^,\s]+)"
+)
 VERDICT_RE = re.compile(
     r"(?P<decision>KEEP|ROLLBACK).*?"
     r"prescription=(?P<prescription>[^,\s]+).*?"
@@ -103,8 +107,6 @@ class EvalSnapshot:
     reliability: float | None = None
     overall: float | None = None
     passed: bool | None = None
-    probes: int | None = None
-    failures: int | None = None
     label_distribution: dict[str, float] = field(default_factory=dict)
     type_distribution: dict[str, float] = field(default_factory=dict)
 
@@ -148,6 +150,7 @@ def parse_log_text(text: str, source: str = "<memory>") -> ParsedLog:
     parsed = ParsedLog(source=source)
     current_eval: EvalSnapshot | None = None
     current_action: OptimizeAction | None = None
+    pending_transition_label: str | None = None
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -157,7 +160,6 @@ def parse_log_text(text: str, source: str = "<memory>") -> ParsedLog:
         if optimize_eval and parsed.evals:
             _update_eval_gate(
                 parsed.evals,
-                composite=_to_float(optimize_eval.group("composite")),
                 passed=_parse_pass(optimize_eval.group("passed")),
             )
             continue
@@ -191,12 +193,14 @@ def parse_log_text(text: str, source: str = "<memory>") -> ParsedLog:
 
         action = ACTION_RE.search(line)
         if action:
-            current_action = OptimizeAction(
+            current_action = _start_or_merge_action(
+                parsed,
                 eval_after=len(parsed.evals),
                 label=action.group("label"),
                 prescription=action.group("id"),
+                reset_config=True,
             )
-            parsed.actions.append(current_action)
+            pending_transition_label = current_action.label
             continue
 
         verdict = VERDICT_RE.search(line)
@@ -210,12 +214,42 @@ def parse_log_text(text: str, source: str = "<memory>") -> ParsedLog:
             )
             continue
 
-        if current_action is None:
+        selected_label = SELECTED_LABEL_RE.search(line)
+        if selected_label:
+            pending_transition_label = selected_label.group("label").strip()
+            if current_action is not None and current_action.label == "-":
+                current_action.label = pending_transition_label
             continue
 
-        selected_label = SELECTED_LABEL_RE.search(line)
-        if selected_label and current_action.label == "-":
-            current_action.label = selected_label.group("label").strip()
+        selected_prescription = SELECTED_PRESCRIPTION_RE.search(line)
+        if selected_prescription:
+            prescription = selected_prescription.group("prescription").strip()
+            label = pending_transition_label or (
+                current_action.label if current_action is not None else "-"
+            )
+            if current_action is not None and _same_action(
+                current_action,
+                label=label,
+                prescription=prescription,
+            ):
+                _prepare_action_for_transition(
+                    current_action,
+                    label=label,
+                    reset_config=True,
+                    assume_keep_if_replacing=True,
+                )
+            else:
+                current_action = _start_or_merge_action(
+                    parsed,
+                    eval_after=len(parsed.evals),
+                    label=label,
+                    prescription=prescription,
+                    reset_config=True,
+                    assume_keep_if_replacing=True,
+                )
+            continue
+
+        if current_action is None:
             continue
 
         config = CONFIG_RE.search(line)
@@ -236,6 +270,10 @@ def build_markdown(logs: Iterable[ParsedLog]) -> str:
         "",
         "This report was built from existing logs only. It is meant to help choose",
         "the next Optimize action without rerunning a large KorQuAD experiment.",
+        "",
+        "Note: action rows need Optimize logs from 2026-07-27 / commit 41b3f09 or later,",
+        "where `처방 적용: id=` and verdict lines were added. Older logs can still fill",
+        "the Eval Timeline, but the Action-Centered Summary may be empty.",
         "",
         "## Sources",
     ]
@@ -423,9 +461,66 @@ def _action_summary(logs: list[ParsedLog]) -> list[dict[str, str]]:
     return rows
 
 
+def _start_or_merge_action(
+    parsed: ParsedLog,
+    eval_after: int,
+    label: str,
+    prescription: str,
+    *,
+    reset_config: bool = False,
+    assume_keep_if_replacing: bool = False,
+) -> OptimizeAction:
+    for action in reversed(parsed.actions):
+        if action.verdict:
+            continue
+        if _same_action(action, label=label, prescription=prescription):
+            action.eval_after = eval_after
+            _prepare_action_for_transition(
+                action,
+                label=label,
+                reset_config=reset_config,
+                assume_keep_if_replacing=assume_keep_if_replacing,
+            )
+            return action
+
+    action = OptimizeAction(
+        eval_after=eval_after,
+        label=label or "-",
+        prescription=prescription or "-",
+    )
+    parsed.actions.append(action)
+    return action
+
+
+def _same_action(action: OptimizeAction, *, label: str, prescription: str) -> bool:
+    if action.prescription != prescription:
+        return False
+    if not label or label == "-":
+        return True
+    return action.label in {"-", label}
+
+
+def _prepare_action_for_transition(
+    action: OptimizeAction,
+    *,
+    label: str,
+    reset_config: bool,
+    assume_keep_if_replacing: bool,
+) -> None:
+    if label and label != "-" and action.label == "-":
+        action.label = label
+    if not reset_config:
+        return
+
+    had_candidate_config = bool(action.before_config or action.after_config)
+    action.before_config = ""
+    action.after_config = ""
+    if assume_keep_if_replacing and had_candidate_config and not action.verdict:
+        action.verdict = "KEEP"
+
+
 def _update_eval_gate(
     evals: list[EvalSnapshot],
-    composite: float | None,
     passed: bool | None,
 ) -> None:
     if passed is None:
@@ -479,11 +574,6 @@ def _distribution_from_line(line: str) -> dict[str, float]:
 
 def _looks_like_label_distribution(data: dict[str, float]) -> bool:
     return any(key in KNOWN_LABELS for key in data)
-
-
-def _parse_config_assignment(raw: str) -> tuple[str, str] | None:
-    items = _parse_config_assignments(raw)
-    return items[0] if items else None
 
 
 def _parse_config_assignments(raw: str) -> list[tuple[str, str]]:
