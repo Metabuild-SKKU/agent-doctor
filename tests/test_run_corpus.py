@@ -16,7 +16,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from core.schema import DiagnosticReport, Finding
 from core.state import AgentDoctorState
-from tests.run_corpus import _fix_reranker_baseline, find_source_doc, write_report
+from tests.run_corpus import (
+    RERANKER_AXES,
+    _fix_reranker_baseline,
+    find_source_doc,
+    write_report,
+)
 
 
 def make_state():
@@ -131,12 +136,34 @@ class RerankerBaselineTest(unittest.TestCase):
         # lazy 면 Eval 에서 처음 로드하다 실패해도 기준선이 조용히 reranker 없이 측정된다.
         self.assertEqual(state.index_config["reranker_preflight"], "eager")
 
-    def test_reranker_actions_are_excluded(self):
-        from agents.optimize.agent import _RERANKER_ACTION_KEYS
+    def test_every_action_on_a_reranker_axis_is_excluded(self):
+        """축 위의 action 을 하나도 남기지 않는다.
+
+        개별 key 를 나열하던 시절 reranker.enabled:disable 이 빠져 기준선을 껐다.
+        카탈로그를 정본으로 삼아 축 전체를 덮는지 확인한다.
+        """
+        from agents.optimize.action_catalog import actions_on_axis
 
         state = AgentDoctorState()
         _fix_reranker_baseline(state)
-        self.assertEqual(state.excluded_actions, set(_RERANKER_ACTION_KEYS))
+        for axis in RERANKER_AXES:
+            for action in actions_on_axis(axis):
+                with self.subTest(action=action.key):
+                    self.assertIn(action.key, state.excluded_actions)
+
+    def test_disable_reranker_is_excluded(self):
+        """기준선을 끄는 반대 방향 처방도 막는다(회귀 핀)."""
+        state = AgentDoctorState()
+        _fix_reranker_baseline(state)
+        self.assertIn("reranker.enabled:disable", state.excluded_actions)
+
+    def test_axes_are_real_catalog_paths(self):
+        """오타난 축 이름은 조용히 0개를 제외한다 — 카탈로그에 있는지 확인한다."""
+        from agents.optimize.action_catalog import actions_on_axis
+
+        for axis in RERANKER_AXES:
+            with self.subTest(axis=axis):
+                self.assertTrue(actions_on_axis(axis), f"카탈로그에 없는 축: {axis}")
 
 
 if __name__ == "__main__":

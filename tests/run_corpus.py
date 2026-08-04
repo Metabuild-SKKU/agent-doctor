@@ -161,15 +161,33 @@ def run_pipeline_for(
     return _run_once(state)
 
 
+# reranker 를 다루는 config 축. 개별 action key 가 아니라 **축**으로 적는다 —
+# 한 축에 여러 방향(enable/disable)이 달려 있고 나중에 더 붙을 수 있어서, key 를
+# 나열하면 새 방향이 생길 때마다 조용히 새어나간다(실측: reranker.enabled:disable 이
+# _RERANKER_ACTION_KEYS 에 없어 제외를 빠져나가 기준선을 껐다).
+RERANKER_AXES = ("reranker.enabled", "reranker.candidate_count", "reranker_model")
+
+
+def _reranker_action_keys() -> set[str]:
+    """RERANKER_AXES 위의 모든 action key. 카탈로그가 정본이다."""
+    from agents.optimize.action_catalog import actions_on_axis
+
+    return {
+        action.key
+        for axis in RERANKER_AXES
+        for action in actions_on_axis(axis)
+    }
+
+
 def _fix_reranker_baseline(state) -> None:
     """reranker 를 기준선에 고정하고 reranker 축 처방은 비교 대상에서 뺀다.
 
     reranker 를 켠 상태 자체를 기준선으로 두고 **다른 축의 처방만** 비교하려는 실행이다.
     켜기만 하고 처방을 남겨두면 Optimize 가 이미 켜진 축을 다시 켜려다 no-op 으로
-    skip 하며 방문을 소비하고, 그 축이 처방 리포트에 섞여 비교를 흐린다.
+    skip 하며 방문을 소비하고, 그 축이 처방 리포트에 섞여 비교를 흐린다. 반대 방향
+    (retrieval_reranker_demotion → disable_reranker)은 더 나쁘다 — 고정한 기준선을
+    실행 도중에 꺼버린다.
     """
-    from agents.optimize.agent import _RERANKER_ACTION_KEYS
-
     state.index_config.update({
         "use_reranker": True,
         # eager: Index 가 모델을 실제로 로드·추론해 runtime capability 를 만든다.
@@ -177,13 +195,14 @@ def _fix_reranker_baseline(state) -> None:
         # 상태로 측정된다.
         "reranker_preflight": "eager",
     })
-    state.excluded_actions.update(_RERANKER_ACTION_KEYS)
+    excluded = _reranker_action_keys()
+    state.excluded_actions.update(excluded)
     print(
         "  초기 reranker: ON "
         f"({state.index_config.get('reranker_model')}, "
         f"후보 {state.index_config.get('rerank_candidates')}개)"
     )
-    print(f"  reranker 처방 제외: {', '.join(sorted(_RERANKER_ACTION_KEYS))}")
+    print(f"  reranker 처방 제외: {', '.join(sorted(excluded))}")
 
 
 def _steps():
