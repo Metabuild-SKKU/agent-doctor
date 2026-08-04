@@ -46,10 +46,32 @@ _LARGE_OUTPUT_PREFIXES = ("deepseek",)
 # 과금된다.
 _REASONING_MIN_OUTPUT_TOKENS = 25_000
 
+# (2) 계열도 같은 하한을 쓴다. 한때 이 계열만 8K 로 낮췄다가 되돌렸다 —
+# 상한을 낮추면 그 상한을 넘는 호출이 "잘린 응답 값 + 재시도 값" 을 모두 지불하게 되어,
+# 정작 상한이 막으려던 폭주 시나리오에서 더 비싸진다(8K+25K=33K > 25K). 상한은
+# 실사용분만 과금되므로 정상 호출의 비용은 값과 무관하고, 낮춰서 얻는 이득이 없다.
+# 이 값으로 시작하면 retry_cap > cap 이 거짓이라 재시도 경로 자체가 열리지 않는다.
+#
+# 실측(deepseek-v4-flash-0731, 한국어 RAGAS fused 판정 1회, top_k=5):
+#   입력 2,514 / 출력 2,708 토큰 — 추론 토큰 포함. 기본 2048 로는 잘렸다.
+# 정상 사용량은 상한의 11% 수준이라, 25K 는 "예산" 이 아니라 폭주 차단선으로만 작동한다.
+_LARGE_OUTPUT_MIN_TOKENS = _REASONING_MIN_OUTPUT_TOKENS
+
 # 추론 모델에서 temperature 가 버려졌다는 사실을 모델당 한 번 알린다.
 # Optimize 의 generation.temperature sweep 이 조용히 no-op 이 되는 걸 드러내기 위함.
 _warned_ignored_temperature: set[str] = set()
 _warn_lock = threading.Lock()
+
+
+def _openrouter_reasoning_disabled() -> bool:
+    """OpenRouter 호출에서 추론 토큰을 끌지. 기본 끔(=True).
+
+    추론 토큰은 output 으로 과금되는데 RAGAS 판정에서 비용의 대부분을 차지한다.
+    끄면 싸지지만 판정 품질이 떨어질 수 있다 — 근거 뒷받침 여부를 따지는 작업이라
+    추론이 도움이 되는 쪽이다. 점수가 거칠어지면 OPENROUTER_REASONING=1 로 되살린다.
+    """
+    return (os.getenv("OPENROUTER_REASONING", "0").strip().lower()
+            not in {"1", "true", "yes", "on"})
 
 
 def _bare_model_name(model: str) -> str:
@@ -139,15 +161,24 @@ def openai_chat(
     base_kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
     if base_url == OPENROUTER_BASE_URL:
         # 응답 usage 에 실제 과금액(cost)을 함께 받는다 — 추가 비용·지연 없음.
-        base_kwargs["extra_body"] = {"usage": {"include": True}}
+        extra: dict = {"usage": {"include": True}}
+        if _openrouter_reasoning_disabled():
+            # 추론 토큰은 output 으로 과금된다. 실측(deepseek, RAGAS 판정 1회)에서 출력
+            # 2,708 토큰 중 대부분이 추론이었고 JSON 본문은 수백 토큰이었다.
+            # 주의: include_reasoning=false 는 "안 보여줄 뿐" 이라 여전히 과금된다.
+            # 실제로 끄려면 reasoning.enabled=false 여야 한다.
+            extra["reasoning"] = {"enabled": False}
+        base_kwargs["extra_body"] = extra
 
     reasoning = _is_reasoning_model(model)
     if reasoning and temperature != 1.0:
         _warn_temperature_ignored_once(model, temperature, tag)
 
     cap = max_output_tokens
-    if reasoning or _needs_large_output(model):
+    if reasoning:
         cap = max(cap, _REASONING_MIN_OUTPUT_TOKENS)
+    elif _needs_large_output(model):
+        cap = max(cap, _LARGE_OUTPUT_MIN_TOKENS)
 
     def _call(limit: int):
         kwargs = dict(base_kwargs)

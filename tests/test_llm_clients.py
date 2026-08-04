@@ -149,9 +149,42 @@ class OpenAiChatParamsTest(unittest.TestCase):
         # 회귀: 2048 이면 추론 토큰이 상한을 다 써 JSON 본문이 안 나온다.
         call("deepseek/deepseek-v4-flash-0731", max_output_tokens=2048, temperature=0.3)
         kwargs = FakeOpenAI.last_kwargs
-        self.assertEqual(kwargs["max_tokens"], llm_clients._REASONING_MIN_OUTPUT_TOKENS)
+        self.assertEqual(kwargs["max_tokens"], llm_clients._LARGE_OUTPUT_MIN_TOKENS)
         self.assertEqual(kwargs["temperature"], 0.3)
         self.assertNotIn("max_completion_tokens", kwargs)
+
+    def test_openrouter_disables_reasoning_by_default(self):
+        # 추론 토큰은 output 으로 과금된다. 기본은 끔.
+        with patch.dict(os.environ, {"OPENROUTER_REASONING": ""}, clear=False):
+            call("deepseek/deepseek-v4-flash-0731",
+                 base_url=llm_clients.OPENROUTER_BASE_URL)
+        extra = FakeOpenAI.last_kwargs["extra_body"]
+        self.assertEqual(extra["reasoning"], {"enabled": False})
+        self.assertEqual(extra["usage"], {"include": True})   # 비용 집계는 유지
+
+    def test_openrouter_reasoning_can_be_reenabled(self):
+        with patch.dict(os.environ, {"OPENROUTER_REASONING": "1"}, clear=False):
+            call("deepseek/deepseek-v4-flash-0731",
+                 base_url=llm_clients.OPENROUTER_BASE_URL)
+        self.assertNotIn("reasoning", FakeOpenAI.last_kwargs["extra_body"])
+
+    def test_non_openrouter_endpoints_are_untouched(self):
+        # OpenRouter 전용 파라미터라 순정 OpenAI·GitHub Models 로는 보내지 않는다.
+        call("gpt-4o")
+        self.assertNotIn("extra_body", FakeOpenAI.last_kwargs)
+
+    def test_large_output_cap_does_not_open_a_retry_path(self):
+        # 이 계열의 상한을 재시도 목표치보다 낮추면, 상한을 넘는 호출이 "잘린 응답 값 +
+        # 재시도 값" 을 둘 다 지불한다(8K+25K=33K > 25K). 상한이 막으려던 폭주에서
+        # 오히려 비싸지므로 낮추지 않는다 — 이 관계가 깨지면 이중 과금이 되살아난다.
+        self.assertGreaterEqual(llm_clients._LARGE_OUTPUT_MIN_TOKENS,
+                                llm_clients._REASONING_MIN_OUTPUT_TOKENS)
+
+    def test_large_output_model_keeps_larger_requested_cap(self):
+        # 호출부가 이미 더 큰 값을 줬으면(fused RAGAS 등) 그쪽을 존중한다.
+        larger = llm_clients._LARGE_OUTPUT_MIN_TOKENS + 1000
+        call("deepseek/deepseek-chat", max_output_tokens=larger)
+        self.assertEqual(FakeOpenAI.last_kwargs["max_tokens"], larger)
 
 
 class TruncationRetryTest(unittest.TestCase):
@@ -212,8 +245,9 @@ class TruncationRetryTest(unittest.TestCase):
         self.assertEqual(FakeOpenAI.calls[0]["max_completion_tokens"],
                          llm_clients._REASONING_MIN_OUTPUT_TOKENS)
 
-    def test_large_output_model_also_starts_at_target(self):
-        # deepseek 도 목록에 잡히면 첫 호출부터 25K → 재시도 불필요.
+    def test_large_output_model_never_pays_twice(self):
+        # 목록에 잡힌 계열은 첫 호출부터 재시도 목표치로 시작하므로, 잘려도 재시도가
+        # 열리지 않는다 — 이중 과금(잘린 응답 + 재시도) 이 발생하면 안 된다.
         FakeOpenAI.script = [("", "length")]
         call("deepseek/deepseek-v4-flash-0731", json_mode=True, max_output_tokens=2048)
         self.assertEqual(len(FakeOpenAI.calls), 1)
