@@ -153,6 +153,98 @@ class GoldLabelingErrorScoringTest(unittest.TestCase):
         rec = self._labeled("bad_gold_chunk", confirmed=False)
         self.assertFalse(report.is_gold_labeling_error(rec))   # 예비면 제외 대상 아님
 
+    # ── 점수 말고 '실패 집계'에서도 빠지는가 ────────────────────────
+    # 제외가 build_report 의 점수 계산에만 있어서, 같은 probe 가 점수에선 빠지고 실패
+    # 목록·콘솔 마크에는 실패로 남았다. 실측(corpus_20260804): 답 만점(answer=1.00)인
+    # probe 4개가 매 반복 ❌ 로 찍히고 '실패한 검증 질문'을 채웠다.
+
+    def test_gold_error_is_not_listed_as_a_failed_question(self):
+        real_failure = self._labeled("retrieval_low_rank")
+        real_failure.probe.probe_id = "real"
+        gold_error = self._labeled("bad_gold_chunk")
+
+        listed = report.build_report([real_failure, gold_error], 0, mode=1).failed_questions
+
+        self.assertEqual([q["probe_id"] for q in listed], ["real"])
+
+    def test_gold_error_count_survives_the_exclusion(self):
+        """조용히 빼면 '30문항 중 몇 개가 애초에 채점 불가였나'를 알 수 없다."""
+        rep = report.build_report(
+            [self._good("g1"), self._labeled("bad_gold_chunk"),
+             self._labeled("bad_gold_answer")], 0, mode=1)
+
+        self.assertEqual(rep.ragas_scores["gold_labeling_errors"], 2)
+        # 진단 자체는 남는다 — 검수하라는 신호가 사라지면 정답셋이 영원히 안 고쳐진다.
+        self.assertEqual(len(rep.findings), 2)
+
+    def test_no_gold_error_leaves_the_key_absent(self):
+        rep = report.build_report([self._good("g1")], 0, mode=1)
+        self.assertNotIn("gold_labeling_errors", rep.ragas_scores)
+
+
+class GoldErrorProbeMarkTest(unittest.TestCase):
+    """콘솔 마크 — 골드 오류 probe 를 ❌ 로 찍으면 '맞은 답을 틀렸다고 한다'가 된다."""
+
+    def _rec_with(self, label):
+        probe = Probe(probe_id="p", question="q", source="taxonomy", ground_truth="gt")
+        rec = EvalRecord(probe=probe, generated_answer="답")
+        rec.f1_score, rec.recall_at_k = 1.0, 0.0
+        rec.findings = [Finding(finding_id="p", type="gap", severity="warning",
+                                description="d", label=label, confirmed=True,
+                                affected_probes=["p"])]
+        return rec
+
+    def test_gold_error_gets_the_review_mark_not_the_failure_mark(self):
+        from agents.eval import agent as eval_agent
+
+        self.assertEqual(eval_agent._mark(None), "🔍")
+        self.assertNotEqual(eval_agent._mark(None), eval_agent._mark(False))
+
+    def test_real_failure_still_marked_failed(self):
+        from agents.eval import agent as eval_agent
+
+        self.assertEqual(eval_agent._mark(False), "❌")
+        self.assertEqual(eval_agent._mark(True), "✅")
+
+    def test_mark_falls_back_to_ascii_on_cp949(self):
+        """cp949 콘솔에서 세 상태가 '?' 로 뭉개지면 안 된다(기존 계약을 3상태로 확장)."""
+        from agents.eval import agent as eval_agent
+
+        class _Cp949Stdout:
+            encoding = "cp949"
+
+        with patch.object(eval_agent, "sys") as fake_sys:
+            fake_sys.stdout = _Cp949Stdout()
+            marks = {eval_agent._mark(v) for v in (True, False, None)}
+
+        self.assertEqual(marks, {"[OK]", "[FAIL]", "[검수]"})
+
+    def test_probe_line_uses_the_review_mark(self):
+        import io
+        import contextlib
+        from agents.eval import agent as eval_agent
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            eval_agent._log_probe(1, 30, self._rec_with("bad_gold_chunk"))
+        header = buf.getvalue().splitlines()[0]
+
+        self.assertIn("골드 검수", header)
+        self.assertNotIn("❌", header)
+
+    def test_probe_line_still_fails_a_real_failure(self):
+        import io
+        import contextlib
+        from agents.eval import agent as eval_agent
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            eval_agent._log_probe(1, 30, self._rec_with("retrieval_low_rank"))
+        header = buf.getvalue().splitlines()[0]
+
+        self.assertIn("❌", header)
+        self.assertNotIn("골드 검수", header)
+
 
 if __name__ == "__main__":
     unittest.main()
