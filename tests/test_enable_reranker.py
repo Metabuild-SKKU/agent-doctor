@@ -247,6 +247,104 @@ class RerankerExecutionTest(unittest.TestCase):
         # 검색 총시간도 함께 실린다 — 리랭크 시간만으로는 '느린 게 검색이냐 생성이냐'가 안 갈린다.
         self.assertGreaterEqual(result["search_seconds"], result["rerank_seconds"])
 
+    def test_timers_measure_their_own_spans(self):
+        """측정 계층 고정 — search_seconds 는 검색 전 구간, rerank_seconds 는 추론 구간.
+
+        집계 테스트는 손으로 적은 값을 더하므로 원천이 틀려도 초록이다. 예를 들어
+        search_seconds 에 리랭크 시간을 실어버리면 '검색의 100%가 리랭크'가 찍히는데,
+        이 계측이 리랭커냐 아니냐를 가릴 심판이라 원천이 틀리면 결론째 뒤집힌다.
+        시계를 고정해 두 구간이 각자 제 몫만 재는지 본다."""
+        chunks = [
+            {"chunk_id": f"c{i}", "doc_id": "d1", "text": f"alpha 문서 {i}", "metadata": {}}
+            for i in range(3)
+        ]
+        model_name = "test/clock-reranker"
+        qdrant_store._rerankers[model_name] = _FakeCrossEncoder([0.1, 0.2, 0.3])
+        retriever = Retriever(
+            chunks,
+            RetrievalSettings(
+                use_reranker=True, reranker_model=model_name, rerank_candidates=3
+            ),
+            client=None,
+        )
+        # 검색시작 100 · 리랭크시작 105 · 리랭크끝 107 · 검색끝 110 → 검색 10초 / 리랭크 2초
+        ticks = iter([100.0, 105.0, 107.0, 110.0])
+
+        with patch("time.monotonic", side_effect=lambda: next(ticks)):
+            result = retriever.search_with_details("alpha", top_k=2)
+
+        self.assertEqual(result["search_seconds"], 10.0)
+        self.assertEqual(result["rerank_seconds"], 2.0)
+        self.assertEqual(next(ticks, None), None)      # 시계 호출 횟수까지 고정
+
+    def test_rerank_timer_excludes_model_load(self):
+        """모델 로드는 rerank_seconds 에서 빠지고 search_seconds 에만 남는다.
+
+        타이머가 _load_reranker 위로 올라가면 쿨다운 만료 직후 첫 쿼리가 2GB 대 재로드를
+        '쌍당 비용'으로 뒤집어쓴다. 로드가 시계를 감는 더블로 그 위치를 고정한다."""
+        chunks = [{"chunk_id": "c1", "doc_id": "d1", "text": "alpha", "metadata": {}}]
+        retriever = Retriever(
+            chunks,
+            RetrievalSettings(
+                use_reranker=True, reranker_model="test/slow-load", rerank_candidates=1
+            ),
+            client=None,
+        )
+        clock = {"now": 100.0}
+
+        def slow_load(_model_name):
+            clock["now"] += 50.0                        # 로드에 50초
+            return _FakeCrossEncoder([0.4]), "ready"
+
+        def tick():
+            clock["now"] += 1.0                         # 그 외 구간은 호출당 1초
+            return clock["now"]
+
+        with patch.object(qdrant_store, "_load_reranker", side_effect=slow_load):
+            with patch("time.monotonic", side_effect=tick):
+                result = retriever.search_with_details("alpha", top_k=1)
+
+        self.assertEqual(result["rerank_seconds"], 1.0)          # 로드 50초 제외
+        self.assertGreaterEqual(result["search_seconds"], 50.0)  # 검색 총시간에는 포함
+
+    def test_rerank_status_reports_zero_seconds_on_failure(self):
+        """실패 경로의 0초는 호출부 가드가 아니라 여기(측정 원천)에서 나온다.
+
+        추론이 오래 돌다 실패하면 그 벽시계가 쌍당 비용으로 새면 안 된다 — 쌍은 0 인데
+        시간만 잡히면 집계 ms_per_pair 가 위로 부푼다."""
+        model_name = "test/failing-seconds"
+        qdrant_store._rerankers[model_name] = _FakeCrossEncoder([])   # 점수 개수 불일치
+        results = [{"chunk_id": "c1", "text": "본문", "score": 0.5}]
+        # started / elapsed 계산 / 쿨다운 기록 — 실패 경로가 시계를 세 번 본다
+        ticks = iter([100.0, 160.0, 160.0])   # 추론이 60초 돌다 실패
+
+        with patch("time.monotonic", side_effect=lambda: next(ticks)):
+            _out, status, seconds = qdrant_store.rerank_with_status(
+                "질문", results, model_name=model_name, top_k=1
+            )
+
+        self.assertEqual(status, "inference_failed")
+        self.assertEqual(seconds, 0.0)
+
+    def test_cost_aggregation_ignores_non_numeric_details(self):
+        """옛 계약·불량 값(None·bool)이 섞여도 집계가 죽지 않고 그 건만 빠진다."""
+        records = [
+            EvalRecord(
+                probe=Probe("p1", "질문", "test"),
+                retrieval_details={
+                    "reranker_enabled": True, "reranker_attempted": True,
+                    "reranked": True, "reranker_status": "applied",
+                    "search_seconds": None, "rerank_seconds": True, "rerank_pairs": "3",
+                },
+            ),
+        ]
+
+        report = build_report(records, iteration=1)
+
+        self.assertEqual(report.runtime_summary["search"]["seconds"], 0.0)
+        self.assertEqual(report.runtime_summary["reranker"]["seconds"], 0.0)
+        self.assertEqual(report.runtime_summary["reranker"]["pairs"], 0)
+
     def test_rerank_cost_not_counted_when_rerank_did_not_run(self):
         """실패한 시도는 시간·쌍 어느 쪽도 세지 않는다. 한쪽만 세면 집계 ms_per_pair 가
         왜곡된다 — inference_failed 는 predict 가 끝까지 돌아 시간만 잡히면 위로 부풀고,
