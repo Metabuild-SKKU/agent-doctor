@@ -108,6 +108,11 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     if repaired:
         scores["fused_repaired"] = repaired
 
+    # 임베딩 출처(api|local|none) — response_relevancy·answer_correctness 유사도 성분이
+    # 어떤 벡터 공간에서 나왔는지. 모델이 다르면 코사인 분포가 달라 실행 간 점수를
+    # 그대로 비교할 수 없으므로, 나중에 성적표만 보고 구분할 수 있게 남긴다.
+    scores["embedding_source"] = _embedding_source()
+
     # 평가 신호(GT 규칙지표/RAGAS)가 전혀 없으면 진단 불가 →
     # eval 한계로 파이프라인을 막지 않도록 통과 처리(overall_score=None).
     # [설계 결정] 이건 "판정 보류"이지 "품질 확인"이 아니다 — ground_truth 없는 probe만 있거나
@@ -197,6 +202,22 @@ def _findings_summary(records: list[EvalRecord], mode: int) -> dict:
         "confirmed_labels": {k: round(v, 3) for k, v in conf_w.items()},
         "preliminary_labels": {k: round(v, 3) for k, v in prelim_w.items()},
     }
+
+
+def _embedding_source() -> str:
+    """임베딩 출처 — "api" | "local" | "none".
+
+    같은 지표라도 벡터 공간이 다르면 코사인 분포가 달라 실행 간 비교가 성립하지 않는다.
+    성적표만 보고 구분할 수 있게 리포트에 남긴다(agents/eval/llm_provider.embed_texts
+    의 폴백 사슬과 같은 판정)."""
+    try:
+        from agents.eval import llm_provider
+
+        if llm_provider._api_embeddings_available():
+            return "api"
+        return "local" if llm_provider._local_embeddings_available() else "none"
+    except Exception:
+        return "none"
 
 
 def _semantic_rescued_count(records: list[EvalRecord]) -> int:
