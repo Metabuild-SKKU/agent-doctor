@@ -41,8 +41,37 @@ CANONICAL_INDEX_CONFIG_KEYS: dict[str, str] = {
     "generation.restate_question": "restate_question",
     "generation.completeness_mode": "completeness_mode",
     "generation.abstention_strict": "abstention_strict",
+    "generation.abstention_relaxed": "abstention_relaxed",
     "generation.model": "generation_model",
 }
+
+
+# 한 축의 양방향이라 동시에 켜질 수 없는 index_config 플래그 쌍.
+#
+# index_config 는 회차 간 누적되므로 켜는 쪽만 쓰면 반대쪽 True 가 그대로 남는다. 그러면
+# 나중 처방이 플래그는 바꿔도(optimizer 는 baseline 과 다르기만 하면 통과시킨다) 소비처가
+# 둘 중 하나만 반영하므로 프롬프트가 안 변하고, 점수가 그대로라 롤백 + blacklist 로 빠진다
+# — 그 라벨의 레버가 영구히 죽는다. 예: relax_abstention 이 유지된 뒤의
+# strengthen_abstention(환각 억제)은 아무것도 못 하고 사라진다.
+#
+# 우선순위 대신 '마지막에 쓴 쪽이 이긴다' 로 푼다. 어느 방향을 특별대우하지 않으므로
+# 양쪽 레버가 모두 살아 있고, 최신 진단이 항상 반영된다.
+EXCLUSIVE_FLAG_PAIRS: tuple[tuple[str, str], ...] = (
+    ("abstention_strict", "abstention_relaxed"),
+)
+
+
+def _resolve_exclusive_flags(mapped_changes: dict[str, Any]) -> None:
+    """상호배제 쌍 중 한쪽을 켜는 변경이면 반대쪽을 같은 묶음에서 내린다(제자리 수정).
+
+    한 묶음이 양쪽을 동시에 켜는 모순은 어느 쪽이 '나중'인지 정할 수 없어 건드리지 않는다
+    (처방은 단일 축이라 정상 경로에선 안 생기고, 소비처의 백스톱이 하나만 싣는다).
+    """
+    for flag, opposite in EXCLUSIVE_FLAG_PAIRS:
+        turned_on = [key for key in (flag, opposite) if mapped_changes.get(key) is True]
+        if len(turned_on) != 1:
+            continue
+        mapped_changes[opposite if turned_on[0] == flag else flag] = False
 
 
 # 표준 config 경로를 읽을 때 허용할 기존 flat key alias 목록이다.
@@ -79,6 +108,7 @@ CONFIG_READ_PATHS: dict[str, tuple[str, ...]] = {
     "generation.restate_question": ("generation.restate_question", "restate_question"),
     "generation.completeness_mode": ("generation.completeness_mode", "completeness_mode"),
     "generation.abstention_strict": ("generation.abstention_strict", "abstention_strict"),
+    "generation.abstention_relaxed": ("generation.abstention_relaxed", "abstention_relaxed"),
     "generation.model": ("generation.model", "generation_model"),
 }
 
@@ -134,6 +164,8 @@ def map_changes_to_index_config(
 
         key, mapped_value = mapped
         mapped_changes[key] = mapped_value
+
+    _resolve_exclusive_flags(mapped_changes)
 
     return mapped_changes, ignored_keys, warnings
 
@@ -217,6 +249,24 @@ def build_config_diff(
         warnings=list(warnings or []),
         metadata=dict(metadata or {}),
     )
+
+
+# canonical 스냅샷 -----------------------------------------------------------
+def canonical_config_view(config: dict[str, Any]) -> dict[str, Any]:
+    """Optimize가 실제로 바꿀 수 있는 축만 표준 경로로 읽어 정렬해 돌려준다.
+
+    같은 config를 flat key로 담았는지 표준 경로로 담았는지에 따라 baseline이 달라
+    보이면 fingerprint가 흔들린다. 비교·해시의 기준을 여기 하나로 모은다.
+    미지정 축은 넣지 않는다 — 키 유무 자체가 baseline 정체성의 일부다.
+    """
+
+    view: dict[str, Any] = {}
+    for canonical in sorted(CONFIG_READ_PATHS):
+        sentinel = object()
+        value = get_current_value(config, canonical, sentinel)
+        if value is not sentinel:
+            view[canonical] = value
+    return view
 
 
 # 경로 정규화와 dict path 읽기 ----------------------------------------------

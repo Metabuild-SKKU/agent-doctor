@@ -33,7 +33,7 @@ class ChunkPrescreenerTest(unittest.TestCase):
             request_id="chunk-precheck",
             iteration=0,
             baseline_config=baseline,
-            failure_label="chunk_test",
+            supporting_labels=["chunk_test"],
             search_space={path: values},
             optimizer="internal",
             max_trials=len(values),
@@ -154,6 +154,49 @@ class ChunkPrescreenerTest(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.metadata["span_source"], "gold_spans")
+
+    def test_identical_spans_from_multiple_supports_are_deduped(self):
+        """같은 축을 여러 라벨이 지지하면 같은 gold span 이 두 번 들어온다.
+
+        중복을 그대로 세면 포함률·중복량 통계가 그 span 쪽으로 기울어 후보 순위가
+        왜곡된다. 좌표가 같으면 한 번만 센다.
+        """
+        spans = [
+            {"doc_id": "doc-1", "start": 100, "end": 350},
+            {"doc_id": "doc-1", "start": 600, "end": 750},
+        ]
+        unique = self.make_request(
+            path="chunker.chunk_size",
+            values=[300, 400, 600],
+            baseline={"chunk_size": 512, "chunk_overlap": 0},
+            spans=spans,
+        )
+        duplicated = self.make_request(
+            path="chunker.chunk_size",
+            values=[300, 400, 600],
+            baseline={"chunk_size": 512, "chunk_overlap": 0},
+            # 두 라벨이 같은 probe 의 gold span 을 각각 실어 보낸 상황
+            spans=[*spans, *spans],
+        )
+
+        unique_result = run(unique, previewer=fixed_previewer)
+        duplicated_result = run(duplicated, previewer=fixed_previewer)
+
+        self.assertEqual(
+            duplicated_result.best_config,
+            unique_result.best_config,
+        )
+        # 후보별 관측 통계까지 같아야 한다 — best 만 같은 건 우연일 수 있다.
+        self.assertEqual(
+            [
+                (trial.config, trial.metrics)
+                for trial in duplicated_result.trial_results
+            ],
+            [
+                (trial.config, trial.metrics)
+                for trial in unique_result.trial_results
+            ],
+        )
 
 
 if __name__ == "__main__":

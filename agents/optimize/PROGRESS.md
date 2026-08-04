@@ -526,3 +526,46 @@ Eval → Planner → chunk prescreener 흐름을 검증한다.
 exact만 사용하고, `min_span_count` 미만이면 `insufficient_spans`로 단일값 폴백한다.
 legacy 반복 문장도 전체 청크 순서와 cursor로 선택된 위치를 찾는다. UTF-8 모드 자동
 테스트는 169개 통과, optional 테스트 1개 스킵이다.
+
+### 8. 2026-08-03 — Action-Centered 전환 완료 (단계 5~8)
+
+선택 단위를 failure label 에서 **실제 config action** 으로 옮겼다. label 은 진단
+근거·영향 probe·목표 metric 을 제공하고, "무엇을 먼저 바꿀지"는 action 끼리의
+경쟁이 정한다. 설계와 결정 근거는
+[`ACTION_CENTERED_OPTIMIZER_IMPLEMENTATION_PLAN.md`](ACTION_CENTERED_OPTIMIZER_IMPLEMENTATION_PLAN.md).
+
+무엇이 달라졌는가:
+
+- **실행 이력·차단 identity** — `(label, prescription_id)` → `ActionAttemptKey`
+  (정확한 config 전이) / `ActionStudyKey`(결론난 탐색). baseline fingerprint 를
+  담고 있어 **차단 강화가 아니라 baseline 별 완화**다. 기존 튜플은 baseline 무관
+  영구 차단이라 "검색을 고친 뒤 리랭커를 다시 본다"는 A>C>B 의도를 막았다.
+- **iteration** — "새 ActionStudy 를 적용한 횟수". 같은 action 내부 sweep 은 하나로
+  묶이고, 다른 action·다른 baseline 은 새 iteration 이다. `max_iterations` 3→5.
+- **종료 보장** — iteration 미소비 경로가 8개라 실제 안전선은 `optimize_visit_count`
+  다. `agent.run()` docstring 에 경로를 열거하고 테스트로 고정했다.
+- **실행 가능성 판정이 앞당겨졌다** — 점수 경쟁 **전에** 거른다. 실행 불가 action 이
+  표를 받아 실행 가능한 것을 밀어내거나, 선택된 뒤 optimizer 에서 탈락해 방문이
+  통째로 낭비되는 일이 없다. 대신 그 사유를 보고할 책임도 planner 로 옮겨왔다.
+- **리포트** — 대표 라벨 하나가 아니라 action + 지지 라벨 전체로 설명하고,
+  **지지받은 라벨과 실제로 해결된 라벨을 구분**한다.
+- **제거** — `PrescriptionCandidate`, `OptimizationRequest.candidates` /
+  `failure_label` / `related_failure_labels`, planner 의 라벨 우선 선택 경로
+  (`_pick_top`·`_rank_groups`·`_build_candidates`·`_build_request` 등).
+
+뒤집힌 동작 2건(합의 후 유지): 예산 소진 후 같은 라벨의 다음 처방이 공짜로 적용되던
+경로가 사라졌고, "노이즈가 우세하면 C를 A보다 먼저"라는 예외가 hard tier 에 흡수됐다.
+
+⚠️ 단계 2 가 "수학을 바꾸지 않는다"고 밝혔지만 `_ground_top_k_from_gold` 한 곳이
+어긋났다 — 반환이 `None` 에서 grounded metadata 로 바뀌었고, 그 결과 **동점에서**
+승자가 `retriever.mmr:enable` → `retriever.top_k:increase` 로 역전된다. 값이 실제로
+실측 기반이라 되돌리지 않고 `GroundedFlagCharacterizationTest` 로 박제했다. 자세한
+경로 분석은 구현계획 §8.6.
+
+테스트: 1064개 통과(약 12초). 환경 사유로 분리한 4개 모듈은 제외한다 —
+`test_pipeline`(실데이터) · `test_ragas_eval`(실키) · `test_oauth`(수동 확인) ·
+`test_eval`(외부 상태 의존).
+
+```bash
+python -m unittest discover -s tests
+```

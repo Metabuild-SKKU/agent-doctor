@@ -94,7 +94,14 @@ def _summarize_stage_event(stage: str, snapshot: AgentDoctorState) -> tuple[str,
             after = last.metadata.get("after_score")
             if before is not None and after is not None:
                 verdict = "유지" if (last.status == "applied" and not last.metadata.get("pending")) else "롤백"
-                return ("처방", f"{last.selected_prescription_id or ''} · 종합 {before:.0f}→{after:.0f} {verdict}", "ok" if verdict == "유지" else "find")
+                # 무엇을 바꿨는지는 action 이 말한다. 구버전 이력에는 없으므로
+                # 처방 id 로 폴백한다(이전 실행의 저장 상태도 계속 읽혀야 한다).
+                subject = (
+                    getattr(last, "action_key", None)
+                    or last.selected_prescription_id
+                    or ""
+                )
+                return ("처방", f"{subject} · 종합 {before:.0f}→{after:.0f} {verdict}", "ok" if verdict == "유지" else "find")
         return ("처방", "설정 조정 시도", "")
     if stage == "serve":
         return ("완료", "리포트 준비 완료", "ok")

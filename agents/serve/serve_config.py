@@ -40,6 +40,7 @@ GENERATION_KEYS: tuple[str, ...] = (
     "restate_question",
     "completeness_mode",
     "abstention_strict",
+    "abstention_relaxed",
     "generation_model",
     "context_compression",
     "context.compression.enabled",

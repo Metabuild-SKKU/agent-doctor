@@ -26,6 +26,19 @@ from core.schema import Finding, Probe
 # lexical 단독 게이트 문턱 — RAGAS 가 없는 모드(DEEP 미만)나 판정기 실패 때만 쓰인다.
 # RAGAS 가 측정된 실행에서는 lexical 을 단독 게이트로 쓰지 않는다(아래 혼합 점수 참고).
 F1_PASS_THRESHOLD = 0.5
+# answer_match 최댓값. degrade 된(불안정한) 심판이 정답을 오답으로 끌어내리는 걸 막는
+# 면제선으로만 쓴다(_degraded_near_miss). 통과 문턱(0.5)이 아니라 이 값을 쓰는 이유:
+# 0.5~0.9 대의 애매한 근접 오답은 심판이 죽었을 때 보수적으로 강등해야 하고, 최댓값만
+# 면제해야 안전망이 헐거워지지 않는다.
+#
+# 주의 — 이 값이 곧 문자열 완전일치는 아니다. gold 가 정규화 후 10자 이하면 answer_match
+# 가 char-recall 경로를 타므로(metrics_basic.answer_match) gold 를 포함하기만 하면 1.0 이
+# 나온다: gold '사망' ↔ 답 '사망하지 않았다' = 1.0. 즉 짧은 gold 의 부정문 근접 오답은
+# 이 선을 그냥 통과한다. 그래서 면제는 이 값 단독이 아니라 faithfulness 하한과 **함께**
+# 걸어야 한다 — 위 예에서 컨텍스트가 '사망'을 말하면 '사망하지 않았다'는 근거에 안 붙어
+# faithfulness 가 떨어지고, 그 축이 강등을 살려낸다. 면제선을 넓히거나 faithfulness 조건을
+# 떼면 _degraded_near_miss 가 원래 잡으려던 부정문 오답이 그대로 새어 나간다.
+F1_EXACT_MATCH = 1.0
 DEFAULT_TOP_K = 5              # index_config.top_k 미지정 시 검색 개수
 
 # STEP3-2 RAGAS 지표 임계값 (설계 STEP4 표 기준, 낮으면 Finding 생성)
@@ -272,6 +285,10 @@ class EvalRecord:
 
     # STEP3-1: 규칙 지표 (diagnose 가 진입 시 계산·저장)
     recall_at_k: float = 0.0
+    # recall_at_k 를 어느 기준으로 쟀나: "span"(gold 원문 좌표 커버리지) | "chunk"(gold 청크 id 포함률).
+    # 로그가 둘을 같은 이름으로 찍어서, gold 청크가 검색 목록에 있는데 recall=0 인 줄이
+    # 모순처럼 보였다(span 은 좌표를 빈틈없이 덮어야 1점이라 청크 하나만으론 0 이 될 수 있다).
+    recall_basis: str = "chunk"
     f1_score: float = 0.0
     oracle_f1: float = 0.0
     raw_f1_score: float = 0.0

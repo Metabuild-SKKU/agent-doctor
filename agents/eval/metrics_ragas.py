@@ -23,6 +23,16 @@ RAGAS 4개 지표 + AspectCritic 을 **LLM-as-Judge** 로 측정한다.
       - ragas/prompt/metrics/base_prompt.py (BasePrompt.to_string 조립 형식)
     환경이 ragas 를 지원하면 라이브러리 호출로 교체해도 결과가 동일하다.
 
+호출 통합(fused, 기본 ON — EVAL_RAGAS_FUSED=0 이면 아래 legacy 경로):
+    5개 지표의 입력이 (question, answer, contexts, reference)로 **전부 같다**. RAGAS 가
+    호출을 쪼갠 건 지표별 독립 클래스라는 라이브러리 구조 때문이지 정보가 부족해서가 아니다.
+    그래서 판정 요청만 한 프롬프트로 묶어 chat 1회 + embed 1회로 받고(_fused_track),
+    점수 계산식은 legacy 와 **같은 함수**를 그대로 쓴다(_average_precision, _correctness_score …).
+      실제 트랙  : chat 14 + embed 2 → chat 1 + embed 1
+      오라클 트랙 : chat  8 + embed 2 → chat 1 + embed 1
+    응답 1건이 지표 5개를 지고 있으므로 파싱 사고의 폭발 반경이 크다 → 블록별로 독립 파싱하고,
+    그래도 빠진 지표는 _fused_repair 가 그 지표만 legacy 개별 호출로 메운다(보통 0건).
+
 비용·재현성:
     - 실행 게이트는 호출부(agent._ragas_track + signals RAGAS 신호)가 담당: `EVAL_ENABLE_LLM=1`
       + `EVAL_MODE≥deep` 일 때만 evaluate_real_track/oracle_track 을 호출한다(기본 비활성).
@@ -59,8 +69,35 @@ RELEVANCY_STRICTNESS = _env_int("EVAL_RELEVANCY_STRICTNESS", 3)
 def _inner_concurrency() -> int:
     """트랙 1개 내부(지표/청크/strictness) 동시성. 기본 1(=off) — 바깥 probe×track
     병렬(EVAL_LLM_CONCURRENCY)과 곱해지면 429 폭풍이 나므로, probe 가 적어 바깥
-    병렬이 놀 때만 명시적으로 켠다. 1이면 parallel_map 이 기존 순차와 동일."""
+    병렬이 놀 때만 명시적으로 켠다. 1이면 parallel_map 이 기존 순차와 동일.
+    (fused 경로에선 트랙당 호출이 1건이라 이 값이 아무 일도 하지 않는다.)"""
     return _env_int("EVAL_RAGAS_INNER_CONCURRENCY", 1)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """불리언 환경변수 — 미설정이면 default. (1/true/yes/on 만 참)"""
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+def _fused_enabled() -> bool:
+    """fused 경로(트랙당 chat 1회) 사용 여부. 기본 켬 — EVAL_RAGAS_FUSED=0 이면 지표별
+    개별 호출(legacy, ragas 원본과 1:1)로 되돌아간다. 두 경로의 점수 비교용 스위치."""
+    return _env_flag("EVAL_RAGAS_FUSED", True)
+
+
+def _fused_repair_enabled() -> bool:
+    """fused 응답에서 특정 지표가 빠졌을 때 그 지표만 legacy 개별 호출로 보수할지.
+    기본 켬 — 파싱/절단 사고 1건이 트랙 지표 전부를 '미측정'으로 날리는 걸 막는다."""
+    return _env_flag("EVAL_RAGAS_FUSED_REPAIR", True)
+
+
+def _fused_max_tokens() -> int:
+    """fused 응답 출력 상한. 7개 블록이 한 JSON 에 들어가므로 기본 2048 로는 잘린다
+    (잘리면 파싱 실패 → {} → 보수 경로). top_k·답변이 길면 더 올릴 것."""
+    return _env_int("EVAL_RAGAS_FUSED_MAX_TOKENS", 4096)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -305,6 +342,18 @@ _CORRECTNESS_EXAMPLES = [
 # answer_correctness = weights[0]·factual_F1 + weights[1]·의미유사도 (ragas 기본 [0.75, 0.25])
 _ANSWER_CORRECTNESS_WEIGHTS = (0.75, 0.25)
 
+# 출력이 입력 크기에 비례하는 심판 호출의 상한. 공용 기본값(2048)보다 넉넉히 잡는다.
+#
+# 여기 걸리는 호출들은 입력 문장 하나마다 statement+reason 을 되풀이해 뱉는 스키마다
+# (NLI·TP/FP/FN 분류·context_recall 분류·문장 분해). 골드가 표나 장문이면 문장이 수십 개라
+# 출력이 2048 을 넘고, 잘린 응답은 JSON 파싱에 실패해 chat_json 이 {} 를 돌려준다 →
+# answer_correctness 의 factual 성분이 통째로 죽고(degrade) 정답 판정이 lexical 단독으로
+# 떨어진다. probe 합성(_SYNTHESIS_MAX_OUTPUT_TOKENS)이 같은 이유로 이미 올려 잡고 있다.
+# 출력이 입력과 무관하게 짧은 호출(relevancy·context_precision·aspect_critic·reasoning_mode)은
+# 기본값을 그대로 둬 비용 방어선을 유지한다.
+# 주의: Gemini 추론 모델은 내부 사고(thoughts)도 이 상한을 함께 소진한다(core/llm_clients.py).
+_LARGE_JUDGE_MAX_OUTPUT_TOKENS = _env_int("EVAL_JUDGE_MAX_OUTPUT_TOKENS", 4096)
+
 
 # 출력 JSON 스키마 힌트 (BasePrompt.to_string 의 output_schema 자리)
 _SCHEMA_STATEMENTS = '{"properties": {"statements": {"items": {"type": "string"}, "type": "array"}}, "required": ["statements"]}'
@@ -314,6 +363,174 @@ _SCHEMA_VERDICT = '{"properties": {"reason": {"type": "string"}, "verdict": {"ty
 _SCHEMA_RECALL = '{"properties": {"classifications": {"items": {"properties": {"statement": {"type": "string"}, "reason": {"type": "string"}, "attributed": {"type": "integer"}}, "required": ["statement", "reason", "attributed"], "type": "object"}, "type": "array"}}, "required": ["classifications"]}'
 _TPFPFN_ITEM = '{"items": {"properties": {"statement": {"type": "string"}, "reason": {"type": "string"}}, "required": ["statement", "reason"], "type": "object"}, "type": "array"}'
 _SCHEMA_CORRECTNESS = '{"properties": {"TP": ' + _TPFPFN_ITEM + ', "FP": ' + _TPFPFN_ITEM + ', "FN": ' + _TPFPFN_ITEM + '}, "required": ["TP", "FP", "FN"]}'
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Fused 프롬프트 (지표 5개를 chat 1회로 통합)
+#    RAGAS 가 호출을 쪼갠 건 지표별 독립 클래스라는 라이브러리 구조 때문이지 정보가
+#    부족해서가 아니다 — 5개 지표의 입력이 전부 (question, answer, contexts, reference)
+#    로 같다. 그래서 판정 요청만 한 프롬프트에 모으고, 점수 계산식(_average_precision,
+#    TP/(TP+0.5(FP+FN)), 지지 비율, 코사인 평균)은 legacy 와 **같은 함수를 그대로** 쓴다.
+#    지시문도 위 legacy 상수를 재사용해 문구가 갈라지지 않게 한다.
+#
+#    비용: 실제 트랙 14 chat + 2 embed → 1 chat + 1 embed. (오라클 8+2 → 1+1)
+#    위험: 응답 1건이 지표 5개를 다 지고 있으므로 파싱 사고의 폭발 반경이 크다 →
+#          블록별로 독립 파싱하고(한 블록이 깨져도 나머지는 산다), 그래도 빠진 지표는
+#          _fused_repair 가 legacy 개별 호출로 메운다.
+# ══════════════════════════════════════════════════════════════════
+
+_FUSED_HEADER = (
+    "You are an evaluation judge. Perform ALL of the numbered sub-tasks below on the SAME input "
+    "in a single pass, and return ONE JSON object that contains every requested key.\n"
+    "Judge each sub-task independently — a verdict in one sub-task must never influence another, "
+    "and you must not skip a sub-task because another one seemed to answer it.\n"
+    "Keep every \"reason\" to one short sentence."
+)
+
+# 블록 = (지시문, 스키마 조각, few-shot 출력 조각). 필요한 블록만 골라 조립한다.
+_FUSED_BLOCKS: dict[str, tuple[str, str, Any]] = {
+    "answer_statements": (
+        f"{_FAITH_STMT_INSTRUCTION} Apply this to `answer` and return them in \"answer_statements\".",
+        '"answer_statements": {"items": {"type": "string"}, "type": "array"}',
+        ["Albert Einstein was a German-born theoretical physicist.",
+         "Albert Einstein is best known for the theory of relativity."],
+    ),
+    "faithfulness_verdicts": (
+        f"{_FAITH_NLI_INSTRUCTION} The statements are the \"answer_statements\" you produced above, "
+        f"and the context is the concatenation of every entry in `contexts`. Return one entry per "
+        f"statement, in the same order, in \"faithfulness_verdicts\".",
+        '"faithfulness_verdicts": {"items": {"properties": {"statement": {"type": "string"}, '
+        '"reason": {"type": "string"}, "verdict": {"type": "integer"}}, '
+        '"required": ["statement", "reason", "verdict"], "type": "object"}, "type": "array"}',
+        [{"statement": "Albert Einstein was a German-born theoretical physicist.",
+          "reason": "The context states this directly.", "verdict": 1},
+         {"statement": "Albert Einstein is best known for the theory of relativity.",
+          "reason": "The context says he is best known for developing the theory of relativity.",
+          "verdict": 1}],
+    ),
+    "relevancy": (
+        f"{_RELEVANCY_INSTRUCTION}\nGenerate {{n}} distinct questions for `answer` (ignore `question` "
+        f"and `contexts` entirely for this sub-task — judge only what `answer` itself asks for) and "
+        f"return them in \"generated_questions\", plus a single \"noncommittal\" flag for `answer`.",
+        '"generated_questions": {"items": {"type": "string"}, "type": "array"}, '
+        '"noncommittal": {"type": "integer"}',
+        None,   # 두 키를 동시에 채우므로 예시는 _FUSED_EXAMPLE_OUTPUT 에서 직접 넣는다
+    ),
+    "context_verdicts": (
+        f"{_CTX_PREC_INSTRUCTION} Judge EACH entry of `contexts` separately against `reference` "
+        f"(treat `reference` as the answer to arrive at). Return one entry per context, carrying "
+        f"its `index`, in \"context_verdicts\".",
+        '"context_verdicts": {"items": {"properties": {"index": {"type": "integer"}, '
+        '"reason": {"type": "string"}, "verdict": {"type": "integer"}}, '
+        '"required": ["index", "reason", "verdict"], "type": "object"}, "type": "array"}',
+        [{"index": 0, "reason": "It contains the physicist and relativity facts of the reference.",
+          "verdict": 1},
+         {"index": 1, "reason": "It is about a mountain range and is unrelated.", "verdict": 0}],
+    ),
+    "reference_statements": (
+        f"{_FAITH_STMT_INSTRUCTION} Apply this to `reference` and return them in "
+        f"\"reference_statements\".",
+        '"reference_statements": {"items": {"type": "string"}, "type": "array"}',
+        ["Albert Einstein was a German-born theoretical physicist.",
+         "Albert Einstein is best known for the theory of relativity.",
+         "Albert Einstein received the 1921 Nobel Prize in Physics."],
+    ),
+    "correctness": (
+        f"{_CORRECTNESS_INSTRUCTION} The answer statements are your \"answer_statements\" and the "
+        f"ground truth statements are your \"reference_statements\". Return the classification in "
+        f"\"correctness\".",
+        '"correctness": {"properties": {"TP": ' + _TPFPFN_ITEM + ', "FP": ' + _TPFPFN_ITEM
+        + ', "FN": ' + _TPFPFN_ITEM + '}, "required": ["TP", "FP", "FN"], "type": "object"}',
+        {"TP": [{"statement": "Albert Einstein was a German-born theoretical physicist.",
+                 "reason": "Directly supported by the ground truth."},
+                {"statement": "Albert Einstein is best known for the theory of relativity.",
+                 "reason": "Directly supported by the ground truth."}],
+         "FP": [],
+         "FN": [{"statement": "Albert Einstein received the 1921 Nobel Prize in Physics.",
+                 "reason": "Present in the ground truth but missing from the answer."}]},
+    ),
+    "recall_classifications": (
+        f"{_CTX_RECALL_INSTRUCTION}\nHere the analyzed answer is `reference` and the context is the "
+        f"concatenation of every entry in `contexts`. Return it in \"recall_classifications\".",
+        '"recall_classifications": {"items": {"properties": {"statement": {"type": "string"}, '
+        '"reason": {"type": "string"}, "attributed": {"type": "integer"}}, '
+        '"required": ["statement", "reason", "attributed"], "type": "object"}, "type": "array"}',
+        [{"statement": "Albert Einstein was a German-born theoretical physicist.",
+          "reason": "Stated in context 0.", "attributed": 1},
+         {"statement": "Albert Einstein is best known for the theory of relativity.",
+          "reason": "Stated in context 0.", "attributed": 1},
+         {"statement": "Albert Einstein received the 1921 Nobel Prize in Physics.",
+          "reason": "No context mentions the Nobel Prize.", "attributed": 0}],
+    ),
+}
+
+_FUSED_EXAMPLE_INPUT = {
+    "question": "What can you tell me about Albert Einstein?",
+    "answer": ("Albert Einstein was a German-born theoretical physicist. "
+               "He is best known for the theory of relativity."),
+    "contexts": [
+        {"index": 0, "text": ("Albert Einstein (1879-1955) was a German-born theoretical physicist, "
+                              "best known for developing the theory of relativity.")},
+        {"index": 1, "text": ("The Andes is the longest continental mountain range in the world, "
+                              "located in South America.")},
+    ],
+    "reference": ("Albert Einstein was a German-born theoretical physicist best known for the theory "
+                  "of relativity. He received the 1921 Nobel Prize in Physics."),
+}
+# relevancy 블록은 키가 2개라 예시를 따로 둔다(블록 조각 자리는 None).
+_FUSED_RELEVANCY_EXAMPLE = {
+    "generated_questions": [
+        "Who was Albert Einstein and what is he best known for?",
+        "What is Albert Einstein best known for?",
+        "Which German-born theoretical physicist developed the theory of relativity?",
+    ],
+    "noncommittal": 0,
+}
+
+
+def _fused_prompt(blocks: list[str], question: str, answer: str,
+                  contexts: list[str], reference: str) -> str:
+    """선택된 블록만으로 fused 프롬프트를 조립한다(_ragas_prompt 와 같은 골격).
+    블록 순서 = 모델이 답을 만들어야 하는 순서(분해 → 판정)이므로 호출부 순서를 지킨다."""
+    instructions, schema_parts, example_out = [], [], {}
+    for i, name in enumerate(blocks, start=1):
+        instr, schema, example = _FUSED_BLOCKS[name]
+        instructions.append(f"({i}) " + instr.replace("{n}", str(RELEVANCY_STRICTNESS)))
+        schema_parts.append(schema)
+        if name == "relevancy":
+            example_out.update(_FUSED_RELEVANCY_EXAMPLE)
+        else:
+            example_out[name] = example
+
+    required = [k for name in blocks
+                for k in (("generated_questions", "noncommittal") if name == "relevancy" else (name,))]
+    schema = ('{"properties": {' + ", ".join(schema_parts) + '}, "required": '
+              + json.dumps(required) + '}')
+
+    input_obj: dict[str, Any] = {"question": question, "answer": answer}
+    if contexts:
+        input_obj["contexts"] = [{"index": i, "text": c} for i, c in enumerate(contexts)]
+    if reference:
+        input_obj["reference"] = reference
+
+    example_str = (
+        "--------EXAMPLE-----------\n"
+        f"Input: {json.dumps(_FUSED_EXAMPLE_INPUT, indent=4, ensure_ascii=False)}\n"
+        f"Output: {json.dumps(example_out, indent=4, ensure_ascii=False)}"
+    )
+    return (
+        f"{_FUSED_HEADER}\n\n"
+        + "\n\n".join(instructions)
+        + "\n\nPlease return the output in a JSON format that complies with the following schema "
+          "as specified in JSON Schema:\n"
+        + f"{schema}Do not use single quotes in your response but double quotes, "
+          "properly escaped with a backslash.\n\n"
+        + f"{example_str}\n"
+        + "-----------------------------\n\n"
+          "Now perform the same with the following input\n"
+        + f"input: {json.dumps(input_obj, indent=4, ensure_ascii=False)}\n"
+          "Output: "
+    )
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -335,13 +552,31 @@ def _judge():
 # ══════════════════════════════════════════════════════════════════
 
 def evaluate_real_track(record: EvalRecord, judge) -> dict:
-    """실제 결과 지표. faithfulness, response_relevancy, (+정답 있으면) context_precision, context_recall.
+    """실제 결과 지표. faithfulness, response_relevancy, (+정답 있으면) context_precision,
+    context_recall, answer_correctness.
 
-    [비용] DEEP 트랙 1개당 LLM 호출 ~11회(faithfulness 2 + precision top_k개 + recall 1 +
-    relevancy strictness). EVAL_RAGAS_INNER_CONCURRENCY>1 이면 지표 4개를 동시 실행
-    (지표 내부의 청크별/strictness 호출도 각자 같은 동시성으로 돈다).
-    순차 대비 차이: 순차에선 첫 지표의 예외가 나머지 호출을 생략시키지만, 어차피
-    호출부(_ragas_track)가 트랙 전체를 {} 로 폴백하므로 최종 결과는 동일하다."""
+    [비용] fused(기본): chat 1 + embed 1. legacy(EVAL_RAGAS_FUSED=0): chat 14 + embed 2
+    (faithfulness 2 + relevancy strictness 3 + precision top_k 5 + recall 1 + correctness 3)."""
+    if _fused_enabled():
+        return _fused_real_track(judge, record)
+    return _evaluate_real_track_legacy(record, judge)
+
+
+def evaluate_oracle_track(record: EvalRecord, judge) -> dict:
+    """gold context 로 생성한 답에 대한 지표. faithfulness, response_relevancy, (+정답 있으면)
+    answer_correctness. [비용] fused: chat 1 + embed 1 / legacy: chat 8 + embed 2."""
+    if _fused_enabled():
+        return _fused_oracle_track(judge, record)
+    return _evaluate_oracle_track_legacy(record, judge)
+
+
+def _evaluate_real_track_legacy(record: EvalRecord, judge) -> dict:
+    """지표별 개별 호출(ragas 원본과 1:1). EVAL_RAGAS_FUSED=0 스위치와 fused 결손 보수용.
+
+    EVAL_RAGAS_INNER_CONCURRENCY>1 이면 지표 5개를 동시 실행(지표 내부의 청크별/strictness
+    호출도 각자 같은 동시성으로 돈다). 순차 대비 차이: 순차에선 첫 지표의 예외가 나머지
+    호출을 생략시키지만, 어차피 호출부(_ragas_track)가 트랙 전체를 {} 로 폴백하므로
+    최종 결과는 동일하다."""
     q = record.probe.question
     ans = record.generated_answer
     ctx = record.retrieved_context
@@ -359,8 +594,8 @@ def evaluate_real_track(record: EvalRecord, judge) -> dict:
     return _drop_none(_merge_task_values(tasks, values))
 
 
-def evaluate_oracle_track(record: EvalRecord, judge) -> dict:
-    """gold context 로 생성한 답에 대한 지표. faithfulness, response_relevancy, (+정답 있으면) answer_correctness."""
+def _evaluate_oracle_track_legacy(record: EvalRecord, judge) -> dict:
+    """오라클 트랙의 지표별 개별 호출 경로(ragas 원본과 1:1)."""
     q = record.probe.question
     ans = record.oracle_answer or ""
     ctx = record.oracle_context or record.retrieved_context
@@ -372,6 +607,209 @@ def evaluate_oracle_track(record: EvalRecord, judge) -> dict:
     if ref:
         out.update(_answer_correctness(judge, q, ans, ref))
     return _drop_none(out)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Fused 트랙 측정 (chat 1회 + embed 1회)
+#    판정만 한 번에 받아오고, 점수 계산은 legacy 와 같은 식·같은 함수를 쓴다.
+#    블록별 독립 파싱 → 한 블록이 깨져도 나머지 지표는 살아남고, 빠진 지표만 보수한다.
+# ══════════════════════════════════════════════════════════════════
+
+def _fused_real_track(judge, record: EvalRecord) -> dict:
+    """실제 트랙 fused. 검색 컨텍스트를 쓰므로 precision/recall 까지 한 응답에 담는다."""
+    return _fused_track(judge, record.probe.question, record.generated_answer,
+                        record.retrieved_context, record.probe.ground_truth,
+                        with_retrieval=True)
+
+
+def _fused_oracle_track(judge, record: EvalRecord) -> dict:
+    """오라클 트랙 fused. gold context 는 검색 품질 지표의 대상이 아니라 precision/recall 은 빼고
+    faithfulness·relevancy·correctness 만 받는다(legacy 오라클 트랙과 같은 지표 구성)."""
+    return _fused_track(judge, record.probe.question, record.oracle_answer or "",
+                        record.oracle_context or record.retrieved_context,
+                        record.probe.ground_truth, with_retrieval=False)
+
+
+def _fused_track(judge, question: str, answer: str, contexts: list[str], reference: str,
+                 *, with_retrieval: bool) -> dict:
+    """재료가 있는 지표의 판정을 chat 1회로 받아 점수로 환산한다.
+
+    블록 선택 규칙은 legacy 의 재료 가드와 같다 — 답변/컨텍스트/정답이 없으면 그 지표를
+    애초에 묻지 않으므로, 없는 재료로 만든 헛 판정이 섞이지 않는다."""
+    answer = answer or ""
+    reference = reference or ""
+    contexts = list(contexts or [])
+    has_answer = bool(answer.strip())
+    has_ref = bool(reference.strip())
+
+    want_faith = has_answer and bool(contexts)
+    want_corr = has_answer and has_ref
+    want_prec = with_retrieval and has_ref and bool(contexts)   # precision·recall 은 재료가 같다
+
+    blocks: list[str] = []
+    if want_faith or want_corr:
+        blocks.append("answer_statements")
+    if want_faith:
+        blocks.append("faithfulness_verdicts")
+    if has_answer:
+        blocks.append("relevancy")
+    if want_prec:
+        blocks.append("context_verdicts")
+    if want_corr:
+        blocks += ["reference_statements", "correctness"]
+    if want_prec:
+        blocks.append("recall_classifications")
+
+    d = _chat(judge, _fused_prompt(blocks, question, answer, contexts, reference),
+              max_output_tokens=_fused_max_tokens(), label="fused") if blocks else {}
+
+    out: dict = {}
+    if not has_answer:
+        out["response_relevancy"] = 0.0          # legacy _response_relevancy 와 동일한 단락
+    if want_faith:
+        out["faithfulness"] = _fused_faithfulness(d)
+    if want_prec:
+        out["context_precision"] = _fused_context_precision(d, len(contexts))
+        out["context_recall"] = _fused_context_recall(d)
+    out.update(_fused_embedded(judge, d, question, answer, reference,
+                               want_relevancy=has_answer, want_correctness=want_corr))
+    out = _drop_none(out)
+
+    if _fused_repair_enabled():
+        _fused_repair(judge, out, question, answer, contexts, reference,
+                      want_faith=want_faith, want_prec=want_prec, want_corr=want_corr)
+    return out
+
+
+def _fused_faithfulness(d: dict):
+    """faithfulness_verdicts → 지지 비율. legacy 2단계(_faithfulness)의 최종식과 동일."""
+    verdicts = [v for v in _as_list(d, "faithfulness_verdicts") if isinstance(v, dict)]
+    if not verdicts:
+        return None
+    return sum(1 for v in verdicts if _truthy(v.get("verdict"))) / len(verdicts)
+
+
+def _fused_context_precision(d: dict, n: int):
+    """context_verdicts → 순위 가중 average precision.
+
+    _average_precision 은 **청크 순위**에 가중을 주므로 판정을 원래 순서로 되돌리는 게 핵심이다.
+    그래서 index 를 함께 받아 그 값으로 재정렬한다(모델이 순서를 흔들어도 안전).
+    index 가 깨졌으면 개수가 맞을 때만 응답 순서를 순위로 믿고, 그마저 안 맞으면 미측정."""
+    items = [v for v in _as_list(d, "context_verdicts") if isinstance(v, dict)]
+    if not items or n <= 0:
+        return None
+    by_index: dict[int, int] = {}
+    for v in items:
+        i = v.get("index")
+        if isinstance(i, bool) or not isinstance(i, int) or not (0 <= i < n) or i in by_index:
+            continue
+        by_index[i] = 1 if _truthy(v.get("verdict")) else 0
+    if len(by_index) == n:
+        verdicts = [by_index[i] for i in range(n)]
+    elif len(items) == n:
+        verdicts = [1 if _truthy(v.get("verdict")) else 0 for v in items]
+    else:
+        return None
+    return _average_precision(verdicts)
+
+
+def _fused_context_recall(d: dict):
+    """recall_classifications → 귀속 비율. legacy _context_recall 의 최종식과 동일."""
+    cls = [c for c in _as_list(d, "recall_classifications") if isinstance(c, dict)]
+    if not cls:
+        return None
+    return sum(1 for c in cls if _truthy(c.get("attributed"))) / len(cls)
+
+
+def _fused_embedded(judge, d: dict, question: str, answer: str, reference: str,
+                    *, want_relevancy: bool, want_correctness: bool) -> dict:
+    """임베딩이 필요한 두 지표(response_relevancy·answer_correctness 의 유사도 성분)를
+    **embed 1회**로 함께 계산한다. legacy 는 지표마다 따로 불러 2회였다."""
+    out: dict = {}
+    gen_qs: list[str] = []
+    if want_relevancy:
+        gen_qs = [q for q in _as_list(d, "generated_questions")
+                  if isinstance(q, str) and q.strip()][:RELEVANCY_STRICTNESS]
+        # 생성 질문이 없으면 legacy 처럼 0.0 으로 확정하지 않고 '미측정'으로 둔다 — legacy 의
+        # 0.0 은 strictness 회 시도가 모두 질문을 못 냈다는 뜻이지만, 여기선 응답 1건이
+        # 통째로 날아간 경우와 구분이 안 된다. 미측정으로 두면 _fused_repair 가 되묻는다.
+
+    texts: list[str] = ([question] + gen_qs) if gen_qs else []
+    sim_at = None
+    if want_correctness:
+        sim_at = len(texts)
+        texts += [reference, answer]
+
+    vecs = None
+    if texts:
+        try:
+            vecs = _embed(judge, texts)
+        except Exception:
+            vecs = None
+        if vecs is not None and len(vecs) != len(texts):
+            vecs = None                          # 길이 불일치면 인덱스를 믿을 수 없다
+
+    if gen_qs:
+        if vecs:
+            sims = [_cosine(vecs[0], v) for v in vecs[1:1 + len(gen_qs)]]
+            # 회피형 판정은 fused 에서 답변당 1개(legacy 는 draft 마다 받아 전부 1일 때만 0).
+            # 같은 답변을 두고 나온 판정이라 다수결이 아니라 그 값이 곧 결론이다.
+            out["response_relevancy"] = (sum(sims) / len(sims)) * (0 if _truthy(d.get("noncommittal")) else 1)
+        else:
+            out["response_relevancy"] = None
+    if want_correctness:
+        sim = max(_cosine(vecs[sim_at], vecs[sim_at + 1]), 0.0) if vecs else None
+        out.update(_correctness_score(_fused_correctness_counts(d), sim,
+                                      "fused 응답에 correctness 블록 없음"))
+    return out
+
+
+def _fused_correctness_counts(d: dict):
+    """correctness 블록 → (TP, FP, FN) 카운트. 블록이 없거나 형식이 깨졌으면 None(=factual 결손)."""
+    corr = d.get("correctness")
+    if not isinstance(corr, dict):
+        return None
+    return len(_as_list(corr, "TP")), len(_as_list(corr, "FP")), len(_as_list(corr, "FN"))
+
+
+def _fused_repair(judge, out: dict, question: str, answer: str, contexts: list[str],
+                  reference: str, *, want_faith: bool, want_prec: bool, want_corr: bool) -> None:
+    """fused 응답에서 빠진 지표만 legacy 개별 호출로 메운다(out 을 제자리 수정).
+
+    보통 0건이라 비용이 0이다 — 출력 절단·JSON 파싱 실패처럼 응답 하나가 통째로 날아간
+    사고에서만 돈다. 이게 없으면 그런 사고 1건이 트랙 지표 5개를 전부 '미측정'으로 만들고,
+    diagnose 의 정답 강등(_f1_ok)이 조용히 스킵돼 lexical 오통과가 성공으로 굳는다.
+    보수 자체가 실패하면 이미 확보한 fused 값은 그대로 두고 물러난다."""
+    missing: list[tuple[str, Callable[[], Any]]] = []
+    if want_faith and "faithfulness" not in out:
+        missing.append(("faithfulness", lambda: _faithfulness(judge, question, answer, contexts)))
+    if "response_relevancy" not in out:
+        missing.append(("response_relevancy", lambda: _response_relevancy(judge, question, answer)))
+    if want_prec and "context_precision" not in out:
+        missing.append(("context_precision", lambda: _context_precision(judge, question, reference, contexts)))
+    if want_prec and "context_recall" not in out:
+        missing.append(("context_recall", lambda: _context_recall(judge, question, reference, contexts)))
+    # degraded = TP/FP/FN 분류가 빠져 유사도 단독으로 낸 점수다. 점수 자체는 있지만 강등
+    # 근거(FN 카운트)가 없으므로 결손으로 보고 다시 받는다 — 성공하면 아래 update 가 덮어쓴다.
+    if want_corr and ("answer_correctness" not in out or out.get("answer_correctness_degraded")):
+        missing.append(("answer_correctness", lambda: _answer_correctness(judge, question, answer, reference)))
+    if not missing:
+        return
+    # 보수 건수 = fused 가 아끼려던 개별 호출이 되살아난 수. 리포트가 집계해(scores.fused_repaired)
+    # '통합했는데 실제로는 개별 호출로 되돌아가고 있다'를 로그가 아니라 지표로 보게 한다.
+    out["fused_repaired"] = out.get("fused_repaired", 0) + len(missing)
+    print(f"[Eval] RAGAS fused 결손 {[k for k, _ in missing]} → 개별 호출로 보수")
+    try:
+        values = parallel_map(lambda t: t[1](), missing, _inner_concurrency())
+    except Exception as e:
+        print(f"[Eval] RAGAS fused 보수 실패({e}) → 해당 지표 미측정 유지")
+        return
+    repaired = _drop_none(_merge_task_values(missing, values))
+    # 보수로 factual 을 되찾았으면 degraded 표시는 사실이 아니게 된다(이 키는 legacy 조각이
+    # 스스로 실을 때만 남아야 한다). 보수가 또 실패했으면 legacy 가 다시 실어 준다.
+    if "answer_correctness" in repaired:
+        out.pop("answer_correctness_degraded", None)
+    out.update(repaired)
 
 
 def answer_similarity(record: EvalRecord, track: str):
@@ -403,7 +841,7 @@ def evaluate_reasoning_mode(record: EvalRecord, judge) -> dict:
         "reference": record.probe.ground_truth or "",
     }
     d = _chat(judge, _ragas_prompt(_REASONING_MODE_INSTRUCTION, _SCHEMA_REASONING_MODE,
-                                   _REASONING_MODE_EXAMPLES, inp))
+                                   _REASONING_MODE_EXAMPLES, inp), label="reasoning_mode")
     mode = d.get("mode")
     if not isinstance(mode, str) or mode not in _REASONING_MODES:
         return {}                                    # 미상·파싱 실패 → 미측정
@@ -424,13 +862,17 @@ def evaluate_abstention(record: EvalRecord, judge) -> dict:
 #  RAGAS 지표 알고리즘 (소스와 동일)
 # ══════════════════════════════════════════════════════════════════
 
-def _decompose_statements(judge, question: str, text: str) -> list[str]:
+def _decompose_statements(judge, question: str, text: str, label: str = "statements") -> list[str]:
     """RAGAS StatementGenerator: 텍스트를 대명사 없는 독립 주장 문장들로 분해.
-    faithfulness·answer_correctness 가 공유(답변/정답 모두 이 형식으로 분해)."""
+    faithfulness·answer_correctness 가 공유(답변/정답 모두 이 형식으로 분해).
+
+    label 은 실패 로그 구분용 — 한 함수를 세 자리(faithfulness/정답분해/골드분해)가
+    공유해서, 이름이 없으면 어느 쪽이 비었는지 로그로 못 가린다."""
     if not (text or "").strip():
         return []
     d = _chat(judge, _ragas_prompt(_FAITH_STMT_INSTRUCTION, _SCHEMA_STATEMENTS,
-                                   _FAITH_STMT_EXAMPLES, {"question": question, "answer": text}))
+                                   _FAITH_STMT_EXAMPLES, {"question": question, "answer": text}),
+              label=label, max_output_tokens=_LARGE_JUDGE_MAX_OUTPUT_TOKENS)
     return [s for s in _as_list(d, "statements") if isinstance(s, str) and s.strip()]
 
 
@@ -439,13 +881,15 @@ def _faithfulness(judge, question: str, answer: str, contexts: list[str]):
     if not (answer or "").strip() or not contexts:
         return None
     # 1. 문장 분해: 검증가능한 주장들로 분해
-    statements = _decompose_statements(judge, question, answer)
+    statements = _decompose_statements(judge, question, answer, "faithfulness.statements")
     if not statements:
         return None
     # 2. NLI 판정: 각 주장이 컨텍스트만으로 추론 가능한지 판단
     context_str = "\n".join(contexts)
     d2 = _chat(judge, _ragas_prompt(_FAITH_NLI_INSTRUCTION, _SCHEMA_NLI,
-                                    _FAITH_NLI_EXAMPLES, {"context": context_str, "statements": statements}))
+                                    _FAITH_NLI_EXAMPLES, {"context": context_str, "statements": statements}),
+               label="faithfulness.nli",
+               max_output_tokens=_LARGE_JUDGE_MAX_OUTPUT_TOKENS)
     verdicts = [v for v in _as_list(d2, "statements") if isinstance(v, dict)]
     if not verdicts:
         return None
@@ -464,54 +908,82 @@ def _answer_correctness(judge, question: str, answer: str, reference: str):
     if not (answer or "").strip() or not (reference or "").strip():
         return {}
 
-    w_f, w_s = _ANSWER_CORRECTNESS_WEIGHTS
-    components: list[tuple[float, float]] = []   # (가중치, 값) — 측정에 성공한 성분만 담는다
-    factual_measured = False
-    counts: dict = {}                            # TP/FP/FN — factual 성공 시에만 채운다
-
     # ① factual F1 — 답변 문장을 정답 기준 TP/FP/FN 으로 분류
-    ans_stmts = _decompose_statements(judge, question, answer)
-    ref_stmts = _decompose_statements(judge, question, reference)
+    counts = None
+    degrade_reason = ""                          # factual 을 못 잰 이유(로그용) — 성공하면 빈 값
+    ans_stmts = _decompose_statements(judge, question, answer, "correctness.answer_statements")
+    ref_stmts = _decompose_statements(judge, question, reference, "correctness.gold_statements")
+    if not ans_stmts or not ref_stmts:
+        # '실패' 로 단정하지 않는다 — 기권("모르겠습니다")처럼 주장이 없는 답변은 0문장이
+        # 정상 분해 결과다. 어느 쪽이 비었는지는 문장 수로 읽는다.
+        degrade_reason = (f"분해 결과 없음(answer={len(ans_stmts)}문장, "
+                          f"gold={len(ref_stmts)}문장, gold {len(reference)}자)")
     if ans_stmts and ref_stmts:
         d = _chat(judge, _ragas_prompt(_CORRECTNESS_INSTRUCTION, _SCHEMA_CORRECTNESS, _CORRECTNESS_EXAMPLES,
-                                       {"question": question, "answer": ans_stmts, "ground_truth": ref_stmts}))
-        tp, fp, fn = len(_as_list(d, "TP")), len(_as_list(d, "FP")), len(_as_list(d, "FN"))
-        denom = tp + 0.5 * (fp + fn)
-        # denom==0 = 분류가 한 건도 안 나옴. 분해된 문장이 있으면 정상 분류는 최소 1건이 나오므로
-        # 이건 판정기 무응답/파싱 실패다 — 이 성분만 버리고 남은 성분으로 계속 간다.
-        # (예전엔 여기서 함수 전체가 None 이라 '미측정'이 되어, 판정기가 죽으면 강등이 통째로
-        #  스킵되고 lexical 오통과가 그대로 성공 처리됐다.)
-        if denom > 0:
-            components.append((w_f, tp / denom))
-            factual_measured = True
-            # TP=맞은 요소 / FP=gold 에 없는 군더더기 / FN=gold 에만 있는 누락 요소.
-            # FN 이 generation_partial_answer 의 판별 근거다(임계 판정은 diagnose 소관).
-            counts = {"answer_correctness_tp": tp,
-                      "answer_correctness_fp": fp,
-                      "answer_correctness_fn": fn}
+                                       {"question": question, "answer": ans_stmts, "ground_truth": ref_stmts}),
+                  label="correctness.classify",
+                  max_output_tokens=_LARGE_JUDGE_MAX_OUTPUT_TOKENS)
+        counts = (len(_as_list(d, "TP")), len(_as_list(d, "FP")), len(_as_list(d, "FN")))
+        if sum(counts) == 0:
+            degrade_reason = (f"TP/FP/FN 분류 무응답(answer={len(ans_stmts)}문장, "
+                              f"gold={len(ref_stmts)}문장, gold {len(reference)}자)")
 
     # ② 의미 유사도 — 답변↔정답 임베딩 코사인
     try:
         vecs = _embed(judge, [reference, answer])
     except Exception:
         vecs = None
-    if vecs and len(vecs) >= 2:
-        components.append((w_s, max(_cosine(vecs[0], vecs[1]), 0.0)))
+    sim = max(_cosine(vecs[0], vecs[1]), 0.0) if vecs and len(vecs) >= 2 else None
+
+    return _correctness_score(counts, sim, degrade_reason)
+
+
+def _correctness_score(counts, sim, degrade_reason: str = "") -> dict:
+    """(TP,FP,FN) 카운트 + 의미유사도 → answer_correctness 조각. legacy·fused 공용 계산식.
+
+    counts=None 또는 denom==0 = 분류가 한 건도 안 나옴. 분해된 문장이 있으면 정상 분류는
+    최소 1건이 나오므로 이건 판정기 무응답/파싱 실패다 — 이 성분만 버리고 남은 성분으로
+    계속 간다. (예전엔 여기서 함수 전체가 None 이라 '미측정'이 되어, 판정기가 죽으면 강등이
+    통째로 스킵되고 lexical 오통과가 그대로 성공 처리됐다.)
+
+    degrade_reason 은 호출부가 아는 '왜 factual 이 없는지' — 리포트엔 건수만 남아서
+    원인이 '골드가 길어 분해가 안 됨'인지 '분류 호출이 죽음'인지 구분이 안 된다. 처방이
+    갈리는 지점이라(전자는 골드/프롬프트, 후자는 출력 상한) 로그로 드러낸다."""
+    w_f, w_s = _ANSWER_CORRECTNESS_WEIGHTS
+    components: list[tuple[float, float]] = []   # (가중치, 값) — 측정에 성공한 성분만 담는다
+    out_counts: dict = {}                        # TP/FP/FN — factual 성공 시에만 채운다
+    if counts is not None:
+        tp, fp, fn = counts
+        denom = tp + 0.5 * (fp + fn)
+        if denom > 0:
+            components.append((w_f, tp / denom))
+            # TP=맞은 요소 / FP=gold 에 없는 군더더기 / FN=gold 에만 있는 누락 요소.
+            # FN 이 generation_partial_answer 의 판별 근거다(임계 판정은 diagnose 소관).
+            out_counts = {"answer_correctness_tp": tp,
+                          "answer_correctness_fp": fp,
+                          "answer_correctness_fn": fn}
+    if sim is not None:
+        components.append((w_s, sim))
 
     if not components:
-        return {}                                # 두 성분 다 실패 → 진짜 미측정
+        # 두 성분 다 실패 → 진짜 미측정. degraded 플래그가 안 붙어 리포트 집계에도 안 잡히는
+        # 경로라, 여기서 안 남기면 '의미축이 왜 없는지'를 로그에서 아예 못 찾는다.
+        print(f"[Eval] answer_correctness 미측정 — {degrade_reason or '원인 미상'} + 임베딩 실패")
+        return {}
     # 성분이 하나만 측정돼도 가중 재정규화해 0~1 스케일을 유지한다.
     score = sum(w * v for w, v in components) / sum(w for w, _ in components)
     out = {"answer_correctness": score}
-    out.update(counts)                           # factual 실패면 빈 dict = 카운트 미측정
+    out.update(out_counts)                       # factual 실패면 빈 dict = 카운트 미측정
 
     # factual(TP/FP/FN 분류)이 빠지면 유사도 단독 점수다. 이 폴백은 판정을 느슨하게 만들지
     # 않는다 — 이 지표를 보는 diagnose._f1_ok 은 이미 lexical 을 통과한 답에만 도달하므로,
     # 유사도가 할 수 있는 일은 '강등'뿐이고 통과시키는 답은 지표가 없었어도 통과했을 답이다.
     # 다만 부정문·근접 오답은 유사도도 높게 나와 못 거르므로, 그 실행의 정답 판정이
     # degrade 됐다는 사실 자체를 리포트로 드러낸다(집계: report._degraded_correctness_count).
-    if not factual_measured:
+    # 사유와 규모는 chat_json 쪽 라벨 로그와 짝을 이룬다.
+    if not out_counts:
         out["answer_correctness_degraded"] = True
+        print(f"[Eval] answer_correctness degrade — {degrade_reason or '원인 미상'}")
     return out
 
 
@@ -522,7 +994,8 @@ def _response_relevancy(judge, question: str, answer: str):
     # 답변으로부터 질문 n회 생성 (inner 동시성 1이면 기존 순차와 동일, 결과는 순서 보존)
     drafts = parallel_map(
         lambda _i: _chat(judge, _ragas_prompt(_RELEVANCY_INSTRUCTION, _SCHEMA_RELEVANCY,
-                                              _RELEVANCY_EXAMPLES, {"response": answer})),
+                                              _RELEVANCY_EXAMPLES, {"response": answer}),
+                         label="response_relevancy"),
         list(range(RELEVANCY_STRICTNESS)),
         _inner_concurrency(),
     )
@@ -534,13 +1007,22 @@ def _response_relevancy(judge, question: str, answer: str):
             gen_qs.append(q)
             noncommittal.append(1 if _truthy(d.get("noncommittal")) else 0)
     if not gen_qs:
+        # 질문 생성이 한 번도 성공 못 함(무응답·파싱 실패) — 답변이 무관해서 나온 0 이 아니다.
+        print(f"[Eval] response_relevancy 0 — 질문 생성 {RELEVANCY_STRICTNESS}회 모두 실패")
         return 0.0
     all_noncommittal = all(n == 1 for n in noncommittal) # noncommittal: 답변이 회피형(잘모르겠다.)인지 판별
     vecs = _embed(judge, [question] + gen_qs)  # Embedding
     if not vecs or len(vecs) < 2:
         return None
     sims = [_cosine(vecs[0], v) for v in vecs[1:]] # Cosine Similarity
-    return (sum(sims) / len(sims)) * (0 if all_noncommittal else 1) # 모든 답변이 회피형이면 0 출력
+    if all_noncommittal:
+        # 0 은 코사인이 낮아서가 아니라 회피 판정이 전부 1 이라 곱해진 결과다. 판정기가
+        # 단정형 답변을 회피형으로 오분류해도 같은 0 이 나오므로(실측), 실제 코사인과
+        # 표본 수를 남겨 '진짜 회피'와 '판정기 오분류'를 사후에 가를 수 있게 한다.
+        print(f"[Eval] response_relevancy 0 — 생성 질문 {len(gen_qs)}개가 모두 noncommittal "
+              f"판정(코사인 평균 {sum(sims) / len(sims):.2f}, strictness={RELEVANCY_STRICTNESS})")
+        return 0.0
+    return sum(sims) / len(sims)
 
 
 def _context_precision(judge, question: str, reference: str, contexts: list[str]):
@@ -552,7 +1034,8 @@ def _context_precision(judge, question: str, reference: str, contexts: list[str]
     decisions = parallel_map(
         lambda c: _chat(judge, _ragas_prompt(_CTX_PREC_INSTRUCTION, _SCHEMA_VERDICT,
                                              _CTX_PREC_EXAMPLES,
-                                             {"question": question, "context": c, "answer": reference})),
+                                             {"question": question, "context": c, "answer": reference}),
+                        label="context_precision"),
         list(contexts),
         _inner_concurrency(),
     )
@@ -565,7 +1048,9 @@ def _context_recall(judge, question: str, reference: str, contexts: list[str]):
         return None
     context_str = "\n".join(contexts)
     d = _chat(judge, _ragas_prompt(_CTX_RECALL_INSTRUCTION, _SCHEMA_RECALL, _CTX_RECALL_EXAMPLES,
-                                   {"question": question, "context": context_str, "answer": reference}))
+                                   {"question": question, "context": context_str, "answer": reference}),
+              label="context_recall",
+              max_output_tokens=_LARGE_JUDGE_MAX_OUTPUT_TOKENS)
     cls = _as_list(d, "classifications")
     if not cls:
         return None
@@ -576,7 +1061,7 @@ def _aspect_critic(judge, definition: str, user_input: str, response: str, conte
     """RAGAS AspectCritic: definition 기준 이진 판정(strictness=1 → 단일 호출)."""
     instruction = _ASPECT_INSTRUCTION_TMPL.format(definition=definition)
     inp = {"user_input": user_input, "response": response, "retrieved_contexts": contexts}
-    d = _chat(judge, _ragas_prompt(instruction, _SCHEMA_VERDICT, [], inp))
+    d = _chat(judge, _ragas_prompt(instruction, _SCHEMA_VERDICT, [], inp), label="aspect_critic")
     return 1 if _truthy(d.get("verdict")) else 0
 
 
@@ -628,9 +1113,15 @@ def _average_precision(verdicts: list[int]) -> float:
     )
     return numerator / denominator
 
-def _chat(judge, prompt: str) -> dict:
-    """RAGAS 형식 단일 프롬프트를 JSON 강제로 호출 → dict. 실패 시 {}."""
-    return llm_provider.chat_json("", prompt)
+def _chat(judge, prompt: str, max_output_tokens: int | None = None, label: str = "") -> dict:
+    """RAGAS 형식 단일 프롬프트를 JSON 강제로 호출 → dict. 실패 시 {}.
+
+    max_output_tokens 는 fused 처럼 응답 구조가 큰 호출만 명시한다(미지정=provider 기본).
+    label 은 실패 로그에 찍히는 호출 이름 — 호출부가 여럿인데 로그가 전부 같은 문구라
+    어느 지표의 심판이 죽었는지 못 가렸다(정답 판정 degrade 원인 추적)."""
+    if max_output_tokens is None:
+        return llm_provider.chat_json("", prompt, label=label)
+    return llm_provider.chat_json("", prompt, label=label, max_output_tokens=max_output_tokens)
 
 
 def _embed(judge, texts: list[str]) -> list[list[float]]:

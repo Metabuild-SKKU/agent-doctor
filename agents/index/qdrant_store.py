@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import math
 import os
 import re
@@ -63,6 +64,14 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    """환경변수 int 파싱 — 비정수/오타면 기본값으로 폴백(_env_float 와 같은 규약)."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 _models: dict[str, Any] = {}
 # model_name → 마지막 로드 실패 시각(monotonic). 실패를 영구 캐시하면 일시적
 # 원인(네트워크 등) 후에도 프로세스 내내 fallback 임베딩만 조용히 쓰게 되므로,
@@ -73,13 +82,78 @@ _FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
 # 정책을 따른다 — 영구 캐시하면 일시적 실패 후에도 프로세스 내내 리랭킹이 죽는다.
 _rerankers: dict[str, Any] = {}
 _failed_rerankers: dict[str, float] = {}
+# model_name → 실제로 적용된 입력 토큰 상한(None = 상한 없이 로드됨). 폴백으로 상한이 빠진
+# 실행을 리포트가 구분할 수 있어야 한다 — reranker_status 는 그 경우에도 "ready" 라
+# capped/uncapped 가 안 남고, 다음 처방 판정이 둘을 같은 실행으로 취급한다.
+_reranker_max_lengths: dict[str, int | None] = {}
 _FAILED_RERANKER_RETRY_SEC = _env_float("INDEX_RERANKER_RETRY_SEC", 300.0)
+# 리랭커(cross-encoder) 입력 토큰 상한. 0 이하면 모델 기본값(이 모델은 8192)을 쓴다.
+#
+# [역할] 폭주 차단용 안전망이지 비용 절감 장치가 아니다. 기본값 1024 는 **정책 내 구성에서는
+# 발동하지 않는다** — 실측(한국어, 이 모델 tokenizer): 1024자=584토큰 / 1500자(정책 최대,
+# optimizer.DEFAULT_CONSTRAINTS)=854토큰 이라, 한국어는 약 1800자를 넘어야 걸린다.
+# 게다가 sentence-transformers 의 텍스트 패딩은 batch-longest(padding=True)라 상한보다 짧은
+# 입력의 계산량은 상한과 무관하다. 즉 이 값을 낮추지 않는 한 리랭크 비용은 안 줄어든다.
+#
+# [왜 그래도 두나] 상한이 아예 없으면 한 쌍이 8192토큰까지 열린다. 정책 밖 구성(수동
+# chunk_size, 청킹 전략 교체로 길어진 청크)이나 코퍼스 특성에 따라 그 꼬리가 실제로 열리므로
+# 최악값을 8배 좁혀 둔다.
+#
+# [왜 더 낮추지 않나] 512(약 868자)로 낮추면 정책상 합법인 chunk_size 후보가 리랭커 입력에서만
+# 잘려, Optimize 의 청크 크기 비교가 '진짜 품질 차이'인지 '뒤가 잘려서'인지 구분되지 않는다.
+# 비용을 실제로 누르려면 상한이 아니라 rerank_candidates(쌍 수)를 줄이거나 리랭커를 끄는 쪽이다.
+# 실측 근거는 새로 붙은 계측(runtime_summary.search / reranker)으로 다음 실행에서 잡는다.
+_RERANKER_MAX_LENGTH = _env_int("INDEX_RERANKER_MAX_LENGTH", 1024)
 _collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, dict[str, bool]] = (
     WeakKeyDictionary()
 )
 # Serve의 동시 검색이 같은 CrossEncoder를 중복 로드하지 않도록 모델 캐시와
 # 실패 쿨다운 갱신을 한 임계구역에서 처리한다. 추론 자체는 병렬 검색을 막지 않는다.
 _reranker_lock = threading.Lock()
+
+
+def _accepts_max_length(cross_encoder_cls) -> bool:
+    """생성자가 max_length 를 받나 — 예외로 떠보지 않고 시그니처로 판정한다.
+
+    TypeError 를 잡아 재시도하면 생성자 **내부**에서 난 무관한 TypeError 까지 '상한 미지원'
+    으로 오진하고, 그 오진의 대가로 2GB 대 모델을 한 번 더 로드한다. 시그니처 조회는 공짜다.
+    **kwargs 를 받는 래퍼는 지원으로 본다 — 넘겨봐야 알 수 있고, 틀렸다면 로드 실패로
+    드러나는 편이 상한만 조용히 빠지는 것보다 낫다. 시그니처를 못 읽으면 보수적으로 False.
+    """
+    try:
+        params = inspect.signature(cross_encoder_cls).parameters
+    except (TypeError, ValueError):
+        return False
+    if "max_length" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _new_cross_encoder(cross_encoder_cls, model_name: str):
+    """입력 길이 상한(_RERANKER_MAX_LENGTH)을 걸어 CrossEncoder 를 만든다.
+
+    상한 인자를 못 받는 구현이면 상한 없이 만들되 조용히 넘어가지 않는다 — 상한이 빠지면
+    리랭크 비용이 다시 chunk_size 에 비례해 열리므로, 로그로 드러내야 원인을 찾을 수 있다.
+
+    경고 문구는 ASCII 기호로만 쓴다. 이 모듈은 진입점의 인코딩 보정
+    (core.console.force_utf8_stdio)을 거치지 않고 import 될 수 있어, cp949 콘솔에서
+    UnicodeEncodeError 가 나면 호출부(_load_reranker)의 except 가 로드 실패로 삼킨다.
+    """
+    if _RERANKER_MAX_LENGTH <= 0:
+        _reranker_max_lengths[model_name] = None
+        return cross_encoder_cls(model_name)
+    if not _accepts_max_length(cross_encoder_cls):
+        print("[Index] reranker 구현이 max_length 를 받지 않아 입력 길이 상한 없이 로드한다 "
+              "(청크가 크면 리랭크 비용이 그만큼 커진다)")
+        _reranker_max_lengths[model_name] = None
+        return cross_encoder_cls(model_name)
+    _reranker_max_lengths[model_name] = _RERANKER_MAX_LENGTH
+    return cross_encoder_cls(model_name, max_length=_RERANKER_MAX_LENGTH)
+
+
+def reranker_max_length(model_name: str = DEFAULT_RERANKER_MODEL) -> int | None:
+    """이 모델에 실제로 적용된 입력 토큰 상한. 상한 없이 로드됐거나 아직 안 실렸으면 None."""
+    return _reranker_max_lengths.get(model_name)
 
 
 def _load_reranker(model_name: str) -> tuple[Any | None, str]:
@@ -106,7 +180,7 @@ def _load_reranker(model_name: str) -> tuple[Any | None, str]:
         try:
             # 모델 생성까지 lock 안에서 수행해야 동시에 들어온 요청이 같은
             # 대형 모델을 각각 메모리에 올리는 것을 막을 수 있다.
-            model = CrossEncoder(model_name)
+            model = _new_cross_encoder(CrossEncoder, model_name)
         except Exception as exc:
             _failed_rerankers[model_name] = time.monotonic()
             print(
@@ -763,18 +837,29 @@ def rerank_with_status(
     results: list[dict],
     model_name: str = DEFAULT_RERANKER_MODEL,
     top_k: int = 5,
-) -> tuple[list[dict], str]:
-    """재정렬 결과와 실제 실행 상태를 함께 반환한다."""
+) -> tuple[list[dict], str, float]:
+    """재정렬 결과·실행 상태·**추론에만 든 시간(초)** 을 함께 반환한다.
+
+    시간을 호출부가 아니라 여기서 재는 이유가 둘 있다.
+      1) 모델 로드 제외가 구조로 보장된다 — _load_reranker 는 타이머 바깥이다. 호출부에서
+         재면 쿨다운 만료 직후 첫 쿼리가 2GB 대 재로드를 '쌍당 비용'으로 뒤집어쓴다.
+      2) seam 이 하나로 유지된다 — 이 함수만 패치하면 테스트에서 모델 로드가 일어나지 않는다.
+         호출부에 사전 로드를 따로 두면 그 패치를 우회해 단위 테스트가 실모델을 내려받는다.
+    실행하지 못한 경우(후보 없음·로드 실패·쿨다운·추론 실패)는 0.0 — 리랭크한 적이 없는
+    시간을 쌍당 비용 집계에 섞지 않는다.
+    """
     if not results:
-        return [], "not_attempted"
+        return [], "not_attempted", 0.0
     model, load_status = _load_reranker(model_name)
     if model is None:
-        return results[:top_k], load_status
+        return results[:top_k], load_status, 0.0
 
     try:
+        started = time.monotonic()
         scores = list(
             model.predict([(query, item.get("text", "")) for item in results])
         )
+        elapsed = time.monotonic() - started
         if len(scores) != len(results):
             raise ValueError(
                 f"reranker 점수 개수 불일치: {len(scores)} != {len(results)}"
@@ -790,13 +875,13 @@ def rerank_with_status(
             f"[Index] reranker 추론 실패, 기존 순위 유지 "
             f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
         )
-        return results[:top_k], "inference_failed"
+        return results[:top_k], "inference_failed", 0.0
     reranked = [
         {**item, "retrieval_score": item.get("score", 0.0), "score": float(score)}
         for item, score in zip(results, scores)
     ]
     reranked.sort(key=lambda item: item["score"], reverse=True)
-    return reranked[:top_k], "applied"
+    return reranked[:top_k], "applied", elapsed
 
 
 def rerank(
@@ -806,7 +891,7 @@ def rerank(
     top_k: int = 5,
 ) -> list[dict]:
     """기존 호출자를 위해 결과 리스트만 반환하는 호환 API."""
-    reranked, _status = rerank_with_status(
+    reranked, _status, _seconds = rerank_with_status(
         query,
         results,
         model_name=model_name,
@@ -849,7 +934,7 @@ def _get_embedding_model(model_name: str) -> Any | None:
             except Exception as exc:
                 _failed_models[model_name] = time.monotonic()
                 print(
-                    f"[Index] 임베딩 모델 '{model_name}' 로드 실패 — deterministic "
+                    f"[Index] 임베딩 모델 '{model_name}' 로드 실패, deterministic "
                     f"fallback 사용, {_FAILED_MODEL_RETRY_SEC:.0f}초 후 재시도: {exc}"
                 )
     return _models.get(model_name)

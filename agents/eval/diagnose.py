@@ -33,7 +33,7 @@ from typing import Optional
 from core.schema import Finding
 from agents.eval.types import (
     DEFAULT_TOP_K, EvalRecord, Mode, resolve_mode,
-    F1_PASS_THRESHOLD, ANSWER_PASS_THRESHOLD, ANSWER_SEMANTIC_FLOOR,
+    F1_PASS_THRESHOLD, F1_EXACT_MATCH, ANSWER_PASS_THRESHOLD, ANSWER_SEMANTIC_FLOOR,
     ANSWER_CORRECTNESS_MIN, EVIDENCE_DENSITY_MIN,
     CONTEXT_CHARS_MAX, CONTEXT_MIDDLE_BAND,
     RAGAS_FAITHFULNESS_MIN, RAGAS_RESPONSE_RELEVANCY_MIN, RAGAS_CONTEXT_PRECISION_MIN,
@@ -74,9 +74,28 @@ def _degraded_near_miss(record: EvalRecord, *, oracle: bool) -> bool:
     'degrade 는 판정을 느슨하게 만들지 않는다'는 규약(metrics_ragas._answer_correctness 주석)이
     깨진다 — 실제로 lexical 0.5·degraded ac 0.0 이 옛 게이트에선 실패, 새 게이트에선 통과였다.
     승격은 막고 강등만 남겨, 판정기가 죽었을 때 게이트가 헐거워지지 않게 한다.
-    """
+
+    단 어휘 F1 이 완전일치(gold 완전 포함, F1_EXACT_MATCH)면 강등하지 않는다 — 이 강등의 대상은
+    '어휘~0.5 의 애매한 근접 오답'인데(위 예시), 완전일치인(=애매하지 않은) 정답까지 끌어내리면
+    degrade 된(불안정한) 심판이 정답을 오답으로 뒤집는다. 그러면 recall=1·oracle 통과와 겹쳐
+    C 전제(_context_failed)가 열려 context_noise_interference 로 오진되고, 심판 degrade 의
+    비결정성 때문에 같은 답이 반복마다 통과/실패를 오간다(실측: probe_qa_26360 반복2 ❌ vs 반복3 ✅).
+    면제선을 통과 문턱(0.5)이 아니라 완전일치로 둔 이유는, 0.5~0.9 대의 애매한 근접 오답은 심판이
+    죽었을 때 여전히 보수적으로 강등해야 하기 때문이다(그 경계는 안전망으로 유지). 완전일치만
+    면제하므로 승격이 아니라 'degrade 가 정답을 끌어내리는 것'만 막는다 — 게이트는 안 헐거워진다.
+
+    추가로 '검색 근거에 붙었나(faithfulness)'까지 요구한다 — 완전일치라도 부정문 오답
+    ('X 가 아니다')은 gold 를 글자 그대로 담아 어휘가 1.0 이 되지만 문맥과 충돌해 근거성이 낮다.
+    이 강등이 원래 (심판이 살아있을 때 ANSWER_SEMANTIC_FLOOR 가) 걸러주던 게 바로 그 부정문
+    오답이라, 심판이 degrade 된 실행에서 근거성 가드가 그 몫을 이어받아 면제 구멍을 좁힌다.
+    근거성 미측정(None)이면 면제하지 않아 기존 강등으로 흐른다(보수적)."""
     ragas = record.oracle_ragas if oracle else record.ragas
     if not ragas.get("answer_correctness_degraded"):
+        return False
+    lexical = record.oracle_f1 if oracle else record.f1_score
+    faith = _faith_oracle(record) if oracle else _faith(record)
+    if (lexical is not None and lexical >= F1_EXACT_MATCH
+            and faith is not None and faith >= RAGAS_FAITHFULNESS_MIN):
         return False
     ac = record.oracle_ragas_answer_correctness if oracle else record.ragas_answer_correctness
     return ac is not None and ac < ANSWER_CORRECTNESS_MIN
@@ -105,6 +124,10 @@ def _answer_ok(record: EvalRecord, *, oracle: bool) -> bool:
 
     비용: 두 트랙 모두 record dict 만 읽는다(LLM 트리거 없음). _oracle_ok 은
     report._oracle_accuracy 가 성공 probe 에도 부르므로 이 성질이 지켜져야 한다.
+    이 성질은 _degraded_near_miss 의 검사 순서가 지탱한다 — 그 안의 면제선이 _faith 를
+    보지만, 그 전에 answer_correctness_degraded 가 아니면 곧장 False 로 빠진다. degrade
+    는 이미 끝난 RAGAS 실행의 플래그라 여기서 새 호출이 나지 않는다. 순서를 바꾸거나
+    면제선을 앞으로 옮기면 이 계약이 깨진다.
     """
     if _degraded_near_miss(record, oracle=oracle):
         return False
@@ -452,7 +475,7 @@ def _rank_reason(record: EvalRecord, targets: dict[str, int]) -> str:
     """순위 라벨 공통 reason 접두 — 대상 gold 의 순위와 top_k."""
     ranked = ", ".join(f"{g}:{r}" for g, r in sorted(targets.items(), key=lambda kv: kv[1]))
     return (f"missed_gold_ranks=[{ranked}] > top_k={len(record.retrieved_chunk_ids)}, "
-            f"recall@k={_v(record.recall_at_k)}")
+            f"recall@k({record.recall_basis})={_v(record.recall_at_k)}")
 
 
 def retrieval_rank_fusion_loss(record: EvalRecord) -> Optional[Finding]:
@@ -472,7 +495,7 @@ def retrieval_rank_fusion_loss(record: EvalRecord) -> Optional[Finding]:
     finding = _finding(
         record, "retrieval_rank_fusion_loss", "retrieval_failure", confirmed=True,
         reason=f"{channel}_rank={channel_rank}<=top_k={len(record.retrieved_chunk_ids)} "
-               f"인데 fused_rank={fused_rank}({gold_id}), recall@k={_v(record.recall_at_k)}",
+               f"인데 fused_rank={fused_rank}({gold_id}), recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["favored_channel"] = channel
     finding.metadata["channel_ranks"] = {
@@ -505,7 +528,7 @@ def retrieval_duplicate_crowding(record: EvalRecord) -> Optional[Finding]:
         record, "retrieval_duplicate_crowding", "retrieval_failure", confirmed=True,
         reason=f"rank={analysis['rank']}({gold_id}), 중복 경쟁청크={analysis['redundant']} → "
                f"중복 제거 시 순위={analysis['projected_rank']}<=top_k="
-               f"{len(record.retrieved_chunk_ids)}, recall@k={_v(record.recall_at_k)}",
+               f"{len(record.retrieved_chunk_ids)}, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["crowding_analysis"] = {
         g: dict(a) for g, a in (_redundancy_above_gold(record) or {}).items()
@@ -564,7 +587,7 @@ def retrieval_reranker_ineffective(record: EvalRecord) -> Optional[Finding]:
         reason=f"pre_rerank_ranks=[{seen}] — 리랭크 전에도 top_k="
                f"{len(record.retrieved_chunk_ids)} 밖(강등 아님, 못 끌어올림), "
                f"reranker_status={record.retrieval_details.get('reranker_status')}, "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["pre_rerank_ranks"] = dict(targets)
     return finding
@@ -606,7 +629,7 @@ def retrieval_reranker_demotion(record: EvalRecord) -> Optional[Finding]:
         reason=f"pre_rerank_ranks=[{seen}](리랭크 전 top_k 안) 인데 최종 top_k="
                f"{len(record.retrieved_chunk_ids)} 밖, fused_ranks=[{fused_note}], "
                f"reranker_status={record.retrieval_details.get('reranker_status')}, "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["pre_rerank_ranks"] = dict(targets)
     return finding
@@ -656,7 +679,7 @@ def retrieval_lexical_mismatch(record: EvalRecord) -> Optional[Finding]:
         return None                      # 순위 라벨이 다룰 구간 → 그쪽에 양보
     return _finding(
         record, "retrieval_lexical_mismatch", "retrieval_failure", confirmed=True,
-        reason=f"bm25_hits_gold=True, dense_missed=True, recall@k={_v(record.recall_at_k)}",
+        reason=f"bm25_hits_gold=True, dense_missed=True, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -683,14 +706,14 @@ def retrieval_semantic_mismatch(record: EvalRecord) -> Optional[Finding]:
     if in_corpus is None:
         return _finding(
             record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=False,
-            reason=f"bm25_hits_gold=False, missed_gold_in_corpus=-, recall@k={_v(record.recall_at_k)}",
+            reason=f"bm25_hits_gold=False, missed_gold_in_corpus=-, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
         )
     if in_corpus:
         return _finding(
             record, "retrieval_semantic_mismatch", "retrieval_failure", confirmed=True,
             reason=f"bm25_hits_gold=False, "
                    f"missed_gold_in_corpus={len(in_corpus)}/{len(missed_gold_ids(record))}, "
-                   f"recall@k={_v(record.recall_at_k)}",
+                   f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
         )
     return None                          # 놓친 gold 가 전부 코퍼스 밖 → corpus_gap 영역
 
@@ -711,13 +734,13 @@ def retrieval_missing_gold(record: EvalRecord) -> Optional[Finding]:
     if in_corpus is None:
         return _finding(
             record, "retrieval_missing_gold", "retrieval_failure", confirmed=False,
-            reason=f"missed_gold_in_corpus=-, recall@k={_v(record.recall_at_k)}",
+            reason=f"missed_gold_in_corpus=-, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
         )
     if in_corpus:
         return _finding(
             record, "retrieval_missing_gold", "retrieval_failure", confirmed=True,
             reason=f"missed_gold_in_corpus={len(in_corpus)}/{len(missed_gold_ids(record))}, "
-                   f"recall@k={_v(record.recall_at_k)}",
+                   f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
         )
     return None                          # 놓친 gold 가 전부 코퍼스 밖 → corpus_gap 영역
 
@@ -745,7 +768,7 @@ def chunking_overchunking(record: EvalRecord) -> Optional[Finding]:
     finding = _finding(
         record, "chunking_overchunking", "retrieval_failure", confirmed=True,
         reason=f"max_span={analysis['max_span_len']}>max_chunk={analysis['max_chunk_len']}, "
-               f"oversized={analysis['oversized_count']}, recall@k={_v(record.recall_at_k)}",
+               f"oversized={analysis['oversized_count']}, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["oversized_analysis"] = dict(analysis)
     return finding
@@ -780,7 +803,7 @@ def chunking_context_mismatch(record: EvalRecord) -> Optional[Finding]:
     finding = _finding(
         record, "chunking_context_mismatch", "retrieval_failure", confirmed=True,
         reason=f"boundary_split={analysis.get('boundary_split_count')}, "
-               f"recall@k={_v(record.recall_at_k)}, {_answer_reason(record)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}, {_answer_reason(record)}",
     )
     finding.metadata["boundary_analysis"] = dict(analysis)
     return finding
@@ -801,7 +824,7 @@ def retrieval_missing_bridge_dependency(record: EvalRecord) -> Optional[Finding]
 
     return _finding(
         record, "retrieval_missing_bridge_dependency", "retrieval_failure", confirmed=False,
-        reason=f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
+        reason=f"qtype={record.probe.qtype}, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -829,7 +852,7 @@ def retrieval_incomplete_enumeration(record: EvalRecord) -> Optional[Finding]:
         record, "retrieval_incomplete_enumeration", "retrieval_failure", confirmed=confirmed,
         reason=f"spans={len(record.probe.gold_spans)}, gold_chunks={len(record.probe.gold_chunk_ids)}, "
                f"top_k={len(record.retrieved_chunk_ids)}, qtype={record.probe.qtype}, "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 def retrieval_failure(record: EvalRecord) -> Optional[Finding]:
@@ -854,7 +877,33 @@ def _generation_failed(record: EvalRecord) -> bool:
         return True
     if record.probe.answer_exists is False and not _abstained(record):
         return True
+    if _wrongful_abstention_premise(record):    # 유효 근거 두고 기권 → 생성측 과다 기권
+        return True
     return False
+
+
+def _wrongful_abstention_premise(record: EvalRecord) -> bool:
+    """근거가 검색됐는데 기권했나 — 과다 기권(B) 전제.
+
+    검색 성공(recall=1) = 답의 근거가 실제로 top-k 에 있었는데 모델이 '제공된 정보로는 알 수
+    없습니다'로 회피한 경우다. 기권이 옳은 상황(_expects_abstention: 무응답 기대·코퍼스 결손)은
+    제외한다 — 그건 generation_abstention_failure 의 정반대 짝이다.
+
+    _oracle_ok 는 전제에 넣지 않는다(리뷰 High): 오라클 답변도 같은 generator·같은
+    index_config 로 생성되므로(eval/agent.py), 과다 기권이 체계적이면 오라클도 함께 기권해
+    oracle_f1 이 낮아진다. 그걸 요구하면 '가끔 기권'만 잡고 '항상 기권'(더 심각한 쪽)은
+    놓치는 역설이 생긴다 — 이 라벨이 잡으려던 상황이 정확히 그쪽이다.
+
+    비용 순서: 싼 지표(recall·f1)로 먼저 거르고, 마커 휴리스틱(is_abstention)이 걸린
+    뒤에만 판정기(_abstained → AspectCritic, record 단위 memoize)를 부른다. not _f1_ok 는
+    의미상 무해하고(기권 답이 정답 판정을 통과할 일은 없다) 정답 경로의 LLM 호출을 없앤다."""
+    if not _recall_ok(record) or _f1_ok(record):
+        return False
+    if _expects_abstention(record):
+        return False
+    if not is_abstention(record.generated_answer):
+        return False                     # 싼 게이트 — 마커가 없으면 판정기까지 가지 않는다
+    return _abstained(record)
 
 
 def _reasoning_mode(record: EvalRecord) -> Optional[str]:
@@ -968,6 +1017,30 @@ def generation_abstention_failure(record: EvalRecord) -> Optional[Finding]:
     return finding
 
 
+def generation_wrongful_abstention(record: EvalRecord) -> Optional[Finding]:
+    """근거는 검색됐는데 잘못 기권함 — generation_abstention_failure 의 정반대 짝.
+
+    확정: 검색 성공(recall=1)인데 실제 답은 기권('제공된 정보로는 알 수 없습니다'). 답의 근거가
+    실제로 top-k 에 있었는데 모델이 회피한 것이라, 검색·컨텍스트 구조가 아니라 생성측 과다
+    기권이다. 처방은 노이즈필터/MMR 이 아니라 기권 완화(relax_abstention).
+
+    오라클 통과를 요구하지 않는다 — 오라클도 같은 generator·설정으로 생성돼 과다 기권이
+    체계적이면 함께 기권하므로, 요구하면 정작 심한 케이스를 놓친다(전제 함수 주석 참고).
+
+    기권 답은 주장이 없어 faithfulness=1 로 C 게이트(context_noise_interference·
+    reranker_low_precision)를 trivially 통과해 오라벨됐었다(실측: probe_qa_42204 반복1 →
+    reranker_low_precision, 반복2·3 → context_noise_interference). _context_failed 가 같은
+    전제로 기권을 제외하고 이 라벨이 B 슬롯에서 진실한 원인을 짚는다."""
+    if not _wrongful_abstention_premise(record):
+        return None
+    judge = "aspect_critic" if _abstention_judged(record) is not None else "heuristic"
+    return _finding(
+        record, "generation_wrongful_abstention", "generation_failure", confirmed=True,
+        reason=f"recall@k={_v(record.recall_at_k)}(근거 검색됨), "
+               f"oracle_f1={_v(record.oracle_f1)}, 기권함({judge}), {_answer_reason(record)}",
+    )
+
+
 def generation_parametric_overreliance(record: EvalRecord) -> Optional[Finding]:
     """
     정답이지만 검색 context 에 근거가 없음 — 모델 파라미터 기억에 의존.
@@ -979,7 +1052,7 @@ def generation_parametric_overreliance(record: EvalRecord) -> Optional[Finding]:
     return _finding(
         record, "generation_parametric_overreliance", "generation_failure", confirmed=True,
         reason=f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
-               f"{_answer_reason(record)}(정답), recall@k={_v(record.recall_at_k)}",
+               f"{_answer_reason(record)}(정답), recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -1090,8 +1163,18 @@ def generation_failure(record: EvalRecord) -> Optional[Finding]:
 # ══════════════════════════════════════════════════════════════════
 
 def _context_failed(record: EvalRecord) -> bool:
-    """컨텍스트 구조 문제(C) 전제: 검색 성공(recall=1)·생성 가능(oracle 통과)인데 실제 답만 틀림."""
-    return _recall_ok(record) and _oracle_ok(record) and not _f1_ok(record)
+    """컨텍스트 구조 문제(C) 전제: 검색 성공(recall=1)·생성 가능(oracle 통과)인데 실제 답만 틀림.
+
+    기권은 제외한다 — 유효 근거를 두고 기권한 건 컨텍스트 '구조'(노이즈·길이·배치)로 답이
+    틀린 게 아니라 생성측 과다 기권이다(generation_wrongful_abstention, B). 제외하지 않으면
+    기권 답이 주장 없음 → faithfulness=1 로 context_noise_interference·reranker_low_precision
+    게이트를 trivially 통과해 오라벨되고, 노이즈필터/MMR 같은 엉뚱한 처방을 부른다.
+
+    배제 술어는 B 라벨과 같은 _wrongful_abstention_premise 를 쓴다 — 두 슬롯이 한 신호로
+    갈려야 '한쪽이 가져가면 다른 쪽은 안 가져간다'가 보장되고, 그 안의 마커 선필터
+    (is_abstention) 덕에 C 후보마다 AspectCritic 을 부르지 않는다(리뷰 Medium)."""
+    return (_recall_ok(record) and _oracle_ok(record)
+            and not _f1_ok(record) and not _wrongful_abstention_premise(record))
 
 def _context_ungrounded(record: EvalRecord) -> bool:
     """C 전제 + 실제 답이 gold·노이즈 어디에도 근거 없음(real faithfulness 낮음).
@@ -1136,7 +1219,7 @@ def too_long_context(record: EvalRecord) -> Optional[Finding]:
         record, "too_long_context", "context_failure", confirmed=True,
         reason=f"context_chars={total}>={CONTEXT_CHARS_MAX}, "
                f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -1156,7 +1239,7 @@ def lost_in_the_middle(record: EvalRecord) -> Optional[Finding]:
         record, "lost_in_the_middle", "context_failure", confirmed=True,
         reason=f"gold_position={_v(_gold_position_band(record))}(중간), context_chars={total}, "
                f"faithfulness={_v(_faith(record))}<{RAGAS_FAITHFULNESS_MIN}(근거 없음), "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -1183,7 +1266,7 @@ def chunking_underchunking(record: EvalRecord) -> Optional[Finding]:
         record, "chunking_underchunking", "retrieval_failure", confirmed=True,
         reason=f"evidence_density={_v(_gold_chunk_evidence_density(record))}<{EVIDENCE_DENSITY_MIN}, "
                f"context_precision={_v(_ctx_precision(record))}<{RAGAS_CONTEXT_PRECISION_MIN}, "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -1209,7 +1292,7 @@ def reranker_low_precision(record: EvalRecord) -> Optional[Finding]:
     return _finding(
         record, "reranker_low_precision", "retrieval_failure", confirmed=False,
         reason=f"reranked=True, context_precision={_v(precision)}<{RAGAS_CONTEXT_PRECISION_MIN}, "
-               f"recall@k={_v(record.recall_at_k)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
 
 
@@ -1222,6 +1305,9 @@ def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     faithfulness 는 retrieved_context(gold+노이즈) 기준이라, 노이즈 청크의 정보를 가져다 쓰면
     '근거 있음'으로 높게 나온다. 낮은 쪽은 gold·노이즈 어디에도 없는 생성측 이탈이라 다른 원인이다.
     처방(enable_noise_filter/mmr)은 rules.py draft — filtering/MMR/reranker 필드 합의 미완.
+
+    기권은 _context_failed 가 이미 배제한다 — 기권 답은 주장이 없어 faithfulness=1 로 이 게이트를
+    trivially 통과하지만 '노이즈에 이끌림'이 아니라 과다 기권(generation_wrongful_abstention)이다.
     """
     if not _context_failed(record):
         return None
@@ -1233,7 +1319,7 @@ def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
     return _finding(
         record, "context_noise_interference", "context_failure", confirmed=True,
         reason=f"faithfulness={_v(faith)}>={RAGAS_FAITHFULNESS_MIN}(검색 context 엔 근거 있음), "
-               f"recall@k={_v(record.recall_at_k)}, {_answer_reason(record)}",
+               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}, {_answer_reason(record)}",
     )
 
 def context_failure(record: EvalRecord) -> Optional[Finding]:
@@ -1360,7 +1446,7 @@ def _gap_finding(record: EvalRecord, label: str) -> Finding:
     finding = _finding(
         record, label, "gap", confirmed=True,
         reason=f"gold_in_corpus={_corpus_membership_ratio(record)}, "
-               f"qtype={record.probe.qtype}, recall@k={_v(record.recall_at_k)}",
+               f"qtype={record.probe.qtype}, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
     finding.metadata["missing_gold_ids"] = _gold_absent_ids(record)
     return finding
@@ -1408,6 +1494,7 @@ _RETRIEVAL_CAUSE = (
 )
 # parametric_overreliance 는 여기 없다 — 슬롯 밖 additive(diagnose 참조).
 _GENERATION_CAUSE = (
+    generation_wrongful_abstention,
     generation_abstention_failure, bad_gold_answer_oracle,
     # reasoning_failure 한 함수가 라벨 4개를 낸다
     # (contradiction/numerical_error/misinterpretation/hop_binding_error).
@@ -1524,12 +1611,22 @@ def _answer_reason(record: EvalRecord) -> str:
 
     f1 만 적으면 오독을 부른다: 판정은 f1 단독이 아니라 혼합 점수(_answer_ok)라, f1 이 문턱
     아래인데 통과한(또는 f1 이 문턱 위인데 실패한) 라벨의 근거가 로그에서 사라진다.
-    의미축 미측정(DEEP 미만)이면 lexical 단독 판정이므로 f1 만 적는다."""
+    의미축 미측정(DEEP 미만)이면 lexical 단독 판정이므로 f1 만 적는다.
+
+    단 의미축이 '심판 degrade' 로 빠진 경우는 그 값을 드러낸다 — degrade + 낮은 ac 는
+    _degraded_near_miss 로 판정을 오답으로 뒤집는데(어휘 f1 이 높아도), 그 신호가 안 보이면
+    'f1 완벽인데 실패'가 로그로 설명되지 않는다(실측: probe_qa_26360 계열). 미측정이 degrade
+    때문인지(ac_degraded) 단순 저모드인지(f1 만)를 가른다. 실제로 그 강등이 걸렸는지까지
+    적어야 '값은 낮은데 왜 통과했나(또는 그 반대)'를 한 줄로 읽을 수 있다."""
     semantic = record.answer_semantic
-    if semantic is None:
-        return f"f1={_v(record.f1_score)}"
-    return (f"answer={_v(record.answer_score)}"
-            f"(f1 {_v(record.f1_score)}·의미 {_v(semantic)})")
+    if semantic is not None:
+        return (f"answer={_v(record.answer_score)}"
+                f"(f1 {_v(record.f1_score)}·의미 {_v(semantic)})")
+    if record.ragas.get("answer_correctness_degraded"):
+        demoted = "→강등" if _degraded_near_miss(record, oracle=False) else ""
+        return (f"f1={_v(record.f1_score)}·의미측정실패"
+                f"(ac_degraded={_v(record.ragas_answer_correctness)}{demoted})")
+    return f"f1={_v(record.f1_score)}"
 
 
 def _rollup_reason(record: EvalRecord) -> str:

@@ -10,6 +10,7 @@ Planner 검증 — 후보값을 어떻게 정하고, 그걸 optimizer 요청으�
 같은 원인이 probe N개에서 터지면 Finding 도 N개다. Planner 는 이를 라벨로 묶어
 점수(빈도)와 근거값(측정 기반 목표값)을 계산해야 한다.
 """
+import itertools
 import os
 import sys
 import unittest
@@ -19,8 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from core.schema import DiagnosticReport, Document, Finding, Probe
 from core.state import AgentDoctorState
-from agents.optimize import planner
-from agents.optimize import rules
+from agents.optimize import action_aggregator, candidate_values, planner, rules
 from agents.optimize.planner import _knee, _knee_candidates
 
 
@@ -123,10 +123,9 @@ class GroundedValueTest(unittest.TestCase):
         request, decision = planner.plan(make_state(findings, top_k=5))
 
         self.assertEqual(decision.mode, "apply_optimize")
-        first = request.candidates[0]
-        self.assertEqual(first.id, "dynamic_top_k")
+        self.assertEqual(request.prescription_id, "dynamic_top_k")
         # ×2 추측이면 [10] 하나가 나왔을 것. 측정 기반은 무릎(8)부터 그 위로.
-        self.assertEqual(first.search_space, {"retriever.top_k": [8, 12, 15]})
+        self.assertEqual(request.search_space, {"retriever.top_k": [8, 12, 15]})
         # 후보가 여러 개 → internal 이 방문에 걸쳐 sweep 하고 실측으로 승자를 고른다.
         self.assertEqual(request.optimizer, "internal")
         self.assertEqual(request.max_trials, 3)
@@ -259,11 +258,19 @@ class GroundedValueTest(unittest.TestCase):
         self.assertEqual(request.search_space, {"retriever.top_k": [11]})
 
     def test_falls_back_to_direction_keyword_without_evidence(self):
-        # gold 개수가 없으면(affected_chunks 비어있음) 계산 불가 → ×2 폴백
+        # gold 개수가 없으면(affected_chunks 비어있음) 계산 불가 → ×2 폴백.
+        # 이 라벨은 MMR 도 지지하고 둘 다 tier A·비용 1·probe 1 이라 동률이다.
+        # 선택은 action_key 사전순으로 갈리므로, 여기서는 '선택'이 아니라
+        # top_k 축의 **후보값 계산**만 본다(폴백 수학은 바뀌지 않았다).
         findings = [make_finding("p1", "retrieval_incomplete_enumeration", gold_n=0)]
-        request, _decision = planner.plan(make_state(findings, top_k=5))
+        state = make_state(findings, top_k=5)
 
-        self.assertEqual(request.candidates[0].search_space, {"retriever.top_k": [10]})
+        request, _decision = planner.plan(
+            state, blacklist={"retriever.mmr:enable"}
+        )
+
+        self.assertEqual(request.action_key, "retriever.top_k:increase")
+        self.assertEqual(request.search_space, {"retriever.top_k": [10]})
 
     def test_eval_supplied_candidates_win_over_computed(self):
         # Eval 이 직접 후보를 주면 planner 계산보다 우선한다(후보 산출을 Eval 로
@@ -294,45 +301,138 @@ class GroupingTest(unittest.TestCase):
     """같은 라벨의 finding 을 묶어야 빈도가 제대로 계산된다."""
 
     def test_frequency_counts_all_affected_probes(self):
-        # 같은 라벨이 probe 3개에서 터짐 → 빈도 3 (묶기 전에는 항상 1이었다)
+        # 같은 라벨이 probe 3개에서 터짐 → 고유 probe 3개가 점수에 반영된다
+        # (묶기 전에는 항상 1이었다). 점수 단위가 라벨에서 action 으로 옮겨졌지만
+        # "고유 probe 를 센다"는 성질은 그대로다 — 대신 같은 probe 는 여러 라벨이
+        # 지지해도 한 번만 기여한다(구현계획 §4.1).
         findings = [
             make_finding(f"p{i}", "retrieval_incomplete_enumeration", gold_n=4)
             for i in range(3)
         ]
         request, _decision = planner.plan(make_state(findings))
 
-        self.assertIn("probe 3개 영향", request.reason)
+        self.assertIn("probe 3개", request.reason)
+        self.assertEqual(len(request.supporting_probes), 3)
+        self.assertEqual(
+            request.action_score_breakdown["supporting_probe_count"], 3
+        )
 
-    def test_more_frequent_label_wins_within_same_group(self):
-        # 두 라벨 모두 A그룹. probe 수가 많은 쪽이 먼저 처방된다.
+    def test_more_probes_wins_within_the_same_tier(self):
+        """같은 tier·같은 비용이면 고유 probe 가 많은 action 이 이긴다.
+
+        두 라벨이 **다른 축**을 지지하도록 골랐다. 같은 축을 지지하면 표가 합쳐져
+        경쟁이 아니라 통합이 되므로(그 성질은 아래 shared_support 테스트가 본다)
+        점수 비교를 보려면 축이 갈려야 한다.
+        """
         findings = [
-            make_finding("p1", "retrieval_missing_gold"),
-            make_finding("p2", "retrieval_incomplete_enumeration", gold_n=4),
-            make_finding("p3", "retrieval_incomplete_enumeration", gold_n=4),
-            make_finding("p4", "retrieval_incomplete_enumeration", gold_n=4),
+            make_finding("p1", "retrieval_missing_gold"),                     # A, probe 1
+            *[
+                make_finding(f"lm{i}", "retrieval_lexical_mismatch")          # A, probe 3
+                for i in range(3)
+            ],
         ]
         request, _decision = planner.plan(make_state(findings))
 
-        self.assertEqual(request.failure_label, "retrieval_incomplete_enumeration")
+        self.assertEqual(request.action_key, "retriever.search_type:replace")
+        self.assertEqual(request.action_score_breakdown["supporting_probe_count"], 3)
 
-    def test_context_noise_can_precede_top_k_expansion_when_dominant(self):
+    def test_two_labels_on_one_axis_are_merged_not_ranked(self):
+        """같은 축을 지지하는 두 라벨은 경쟁하지 않고 표를 합친다.
+
+        `retrieval_missing_gold`(increase_top_k)와
+        `retrieval_incomplete_enumeration`(dynamic_top_k)은 선언 이름이 다르지만
+        같은 config 변경이다 — 전환의 목적이 바로 이 통합이다.
+        """
+        findings = [
+            make_finding("p1", "retrieval_missing_gold"),
+            *[
+                make_finding(f"p{i}", "retrieval_incomplete_enumeration", gold_n=4)
+                for i in range(2, 5)
+            ],
+        ]
+        request, _decision = planner.plan(
+            make_state(findings), blacklist={"retriever.mmr:enable"}
+        )
+
+        self.assertEqual(request.action_key, "retriever.top_k:increase")
+        self.assertEqual(
+            sorted(request.supporting_labels),
+            ["retrieval_incomplete_enumeration", "retrieval_missing_gold"],
+        )
+        # probe 4개가 하나의 action 에 합산된다.
+        self.assertEqual(request.action_score_breakdown["supporting_probe_count"], 4)
+
+    def test_causal_tier_beats_probe_dominance(self):
+        """A > C 는 불변조건이다 — 지지가 몰려도 뒤집히지 않는다(구현계획 §4.3).
+
+        ⚠️ 전환으로 뒤집힌 동작이다. 예전 planner 에는 "노이즈가 top_k 확장 라벨만큼
+        강하면 압축을 먼저 검증한다"는 예외가 있었다(_context_noise_precedes_top_k_
+        expansion). 이제 causal tier 가 다르면 점수를 아예 보지 않는다 — 검색이 새는
+        상태에서 하류를 먼저 손대면 garbage-in tuning 이 되기 때문이다.
+
+        노이즈 라벨이 사라지는 것은 아니다. A 축이 소진되면 그때 C 가 올라온다.
+        """
+        # 축을 공유하지 않는 두 라벨을 쓴다(공유 합산과 tier 를 섞어 보지 않기 위해).
         findings = [
             make_finding("noise1", "context_noise_interference"),
             make_finding("noise2", "context_noise_interference"),
             make_finding("noise3", "context_noise_interference"),
-            make_finding("enum1", "retrieval_incomplete_enumeration", gold_n=4),
+            make_finding("gold1", "retrieval_missing_gold"),
         ]
 
         request, decision = planner.plan(make_state(findings, top_k=5))
 
         self.assertEqual(decision.mode, "apply_optimize")
-        self.assertEqual(request.failure_label, "context_noise_interference")
-        first = request.candidates[0]
-        self.assertEqual(first.id, "context_compression")
-        self.assertEqual(
-            first.search_space,
-            {"context.compression.enabled": [True]},
-        )
+        # probe 3:1 로 밀리는데도(C 점수 3.0 > A 점수 1.0) A 그룹 action 이 선택된다.
+        self.assertEqual(request.action.causal_rank_group, "A")
+        self.assertEqual(request.action_key, "retriever.top_k:increase")
+        # 이긴 쪽의 점수가 더 낮다 — tier 가 점수보다 먼저라는 증거다.
+        runner_up_scores = [
+            entry["score"] for entry in request.metadata["runner_up_actions"]
+        ]
+        self.assertTrue(any(score > request.action_score for score in runner_up_scores))
+
+        # C 축이 사라진 게 아니라 뒤로 밀렸을 뿐이다.
+        runner_ups = {
+            entry["action_key"] for entry in request.metadata["runner_up_actions"]
+        }
+        self.assertIn("context.compression.enabled:enable", runner_ups)
+
+    def test_shared_probe_votes_only_once_across_labels(self):
+        """같은 probe 가 두 라벨을 통해 같은 action 을 지지해도 한 표다(§4.1).
+
+        라벨 수로 세면 taxonomy 를 잘게 쪼갤수록 점수가 커지는 왜곡이 생긴다.
+        retriever.mmr 은 incomplete_enumeration(A)과 context_noise(C)가 함께 지지한다.
+        """
+        findings = [
+            make_finding("p1", "retrieval_incomplete_enumeration", gold_n=4),
+            make_finding("p1", "context_noise_interference"),
+        ]
+
+        request, _decision = planner.plan(make_state(findings, top_k=5))
+
+        self.assertEqual(request.action_key, "retriever.mmr:enable")
+        self.assertEqual(len(request.supporting_labels), 2)
+        self.assertEqual(request.action_score_breakdown["supporting_probe_count"], 1)
+        self.assertEqual(request.action_score_breakdown["supporting_label_count"], 2)
+
+    def test_shared_support_aggregates_across_labels(self):
+        """서로 다른 라벨의 고유 probe 는 같은 action 에 합산된다(§4.1).
+
+        전환의 실익이 여기서 나온다 — 라벨 하나로는 최상위가 아니어도, 여러 라벨이
+        같은 config 변경을 지지하면 그 변경이 앞선다.
+        """
+        findings = [
+            make_finding("enum1", "retrieval_incomplete_enumeration", gold_n=4),
+            make_finding("noise1", "context_noise_interference"),
+            make_finding("noise2", "context_noise_interference"),
+        ]
+
+        request, _decision = planner.plan(make_state(findings, top_k=5))
+
+        # top_k(A, probe 1) 대신 두 라벨이 함께 지지하는 MMR(probe 3)이 선택된다.
+        self.assertEqual(request.action_key, "retriever.mmr:enable")
+        self.assertEqual(request.action_score_breakdown["supporting_probe_count"], 3)
 
 
 class ConfirmedGatingTest(unittest.TestCase):
@@ -357,7 +457,7 @@ class ConfirmedGatingTest(unittest.TestCase):
         ]
         request, _decision = planner.plan(make_state(findings))
 
-        self.assertEqual(request.failure_label, "retrieval_incomplete_enumeration")
+        self.assertEqual(next(iter(request.supporting_labels), None), "retrieval_incomplete_enumeration")
 
 
 # ── 2. 후보 전달 (optimizer 요청 계약) ────────────────────────────
@@ -382,15 +482,12 @@ class PlannerCandidateListTest(unittest.TestCase):
 
     def test_draft_prescriptions_inside_ready_rule_are_not_available(self):
         finding = make_finding("p1", "context_noise_interference")
-        rule = rules.LABEL_TO_PRESCRIPTIONS["context_noise_interference"]
 
         available_ids = {
-            prescription["id"]
-            for prescription in planner._available_prescriptions(
-                rule,
-                "context_noise_interference",
-                set(),
-                [finding],
+            support.prescription_id
+            for support in action_aggregator.build_action_supports(
+                {"context_noise_interference": [finding]},
+                make_state([finding]),
             )
         }
 
@@ -543,7 +640,7 @@ class PlannerCandidateListTest(unittest.TestCase):
         )
 
         self.assertEqual(decision.mode, "apply_optimize")
-        self.assertEqual(request.candidates[0].id, "switch_to_recursive_sentence")
+        self.assertEqual(request.prescription_id, "switch_to_recursive_sentence")
         self.assertEqual(
             request.search_space,
             {"chunker.strategy": ["recursive_sentence", "markdown_recursive"]},
@@ -552,8 +649,15 @@ class PlannerCandidateListTest(unittest.TestCase):
         self.assertEqual(request.max_trials, 2)
         self.assertNotIn("chunk_precheck_context", request.metadata)
 
-    def test_single_chunk_strategy_candidate_uses_rules_backend(self):
-        # rules 처방 하나만 있으면 후보값도 하나라 sweep 할 게 없다(rules 1회 검증).
+    def test_chunk_strategy_values_are_one_action_not_two(self):
+        """같은 축의 고정값 둘은 경쟁자가 아니라 한 action 의 두 후보다(§3.2).
+
+        전환 전에는 값마다 별도 처방이라 `switch_to_recursive_sentence` 와
+        `switch_to_markdown_recursive` 가 따로 경쟁했다. 값을 action key 에 넣으면
+        **지지 라벨 집합이 완전히 같아져 점수가 수학적으로 항상 동률**이 되고,
+        충돌 보류 규칙에 걸려 그 축이 영원히 선택되지 않는다(starvation).
+        어떤 값으로 시도했는지는 후보값 fingerprint 가 구분한다.
+        """
         finding = make_finding("p1", "chunking_context_mismatch")
         state = AgentDoctorState(
             report=_report(finding),
@@ -570,22 +674,134 @@ class PlannerCandidateListTest(unittest.TestCase):
             blacklist=self._chunk_strategy_blacklist(),
         )
 
+        self.assertEqual(request.action_key, "chunker.strategy:replace")
         self.assertEqual(
             request.search_space,
-            {"chunker.strategy": ["recursive_sentence"]},
+            {"chunker.strategy": ["recursive_sentence", "markdown_recursive"]},
         )
-        self.assertEqual(request.optimizer, "rules")
-        self.assertEqual(request.max_trials, 1)
+        # 후보가 둘이라 실측(sweep)이 고른다. 사전검증(prescreener)은 경계 생성
+        # 규칙 자체가 바뀌는 축이라 쓰지 않는다.
+        self.assertEqual(request.optimizer, "internal")
+        self.assertEqual(request.max_trials, 2)
         self.assertNotIn("chunk_precheck_context", request.metadata)
+
+    def test_selection_is_independent_of_finding_order(self):
+        """Eval 이 Finding 을 내는 순서가 실행 경로를 바꾸면 안 된다 (§7.2-6).
+
+        같은 축(chunk_size 축소)을 두 라벨이 지지하는데 한쪽만 gold span 근거를 갖는
+        상황이다. 예전에는 support 순서가 곧 후보값 순서였고 `_selected_grounding` 이
+        첫 support 의 근거를 그대로 보고했다. 그 status 는 표시용이 아니라
+        `_should_sweep` 의 입력이라 **backend(internal↔rules)와 적용값까지 뒤집혔다.**
+        """
+        document = Document("d1", "memory", "txt", "가" * 4000)
+        probes = [
+            Probe(probe_id="p1", question="q1", source="taxonomy", answer_exists=True,
+                  gold_spans=[{"doc_id": "d1", "start": 0, "end": 300},
+                              {"doc_id": "d1", "start": 900, "end": 1250},
+                              {"doc_id": "d1", "start": 1800, "end": 2100},
+                              {"doc_id": "d1", "start": 2500, "end": 2800}]),
+            Probe(probe_id="p2", question="q2", source="taxonomy", answer_exists=True),
+        ]
+        pair = [("p1", "too_long_context"), ("p2", "retrieval_semantic_mismatch")]
+        # 더 싼 축을 막아 chunk_size 축이 선택되게 한다.
+        blacklist = {"retriever.top_k:decrease", "context.compression.enabled:enable",
+                     "chunker.strategy:replace", "embedding.model:replace"}
+
+        seen = set()
+        for order in itertools.permutations(pair):
+            config = dict(AgentDoctorState().index_config)
+            config.update({"top_k": 5, "chunk_size": 800, "chunk_overlap": 50,
+                           "chunk_strategy": "fixed"})
+            state = AgentDoctorState(
+                report=_report([make_finding(p, l) for p, l in order]),
+                documents=[document], probes=probes, index_config=config,
+            )
+            request, _decision = planner.plan(state, blacklist=blacklist)
+            seen.add((
+                request.action_key,
+                tuple(request.search_space["chunker.chunk_size"]),
+                request.optimizer,
+                request.metadata.get("candidate_grounding", {}).get("status"),
+            ))
+
+        self.assertEqual(len(seen), 1, f"finding 순서에 따라 선택이 갈렸다: {seen}")
+
+    def test_chunk_precheck_merges_every_supporting_label(self):
+        """사전검증 입력은 지지 라벨 **전체**의 evidence 에서 모은다.
+
+        대표 라벨 하나만 쓰면 같은 chunk 축을 함께 지지한 다른 라벨의 gold span 이
+        측정에서 빠진다. 그러면 그 라벨이 요구하는 경계를 만족하는지 확인하지 못한
+        채 후보가 통과하고, 재청킹 뒤에야 실패가 드러난다.
+        """
+        document = Document("d1", "memory", "txt", "가" * 3000)
+        candidates = {"chunker.chunk_size": [700, 900]}
+        findings = [
+            make_finding("p1", "retrieval_missing_gold", candidates=candidates),
+            make_finding("p2", "chunking_context_mismatch", candidates=candidates),
+        ]
+        state = AgentDoctorState(
+            report=_report(findings),
+            documents=[document],
+            probes=[
+                Probe(
+                    probe_id="p1", question="q1", source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[{"doc_id": "d1", "start": 0, "end": 400}],
+                ),
+                Probe(
+                    probe_id="p2", question="q2", source="taxonomy",
+                    answer_exists=True,
+                    gold_spans=[{"doc_id": "d1", "start": 1000, "end": 1500}],
+                ),
+            ],
+            index_config={
+                "top_k": 5, "chunk_size": 512, "chunk_overlap": 50,
+                "chunk_strategy": "fixed",
+            },
+        )
+
+        # 더 싼 축들을 막아 chunk_size 축이 선택되게 한다.
+        request, _decision = planner.plan(
+            state,
+            blacklist={
+                "retriever.top_k:increase",
+                "chunker.chunk_overlap:increase",
+            },
+        )
+
+        self.assertEqual(request.action_key, "chunker.chunk_size:increase")
+        self.assertEqual(
+            request.supporting_labels,
+            ["retrieval_missing_gold", "chunking_context_mismatch"],
+        )
+        spans = request.metadata["chunk_precheck_context"]["evidence_spans"]
+        gold_ranges = {(span["gold_start"], span["gold_end"]) for span in spans}
+        self.assertEqual(gold_ranges, {(0, 400), (1000, 1500)})
 
     @staticmethod
     def _chunk_blacklist():
-        """too_long_context의 앞선 두 처방을 건너뛰고 chunk 처방을 선택한다."""
+        """too_long_context의 다른 두 축을 건너뛰고 chunk 축을 선택하게 만든다."""
 
         return {
             ("too_long_context", "decrease_top_k"),
             ("too_long_context", "context_compression"),
         }
+
+    def _rejected_grounding(self, decision, action_key):
+        """근거값 계산이 실패해 제외된 action 의 grounding 을 꺼낸다.
+
+        후보값을 못 만든 action 은 **점수 경쟁 전에** 제외되므로(구현계획 §4.6)
+        request 자체가 만들어지지 않는다. 그 설명은 decision.metadata 에 남는다 —
+        없으면 사용자에게 "처방 없음"만 보이고 왜인지 알 수 없다.
+        """
+        self.assertEqual(decision.status, "skipped")
+        rejected = {
+            entry["action_key"]: entry
+            for entry in decision.metadata["rejected_actions"]
+        }
+        self.assertIn(action_key, rejected)
+        self.assertEqual(rejected[action_key]["reason"], "no_candidate_value")
+        return rejected[action_key]["candidate_grounding"]
 
     @staticmethod
     def _chunk_strategy_blacklist():
@@ -673,10 +889,10 @@ class PlannerCandidateListTest(unittest.TestCase):
             },
         )
 
-        request, _decision = planner.plan(state, blacklist=self._chunk_blacklist())
+        request, decision = planner.plan(state, blacklist=self._chunk_blacklist())
 
-        self.assertEqual(request.search_space, {})
-        grounding = request.metadata["candidate_grounding"]
+        grounding = self._rejected_grounding(decision, "chunker.chunk_size:decrease")
+        self.assertIsNone(request)
         self.assertEqual(grounding["status"], "direction_conflict")
         self.assertEqual(grounding["span_count"], 3)
         self.assertEqual(grounding["source"], "structural_evidence_windows")
@@ -726,10 +942,10 @@ class PlannerCandidateListTest(unittest.TestCase):
             },
         )
 
-        request, _decision = planner.plan(state, blacklist=self._chunk_blacklist())
+        request, decision = planner.plan(state, blacklist=self._chunk_blacklist())
 
-        self.assertEqual(request.search_space, {})
-        grounding = request.metadata["candidate_grounding"]
+        grounding = self._rejected_grounding(decision, "chunker.chunk_size:decrease")
+        self.assertIsNone(request)
         self.assertEqual(grounding["status"], "direction_conflict")
         self.assertEqual(grounding["span_count"], 3)
         self.assertEqual(grounding["source"], "structural_evidence_windows")
@@ -766,11 +982,10 @@ class PlannerCandidateListTest(unittest.TestCase):
             },
         )
 
-        request, _decision = planner.plan(state, blacklist=self._chunk_blacklist())
+        request, decision = planner.plan(state, blacklist=self._chunk_blacklist())
 
-        self.assertEqual(request.search_space, {})
-        self.assertEqual(request.optimizer, "rules")
-        grounding = request.metadata["candidate_grounding"]
+        grounding = self._rejected_grounding(decision, "chunker.chunk_size:decrease")
+        self.assertIsNone(request)
         self.assertEqual(grounding["status"], "insufficient_spans")
         self.assertEqual(grounding["source"], "structural_evidence_windows")
 
@@ -1049,11 +1264,13 @@ class PlannerCandidateListTest(unittest.TestCase):
         })
         grounded_values = {
             key: dict(value)
-            for key, value in planner._GROUNDED_VALUES.items()
+            for key, value in candidate_values._GROUNDED_VALUES.items()
         }
         grounded_values[label] = {}
 
-        with patch.object(planner, "_GROUNDED_VALUES", grounded_values):
+        # ⚠️ 소유 모듈을 patch 해야 한다. planner 의 동명 심볼은 re-export 라
+        # 그쪽을 바꿔도 _grounded_search_space 가 읽는 registry 는 그대로다.
+        with patch.object(candidate_values, "_GROUNDED_VALUES", grounded_values):
             space, metadata = planner._finding_search_space(
                 [finding],
                 {"chunk_size": "decrease"},
@@ -1259,10 +1476,13 @@ class PlannerCandidateListTest(unittest.TestCase):
             index_config={"chunk_size": 800, "chunk_overlap": 50},
         )
 
+        # 후보값 계산이 candidate_values 로 분리되면서 실제 호출 위치가 그쪽으로
+        # 옮겨졌다. planner 에 패치를 걸면 감지되지 않으므로 호출 모듈을 직접 잡는다.
+        # (memoization 동작 자체는 그대로다 — 한 번만 계산해 재사용한다.)
         with patch.object(
-            planner,
+            candidate_values,
             "build_evidence_windows",
-            wraps=planner.build_evidence_windows,
+            wraps=candidate_values.build_evidence_windows,
         ) as build_windows:
             planner.plan(state, blacklist=self._chunk_blacklist())
 
@@ -1293,178 +1513,6 @@ class PlannerCandidateListTest(unittest.TestCase):
             "retriever.top_k",
             None,
         ))
-
-
-class TopicClusterSignalDeferredTest(unittest.TestCase):
-    """topic_cluster 신호 소비가 꺼진 현재 동작 — 관측용 신호로만 유지.
-
-    planner._CONSUME_TOPIC_CLUSTER_SIGNAL=False 인 동안 _available_prescriptions 는
-    findings 를 줘도 applies_when 을 보지 않고, 신호값과 무관하게 전 처방을 순서대로
-    돌려줘야 한다(신호 배선 이전 = 순차 fallback 과 동작 동일). 소비를 켰을 때의 대조
-    로직 계약은 아래 TopicClusterAppliesWhenConsumeOnTest 가 별도로 고정한다.
-    """
-
-    LABEL = "retrieval_semantic_mismatch"
-
-    def _rule(self):
-        from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
-        return LABEL_TO_PRESCRIPTIONS[self.LABEL]
-
-    def _finding_with_signal(self, signal):
-        f = make_finding("p0", self.LABEL)
-        if signal is not None:
-            f.metadata["topic_cluster"] = signal
-        return f
-
-    def _ids(self, signal):
-        rule = self._rule()
-        avail = planner._available_prescriptions(
-            rule, self.LABEL, set(), [self._finding_with_signal(signal)]
-        )
-        return [p["id"] for p in avail]
-
-    def test_consume_flag_is_off(self):
-        # 이 PR 이 착지시키는 상태 = 소비 OFF. 켜지면 아래 회귀들이 의미를 잃으므로
-        # 플래그 자체를 명시적으로 고정한다(소비를 켤 때 이 테스트가 먼저 걸린다).
-        self.assertFalse(planner._CONSUME_TOPIC_CLUSTER_SIGNAL)
-
-    def test_all_signals_keep_all_prescriptions(self):
-        # 신호값이 무엇이든(소비 OFF) 전 처방이 순서대로 통과해야 한다.
-        rule = self._rule()
-        all_ids = [p["id"] for p in rule["prescriptions"]]
-        for signal in ("concentrated", "spread", "none", "unmeasured", None):
-            with self.subTest(signal=signal):
-                self.assertEqual(self._ids(signal), all_ids)
-
-    def test_no_findings_arg_is_legacy_blacklist_only(self):
-        # findings 를 안 주는 레거시 호출도 블랙리스트만 본다(소비 OFF 와 결과 동일).
-        rule = self._rule()
-        ids = [p["id"] for p in planner._available_prescriptions(rule, self.LABEL, set())]
-        self.assertEqual(ids, [p["id"] for p in rule["prescriptions"]])
-
-    def test_blacklist_still_filters_under_deferred_consume(self):
-        # 소비가 꺼져 있어도 블랙리스트는 계속 유효하다(신호와 무관한 기존 경로).
-        rule = self._rule()
-        blacklist = {(self.LABEL, "swap_embedding_model")}
-        finding = self._finding_with_signal("spread")
-        ids = [
-            p["id"]
-            for p in planner._available_prescriptions(
-                rule, self.LABEL, blacklist, [finding]
-            )
-        ]
-        self.assertNotIn("swap_embedding_model", ids)
-        self.assertIn("shrink_chunk_size", ids)
-
-
-class TopicClusterAppliesWhenConsumeOnTest(unittest.TestCase):
-    """소비를 켰을 때(_CONSUME_TOPIC_CLUSTER_SIGNAL=True)의 applies_when 대조 계약.
-
-    소비는 현재 꺼져 있지만 대조 로직(_prescription_applies)과 완화 경로는 그대로 배선돼
-    있다. 향후 캘리브레이션·임베딩 교체가 준비돼 소비를 켤 때 이 계약이 깨지지 않도록,
-    플래그를 켠 상태로 고정해 회귀를 잡아둔다.
-
-    rules.py 계약: spread/concentrated → swap_embedding_model 만, none → 청킹 처방만,
-    신호 미측정/unmeasured → 셋 다(순차 fallback).
-    """
-
-    LABEL = "retrieval_semantic_mismatch"
-
-    def setUp(self):
-        self._saved = planner._CONSUME_TOPIC_CLUSTER_SIGNAL
-        planner._CONSUME_TOPIC_CLUSTER_SIGNAL = True
-
-    def tearDown(self):
-        planner._CONSUME_TOPIC_CLUSTER_SIGNAL = self._saved
-
-    def _rule(self):
-        from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
-        return LABEL_TO_PRESCRIPTIONS[self.LABEL]
-
-    def _finding_with_signal(self, signal):
-        f = make_finding("p0", self.LABEL)
-        if signal is not None:
-            f.metadata["topic_cluster"] = signal
-        return f
-
-    def _ids(self, signal):
-        rule = self._rule()
-        avail = planner._available_prescriptions(
-            rule, self.LABEL, set(), [self._finding_with_signal(signal)]
-        )
-        return [p["id"] for p in avail]
-
-    def test_concentrated_keeps_only_embedding_swap(self):
-        self.assertEqual(self._ids("concentrated"), ["swap_embedding_model"])
-
-    def test_spread_keeps_only_embedding_swap(self):
-        self.assertEqual(self._ids("spread"), ["swap_embedding_model"])
-
-    def test_none_keeps_only_chunking(self):
-        # none → 청킹 처방만 남고 임베딩 교체는 빠진다. 청킹 전략 교체는 main 에서
-        # 2-후보 스윕(switch_to_recursive_sentence / switch_to_markdown_recursive)으로
-        # 분화됐으므로, 특정 id 를 박지 말고 "swap 을 뺀 나머지 = 청킹 처방 전부"인지 본다.
-        ids = self._ids("none")
-        self.assertNotIn("swap_embedding_model", ids)
-        self.assertIn("shrink_chunk_size", ids)
-        rule = self._rule()
-        chunking_ids = [
-            p["id"] for p in rule["prescriptions"] if p["id"] != "swap_embedding_model"
-        ]
-        self.assertEqual(ids, chunking_ids)
-
-    def test_missing_signal_keeps_all_prescriptions(self):
-        # 신호 미측정 → 전부 통과 = 기존 순차 fallback (동작 불변).
-        rule = self._rule()
-        all_ids = [p["id"] for p in rule["prescriptions"]]
-        self.assertEqual(self._ids(None), all_ids)
-
-    def test_prescription_without_applies_when_always_passes(self):
-        # applies_when 이 없는 라벨(예: retrieval_lexical_mismatch)은 신호와 무관하게 통과.
-        from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
-        label = "retrieval_lexical_mismatch"
-        rule = LABEL_TO_PRESCRIPTIONS[label]
-        f = make_finding("p0", label)
-        f.metadata["topic_cluster"] = "concentrated"   # 무관 신호
-        avail = planner._available_prescriptions(rule, label, set(), [f])
-        self.assertEqual(len(avail), len(rule["prescriptions"]))
-
-    def test_unmeasured_signal_keeps_all_prescriptions(self):
-        # 판정 불가(unmeasured)는 어느 허용 리스트에도 없지만, 완화 경로로 전부 통과해야
-        # 한다 — 근거가 없을 때는 신호 배선 이전의 순차 fallback 과 같아야 하기 때문.
-        rule = self._rule()
-        self.assertEqual(self._ids("unmeasured"), [p["id"] for p in rule["prescriptions"]])
-
-    def test_signal_relaxes_when_blacklist_exhausts_preferred(self):
-        """신호가 고른 처방이 블랙리스트에 걸리면 나머지로 완화된다(라벨 스킵 금지).
-
-        spread + swap_embedding_model 블랙리스트 조합. 완화가 없으면 후보가 []가 되어
-        _pick_top 이 라벨을 통째로 건너뛴다 — 신호 배선 이전에는 청킹 처방으로 넘어가던
-        경로라 회귀다.
-        """
-        rule = self._rule()
-        blacklist = {(self.LABEL, "swap_embedding_model")}
-        finding = self._finding_with_signal("spread")
-
-        avail = planner._available_prescriptions(rule, self.LABEL, blacklist, [finding])
-        ids = [p["id"] for p in avail]
-        self.assertNotIn("swap_embedding_model", ids)      # 블랙리스트는 계속 유효
-        self.assertIn("shrink_chunk_size", ids)            # 신호 조건은 완화됨
-
-        ranked = [(self.LABEL, [finding], rule, 1.0)]
-        self.assertIsNotNone(planner._pick_top(ranked, blacklist))
-
-    def test_blacklist_still_skips_label_when_fully_exhausted(self):
-        # 완화는 신호에만 적용된다 — 블랙리스트로 전부 소진되면 라벨은 그대로 스킵.
-        rule = self._rule()
-        blacklist = {(self.LABEL, p["id"]) for p in rule["prescriptions"]}
-        finding = self._finding_with_signal("spread")
-
-        self.assertEqual(
-            planner._available_prescriptions(rule, self.LABEL, blacklist, [finding]), []
-        )
-        ranked = [(self.LABEL, [finding], rule, 1.0)]
-        self.assertIsNone(planner._pick_top(ranked, blacklist))
 
 
 if __name__ == "__main__":

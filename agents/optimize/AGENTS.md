@@ -57,11 +57,13 @@ AgentDoctor의 차별점은 brute-force로 최적값만 찾는 것이 아니라 
 - 라벨 판별과 oracle/topic/fact 신호 계산은 Eval 책임이다. Optimize는
   `DiagnosticReport.findings`와 `Finding.label`/`metadata`를 신뢰하고 처방만 만든다.
   코퍼스 재조회, LLM 재진단, 라벨 재판정 로직을 Optimize에 넣지 않는다.
-- 한 번에 최상위 라벨 하나와 처방 하나만 선택한다. 한 라벨의 여러 config를 한꺼번에
-  바꾸지 말고, `rules.py`에 정의된 순서대로 하나씩 적용하고 Eval로 검증한다.
+- 한 번에 **config 축 하나**만 바꾼다. 선택 단위는 라벨이 아니라 action(실제 config
+  변경)이며, 모든 활성 라벨이 지지하는 action 을 통합해 경쟁시킨 뒤 하나를 고른다.
+  `rules.py` 의 **선언 순서는 실행 순서가 아니다** — 인과 등급(A>C>B) → 고유 probe
+  기반 점수 → 비용 → action key 사전순으로 정한다.
 - 성공하면 유지하고 다음 진단으로 진행한다. 무개선·악화 또는 전역 하한선 위반이면
-  이전 config로 rollback하고 `(label, prescription_id)`를 blacklist에 기록한 뒤 다음
-  후보를 시도한다.
+  이전 config로 rollback하고 그 **정확한 전이**(`ActionAttemptKey`)를 차단한 뒤 다음
+  action 을 시도한다. 차단은 baseline 별이라 config 가 바뀌면 같은 축을 다시 볼 수 있다.
 - `diagnosis_confidence`는 진단 신호의 명확도를 나타내는 규칙 상수이고, `impact`는
   처방 후 실측되는 효과다. 두 값을 같은 변수나 의미로 사용하지 않는다.
 - RAGBuilder가 반환한 best config는 대리 파이프라인의 유망 후보일 뿐이다.
@@ -156,7 +158,8 @@ AGENTS/README에 별도 처방 테이블을 복제하지 않는다.
 | 파일 | 책임 | 넣지 말아야 할 것 |
 | --- | --- | --- |
 | `agent.py` | planner → optimizer → mapper → history → reporter 연결, state 갱신 | 진단 규칙, backend 세부 구현 |
-| `planner.py` | finding 분류, `applies_when`, 우선순위, 단일 후보/request/decision 생성 | state 직접 수정, config 적용 |
+| `planner.py` | finding 분류, 우선순위, 단일 후보/request/decision 생성 | state 직접 수정, config 적용 |
+| `action_aggregator.py` | finding → ActionSupport 집계, `applies_when` 대조(planner 에서 이관) | state 직접 수정, 후보값 수학 |
 | `rules.py` | 라벨별 선언적 처방 데이터와 조회 함수 | 실행·탐색 로직 |
 | `schemas.py` | Optimize 내부 dataclass와 Literal 계약 | 실행 로직, 다른 Optimize 모듈 import |
 | `optimizer.py` | capability/constraint, backend 선택, 공통 결과 정규화와 안전 fallback | state 직접 수정 |
@@ -191,10 +194,13 @@ RAGBuilder 연동에서는 다음 경계를 지킨다.
   증명됐다는 뜻이 아니다. `OptimizationResult.improved`는 평가 전 `None`을 유지한다.
 - 값이 모두 필터링됨, 미지원 backend/path/objective, 외부 adapter 실패를 구분 가능한
   status/error/warning으로 남긴다. 빈 `internal_adapter`로 조용히 fallback하지 않는다.
-- history에는 request/trial ID, iteration, label, prescription ID, backend, before/after
-  config와 metric, target metrics, rollback 이유를 저장한다.
-- blacklist는 `(failure_label, prescription_id)` 단위로 만든다. 같은 실패 처방이 반복돼
-  그래프가 무한 순환하지 않도록 한다.
+- history에는 request/trial ID, iteration, action key, 지지 라벨·probe 스냅샷, backend,
+  before/after config와 metric, target metrics, rollback 이유를 저장한다. 지지 라벨과
+  **실제로 해결된 라벨**은 구분해 기록한다(전자는 근거, 후자는 성과다).
+- 차단 단위는 `ActionAttemptKey(action_key, baseline, candidate)` 다. 축 전체를 닫지
+  않으므로 "상류를 고친 뒤 하류를 재평가한다"는 A>C>B 설계 의도가 유지된다. 무한
+  순환은 정확 전이 차단 + 후보 소진 + 예산(`max_iterations`/`optimize_visit_count`) +
+  개선 마진이 함께 막는다. 결론이 난 탐색은 `ActionStudyKey` 로 기록한다.
 - rollback 비교는 반올림하지 않은 원값을 사용한다. 사용자 표시 점수만 반올림하고
   참고용 추정치임을 밝힌다.
 - reporter는 원인, 제안/적용 처방, 실제 변경과 무시된 key, 예상 trade-off, 수동 조치,
