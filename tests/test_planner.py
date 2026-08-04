@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from core.schema import DiagnosticReport, Document, Finding, Probe
 from core.state import AgentDoctorState
-from agents.optimize import candidate_values, planner, rules
+from agents.optimize import action_aggregator, candidate_values, planner, rules
 from agents.optimize.planner import _knee, _knee_candidates
 
 
@@ -479,6 +479,22 @@ class PlannerCandidateListTest(unittest.TestCase):
 
         self.assertEqual(request.optimizer, "rules")
         self.assertEqual(request.max_trials, 1)
+
+    def test_draft_prescriptions_inside_ready_rule_are_not_available(self):
+        finding = make_finding("p1", "context_noise_interference")
+
+        available_ids = {
+            support.prescription_id
+            for support in action_aggregator.build_action_supports(
+                {"context_noise_interference": [finding]},
+                make_state([finding]),
+            )
+        }
+
+        self.assertIn("context_compression", available_ids)
+        self.assertIn("enable_mmr", available_ids)
+        self.assertNotIn("enable_noise_filter", available_ids)
+        self.assertNotIn("strict_conflict_prompt", available_ids)
 
     def test_top_k_candidates_make_one_internal_request(self):
         finding = make_finding(

@@ -1217,5 +1217,3 @@ def _allows_symbolic_fallback(
         return False
     status = grounding_metadata.get("status")
     return isinstance(status, str) and status in allowed_statuses
-
-
