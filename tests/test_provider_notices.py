@@ -393,3 +393,44 @@ class RagasTrackSurvivesMissingEmbeddingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GenerationMaxTokensTest(unittest.TestCase):
+    """답변 생성 출력 상한 — 공용 기본값(2048)은 긴 컨텍스트에서 잘렸다.
+
+    잘린 답변은 그대로 채점에 들어가 faithfulness·answer_correctness 를 부당하게
+    떨어뜨리므로, 상한 부족은 비용 문제가 아니라 진단 신뢰도 문제다."""
+
+    def test_default_is_larger_than_shared_default(self):
+        from core.llm_clients import DEFAULT_MAX_OUTPUT_TOKENS
+
+        self.assertGreater(generator.DEFAULT_GENERATION_MAX_TOKENS,
+                           DEFAULT_MAX_OUTPUT_TOKENS)
+
+    def test_env_overrides_default(self):
+        with patch.dict(os.environ, {"RAG_MAX_OUTPUT_TOKENS": "9000"}, clear=False):
+            self.assertEqual(generator._generation_max_tokens(None), 9000)
+
+    def test_config_wins_over_env(self):
+        with patch.dict(os.environ, {"RAG_MAX_OUTPUT_TOKENS": "9000"}, clear=False):
+            self.assertEqual(
+                generator._generation_max_tokens({"generation_max_tokens": 512}), 512)
+
+    def test_invalid_values_fall_back_to_default(self):
+        for bad in ("", "abc", "0", "-1", None):
+            with patch.dict(os.environ, {"RAG_MAX_OUTPUT_TOKENS": str(bad)}, clear=False):
+                self.assertEqual(generator._generation_max_tokens(None),
+                                 generator.DEFAULT_GENERATION_MAX_TOKENS, bad)
+
+    def test_cap_reaches_the_transport(self):
+        captured = {}
+
+        def fake_chat(*a, **kw):
+            captured.update(kw)
+            return "답변"
+
+        env = {"OPENROUTER_API_KEY": "sk-or-test", "RAG_MAX_OUTPUT_TOKENS": "6000"}
+        with patch.dict(os.environ, env, clear=False), \
+                patch.object(generator, "openai_chat", fake_chat):
+            generator._openrouter_generate("sys", "user")
+        self.assertEqual(captured["max_output_tokens"], 6000)
