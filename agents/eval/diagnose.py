@@ -20,7 +20,8 @@ Finding.type 필드에 라벨 그룹을 담고, Finding.label 필드에 세분�
   - diagnose() 진입 시 metrics_common.set_mode 로 현재 실행 모드를 설정한다.
   - 지정된 진단 모드 이하 tier인 진단만 수행할 수 있다.
   - 파이프라인 재실행으로 확정하던 경로는 Optimize 로 넘겼다. context 원인(C)은 실측 신호로
-    DEEP 에서 확정한다 — reranker_low_precision 만 인과 미측정이라 예비로 남는다.
+    DEEP 에서 확정한다 — reranker_low_precision 은 리랭크 전/후 기록이 있을 때만 확정이고,
+    없으면(옛 결과·MMR 이 최종 컷) 예비로 남는다.
 
 측정값·진단 자원(_ctx)·모드 상태는 tier 별 측정 파일에 존재한다:
   metrics_common(인프라) / metrics_basic(tier1) / metrics_search(tier2) / metrics_ragas(tier3).
@@ -51,7 +52,7 @@ from agents.eval.metrics_search import (           # tier2
     _gold_ranks, _bm25_hits_gold, _gold_in_corpus, _missed_gold_in_corpus,
     _gold_absent_from_corpus, _gold_corpus_membership,
     _gold_dense_ranks, _gold_lexical_ranks, _gold_pre_rerank_ranks,
-    _redundancy_above_gold,
+    _redundancy_above_gold, _rerank_promoted_ids,
 )
 from agents.eval.metrics_ragas import (            # tier3
     _compute_ragas_real, _compute_ragas_oracle, _abstention_judged, _reasoning_mode_oracle,
@@ -1273,12 +1274,19 @@ def chunking_underchunking(record: EvalRecord) -> Optional[Finding]:
 def reranker_low_precision(record: EvalRecord) -> Optional[Finding]:
     """
     리랭커가 무관한 청크를 상위로 올림.
-    예비: C 전제 + 리랭크가 실제 적용됨 + context_precision 낮음 + 청크 안 노이즈는 아님.
+    확정: C 전제 + 리랭크가 실제 적용됨 + context_precision 낮음 + 청크 안 노이즈는 아님
+          + **리랭크가 top_k 구성을 실제로 바꿨음**(_rerank_promoted_ids).
 
-    C그룹에서 유일하게 예비로 남는 라벨이다 — 확정하려면 리랭크 전/후 순위를 대조해야 하는데
-    retriever 가 리랭크 전 후보를 남기지 않는다(search_with_details 가 results 를 덮어씀).
-    그래서 '리랭크를 거친 결과의 정밀도가 낮다'까지만 말한다(리랭커가 원인이라는 증거는 아니다 —
-    원래 검색이 나빴을 수도 있다). 전/후 기록을 남기면 그때 확정으로 올릴 수 있다(별도 PR).
+    마지막 조건이 이 라벨을 예비에서 확정으로 올린다. 예전엔 '리랭크를 거친 결과의 정밀도가
+    낮다'까지만 말했다 — 리랭커가 원인이라는 증거가 아니었다(원래 검색이 나빴을 수도 있다).
+    retriever 가 pre_rerank_ids 를 싣게 된 뒤로 전/후 대조가 가능해져(PR #51 이 미뤄둔 조건),
+    리랭크가 새로 밀어 올린 청크가 있을 때만 리랭커에 책임을 묻는다.
+
+    구성이 안 바뀌었으면(promoted 가 빈 리스트) 아예 발행하지 않는다 — 리랭크 전에도 같은
+    청크들이 들어 있었으므로 리랭커를 바꿔봐야 이 실패는 그대로다. 전/후 기록이 없거나
+    MMR 이 최종 컷을 맡은 결과(promoted is None)는 판정 근거가 없으니 예비로 남긴다.
+
+    확정으로 서도 길이·배치·노이즈 원인이 함께 실측되면 슬롯은 그쪽이 가져간다(_CONTEXT_CAUSE).
     """
     if not _context_failed(record):
         return None
@@ -1289,11 +1297,20 @@ def reranker_low_precision(record: EvalRecord) -> Optional[Finding]:
     precision = _ctx_precision(record)
     if precision is None or precision >= RAGAS_CONTEXT_PRECISION_MIN:
         return None
-    return _finding(
-        record, "reranker_low_precision", "retrieval_failure", confirmed=False,
+    promoted = _rerank_promoted_ids(record)
+    if promoted is not None and not promoted:
+        return None                      # 리랭커가 top_k 구성을 안 바꿈 → 원인 아님
+    confirmed = promoted is not None
+    evidence = (f"리랭크 승격 {len(promoted)}개" if confirmed
+                else "리랭크 전/후 기록 없음(예비)")
+    finding = _finding(
+        record, "reranker_low_precision", "retrieval_failure", confirmed=confirmed,
         reason=f"reranked=True, context_precision={_v(precision)}<{RAGAS_CONTEXT_PRECISION_MIN}, "
-               f"recall@k({record.recall_basis})={_v(record.recall_at_k)}",
+               f"{evidence}, recall@k({record.recall_basis})={_v(record.recall_at_k)}",
     )
+    if confirmed:
+        finding.metadata["rerank_promoted_ids"] = list(promoted)
+    return finding
 
 
 def context_noise_interference(record: EvalRecord) -> Optional[Finding]:
@@ -1507,14 +1524,17 @@ _GENERATION_CAUSE = (
 # A 슬롯에만 두면 recall=1 인 경계 분할 실패에서 도달 자체가 불가능하다(_dedup 이 중복 제거).
 # 노이즈가 '청크 안'이면 underchunking, '청크 사이'면 reranker/noise_interference —
 # _chunk_noise_heavy 로 배타가 서서 순서에 기대지 않는다.
-# 단 reranker_low_precision 과 too_long_context/lost_in_the_middle 은 함께 성립할 수 있다
-# (리랭커가 gold 를 중간으로 밀면 둘 다 참). 이때는 _pick 이 확정을 먼저 뽑아 그쪽이 채택된다 —
-# reranker 는 인과(리랭크 전/후 대조)가 미측정이라 예비로 남기 때문이고, 순서가 아니라
-# confirmed 로 갈린다. 다른 확정이 없을 때만 reranker 가 슬롯을 가져간다.
+# 단 reranker_low_precision 은 too_long_context/lost_in_the_middle/context_noise_interference
+# 와 함께 성립할 수 있다(리랭커가 gold 를 중간으로 밀면 둘 다 참). 예전엔 reranker 만 예비라
+# confirmed 로 갈렸는데, 전/후 대조가 생겨 넷 다 확정으로 설 수 있게 됐다. 그래서 여기서만
+# 튜플 순서로 가른다 — reranker 를 뒤에 두고, 길이·배치·노이즈 근거가 실측되면 그쪽을 뿌리로
+# 본다. 그 셋은 '답이 어느 청크를 어떻게 썼나'까지 실측한 반면 reranker 는 '구성이 바뀌었다'
+# 까지만 말하기 때문이다. 셋 다 성립하지 않을 때만 reranker 가 슬롯을 가져간다.
 _CONTEXT_CAUSE = (
     bad_gold_answer, chunking_overchunking, chunking_context_mismatch,
-    chunking_underchunking, reranker_low_precision,
+    chunking_underchunking,
     too_long_context, lost_in_the_middle, context_noise_interference,
+    reranker_low_precision,
     context_failure
 )
 
