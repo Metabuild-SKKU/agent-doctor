@@ -71,10 +71,16 @@ _FLOORS: dict[str, float] = {
 # "개선"으로 확정하지 않기 위한 값이다.
 #
 # ⚠️ 이 값은 **잠정치다. 노이즈 분포를 측정해서 나온 값이 아니다.**
-#    유일한 관측 근거는 같은 config 재평가가 82↔78(표시 4점 폭)로 흔들린 사례
-#    하나뿐이고(PR #66 리뷰), 그게 사실이면 2점은 노이즈보다 작아 제 역할을 못 한다.
-#    같은 config 반복 Eval 로 σ 를 재고 마진을 k·σ 로 다시 정해야 한다.
-#    보정에 쓸 관측값은 finalize_item 이 이력에 남긴다
+#    관측 근거는 두 건뿐이다.
+#      · 같은 config 재평가가 82↔78(표시 4점 폭)로 흔들린 사례(PR #66 리뷰)
+#      · corpus_20260804_103059 에서 기능적으로 동일한 config(리랭커 off — 후보창
+#        값은 읽히지 않는다)가 0.75 와 0.73 으로 측정된 사례. 편차가 **마진과 같다.**
+#    둘 다 2점이 노이즈보다 작거나 같다는 쪽을 가리킨다. 같은 config 반복 Eval 로
+#    σ 를 재고 마진을 k·σ 로 다시 정해야 한다.
+#
+#    관측 수집은 자동이다 — max_repeated_measurement_spread 가 이력에서 같은 도착
+#    config 의 재측정 편차를 뽑고, 그것이 이 마진 이상이면 Optimize 로그가 경고한다.
+#    시도별 상승폭 분포는 finalize_item 이 남긴다
 #    (margin_rejected·score_delta·improvement_margin).
 #
 # ⚠️ 스케일 주의: judge 도 sweep objective 도 정규화 composite(0~1)를 쓴다.
@@ -238,6 +244,207 @@ def study_key_for_request(
         request.search_space,
         runtime_capabilities,
     )
+
+
+# ── 0-b. 결과 config 기억 (같은 답 재측정 방지) ────────────────────
+# attempt/study 차단의 단위는 **전이**(action, baseline, 후보값)라, 도착 지점이 같은
+# 다른 전이는 막지 못한다. reranker 끄기가 그 예다 — baseline 의 후보창이 20 이든
+# 22 든 끄고 나면 검색 동작은 하나로 수렴하는데, baseline 지문이 달라 차단이 풀리고
+# 이미 실패한 config 를 다시 잰다.
+#
+# 그래서 전이가 아니라 **도착 config** 를 기억한다. 이미 재 봤고 그 점수가 지금
+# baseline 대비 개선 마진을 못 넘었다면, 다시 적용해도 judge 는 반드시 롤백한다 —
+# iteration 하나를 아는 답 재확인에 쓰는 셈이다.
+
+# 다른 축의 값 때문에 파이프라인이 아예 읽지 않게 되는 축.
+#   {비활성화되는 축: 그것을 켜는 축}
+# 리랭커가 꺼져 있으면 후보창 크기는 검색 동작에 아무 영향이 없으므로, config
+# 정체성에서 빼야 "같은 동작"을 같은 config 로 인식한다. 여기 빠진 축이 있으면
+# 기억이 헐거워질 뿐(중복 측정)이고, 반대로 잘못 넣으면 서로 다른 동작을 같은
+# config 로 오인해 정당한 시도를 막는다 — 확신이 있는 축만 넣는다.
+_INERT_WHEN_OFF: dict[str, str] = {
+    "reranker.candidate_count": "reranker.enabled",
+}
+
+# 되돌리기 견제(reversal guard)용 방향 쌍. 여기 없는 operation(replace/adjust)은
+# "되돌린다"를 정의할 수 없으므로 견제 대상이 아니다.
+_REVERSE_OPERATIONS: dict[str, str] = {
+    "enable": "disable",
+    "disable": "enable",
+    "increase": "decrease",
+    "decrease": "increase",
+}
+
+_MISSING = object()
+
+
+def effective_config_view(config: dict[str, Any]) -> dict[str, Any]:
+    """파이프라인 동작에 실제로 영향을 주는 축만 남긴 config 뷰.
+
+    게이트 축이 config 에 없으면 아무것도 빼지 않는다 — 기본값을 추측해 비활성으로
+    단정하면, 서로 다른 동작의 config 두 개가 같은 지문을 갖게 된다.
+    """
+    view = canonical_config_view(config or {})
+    for path, gate in _INERT_WHEN_OFF.items():
+        if path in view and gate in view and not view[gate]:
+            view.pop(path)
+    return view
+
+
+def effective_config_fingerprint(config: dict[str, Any]) -> str:
+    """'이 config 로 돌리면 같은 동작인가' 의 지문."""
+    return _digest(effective_config_view(config))
+
+
+def measured_config_scores(
+    optimization_history: list[OptimizationHistoryItem],
+) -> dict[str, float]:
+    """이번 실행에서 실제로 Eval 을 돌려 본 config 와 그 점수(정규화 0~1).
+
+    한 config 를 여러 번 쟀으면 **가장 좋았던** 관측을 남긴다. 이 값은 재적용을
+    막는 근거로 쓰이므로 후보에게 가장 유리한 관측으로 판단해야, 노이즈로 낮게
+    나온 한 번의 측정이 멀쩡한 축을 닫지 않는다.
+
+    unjudgeable 항목은 건너뛴다 — 점수가 있어도 그 측정이 성립하지 않았다는 뜻이라
+    (리포트 부재·리랭커 미실행) 재적용 차단의 근거로 쓸 수 없다.
+    """
+    return {
+        fingerprint: max(observations)
+        for fingerprint, observations in _collect_measurements(
+            optimization_history
+        ).items()
+    }
+
+
+def _collect_measurements(
+    optimization_history: list[OptimizationHistoryItem],
+) -> dict[str, list[float]]:
+    """도착 config 지문별 관측 점수 목록.
+
+    한 config 가 여러 번 나오는 것은 정상이다 — 어떤 처방의 after 는 다음 처방의
+    before 이므로 같은 Eval 이 두 번 실린다. 그 둘은 값이 같아 편차 계산을 흔들지
+    않는다. 값이 **다르게** 나온 경우가 곧 재측정 노이즈 관측이다.
+    """
+    measurements: dict[str, list[float]] = {}
+
+    def record(config: dict[str, Any] | None, score: Any) -> None:
+        if not config:
+            return
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            return
+        measurements.setdefault(effective_config_fingerprint(config), []).append(
+            float(score)
+        )
+
+    for item in optimization_history:
+        if item.metadata.get("pending") or item.metadata.get("unjudgeable"):
+            continue
+        record(item.before_config, item.metadata.get("before_score"))
+        record(item.after_config, item.metadata.get("after_score"))
+    return measurements
+
+
+def max_repeated_measurement_spread(
+    optimization_history: list[OptimizationHistoryItem],
+) -> float | None:
+    """같은 config 를 다시 쟀을 때 벌어진 점수 폭 중 가장 큰 값. 없으면 None.
+
+    MIN_IMPROVEMENT_MARGIN 주석이 요구하는 σ 관측을 **정상 실행에서 공짜로** 모으기
+    위한 것이다. 마진은 "노이즈로 우연히 오른 점수를 개선으로 보지 않는다"가 목적인데,
+    그러려면 노이즈가 얼마나 큰지 알아야 한다. 지금 값(0.02)은 측정에서 나오지 않은
+    잠정치라, 노이즈가 그보다 크면 마진이 제 역할을 못 한다.
+
+    설정을 바꾸지 않고 Eval 을 반복하는 전용 실험 없이도, 롤백이 config 를 되돌리는
+    과정에서 같은 config 가 자연스럽게 두 번 측정된다. 그 편차가 곧 σ 의 하한 관측이다.
+    """
+    spreads = [
+        max(observations) - min(observations)
+        for observations in _collect_measurements(optimization_history).values()
+        if len(observations) > 1
+    ]
+    return max(spreads) if spreads else None
+
+
+def no_progress_config_fingerprints(
+    optimization_history: list[OptimizationHistoryItem],
+    index_config: dict[str, Any],
+    report: DiagnosticReport | None = None,
+    margin: float = MIN_IMPROVEMENT_MARGIN,
+) -> set[str]:
+    """다시 적용해도 judge 가 반드시 롤백할 config 들의 지문.
+
+    비교 기준(현재 점수)은 **현재 config 의 관측값을 우선**한다. 롤백 직후 방문에서
+    state.report 는 되돌리기 전의 열화된 Eval 이라, 그걸 기준으로 삼으면 문턱이
+    낮아져 이미 실패한 config 가 다시 통과한다. 복원된 config 의 점수는 이력에
+    남아 있으므로 그쪽을 먼저 본다.
+    """
+    scores = measured_config_scores(optimization_history)
+    if not scores:
+        return set()
+
+    current = scores.get(effective_config_fingerprint(index_config or {}))
+    if current is None:
+        if report is None:
+            return set()
+        current = _read_score(report)
+
+    return {
+        fingerprint
+        for fingerprint, score in scores.items()
+        if not meets_improvement_margin(score - current, margin)
+    }
+
+
+def _reverse_action_key(action_key: str) -> str | None:
+    """이 action 을 되돌리는 action 의 key. 방향이 없는 축이면 None."""
+    path, _, operation = action_key.partition(":")
+    reverse = _REVERSE_OPERATIONS.get(operation)
+    return f"{path}:{reverse}" if reverse else None
+
+
+def reversal_guard_thresholds(
+    optimization_history: list[OptimizationHistoryItem],
+    index_config: dict[str, Any],
+) -> dict[str, float]:
+    """되돌리기를 견제할 action 과, 그것을 허용하기 위해 필요한 지지 크기.
+
+    유지(KEEP) 판정은 "이 변경이 **전체적으로** 이득이었다"는 실측이다. 그런데
+    변경 하나가 probe 여럿을 살리면서 한둘을 새로 망가뜨리는 일은 흔하고, 그
+    부작용에 붙은 라벨이 곧바로 역방향 처방을 지지한다. 지지 크기를 비교하지 않으면
+    probe 1개짜리 부작용이 probe 7개짜리 이득을 되돌린다.
+    ⚠️ 이건 영구 금지가 아니라 **문턱**이다. 되돌리기가 원래 처방보다 넓은 지지를
+    받으면 통과한다 — 진단이 실제로 뒤집힌 경우까지 막지는 않는다.
+
+    반환은 {되돌리는 action key: 필요한 지지 크기}. 그 축을 뒤에 다른 처방이 덮어써
+    현재 config 에 남아 있지 않으면 보호하지 않는다(지킬 이득이 이미 없다).
+    """
+    current = canonical_config_view(index_config or {})
+    thresholds: dict[str, float] = {}
+
+    for item in optimization_history:
+        # status=applied 는 KEEP 이다(롤백은 finalize 에서 failed 로 바뀐다).
+        # pending 은 아직 판정 전이라 지킬 근거가 없다.
+        if item.metadata.get("pending") or item.status != "applied":
+            continue
+        if not item.action_key:
+            continue
+        reverse_key = _reverse_action_key(item.action_key)
+        if reverse_key is None:
+            continue
+
+        axis = item.action_key.partition(":")[0]
+        applied = canonical_config_view(item.after_config or {}).get(axis, _MISSING)
+        if applied is _MISSING or current.get(axis, _MISSING) != applied:
+            continue
+
+        support = item.metadata.get("weighted_probe_support")
+        if not isinstance(support, (int, float)) or isinstance(support, bool):
+            # 구버전 이력엔 가중 지지가 없다. probe 수가 confidence=1.0 일 때의
+            # 같은 값이므로 근사치로 쓴다.
+            support = float(len(item.supporting_probes))
+        thresholds[reverse_key] = max(thresholds.get(reverse_key, 0.0), float(support))
+
+    return thresholds
 
 
 # ── 1. 하한선 검사 ────────────────────────────────────────────────
@@ -437,6 +644,11 @@ def create_pending_item(
             "before_report": before_report,  # judge 용(MVP: 객체 참조 보관)
             "before_composite": _read_composite(before_report),  # 표시용 baseline 종합점수
             "applied_changes": dict(applied_changes or {}),
+            # 이 처방이 받은 지지 크기. 유지 판정이 난 뒤 되돌리기를 견제할 때
+            # 문턱으로 쓴다(reversal_guard_thresholds).
+            "weighted_probe_support": request.action_score_breakdown.get(
+                "weighted_probe_support"
+            ),
         },
     )
 

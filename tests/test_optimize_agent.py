@@ -642,24 +642,29 @@ class OptimizeAgentForwardTest(unittest.TestCase):
 
         self.assertLessEqual(out.index_config["rerank_candidates"], 50)
 
-    def test_duplicate_crowding_is_reported_without_prescription(self):
-        """중복 밀림은 지금 config 에 레버가 없다 — 리랭커를 억지로 처방하지 않고 미룬다.
+    def test_duplicate_crowding_prescribes_mmr(self):
+        """중복 밀림의 레버는 MMR 다. 리랭커가 아니다.
 
-        deduplicate 는 기본값이 이미 True 인 본문 해시 완전일치 제거라 near-duplicate 를
-        못 걸러낸다(= patch 를 내도 config 가 안 바뀐다). mmr 필드는 아직 없다.
+        예전엔 "config 에 레버가 없다"며 미뤘는데, PR #51 이 Retriever 에 MMR 을 구현하고
+        core/state.py 에 use_mmr 을 넣으면서 그 전제가 사라졌다(같은 enable_mmr 처방이
+        retrieval_incomplete_enumeration·context_noise_interference 에서는 이미 실행 중).
+
+        리랭커를 처방하면 안 된다는 조건도 함께 고정한다 — cross-encoder 는 중복 청크를
+        상위에 그대로 둔다(각각이 질문과 실제로 관련 있어 점수가 높다). 처방했다면 실패 후
+        blacklist 만 쌓인다.
         """
         state = self._rank_cause_state(
             "retrieval_duplicate_crowding",
             {"crowding_analysis": {"g": {"rank": 4, "redundant": 2,
                                          "projected_rank": 2}}},
         )
-        before = dict(state.index_config)
 
         out = agent.run(state)
 
-        self.assertEqual(out.status, "skipped")
-        self.assertEqual(out.index_config, before)
-        self.assertFalse(rules.is_actionable("retrieval_duplicate_crowding"))
+        self.assertTrue(rules.is_actionable("retrieval_duplicate_crowding"))
+        self.assertTrue(out.index_config["use_mmr"])
+        self.assertFalse(out.index_config["use_reranker"])   # 리랭커는 이 라벨의 레버가 아니다
+        self.assertNotEqual(out.status, "skipped")
 
     def test_low_rank_does_not_widen_candidate_count(self):
         """low_rank 는 'gold 가 후보창 안'이라는 신호라 창 확대가 처방이 아니다.
@@ -848,6 +853,195 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         moved.index_config["chunk_size"] = 256
         request, _decision = agent.planner.plan(moved, blacklist=blocked)
         self.assertEqual(request.action_key, "context.compression.enabled:enable")
+
+    def _reranker_baseline(self, rerank_candidates=20):
+        return {
+            "top_k": 5,
+            "chunk_size": 512,
+            "chunk_overlap": 50,
+            "use_reranker": True,
+            "reranker_model": "BAAI/bge-reranker-v2-m3",
+            "rerank_candidates": rerank_candidates,
+        }
+
+    def _disable_reranker_rollback(self, trial_id, iteration, before_config, caps):
+        item = OptimizationHistoryItem(
+            trial_id=trial_id,
+            request_id=f"req-{trial_id}",
+            iteration=iteration,
+            failure_labels=["retrieval_reranker_demotion"],
+            optimizer="rules",
+            status="failed",
+            selected_prescription_id="disable_reranker",
+            before_config=before_config,
+            after_config={**before_config, "use_reranker": False},
+            rollback_reason="종합점수 미상승 0.780→0.750 → 롤백",
+            action_key="reranker.enabled:disable",
+            supporting_labels=["retrieval_reranker_demotion"],
+            supporting_probes=["p1"],
+            metadata={
+                "pending": False,
+                "before_score": 0.78,
+                "after_score": 0.75,
+                "unjudgeable": False,
+            },
+        )
+        item.action_attempt_key = history.build_attempt_key(
+            item.action_key,
+            before_config,
+            {"reranker.enabled": False},
+            caps,
+        )
+        return item
+
+    def _reranker_state(self, rerank_candidates):
+        return AgentDoctorState(
+            report=make_report(73.0, label="retrieval_reranker_demotion"),
+            index_config=self._reranker_baseline(rerank_candidates),
+            iteration=2,
+            max_iterations=5,
+            runtime_capabilities={
+                "reranker": {
+                    "status": "verified",
+                    "model": "BAAI/bge-reranker-v2-m3",
+                    "retryable": False,
+                    "reason": None,
+                }
+            },
+        )
+
+    def test_single_rollback_still_retries_on_a_moved_baseline(self):
+        """한 번 롤백했다고 축을 닫지 않는다 — 옮겨간 baseline 에서 한 번은 더 본다(§5.1)."""
+        state = self._reranker_state(22)
+        state.optimization_history.append(
+            self._disable_reranker_rollback(
+                "disable-1", 1, self._reranker_baseline(20), state.runtime_capabilities
+            )
+        )
+        state.blocked_action_attempts.add(
+            state.optimization_history[0].action_attempt_key
+        )
+
+        self.assertEqual(
+            agent._rollback_action_cooldown_exclusions(state.optimization_history),
+            set(),
+        )
+        buf = StringIO()
+        with redirect_stdout(buf):
+            out = agent.run(state)
+        self.assertIn("선택한 action: reranker.enabled:disable", buf.getvalue())
+        self.assertFalse(out.index_config["use_reranker"])
+
+    def test_confirmed_rollback_action_enters_run_cooldown_after_second_rollback(self):
+        """두 번째 롤백부터는 baseline 이 또 움직여도 같은 action 을 다시 고르지 않는다.
+
+        실제 로그에서 reranker.enabled:disable 이 롤백된 뒤 rerank_candidates 만
+        20→22로 바뀌자 같은 action 이 곧바로 다시 선택되어 한 번 더 롤백됐다. exact
+        attempt 차단의 완화(§5.1)는 그대로 두고, 확인된 롤백이 쌓인 뒤에만 닫는다.
+        """
+        state = self._reranker_state(24)
+        for index, candidates in enumerate((20, 22), start=1):
+            item = self._disable_reranker_rollback(
+                f"disable-{index}",
+                index,
+                self._reranker_baseline(candidates),
+                state.runtime_capabilities,
+            )
+            state.optimization_history.append(item)
+            state.blocked_action_attempts.add(item.action_attempt_key)
+
+        # exact attempt 차단만 넘기면 baseline 이 달라져 disable 이 다시 열린다.
+        request, _decision = agent.planner.plan(
+            state,
+            blacklist=set(state.blocked_action_attempts),
+        )
+        self.assertEqual(request.action_key, "reranker.enabled:disable")
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            out = agent.run(state)
+
+        self.assertEqual(out.status, "skipped")
+        self.assertTrue(out.index_config["use_reranker"])
+        self.assertEqual(out.index_config["rerank_candidates"], 24)
+        self.assertEqual(len(out.optimization_history), 2)
+        self.assertIn("제외된 action: [reranker.enabled:disable]", buf.getvalue())
+        self.assertNotIn("선택한 action: reranker.enabled:disable", buf.getvalue())
+
+    def test_rollback_cooldown_ignores_unjudgeable_rollbacks(self):
+        item = OptimizationHistoryItem(
+            trial_id="u1",
+            request_id="r1",
+            iteration=1,
+            failure_labels=["retrieval_low_rank"],
+            optimizer="rules",
+            status="failed",
+            selected_prescription_id="enable_reranker",
+            rollback_reason="판정 불가 — 롤백",
+            action_key="reranker.enabled:enable",
+            metadata={"unjudgeable": True},
+        )
+
+        self.assertEqual(agent._rollback_action_cooldown_exclusions([item, item]), set())
+
+    def test_rollback_cooldown_ignores_margin_rejected_rollbacks(self):
+        """마진 미달 롤백은 점수가 오른 시도다 — 그 축이 나쁘다는 증거가 아니다."""
+        item = OptimizationHistoryItem(
+            trial_id="m1",
+            request_id="r1",
+            iteration=1,
+            failure_labels=["retrieval_low_rank"],
+            optimizer="rules",
+            status="failed",
+            selected_prescription_id="increase_top_k",
+            rollback_reason="종합점수 상승폭 부족 0.780→0.782 → 롤백",
+            action_key="retriever.top_k:increase",
+            metadata={"unjudgeable": False, "margin_rejected": True},
+        )
+
+        self.assertEqual(agent._rollback_action_cooldown_exclusions([item, item]), set())
+
+    def test_excluded_action_log_survives_a_rollback_in_the_same_visit(self):
+        """롤백 방문에서도 로그가 살아 있는 차단을 빠뜨리지 않는다.
+
+        롤백은 index_config 를 복원한 뒤 planner 를 부른다. 제외 목록을 그 전에
+        찍으면 복원될 baseline 에 걸린 차단이 로그에서 사라져, 이번 방문에 어떤
+        action 이 닫혀 있었는지 사후에 읽을 수 없다.
+        """
+        baseline = self._reranker_baseline(20)
+        state = self._reranker_state(20)
+        state.index_config = {**baseline, "use_reranker": False}  # 롤백 전(적용 상태)
+        state.report = make_report(40.0, label="retrieval_reranker_demotion")
+        pending = OptimizationHistoryItem(
+            trial_id="p1",
+            request_id="req-p1",
+            iteration=1,
+            failure_labels=["retrieval_reranker_demotion"],
+            optimizer="rules",
+            status="pending",
+            selected_prescription_id="disable_reranker",
+            before_config=baseline,
+            after_config={},
+            action_key="reranker.enabled:disable",
+            metadata={"pending": True, "before_report": make_report(75.0)},
+        )
+        state.optimization_history.append(pending)
+        # 복원될 baseline 에서만 걸려 있는 다른 축의 차단
+        state.blocked_action_attempts.add(
+            history.build_attempt_key(
+                "retriever.top_k:increase",
+                baseline,
+                {"retriever.top_k": 7},
+                state.runtime_capabilities,
+            )
+        )
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            out = agent.run(state)
+
+        self.assertEqual(out.optimization_history[0].status, "failed")  # 롤백 완료
+        self.assertIn("제외된 action: [retriever.top_k:increase]", buf.getvalue())
 
     def test_rollback_then_followup_application_logs_both_prescriptions(self):
         state = agent.run(make_state(overall=60.0))

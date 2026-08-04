@@ -374,6 +374,10 @@ def _annotate_opposition(candidates: list[ActionCandidate]) -> None:
 # ── 3. 실행 가능성 필터 ───────────────────────────────────────────
 
 REASON_BLOCKED_ATTEMPT = "blocked_action_attempt"
+# 적용 결과가 "이번 실행에서 이미 재 봤고 개선이 아니었던" config 인 경우.
+REASON_NO_PROGRESS_CONFIG = "no_progress_config"
+# 유지 판정을 받은 변경을 되돌리려는데 지지가 그만큼 넓지 않은 경우.
+REASON_KEEP_PROTECTED_AXIS = "keep_protected_axis"
 
 
 def _drop_blocked_attempts(
@@ -410,6 +414,69 @@ def _drop_blocked_attempts(
     return kept
 
 
+def _drop_no_progress_values(
+    candidate: ActionCandidate,
+    values: list[Any],
+    baseline_config: dict[str, Any],
+    no_progress_configs: set[str] | None,
+) -> list[Any]:
+    """적용 결과가 '이미 재 봤고 개선이 아니었던' config 인 후보값을 뺀다.
+
+    전이 단위 차단(_drop_blocked_attempts)과 상호보완이다. 저쪽은 "이 baseline 에서
+    이 값을 시도했다가 나빴다"를 막고, 이쪽은 baseline 이 달라져 저 차단이 풀렸더라도
+    **도착 지점이 같으면** 막는다. 리랭커를 끄면 후보창 값과 무관하게 같은 검색
+    동작으로 수렴하는 경우가 정확히 이 구멍이었다.
+    """
+    from agents.optimize import config_mapper, history
+
+    if not no_progress_configs or not values:
+        return values
+
+    path = candidate.definition.canonical_path
+    kept: list[Any] = []
+    for value in values:
+        projected = config_mapper.project_changes(baseline_config, {path: value})
+        if history.effective_config_fingerprint(projected) not in no_progress_configs:
+            kept.append(value)
+    return kept
+
+
+def filter_keep_protected_actions(
+    candidates: list[ActionCandidate],
+    guard_thresholds: dict[str, float] | None,
+) -> tuple[list[ActionCandidate], list[ActionCandidate]]:
+    """유지 판정을 받은 변경을 되돌리려는 action 을 지지 크기로 견제한다.
+
+    **eligibility 보다 먼저 부른다.** 여기서 걸린 후보는 "실행할 수 없다"가 아니라
+    "지금 되돌릴 만큼의 근거가 없다"이므로, 실행 가능성 판정에 섞지 않고 따로
+    사유를 남겨야 리포트가 두 상황을 구분해 설명할 수 있다.
+
+    통과 조건은 **엄격한 초과**다. 동률이면 되돌리지 않는다 — 같은 크기의 지지라면
+    실측으로 이득이 확인된 쪽(이미 유지된 변경)을 남기는 것이 안전하다.
+    """
+    if not guard_thresholds:
+        return list(candidates), []
+
+    kept: list[ActionCandidate] = []
+    rejected: list[ActionCandidate] = []
+    for candidate in candidates:
+        threshold = guard_thresholds.get(candidate.action_key)
+        support = candidate.score_breakdown.get("weighted_probe_support", 0.0)
+        if threshold is None or (
+            isinstance(support, (int, float)) and float(support) > threshold
+        ):
+            kept.append(candidate)
+            continue
+        candidate.status = "blocked"
+        candidate.reason = REASON_KEEP_PROTECTED_AXIS
+        candidate.metadata["keep_protection"] = {
+            "required_support": threshold,
+            "candidate_support": support,
+        }
+        rejected.append(candidate)
+    return kept, rejected
+
+
 def filter_ineligible_actions(
     candidates: list[ActionCandidate],
     state: AgentDoctorState,
@@ -419,6 +486,7 @@ def filter_ineligible_actions(
     runtime_capabilities: dict[str, Any] | None = None,
     constraints: dict[str, Any] | None = None,
     blocked_attempts: set[Any] | None = None,
+    no_progress_configs: set[str] | None = None,
 ) -> tuple[list[ActionCandidate], list[ActionCandidate]]:
     """실행 가능한 후보와 제외된 후보를 나눠 반환한다.
 
@@ -469,6 +537,20 @@ def filter_ineligible_actions(
             candidate.metadata["eligibility"] = verdict.detail
             rejected.append(candidate)
             continue
+
+        # 전이가 아니라 **도착 config** 로 거른다. 순서상 여기여야 한다 —
+        # eligibility 가 상한·no-op 으로 값을 깎은 뒤의 최종 후보로 도착 지점을
+        # 계산해야 실제 적용될 config 와 어긋나지 않는다.
+        remaining = _drop_no_progress_values(
+            candidate, remaining, state.index_config, no_progress_configs
+        )
+        if not remaining:
+            candidate.status = "blocked"
+            candidate.reason = REASON_NO_PROGRESS_CONFIG
+            candidate.metadata["eligibility"] = verdict.detail
+            rejected.append(candidate)
+            continue
+
         candidate.search_space = {path: remaining}
         eligible.append(candidate)
 
