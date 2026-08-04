@@ -389,12 +389,6 @@ class RagasTrackSurvivesMissingEmbeddingTest(unittest.TestCase):
             faith = metrics_ragas._faithfulness(
                 object(), "질문?", "답변입니다.", ["근거 문장."])
         self.assertEqual(faith, 1.0)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class GenerationMaxTokensTest(unittest.TestCase):
     """답변 생성 출력 상한 — 공용 기본값(2048)은 긴 컨텍스트에서 잘렸다.
 
@@ -481,3 +475,6 @@ class ProviderAliasThreeWaySymmetryTest(unittest.TestCase):
         with patch.dict(os.environ, env, clear=False), redirect_stdout(buf):
             self.assertIsNone(graph_index._graph_llm_target({}))
         self.assertIn("keyword", buf.getvalue())
+
+if __name__ == "__main__":
+    unittest.main()

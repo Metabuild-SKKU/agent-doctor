@@ -253,12 +253,6 @@ class TruncationRetryTest(unittest.TestCase):
         self.assertEqual(len(FakeOpenAI.calls), 1)
         self.assertEqual(FakeOpenAI.calls[0]["max_tokens"],
                          llm_clients._REASONING_MIN_OUTPUT_TOKENS)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReasoningOffSkipsLargeCapTest(unittest.TestCase):
     """추론을 끈 호출에는 큰 출력 예산 승급을 적용하지 않는다.
 
@@ -291,3 +285,66 @@ class ReasoningOffSkipsLargeCapTest(unittest.TestCase):
             call("deepseek/deepseek-v4-flash-0731", max_output_tokens=4096)
         self.assertEqual(FakeOpenAI.last_kwargs["max_tokens"],
                          llm_clients._LARGE_OUTPUT_MIN_TOKENS)
+
+class JsonModeKeepsLargeCapTest(unittest.TestCase):
+    """json_mode 는 추론을 꺼도 큰 출력 예산 승급을 유지한다.
+
+    잘린 JSON 은 파싱 실패로 전량 손실이고 재시도가 반드시 걸려 "잘린 값 + 재시도 값"
+    을 둘 다 지불한다. 실측: 이 예외 없이 fused RAGAS 를 돌리면 4096 에서 잘려
+    결손 13건·재시도 4건(건당 4,096+25,000=29,096 토큰), 승급하면 잘림 0건."""
+
+    def setUp(self):
+        FakeOpenAI.last_kwargs = {}
+        FakeOpenAI.calls = []
+        FakeOpenAI.finish_reason = "stop"
+        FakeOpenAI.content = '{"ok": 1}'
+        FakeOpenAI.script = None
+
+    def test_json_mode_keeps_bump_even_with_reasoning_off(self):
+        with patch.dict(os.environ, {"OPENROUTER_REASONING": "0"}, clear=False):
+            call("deepseek/deepseek-v4-flash-0731", json_mode=True,
+                 max_output_tokens=4096, base_url=llm_clients.OPENROUTER_BASE_URL)
+        self.assertEqual(FakeOpenAI.last_kwargs["max_tokens"],
+                         llm_clients._LARGE_OUTPUT_MIN_TOKENS)
+
+    def test_prose_still_honours_caller_cap(self):
+        # e5e1734 의 의도 — RAG 답변은 잘려도 부분 답변이 쓸모 있어 좁은 상한이 이득.
+        with patch.dict(os.environ, {"OPENROUTER_REASONING": "0"}, clear=False):
+            call("deepseek/deepseek-v4-flash-0731", json_mode=False,
+                 max_output_tokens=4096, base_url=llm_clients.OPENROUTER_BASE_URL)
+        self.assertEqual(FakeOpenAI.last_kwargs["max_tokens"], 4096)
+
+    def test_json_mode_never_pays_twice(self):
+        # 승급값이 재시도 목표치 이상이라 retry_cap > cap 이 거짓 → 재시도가 안 열린다.
+        FakeOpenAI.script = [("", "length")]
+        with patch.dict(os.environ, {"OPENROUTER_REASONING": "0"}, clear=False):
+            call("deepseek/deepseek-v4-flash-0731", json_mode=True,
+                 max_output_tokens=4096, base_url=llm_clients.OPENROUTER_BASE_URL)
+        self.assertEqual(len(FakeOpenAI.calls), 1)
+
+
+class TestFileWiringTest(unittest.TestCase):
+    """__main__ 블록 아래에 클래스를 덧붙이면 파일 직접 실행에서 그 테스트가 안 돈다.
+
+    실제로 이 PR 의 회귀 핀 12개가 그렇게 묻혔다(직접 27 vs -m unittest 30).
+    블록이 파일 맨 끝에 하나만 있는지 고정한다."""
+
+    def test_main_block_is_last_in_test_files(self):
+        import pathlib as _p
+
+        root = _p.Path(__file__).parent
+        for name in ("test_llm_clients.py", "test_provider_notices.py"):
+            lines = (root / name).read_text(encoding="utf-8").splitlines()
+            # 들여쓰기 없는 선언만 센다 — 이 테스트 본문에도 같은 문자열이 들어 있어
+            # 원문 전체를 세면 자기 자신을 잡는다.
+            guards = [i for i, ln in enumerate(lines) if ln.startswith("if __name__")]
+            classes = [i for i, ln in enumerate(lines) if ln.startswith("class ")]
+            with self.subTest(name=name):
+                self.assertEqual(len(guards), 1, "__main__ 블록은 하나여야 한다")
+                self.assertTrue(classes, "테스트 클래스가 없다")
+                self.assertLess(max(classes), guards[0],
+                                "__main__ 블록 뒤의 클래스는 직접 실행에서 안 돈다")
+
+
+if __name__ == "__main__":
+    unittest.main()
