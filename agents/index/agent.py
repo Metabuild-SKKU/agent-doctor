@@ -1493,7 +1493,9 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
             state.index_config["recreate_collection_on_dimension_mismatch"] = False
 
         state.chunks = all_chunks
-        if config.get("graph_enabled", True):
+        # 기본값은 core/state.py 의 index_config 와 같은 False 여야 한다 — 부분 config 를
+        # 넘기는 호출부가 생기면 여기 기본값이 그 설정을 조용히 뒤집는다.
+        if config.get("graph_enabled", False):
             graph_usage = snapshot_usage()
             try:
                 state.index_artifacts = tools.build_graph_artifacts(

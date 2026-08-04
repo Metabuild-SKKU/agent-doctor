@@ -93,6 +93,9 @@ _EVAL_CACHE_ENV_KEYS = (
     "RAG_GEMINI_MODEL",
     "RAG_GITHUB_MODEL",
     "RAG_OPENROUTER_MODEL",
+    # 심판 동작을 바꾸는 스위치라 EVAL_JUDGE_MODEL 과 같은 급이다 — 빠지면
+    # 토글해도 캐시가 히트해 "켜서 비교" 자체가 불가능해진다.
+    "OPENROUTER_REASONING",
 )
 _EVAL_CACHE_SECRET_KEYS = (
     "OPENAI_API_KEY",

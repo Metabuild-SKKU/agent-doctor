@@ -434,3 +434,50 @@ class GenerationMaxTokensTest(unittest.TestCase):
                 patch.object(generator, "openai_chat", fake_chat):
             generator._openrouter_generate("sys", "user")
         self.assertEqual(captured["max_output_tokens"], 6000)
+
+
+class ProviderAliasThreeWaySymmetryTest(unittest.TestCase):
+    """Eval·RAG·Index 세 축이 같은 철자표를 본다.
+
+    Eval/RAG 만 대칭을 맞춰두고 Index 가 원문 비교만 하던 시절, 같은 값을 세 env 에
+    넣으면 두 곳은 OpenRouter 로 가고 Index 만 keyword 로 갈렸다."""
+
+    def setUp(self):
+        graph_index._warned_graph_providers.clear()
+
+    def test_all_three_share_one_table(self):
+        from core.llm_clients import PROVIDER_ALIASES
+
+        self.assertIs(llm_provider._PROVIDER_ALIASES, PROVIDER_ALIASES)
+        self.assertIs(generator._PROVIDER_ALIASES, PROVIDER_ALIASES)
+
+    def test_index_accepts_openrouter_aliases(self):
+        env = {"OPENROUTER_API_KEY": "or-dummy", "OPENAI_API_KEY": ""}
+        for spelling in ("openrouter", "OpenRouter", "  open_router ",
+                         "open-router", "openrouter.ai"):
+            with self.subTest(spelling=spelling):
+                with patch.dict(os.environ, dict(env, INDEX_LLM_PROVIDER=spelling),
+                                clear=False):
+                    target = graph_index._graph_llm_target({})
+                self.assertIsNotNone(target, spelling)
+                self.assertEqual(target[1], "https://openrouter.ai/api/v1")
+
+    def test_index_warns_once_on_unknown_value(self):
+        env = {"OPENROUTER_API_KEY": "or-dummy", "OPENAI_API_KEY": "",
+               "INDEX_LLM_PROVIDER": "openroutr"}
+        buf = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), redirect_stdout(buf):
+            first = graph_index._graph_llm_target({})
+            log = buf.getvalue()
+            graph_index._graph_llm_target({})
+        self.assertIsNone(first)                       # keyword 로 폴백
+        self.assertIn("알 수 없는 INDEX_LLM_PROVIDER", log)
+        self.assertEqual(buf.getvalue(), log)          # 값당 1회만
+
+    def test_index_typo_with_valid_key_is_not_silent(self):
+        # 키가 멀쩡한데 오타 하나로 LLM 추출이 꺼지는 게 가장 알아채기 어렵다.
+        env = {"OPENAI_API_KEY": "sk-dummy", "INDEX_LLM_PROVIDER": "opnai"}
+        buf = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), redirect_stdout(buf):
+            self.assertIsNone(graph_index._graph_llm_target({}))
+        self.assertIn("keyword", buf.getvalue())

@@ -20,6 +20,24 @@ from core.llm_usage import log_usage
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# provider 철자표 — 같은 값을 EVAL_LLM_PROVIDER / RAG_LLM_PROVIDER / INDEX_LLM_PROVIDER
+# 어디에 넣어도 같게 해석되도록 한 곳에서 소유한다. 예전엔 Eval·RAG 가 각자 복사본을
+# 두고 테스트로 대칭만 고정했는데, 나중에 붙은 Index 가 세 번째 표 없이 원문 비교만 해서
+# 같은 값이 두 곳은 OpenRouter, Index 만 keyword 로 갈렸다.
+PROVIDER_ALIASES = {
+    "github_models": "github",
+    "open_router": "openrouter",
+    "open-router": "openrouter",
+    "openrouter_ai": "openrouter",
+    "openrouter.ai": "openrouter",
+}
+
+
+def normalize_provider(raw: str | None) -> str:
+    """provider 문자열을 정규 표기로. 공백·대소문자·별칭을 흡수한다(미지원 값은 그대로)."""
+    value = str(raw or "").strip().lower()
+    return PROVIDER_ALIASES.get(value, value)
+
 # 출력 토큰 기본 상한. 상한이 없으면 모델이 같은 문장을 반복 생성하며 최대치(64K)까지
 # 달려도 아무도 막지 않는다 — 실제로 한 번 일어났고(응답 65,521 토큰, 그 1회로 $0.10),
 # 잘린 응답이 JSON 파싱에 실패해 호출부가 조용히 휴리스틱으로 폴백하면서 쓰레기 Probe 를

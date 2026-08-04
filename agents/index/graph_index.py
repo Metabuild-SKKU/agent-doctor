@@ -11,7 +11,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from core.llm_clients import OPENROUTER_BASE_URL, openai_chat
+from core.llm_clients import OPENROUTER_BASE_URL, normalize_provider, openai_chat
 from core.llm_retry import run_with_retry
 from core.parallel import parallel_map
 from core.schema import Chunk
@@ -20,6 +20,25 @@ from core.state import DEFAULT_GRAPH_LLM_MODEL
 # OpenRouter 용 기본 모델. 모델명이 "publisher/model" 형식이어야 하므로
 # DEFAULT_GRAPH_LLM_MODEL(OpenAI용)을 그대로 보내면 404 가 나고 keyword 로 조용히 강등된다.
 _DEFAULT_GRAPH_MODEL_OPENROUTER = "openai/gpt-4.1-mini"
+
+# INDEX_LLM_PROVIDER 가 받는 값. 철자표는 core/llm_clients.PROVIDER_ALIASES 를 공유하므로
+# Eval/RAG 에 넣던 값(open_router 등)을 여기에 넣어도 같게 해석된다.
+_KNOWN_GRAPH_PROVIDERS = {"auto", "openai", "openrouter"}
+# 이미 경고한 미지원 값(Index 는 청크를 병렬 처리하므로 lock 으로 보호).
+_warned_graph_providers: set[str] = set()
+_warned_graph_provider_lock = threading.Lock()
+
+
+def _warn_unknown_provider_once(raw: str) -> None:
+    """미지원 INDEX_LLM_PROVIDER 값 경고를 값당 한 번만 출력한다.
+
+    조용히 keyword 로 떨어지면 키가 멀쩡한데도 LLM 추출이 꺼진 것을 알 수 없다."""
+    with _warned_graph_provider_lock:
+        if raw in _warned_graph_providers:
+            return
+        _warned_graph_providers.add(raw)
+    print(f"[Index] 알 수 없는 INDEX_LLM_PROVIDER '{raw}' — keyword 추출로 폴백 "
+          f"(auto|openai|openrouter)")
 
 _STOPWORDS = {
     "그리고", "그러나", "대한", "위한", "있는", "한다", "에서", "으로",
@@ -49,11 +68,15 @@ def _graph_llm_target(config: dict) -> tuple[str, str | None, str] | None:
     OPENROUTER_API_KEY 도 받아주던 때, Eval/RAG 용으로 넣은 키 하나가 검색 품질과
     무관한 이 단계까지 켜서 청크당 1회 호출이 조용히 과금됐다. 그래프 산출물은
     시각화용이라 그 대가를 치를 이유가 없고, 켜는 쪽이 의도를 밝히는 게 맞다."""
-    provider = str(
+    provider = normalize_provider(
         config.get("graph_llm_provider")
         or os.getenv("INDEX_LLM_PROVIDER")
         or "auto"
-    ).strip().lower()
+    )
+    if provider not in _KNOWN_GRAPH_PROVIDERS:
+        # 조용히 keyword 로 떨어지면 키가 멀쩡한데도 LLM 추출이 꺼진 걸 알 수 없다.
+        _warn_unknown_provider_once(provider)
+        return None
     openai_key = os.getenv("OPENAI_API_KEY")
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
 
