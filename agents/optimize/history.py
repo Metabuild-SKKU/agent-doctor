@@ -71,10 +71,16 @@ _FLOORS: dict[str, float] = {
 # "개선"으로 확정하지 않기 위한 값이다.
 #
 # ⚠️ 이 값은 **잠정치다. 노이즈 분포를 측정해서 나온 값이 아니다.**
-#    유일한 관측 근거는 같은 config 재평가가 82↔78(표시 4점 폭)로 흔들린 사례
-#    하나뿐이고(PR #66 리뷰), 그게 사실이면 2점은 노이즈보다 작아 제 역할을 못 한다.
-#    같은 config 반복 Eval 로 σ 를 재고 마진을 k·σ 로 다시 정해야 한다.
-#    보정에 쓸 관측값은 finalize_item 이 이력에 남긴다
+#    관측 근거는 두 건뿐이다.
+#      · 같은 config 재평가가 82↔78(표시 4점 폭)로 흔들린 사례(PR #66 리뷰)
+#      · corpus_20260804_103059 에서 기능적으로 동일한 config(리랭커 off — 후보창
+#        값은 읽히지 않는다)가 0.75 와 0.73 으로 측정된 사례. 편차가 **마진과 같다.**
+#    둘 다 2점이 노이즈보다 작거나 같다는 쪽을 가리킨다. 같은 config 반복 Eval 로
+#    σ 를 재고 마진을 k·σ 로 다시 정해야 한다.
+#
+#    관측 수집은 자동이다 — max_repeated_measurement_spread 가 이력에서 같은 도착
+#    config 의 재측정 편차를 뽑고, 그것이 이 마진 이상이면 Optimize 로그가 경고한다.
+#    시도별 상승폭 분포는 finalize_item 이 남긴다
 #    (margin_rejected·score_delta·improvement_margin).
 #
 # ⚠️ 스케일 주의: judge 도 sweep objective 도 정규화 composite(0~1)를 쓴다.
@@ -302,23 +308,61 @@ def measured_config_scores(
     unjudgeable 항목은 건너뛴다 — 점수가 있어도 그 측정이 성립하지 않았다는 뜻이라
     (리포트 부재·리랭커 미실행) 재적용 차단의 근거로 쓸 수 없다.
     """
-    scores: dict[str, float] = {}
+    return {
+        fingerprint: max(observations)
+        for fingerprint, observations in _collect_measurements(
+            optimization_history
+        ).items()
+    }
+
+
+def _collect_measurements(
+    optimization_history: list[OptimizationHistoryItem],
+) -> dict[str, list[float]]:
+    """도착 config 지문별 관측 점수 목록.
+
+    한 config 가 여러 번 나오는 것은 정상이다 — 어떤 처방의 after 는 다음 처방의
+    before 이므로 같은 Eval 이 두 번 실린다. 그 둘은 값이 같아 편차 계산을 흔들지
+    않는다. 값이 **다르게** 나온 경우가 곧 재측정 노이즈 관측이다.
+    """
+    measurements: dict[str, list[float]] = {}
 
     def record(config: dict[str, Any] | None, score: Any) -> None:
         if not config:
             return
         if not isinstance(score, (int, float)) or isinstance(score, bool):
             return
-        key = effective_config_fingerprint(config)
-        if key not in scores or float(score) > scores[key]:
-            scores[key] = float(score)
+        measurements.setdefault(effective_config_fingerprint(config), []).append(
+            float(score)
+        )
 
     for item in optimization_history:
         if item.metadata.get("pending") or item.metadata.get("unjudgeable"):
             continue
         record(item.before_config, item.metadata.get("before_score"))
         record(item.after_config, item.metadata.get("after_score"))
-    return scores
+    return measurements
+
+
+def max_repeated_measurement_spread(
+    optimization_history: list[OptimizationHistoryItem],
+) -> float | None:
+    """같은 config 를 다시 쟀을 때 벌어진 점수 폭 중 가장 큰 값. 없으면 None.
+
+    MIN_IMPROVEMENT_MARGIN 주석이 요구하는 σ 관측을 **정상 실행에서 공짜로** 모으기
+    위한 것이다. 마진은 "노이즈로 우연히 오른 점수를 개선으로 보지 않는다"가 목적인데,
+    그러려면 노이즈가 얼마나 큰지 알아야 한다. 지금 값(0.02)은 측정에서 나오지 않은
+    잠정치라, 노이즈가 그보다 크면 마진이 제 역할을 못 한다.
+
+    설정을 바꾸지 않고 Eval 을 반복하는 전용 실험 없이도, 롤백이 config 를 되돌리는
+    과정에서 같은 config 가 자연스럽게 두 번 측정된다. 그 편차가 곧 σ 의 하한 관측이다.
+    """
+    spreads = [
+        max(observations) - min(observations)
+        for observations in _collect_measurements(optimization_history).values()
+        if len(observations) > 1
+    ]
+    return max(spreads) if spreads else None
 
 
 def no_progress_config_fingerprints(

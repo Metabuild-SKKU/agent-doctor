@@ -64,6 +64,10 @@ AgentDoctor의 차별점은 brute-force로 최적값만 찾는 것이 아니라 
 - 성공하면 유지하고 다음 진단으로 진행한다. 무개선·악화 또는 전역 하한선 위반이면
   이전 config로 rollback하고 그 **정확한 전이**(`ActionAttemptKey`)를 차단한 뒤 다음
   action 을 시도한다. 차단은 baseline 별이라 config 가 바뀌면 같은 축을 다시 볼 수 있다.
+- rollback 은 **config 와 `state.report` 를 함께** 되돌린다. 하나만 되돌리면 같은 방문의
+  처방 선택이 복원된 설정으로 결정하면서 근거는 되돌리기 전 finding 을 본다 — 방금
+  없앤 증상을 고치려 든다. 이 복원은 Eval 이 다음 방문에 롤백 진단 캐시로 하는 일과
+  같으므로, 한 스텝 뒤 성립할 상태를 앞당기는 것이지 새 값을 만드는 것이 아니다.
 - 유지(KEEP) 판정은 다음 선택의 입력이다. 그 변경을 되돌리는 action 은 원래 처방보다
   **넓은 지지**를 받을 때만 후보가 된다(`history.reversal_guard_thresholds`). 변경 하나가
   probe 여럿을 살리며 한둘을 새로 망가뜨리는 일은 흔한데, 견제가 없으면 그 부작용

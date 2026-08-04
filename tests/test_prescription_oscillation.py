@@ -450,6 +450,129 @@ class OscillationReplayTest(unittest.TestCase):
         self.assertNotIn(DISABLE, applied)
 
 
+# ── 4. 롤백 방문의 계획 입력 ──────────────────────────────────────
+
+class RollbackPlanningInputTest(unittest.TestCase):
+    """롤백은 config 와 진단서를 함께 되돌린다.
+
+    하나만 되돌리면 같은 방문의 나머지 로직이 서로 다른 config 를 가정한다 —
+    복원된 설정으로 처방을 고르면서 근거는 되돌리기 전 finding 인 상태가 된다.
+    """
+
+    def _pending_item(self, before_report):
+        item = _kept_item(
+            "generation.abstention_strict:enable",
+            _config(),
+            {**_config(), "abstention_strict": True},
+            support=1.0,
+        )
+        item.status = "applied"
+        item.metadata.update({"pending": True, "before_report": before_report})
+        item.failure_labels = ["generation_hallucination"]
+        item.supporting_labels = ["generation_hallucination"]
+        item.supporting_probes = ["p11"]
+        return item
+
+    def test_rollback_restores_the_report_with_the_config(self):
+        from agents.optimize import agent
+
+        # 복원 대상: 리랭커가 꺼져 있고 low_rank 가 남아 있던 0.78 짜리 진단서.
+        restored_report = _report(
+            [_finding(f"p{i}", "retrieval_low_rank") for i in range(7)], composite=78.0
+        )
+        # 방금 적용한 처방이 점수를 떨어뜨렸고, 그 처방이 **스스로 만든** 증상이
+        # 리포트에 남아 있다.
+        degraded_report = _report(
+            [_finding("p13", "generation_wrongful_abstention")], composite=67.0
+        )
+
+        state = AgentDoctorState(
+            report=degraded_report,
+            index_config={**_config(), "abstention_strict": True},
+            optimization_history=[self._pending_item(restored_report)],
+            iteration=1,
+            max_iterations=5,
+            runtime_capabilities={
+                "reranker": {"status": "verified", "model": "BAAI/bge-reranker-v2-m3"}
+            },
+        )
+
+        agent.run(state)
+
+        # 진단서가 config 와 함께 되돌아왔다.
+        self.assertIs(state.report, restored_report)
+        # 되돌린 처방이 만든 증상(wrongful_abstention)을 고치는 처방은 고르지 않는다.
+        applied = [item.action_key for item in state.optimization_history]
+        self.assertNotIn("generation.abstention_relaxed:enable", applied)
+
+    def test_an_unmeasured_rollback_leaves_the_report_alone(self):
+        """되돌릴 진단서가 없으면(before_report 부재) 건드리지 않는다."""
+        from agents.optimize import agent
+
+        degraded_report = _report(
+            [_finding("p13", "generation_wrongful_abstention")], composite=67.0
+        )
+        state = AgentDoctorState(
+            report=degraded_report,
+            index_config={**_config(), "abstention_strict": True},
+            optimization_history=[self._pending_item(None)],
+            iteration=1,
+            max_iterations=5,
+        )
+
+        agent.run(state)
+
+        self.assertIs(state.report, degraded_report)
+
+
+# ── 5. 재측정 노이즈 관측 ─────────────────────────────────────────
+
+class MeasurementNoiseTest(unittest.TestCase):
+    """마진 재보정에 쓸 σ 관측을 정상 실행에서 모은다.
+
+    MIN_IMPROVEMENT_MARGIN 은 측정에서 나온 값이 아니라는 것이 주석에 명시돼 있다.
+    노이즈가 그보다 크면 마진이 제 역할을 못 하는데, 지금은 그 사실을 알 방법이 없다.
+    """
+
+    def test_same_config_measured_twice_reports_the_spread(self):
+        """로그의 실제 관측 — 기능적으로 같은 config 가 0.75 와 0.73 으로 나왔다."""
+        off = _config(reranker=False)
+        items = [
+            _kept_item(ENABLE, off, _config(), before_score=0.75, after_score=0.78),
+            _kept_item(
+                WIDEN,
+                _config(reranker=False, candidates=22),   # 리랭커가 꺼져 있어 같은 동작
+                _config(),
+                before_score=0.73,
+                after_score=0.80,
+            ),
+        ]
+
+        spread = history.max_repeated_measurement_spread(items)
+
+        self.assertAlmostEqual(spread, 0.02)
+        # 이 폭이 마진 이상이면 '개선'과 노이즈가 구분되지 않는다.
+        self.assertGreaterEqual(spread, history.MIN_IMPROVEMENT_MARGIN)
+
+    def test_a_config_measured_once_has_no_spread(self):
+        items = [_kept_item(ENABLE, _config(reranker=False), _config(),
+                            before_score=0.75, after_score=0.78)]
+
+        self.assertIsNone(history.max_repeated_measurement_spread(items))
+
+    def test_the_same_eval_appearing_twice_is_not_noise(self):
+        """한 처방의 after 는 다음 처방의 before 다 — 같은 Eval 이라 편차가 아니다."""
+        mid = _config()
+        items = [
+            _kept_item(ENABLE, _config(reranker=False), mid,
+                       before_score=0.75, after_score=0.78),
+            _kept_item(WIDEN, mid, _config(candidates=22),
+                       before_score=0.78, after_score=0.80),
+        ]
+
+        self.assertEqual(history.max_repeated_measurement_spread(items), 0.0)
+
+
 def _stub_candidate(action_key, *, support):
     """지지 크기만 채운 최소 후보. 견제 판정은 그 값 하나만 본다."""
     from agents.optimize import action_catalog
