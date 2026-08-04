@@ -46,6 +46,16 @@ _LARGE_OUTPUT_PREFIXES = ("deepseek",)
 # 과금된다.
 _REASONING_MIN_OUTPUT_TOKENS = 25_000
 
+# (2) 계열용 하한선은 따로 둔다. 상한은 실사용분만 과금되므로 평소 비용에는 영향이 없지만,
+# 같은 문장을 반복 생성하는 폭주 상황의 최악값을 결정하는 방어선이기도 하다(파일 상단
+# 주석의 65,521 토큰 사고). 25K 는 훨씬 깊게 사고하는 OpenAI o-series 기준이라 이 계열엔
+# 과하다.
+# 실측(deepseek-v4-flash-0731, 한국어 RAGAS fused 판정 1회, top_k=5):
+#   입력 2,514 / 출력 2,708 토큰 — 추론 토큰 포함. 기본 2048 로는 잘렸다.
+# 여기에 약 3배 여유를 둔 값이다. 이보다 긴 판정이 잘리면 아래 재시도 안전망이
+# _REASONING_MIN_OUTPUT_TOKENS 로 올려 받는다 — 평소엔 좁게, 필요할 때만 넓게.
+_LARGE_OUTPUT_MIN_TOKENS = 8_000
+
 # 추론 모델에서 temperature 가 버려졌다는 사실을 모델당 한 번 알린다.
 # Optimize 의 generation.temperature sweep 이 조용히 no-op 이 되는 걸 드러내기 위함.
 _warned_ignored_temperature: set[str] = set()
@@ -146,8 +156,10 @@ def openai_chat(
         _warn_temperature_ignored_once(model, temperature, tag)
 
     cap = max_output_tokens
-    if reasoning or _needs_large_output(model):
+    if reasoning:
         cap = max(cap, _REASONING_MIN_OUTPUT_TOKENS)
+    elif _needs_large_output(model):
+        cap = max(cap, _LARGE_OUTPUT_MIN_TOKENS)
 
     def _call(limit: int):
         kwargs = dict(base_kwargs)
