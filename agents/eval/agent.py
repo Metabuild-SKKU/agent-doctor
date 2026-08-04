@@ -689,18 +689,20 @@ def _annotate_topic_cluster(records: list[EvalRecord], chunks: list) -> None:
     개별 probe 로는 못 내는 cross-probe 신호라 diagnose() 밖(전 record 준비 후)에서 계산한다.
     실패한 semantic_mismatch probe 들의 '놓친 gold' 임베딩이 서로 뭉쳤나 흩어졌나를
     코퍼스 baseline 대비 비율로 판정해(agents/eval/topic_cluster.py), 그 값을 해당 라벨의
-    모든 finding metadata['topic_cluster'] 에 실어 Optimize(planner)가 처방을 가르게 한다.
+    모든 finding metadata['topic_cluster'] 에 실어 Optimize 가 처방을 가르게 한다
+    (소비부: optimize/action_aggregator._prescription_applies).
 
     'none' 도 명시적으로 단다 — rules.py 의 semantic_mismatch 처방은 none 을 "청크 희석
     (Case1) → 청킹 조정" 신호로 쓴다(shrink_chunk_size / switch_chunking 의
-    applies_when={"topic_cluster":["none"]}). 여기서 none 을 안 달면 planner 가 '미측정
-    =순차 fallback'으로 보아 임베딩 교체 처방까지 통과시켜, none 이 청킹만 선택하려던
-    rules.py 계약이 깨진다.
+    applies_when={"topic_cluster":["none"]}). 여기서 none 을 안 달면 소비부가 '미측정'
+    으로 보아 임베딩 교체 처방까지 통과시켜, none 이 청킹만 선택하려던 rules.py 계약이
+    깨진다.
 
     반대로 '아예 못 잰' 경우(임베딩 미부착/fallback, 실패 gold 2개 미만, baseline 측정
     불가)는 none 이 아니라 'unmeasured' 로 나간다 — 근거 없이 청킹 처방을 확정 선택하면
-    안 되기 때문이다. unmeasured 는 어느 applies_when 허용 리스트에도 없어 planner 가
-    순차 fallback 으로 되돌린다(agents/eval/topic_cluster.py 의 값 도메인 주석 참고).
+    안 되기 때문이다. 이 값은 허용 리스트에 없어서가 아니라 소비부가 sentinel 로 알아봐서
+    (core.schema.UNMEASURED_SIGNAL) 조건 자체를 통과한다 — 허용 리스트에 없다는 건
+    '탈락'이지 '미측정'이 아니다(agents/eval/topic_cluster.py 의 값 도메인 주석 참고).
     """
     sem_findings = [
         f
@@ -871,7 +873,14 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
             f"{str(bool(rec.retrieval_details.get('search_fallback_used'))).lower()}, "
             f"reranker={rec.retrieval_details.get('reranker_status', 'disabled')}"
         )
-    metric_line = f"    recall@k={recall}  f1={f1}  oracle_f1={oracle}"
+    # recall 은 gold_spans 가 있으면 span 커버리지(빈틈없이 덮어야 1점)라, 이름만 'recall@k' 로
+    # 찍으면 '골드 청크가 검색 목록에 있는데 recall=0' 이 모순처럼 보인다. 기준과 청크 적중수를
+    # 함께 남겨 그 착시를 없앤다.
+    recall_note = f"recall@k({rec.recall_basis})={recall}"
+    if p.gold_chunk_ids:
+        hit = len(set(p.gold_chunk_ids) & set(rec.retrieved_chunk_ids))
+        recall_note += f"  gold청크 {hit}/{len(p.gold_chunk_ids)} 검색"
+    metric_line = f"    {recall_note}  f1={f1}  oracle_f1={oracle}"
     # 판정 기준은 f1 단독이 아니라 혼합 점수(answer_score = lexical·의미 가중합)다 —
     # 그 값과 의미축을 함께 남기지 않으면 'f1 이 낮은데 왜 통과(또는 통과 못)했나'를 로그만
     # 보고 알 수 없다. 의미축은 DEEP 에서만 측정되므로 있을 때만 붙인다.
@@ -879,6 +888,10 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
         metric_line += (f"  answer={_fmt_metric(rec.answer_score)}"
                         f"(의미 {_fmt_metric(rec.answer_semantic)}"
                         f", 커버리지 {_fmt_metric(rec.gold_coverage)})")
+    elif p.ground_truth and rec.ragas.get("answer_correctness_degraded"):
+        # 의미축이 죽어 lexical 단독으로 판정된 probe. 이 줄이 없으면 'f1=1.00 인데 실패'가
+        # 설명 없이 남는다 — 판정을 뒤집은 게 어휘 점수가 아니라 판정기 실패라는 걸 못 본다.
+        metric_line += "  answer=f1 단독(의미축 degrade)"
     print(metric_line)
     # gold 용어 별칭(자산총계↔총자산 등)이 실제로 점수를 올렸을 때만 — gold 품질 검수 신호다.
     if p.ground_truth and rec.best_gold_answer_f1 > rec.raw_f1_score:

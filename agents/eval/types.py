@@ -285,6 +285,10 @@ class EvalRecord:
 
     # STEP3-1: 규칙 지표 (diagnose 가 진입 시 계산·저장)
     recall_at_k: float = 0.0
+    # recall_at_k 를 어느 기준으로 쟀나: "span"(gold 원문 좌표 커버리지) | "chunk"(gold 청크 id 포함률).
+    # 로그가 둘을 같은 이름으로 찍어서, gold 청크가 검색 목록에 있는데 recall=0 인 줄이
+    # 모순처럼 보였다(span 은 좌표를 빈틈없이 덮어야 1점이라 청크 하나만으론 0 이 될 수 있다).
+    recall_basis: str = "chunk"
     f1_score: float = 0.0
     oracle_f1: float = 0.0
     raw_f1_score: float = 0.0

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from core.schema import Finding
+from core.schema import Finding, UNMEASURED_SIGNAL
 from core.state import AgentDoctorState
 from agents.optimize import action_catalog, eligibility, rules
 from agents.optimize.schemas import (
@@ -77,6 +77,16 @@ def _finding_signal(findings: list[Finding], key: str) -> Any:
     return None
 
 
+def _is_unmeasured(signal: Any) -> bool:
+    """이 신호값이 '못 쟀다'인가 — 키 부재(None)와 측정 실패 sentinel 을 함께 본다.
+
+    측정부가 실패를 알리는 방법이 둘이다: 키를 아예 안 싣거나(None), 재려다 실패했다는
+    사실을 UNMEASURED_SIGNAL 로 명시하거나. 후자를 놓치면 '못 쟀다'가 '허용 리스트에
+    없는 값'으로 읽혀 처방이 **탈락**한다 — 미측정이 통과여야 하는 것과 정반대다.
+    """
+    return signal is None or signal == UNMEASURED_SIGNAL
+
+
 def _prescription_applies(prescription: dict, findings: list[Finding]) -> bool:
     """처방의 applies_when 조건을 finding metadata 와 대조한다.
 
@@ -85,10 +95,15 @@ def _prescription_applies(prescription: dict, findings: list[Finding]) -> bool:
       - 신호 키는 있는데 값이 없으면       → 적용(미측정 = 순차 fallback)
       - 값이 있으면 허용 리스트 membership → 포함될 때만 적용
     키가 여러 개면 전부(AND) 만족해야 한다.
+
+    '미측정'은 값의 부재(None)뿐 아니라 UNMEASURED_SIGNAL 도 포함한다(_is_unmeasured).
+    측정부는 '쟀는데 해당 없음'(예: topic_cluster "none")과 '아예 못 쟀음'을 다른 값으로
+    구분해 보내는데, 후자를 일반 값처럼 membership 검사에 넣으면 어느 허용 리스트에도
+    없어 처방이 탈락한다 — 근거가 없을수록 더 많이 걸러내는 셈이라 계약과 반대다.
     """
     for key, allowed in (prescription.get("applies_when") or {}).items():
         signal = _finding_signal(findings, key)
-        if signal is None:
+        if _is_unmeasured(signal):
             continue                    # 미측정 → 이 조건은 통과
         if signal not in allowed:
             return False

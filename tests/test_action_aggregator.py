@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from agents.optimize import action_aggregator as aggregator
 from agents.optimize import action_catalog, candidate_values, history
 from agents.optimize.schemas import ActionCandidate, ActionSupport
+from core.schema import UNMEASURED_SIGNAL
 from tests.test_planner import make_finding, make_state
 
 
@@ -521,10 +522,65 @@ class AppliesWhenSignalConsumeOnTest(unittest.TestCase):
         )
 
     def test_unmeasured_signal_keeps_all_prescriptions(self):
-        # 판정 불가는 어느 허용 리스트에도 없지만 완화 경로로 전부 통과해야 한다 —
-        # 근거가 없을 때는 신호 배선 이전과 같아야 하기 때문.
+        # 판정 불가면 신호 배선 이전과 같아야 한다(순차 fallback).
         self.assertEqual(
-            self._ids("unmeasured"), [p["id"] for p in self._rule()["prescriptions"]]
+            self._ids(UNMEASURED_SIGNAL), [p["id"] for p in self._rule()["prescriptions"]]
+        )
+
+    def test_unmeasured_passes_the_condition_itself_not_via_relaxation(self):
+        """'못 쟀다'는 조건 자체를 통과해야 한다 — 전멸 후 완화로 되살아나면 안 된다.
+
+        완화는 결과만 같게 만들 뿐 기전이 반대다(전원 탈락 → 되살림). 그 상태로 두면
+        applies_when 없는 처방이 하나라도 생기는 순간 완화가 안 걸려, 못 잰 회차가
+        그 한 처방으로 확정된다 — 아래 test_unmeasured_matches_missing_signal 이 잡는 경우.
+        """
+        gated = {"id": "gated", "applies_when": {"topic_cluster": ["spread"]}}
+        findings = [self._finding_with_signal(UNMEASURED_SIGNAL)]
+
+        self.assertTrue(aggregator._prescription_applies(gated, findings))
+        # 키가 아예 없을 때와 같은 판정이어야 한다(둘 다 '근거 없음').
+        self.assertTrue(aggregator._prescription_applies(gated, [self._finding_with_signal(None)]))
+        # 반면 '쟀는데 해당 없음'은 여전히 탈락한다 — 미측정과 뭉개지 않는다.
+        self.assertFalse(aggregator._prescription_applies(gated, [self._finding_with_signal("none")]))
+
+    def test_unmeasured_matches_missing_signal_with_signal_agnostic_prescription(self):
+        """applies_when 없는 처방이 섞여도 unmeasured 는 '키 없음'과 같은 결과여야 한다.
+
+        완화에 기대던 시절엔 이 조합에서 뒤집혔다: 신호 무관 처방만 살아남아 preferred 가
+        비지 않으므로 완화가 안 걸리고, **측정에 성공한 회차보다 못 잰 회차가 더 좁은
+        후보로 확정**됐다(근거가 없을수록 단정적으로 행동 = 계약의 정반대).
+        """
+        rule = {
+            "prescriptions": [
+                {"id": "embedding", "applies_when": {"topic_cluster": ["spread"]}},
+                {"id": "chunking", "applies_when": {"topic_cluster": ["none"]}},
+                {"id": "signal_agnostic"},                      # applies_when 없음
+            ]
+        }
+
+        def ids(signal):
+            return [p["id"] for p in aggregator._applicable_prescriptions(
+                rule, [self._finding_with_signal(signal)])]
+
+        self.assertEqual(ids(UNMEASURED_SIGNAL), ids(None))
+        self.assertEqual(ids(UNMEASURED_SIGNAL), ["embedding", "chunking", "signal_agnostic"])
+        self.assertEqual(ids("none"), ["chunking", "signal_agnostic"])   # 측정된 값은 계속 좁힌다
+
+    def test_producers_real_unmeasured_output_is_treated_as_unmeasured(self):
+        """생산자가 실제로 내보내는 값을 소비자가 미측정으로 알아보는가 (end-to-end).
+
+        두 에이전트는 서로 import 하지 않고 Finding.metadata 로만 대화하므로, 문자열이
+        어긋나도 타입 검사에 안 걸린다. 상수끼리 비교하면 양쪽이 같은 오타를 공유해도
+        통과하니, 판정 함수를 실제로 돌려 나온 값을 그대로 먹인다.
+        """
+        from agents.eval.topic_cluster import classify
+
+        signal = classify([[1.0, 0.0]], [])          # 실패 gold 2개 미만 → 판정 불가
+        self.assertEqual(signal, UNMEASURED_SIGNAL)  # 생산자 계약
+
+        gated = {"id": "gated", "applies_when": {"topic_cluster": ["spread"]}}
+        self.assertTrue(
+            aggregator._prescription_applies(gated, [self._finding_with_signal(signal)])
         )
 
     def test_prescription_without_applies_when_always_passes(self):

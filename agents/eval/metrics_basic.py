@@ -381,6 +381,7 @@ def _compute_metrics(record: EvalRecord) -> None:
         if span_recall is not None
         else recall_at_k(record.probe.gold_chunk_ids, record.retrieved_chunk_ids)
     )
+    record.recall_basis = "span" if span_recall is not None else "chunk"
     # answer_match: KorQuAD char-F1 (+짧은 정답 recall).
     if gt:
         score, best_variant, raw_score, variant_count = best_answer_match(record.generated_answer, gt)
