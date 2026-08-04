@@ -658,6 +658,26 @@ def _generation_temperature(config: dict | None) -> float:
         return 0.0
 
 
+# 답변 생성 출력 상한. 공용 기본값(2048)은 컨텍스트가 긴 코퍼스에서 부족했다 —
+# KorQuAD 위키 문서(청크 39~50개)로 돌린 실행에서 solar-pro-3 답변이
+# finish_reason=length 로 잘렸다. 잘린 답변은 그대로 채점에 들어가 faithfulness·
+# answer_correctness 를 부당하게 떨어뜨리므로, 진단 품질에 직접 영향을 준다.
+# 상한은 실사용분만 과금되니 올려도 정상 답변의 비용은 그대로다.
+DEFAULT_GENERATION_MAX_TOKENS = 4096
+
+
+def _generation_max_tokens(config: dict | None) -> int:
+    """답변 생성 출력 상한. config > env(RAG_MAX_OUTPUT_TOKENS) > 기본값."""
+    raw = _config_value(config, "generation_max_tokens", "max_output_tokens")
+    if raw is None:
+        raw = os.getenv("RAG_MAX_OUTPUT_TOKENS")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_GENERATION_MAX_TOKENS
+    return value if value > 0 else DEFAULT_GENERATION_MAX_TOKENS
+
+
 def _openai_generate(
     system: str,
     user: str,
@@ -670,6 +690,7 @@ def _openai_generate(
     selected_model = model or os.getenv("RAG_OPENAI_MODEL", "gpt-4o")
     return openai_chat(
         system, user, selected_model,
+        max_output_tokens=_generation_max_tokens(config),
         temperature=_generation_temperature(config), tag="RAG",
     ).strip() or None
 
@@ -691,6 +712,7 @@ def _github_generate(
     return openai_chat(
         system, user, selected_model,
         api_key=api_key, base_url=GITHUB_MODELS_BASE_URL,
+        max_output_tokens=_generation_max_tokens(config),
         temperature=_generation_temperature(config), tag="RAG",
     ).strip() or None
 
@@ -712,6 +734,7 @@ def _openrouter_generate(
     return openai_chat(
         system, user, selected_model,
         api_key=api_key, base_url=OPENROUTER_BASE_URL,
+        max_output_tokens=_generation_max_tokens(config),
         temperature=_generation_temperature(config), tag="RAG",
     ).strip() or None
 
@@ -729,5 +752,6 @@ def _gemini_generate(
     selected_model = model or os.getenv("RAG_GEMINI_MODEL", "gemini-flash-latest")
     return gemini_chat(
         system, user, selected_model,
+        max_output_tokens=_generation_max_tokens(config),
         temperature=_generation_temperature(config), tag="RAG",
     ).strip() or None
