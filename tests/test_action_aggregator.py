@@ -243,11 +243,16 @@ class DeterministicRankingTest(unittest.TestCase):
 class EligibilityFilterTest(unittest.TestCase):
     """실행 불가 action 은 경쟁에서 빠진다 (starvation 방지)."""
 
-    def test_catalog_blocked_action_is_rejected(self):
+    def test_draft_prescription_does_not_create_support(self):
         findings = [make_finding("p0", "retrieval_missing_gold", gold_ranks={"g": 12})]
         result = _pipeline(findings)
-        rejected = {c.action_key: c.reason for c in result["rejected"]}
-        self.assertEqual(rejected.get("query_rewrite:replace"), "catalog_blocked")
+        supported = {support.action_key for support in result["supports"]}
+        candidates = {candidate.action_key for candidate in result["candidates"]}
+        rejected = {candidate.action_key for candidate in result["rejected"]}
+
+        self.assertNotIn("query_rewrite:replace", supported)
+        self.assertNotIn("query_rewrite:replace", candidates)
+        self.assertNotIn("query_rewrite:replace", rejected)
 
     def test_action_without_usable_candidate_is_rejected(self):
         """근거값이 방향과 맞지 않아 후보가 비면 제외된다."""

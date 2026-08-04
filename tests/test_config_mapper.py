@@ -10,7 +10,9 @@ from agents.optimize.config_mapper import (
     apply_config_patch,
     get_current_value,
     map_changes_to_index_config,
+    map_canonical_change,
 )
+from agents.optimize import rules
 from agents.optimize.schemas import ConfigPatch
 
 
@@ -110,6 +112,20 @@ class ConfigMapperTest(unittest.TestCase):
         self.assertEqual(index_config, {"chunk_size": 512})
         self.assertEqual(diff.ignored_keys, ["temperature"])
         self.assertTrue(diff.warnings)
+
+    def test_ready_prescription_patches_have_index_config_mapping(self):
+        unmapped = []
+        for label, rule in rules.LABEL_TO_PRESCRIPTIONS.items():
+            if rule.get("status") != "ready":
+                continue
+            for prescription in rule.get("prescriptions", []):
+                if not rules.is_prescription_ready(rule, prescription):
+                    continue
+                for path, value in prescription.get("patch", {}).items():
+                    if map_canonical_change(path, value) is None:
+                        unmapped.append(f"{label}/{prescription.get('id')}:{path}")
+
+        self.assertEqual([], unmapped)
 
 
 if __name__ == "__main__":

@@ -76,12 +76,10 @@ _EVAL_CACHE_ENV_KEYS = (
     "EVAL_PROBE_SOURCE",
     "EVAL_ENABLE_LLM",
     "EVAL_LLM_PROVIDER",
-    "EVAL_GEN_MODEL",
-    "EVAL_GEN_MODEL_GEMINI",
-    "EVAL_GEN_MODEL_GITHUB",
     "EVAL_JUDGE_MODEL",
     "EVAL_JUDGE_MODEL_GEMINI",
     "EVAL_JUDGE_MODEL_GITHUB",
+    "EVAL_JUDGE_MODEL_OPENROUTER",
     "EVAL_RELEVANCY_STRICTNESS",
     "EVAL_EMBED_MODEL",
     "EVAL_EMBED_MODEL_GEMINI",
@@ -94,12 +92,19 @@ _EVAL_CACHE_ENV_KEYS = (
     "RAG_OPENAI_MODEL",
     "RAG_GEMINI_MODEL",
     "RAG_GITHUB_MODEL",
+    "RAG_OPENROUTER_MODEL",
+    # 답변 잘림 여부를 바꾸므로 faithfulness·answer_correctness 가 따라 바뀐다.
+    "RAG_MAX_OUTPUT_TOKENS",
+    # 심판 동작을 바꾸는 스위치라 EVAL_JUDGE_MODEL 과 같은 급이다 — 빠지면
+    # 토글해도 캐시가 히트해 "켜서 비교" 자체가 불가능해진다.
+    "OPENROUTER_REASONING",
 )
 _EVAL_CACHE_SECRET_KEYS = (
     "OPENAI_API_KEY",
     "GEMINI_API_KEY",
     "GITHUB_MODELS_TOKEN",
     "GITHUB_TOKEN",
+    "OPENROUTER_API_KEY",
 )
 
 
