@@ -64,6 +64,38 @@ class ReportViewCompositeTest(unittest.TestCase):
         self.assertEqual(view["score"]["before"], view["score"]["after"])
         self.assertEqual(view["score"]["delta"], 0.0)
 
+    def test_pass_badge_uses_optimize_gate_not_eval_threshold(self):
+        report = make_report(overall=0.95, composite_total=12, pass_threshold=True)
+        report.ragas_scores["mean_recall_at_k"] = 0.9
+
+        score = build_report_view(make_state(report))["score"]
+
+        self.assertFalse(score["pass_threshold"])
+        self.assertFalse(score["gate_pass"])
+        self.assertTrue(score["eval_pass_threshold"])
+        self.assertEqual(score["gate"]["reason"], "composite_below_threshold")
+
+    def test_high_composite_can_pass_even_if_eval_threshold_is_false(self):
+        report = make_report(overall=0.40, composite_total=92, pass_threshold=False)
+        report.ragas_scores["mean_recall_at_k"] = 0.9
+
+        score = build_report_view(make_state(report))["score"]
+
+        self.assertTrue(score["pass_threshold"])
+        self.assertTrue(score["gate_pass"])
+        self.assertFalse(score["eval_pass_threshold"])
+        self.assertEqual(score["gate"]["reason"], "passed")
+
+    def test_recall_floor_failure_is_visible_in_gate_summary(self):
+        report = make_report(overall=0.95, composite_total=92, pass_threshold=True)
+        report.ragas_scores["mean_recall_at_k"] = 0.4
+
+        score = build_report_view(make_state(report))["score"]
+
+        self.assertFalse(score["pass_threshold"])
+        self.assertEqual(score["gate"]["reason"], "recall_below_floor")
+        self.assertEqual(score["gate"]["mean_recall_at_k"], 0.4)
+
 
 class TreatmentCourseViewTest(unittest.TestCase):
     @staticmethod

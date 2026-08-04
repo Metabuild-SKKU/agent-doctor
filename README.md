@@ -92,7 +92,7 @@ http://localhost:8766/answer?query=재택근무  # 검색 + LLM 답변 생성
 | `overall_score` | 0–1 | 품질 단일 축 — Optimize의 탐색 신호 |
 | `composite_score` | 0–100 | 품질 × 신뢰도의 조화 평균 — **통과 판정·리포트 헤드라인** |
 
-`composite_score ≥ 80`이면 통과해 Serve로 이동하고, 미달이면 Optimize가 개입합니다.
+`composite_score ≥ 90`이고 `mean_recall_at_k ≥ 0.6`이면 통과해 Serve로 이동하고, 미달이면 Optimize가 개입합니다.
 
 ### 최적화 (Optimize)
 
