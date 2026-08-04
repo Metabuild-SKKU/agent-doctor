@@ -11,11 +11,34 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from core.llm_clients import openai_chat
+from core.llm_clients import OPENROUTER_BASE_URL, normalize_provider, openai_chat
 from core.llm_retry import run_with_retry
 from core.parallel import parallel_map
 from core.schema import Chunk
 from core.state import DEFAULT_GRAPH_LLM_MODEL
+
+# OpenRouter 용 기본 모델. 모델명이 "publisher/model" 형식이어야 하므로
+# DEFAULT_GRAPH_LLM_MODEL(OpenAI용)을 그대로 보내면 404 가 나고 keyword 로 조용히 강등된다.
+_DEFAULT_GRAPH_MODEL_OPENROUTER = "openai/gpt-4.1-mini"
+
+# INDEX_LLM_PROVIDER 가 받는 값. 철자표는 core/llm_clients.PROVIDER_ALIASES 를 공유하므로
+# Eval/RAG 에 넣던 값(open_router 등)을 여기에 넣어도 같게 해석된다.
+_KNOWN_GRAPH_PROVIDERS = {"auto", "openai", "openrouter"}
+# 이미 경고한 미지원 값(Index 는 청크를 병렬 처리하므로 lock 으로 보호).
+_warned_graph_providers: set[str] = set()
+_warned_graph_provider_lock = threading.Lock()
+
+
+def _warn_unknown_provider_once(raw: str) -> None:
+    """미지원 INDEX_LLM_PROVIDER 값 경고를 값당 한 번만 출력한다.
+
+    조용히 keyword 로 떨어지면 키가 멀쩡한데도 LLM 추출이 꺼진 것을 알 수 없다."""
+    with _warned_graph_provider_lock:
+        if raw in _warned_graph_providers:
+            return
+        _warned_graph_providers.add(raw)
+    print(f"[Index] 알 수 없는 INDEX_LLM_PROVIDER '{raw}' — keyword 추출로 폴백 "
+          f"(auto|openai|openrouter)")
 
 _STOPWORDS = {
     "그리고", "그러나", "대한", "위한", "있는", "한다", "에서", "으로",
@@ -35,12 +58,53 @@ def _keyword_entities(text: str, limit: int = 8) -> tuple[list[str], list[dict]]
     return entities, relations
 
 
+# 어떤 LLM으로 entity를 뽑을지 결정한다. 쓸 수 있는 키가 없으면 None → keyword 방식.
+def _graph_llm_target(config: dict) -> tuple[str, str | None, str] | None:
+    """(api_key, base_url, model) 또는 None.
+
+    provider 는 config["graph_llm_provider"] > env INDEX_LLM_PROVIDER > "auto" 순.
+
+    auto 는 OPENAI_API_KEY 만 본다 — OpenRouter 는 반드시 명시해야 켜진다. auto 가
+    OPENROUTER_API_KEY 도 받아주던 때, Eval/RAG 용으로 넣은 키 하나가 검색 품질과
+    무관한 이 단계까지 켜서 청크당 1회 호출이 조용히 과금됐다. 그래프 산출물은
+    시각화용이라 그 대가를 치를 이유가 없고, 켜는 쪽이 의도를 밝히는 게 맞다."""
+    provider = normalize_provider(
+        config.get("graph_llm_provider")
+        or os.getenv("INDEX_LLM_PROVIDER")
+        or "auto"
+    )
+    if provider not in _KNOWN_GRAPH_PROVIDERS:
+        # 조용히 keyword 로 떨어지면 키가 멀쩡한데도 LLM 추출이 꺼진 걸 알 수 없다.
+        _warn_unknown_provider_once(provider)
+        return None
+    openai_key = os.getenv("OPENAI_API_KEY")
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+
+    if provider in {"openai", "auto"} and openai_key:
+        return openai_key, None, str(config.get("graph_llm_model") or DEFAULT_GRAPH_LLM_MODEL)
+    if provider == "openrouter" and openrouter_key:
+        model = str(
+            config.get("graph_llm_model_openrouter")
+            or os.getenv("INDEX_GRAPH_MODEL_OPENROUTER")
+            or _DEFAULT_GRAPH_MODEL_OPENROUTER
+        )
+        return openrouter_key, OPENROUTER_BASE_URL, model
+    return None
+
+
 # LLM을 쓸 수 있으면 entity/relation JSON만 받아온다.
 # 호출은 core/llm_clients.openai_chat 에 위임한다 — 직접 호출하던 시절엔 출력 상한이
 # 없어 반복 생성이 최대치까지 달릴 수 있었다(청크마다 1회라 피해가 곱해진다).
+# base_url 을 갈아끼울 수 있어야 OpenRouter 로도 보낼 수 있다.
 # 429 는 run_with_retry 로 되받는다 — 청크 추출을 동시 실행하므로 rate limit 확률이 올라가는데,
 # 재시도가 없으면 _extract 가 예외를 삼켜 그 청크만 조용히 keyword 폴백으로 떨어진다.
-def _llm_entities(text: str, model: str) -> tuple[list[str], list[dict]]:
+def _llm_entities(
+    text: str,
+    model: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> tuple[list[str], list[dict]]:
     raw = run_with_retry(
         lambda: openai_chat(
             "기술 문서에서 핵심 entity와 entity 간 relation을 추출한다. "
@@ -49,6 +113,8 @@ def _llm_entities(text: str, model: str) -> tuple[list[str], list[dict]]:
             text[:8000],
             model,
             json_mode=True,
+            api_key=api_key,
+            base_url=base_url,
             tag="Index",
         ),
         label="entity 추출",
@@ -68,33 +134,39 @@ def _llm_entities(text: str, model: str) -> tuple[list[str], list[dict]]:
     return entities[:12], relations[:20]
 
 
-# auto 모드는 OPENAI_API_KEY 존재만으로 켜진다 — 다른 용도(Eval provider 등)로 키를
+# auto 모드는 API 키 존재만으로 켜진다 — 다른 용도(Eval provider 등)로 키를
 # 넣었을 뿐인데 청크마다 LLM 호출이 붙는 걸 모르고 지나가지 않도록 알린다.
 # 프로세스당 한 번 — Optimize 루프가 Index 를 여러 번 돌려도 줄이 늘지 않는다.
 _llm_extraction_notified = False
 _llm_extraction_lock = threading.Lock()
 
 
-def _notify_llm_extraction_once(model: str) -> None:
+def _key_name(base_url: str | None) -> str:
+    """알림 문구에 쓸 env 이름 — 어떤 키 때문에 LLM 추출이 켜졌는지 드러내기 위함."""
+    return "OPENROUTER_API_KEY" if base_url == OPENROUTER_BASE_URL else "OPENAI_API_KEY"
+
+
+def _notify_llm_extraction_once(model: str, key_name: str) -> None:
     global _llm_extraction_notified
     with _llm_extraction_lock:
         if _llm_extraction_notified:
             return
         _llm_extraction_notified = True
-    print(f"[Index] OPENAI_API_KEY 감지 — 그래프 entity 추출을 LLM({model})로 수행합니다. "
+    print(f"[Index] {key_name} 감지 — 그래프 entity 추출을 LLM({model})로 수행합니다. "
           f"청크당 1회 호출이며, 끄려면 config graph_extraction=keyword.")
 
 
 # 설정과 API key 상태에 따라 LLM/keyword 추출을 고른다.
 def _extract(chunk: Chunk, config: dict) -> tuple[list[str], list[dict], str]:
     mode = config.get("graph_extraction", "auto")
-    if mode in {"auto", "llm"} and os.getenv("OPENAI_API_KEY"):
+    target = _graph_llm_target(config) if mode in {"auto", "llm"} else None
+    if target is not None:
+        api_key, base_url, model = target
         if mode == "auto":
-            _notify_llm_extraction_once(config.get("graph_llm_model", DEFAULT_GRAPH_LLM_MODEL))
+            _notify_llm_extraction_once(model, _key_name(base_url))
         try:
             entities, relations = _llm_entities(
-                chunk.text,
-                config.get("graph_llm_model", DEFAULT_GRAPH_LLM_MODEL),
+                chunk.text, model, api_key=api_key, base_url=base_url,
             )
             return entities, relations, "llm"
         except Exception as exc:
@@ -109,10 +181,14 @@ def _extract(chunk: Chunk, config: dict) -> tuple[list[str], list[dict], str]:
 # 일부 청크만 바뀐 재청킹에서는 바뀐 청크만 entity 추출을 다시 한다(entity cache).
 
 def _extraction_ctx(config: dict) -> str:
-    # entity 추출 결과에 영향을 주는 조건: 요청 모드, LLM 모델, 키 존재 여부.
+    # entity 추출 결과에 영향을 주는 조건: 요청 모드, 실제로 쓰일 모델, 키 존재 여부.
+    # provider 는 따로 넣지 않는다 — OpenRouter 모델명은 "publisher/model" 이라 모델
+    # 문자열만으로 이미 구분되고, OpenAI 경로는 기존 캐시 키를 그대로 유지한다.
     mode = config.get("graph_extraction", "auto")
-    llm_on = 1 if (mode in {"auto", "llm"} and os.getenv("OPENAI_API_KEY")) else 0
-    return f"{mode}:{config.get('graph_llm_model', DEFAULT_GRAPH_LLM_MODEL)}:{llm_on}"
+    target = _graph_llm_target(config) if mode in {"auto", "llm"} else None
+    if target is None:
+        return f"{mode}:{config.get('graph_llm_model', DEFAULT_GRAPH_LLM_MODEL)}:0"
+    return f"{mode}:{target[2]}:1"
 
 
 def _graph_signature(chunks: list[Chunk], config: dict) -> str:
