@@ -849,6 +849,101 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         request, _decision = agent.planner.plan(moved, blacklist=blocked)
         self.assertEqual(request.action_key, "context.compression.enabled:enable")
 
+    def test_confirmed_rollback_action_enters_run_cooldown_after_baseline_moves(self):
+        """정상 판정으로 롤백된 action 은 작은 baseline 변화 뒤에도 바로 재선택하지 않는다.
+
+        ActionAttemptKey 는 baseline 이 바뀌면 풀리는 게 맞다. 다만 실제 로그에서
+        reranker.enabled:disable 이 롤백된 뒤 rerank_candidates 만 20→22로 바뀌자 같은
+        action 이 곧바로 다시 선택되어 한 번 더 롤백됐다. 이 테스트는 exact attempt
+        차단의 완화는 유지하면서, agent 실행 레벨에서 confirmed rollback cooldown 이
+        같은 action 재선택을 막는지 고정한다.
+        """
+        before_config = {
+            "top_k": 5,
+            "chunk_size": 512,
+            "chunk_overlap": 50,
+            "use_reranker": True,
+            "reranker_model": "BAAI/bge-reranker-v2-m3",
+            "rerank_candidates": 20,
+        }
+        state = AgentDoctorState(
+            report=make_report(73.0, label="retrieval_reranker_demotion"),
+            index_config={**before_config, "rerank_candidates": 22},
+            iteration=2,
+            max_iterations=5,
+            runtime_capabilities={
+                "reranker": {
+                    "status": "verified",
+                    "model": "BAAI/bge-reranker-v2-m3",
+                    "retryable": False,
+                    "reason": None,
+                }
+            },
+        )
+        failed = OptimizationHistoryItem(
+            trial_id="disable-1",
+            request_id="req-disable-1",
+            iteration=1,
+            failure_labels=["retrieval_reranker_demotion"],
+            optimizer="rules",
+            status="failed",
+            selected_prescription_id="disable_reranker",
+            before_config=before_config,
+            after_config={**before_config, "use_reranker": False},
+            rollback_reason="종합점수 미상승 0.780→0.750 → 롤백",
+            action_key="reranker.enabled:disable",
+            supporting_labels=["retrieval_reranker_demotion"],
+            supporting_probes=["p1"],
+            metadata={
+                "pending": False,
+                "before_score": 0.78,
+                "after_score": 0.75,
+                "unjudgeable": False,
+            },
+        )
+        failed.action_attempt_key = history.build_attempt_key(
+            failed.action_key,
+            before_config,
+            {"reranker.enabled": False},
+            state.runtime_capabilities,
+        )
+        state.optimization_history.append(failed)
+        state.blocked_action_attempts.add(failed.action_attempt_key)
+
+        # exact attempt 차단만 넘기면 baseline 이 달라져 disable 이 다시 열린다.
+        request, _decision = agent.planner.plan(
+            state,
+            blacklist=set(state.blocked_action_attempts),
+        )
+        self.assertEqual(request.action_key, "reranker.enabled:disable")
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            out = agent.run(state)
+
+        self.assertEqual(out.status, "skipped")
+        self.assertTrue(out.index_config["use_reranker"])
+        self.assertEqual(out.index_config["rerank_candidates"], 22)
+        self.assertEqual(len(out.optimization_history), 1)
+        self.assertIn("제외된 action: [reranker.enabled:disable]", buf.getvalue())
+        self.assertNotIn("선택한 action: reranker.enabled:disable", buf.getvalue())
+
+    def test_rollback_cooldown_ignores_unjudgeable_rollbacks(self):
+        item = OptimizationHistoryItem(
+            trial_id="u1",
+            request_id="r1",
+            iteration=1,
+            failure_labels=["retrieval_low_rank"],
+            optimizer="rules",
+            status="failed",
+            selected_prescription_id="enable_reranker",
+            rollback_reason="판정 불가 — 롤백",
+            action_key="reranker.enabled:enable",
+            metadata={"unjudgeable": True},
+        )
+
+        self.assertEqual(agent._rollback_action_cooldown_exclusions([item]), set())
+
     def test_rollback_then_followup_application_logs_both_prescriptions(self):
         state = agent.run(make_state(overall=60.0))
         state.report = make_report(40.0, label="retrieval_semantic_mismatch")

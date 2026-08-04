@@ -269,6 +269,57 @@ def _unjudgeable_exclusions(
     return excluded
 
 
+def _rollback_action_cooldown_exclusions(
+    optimization_history: list[OptimizationHistoryItem],
+) -> set[str]:
+    """품질 저하로 롤백된 action 은 같은 optimize 실행 안에서 다시 고르지 않는다.
+
+    ``blocked_action_attempts`` 는 의도적으로 baseline 이 바뀌면 풀리는 정확한 전이
+    차단이다. 그 의미는 유지하되, 이미 한 번 점수 하락이 확인된 action 을 작은
+    baseline 변화마다 바로 재시도하면 예산만 태우므로 history 기반 cooldown 을
+    별도로 얹는다.
+    """
+    excluded: set[str] = set()
+    for item in optimization_history:
+        action_key = item.action_key or ""
+        if not action_key or item.status != "failed":
+            continue
+        if item.metadata.get("unjudgeable"):
+            continue
+        if item.metadata.get("study_error") or item.metadata.get("visit_limit_reached"):
+            continue
+        if item.rollback_reason is None:
+            continue
+        excluded.add(action_key)
+    return excluded
+
+
+def _active_excluded_action_keys(state: AgentDoctorState) -> set[str]:
+    """현재 baseline 에서 실제로 닫혀 있는 action key 를 로그용으로 모은다."""
+    active = set(_unjudgeable_exclusions(state.optimization_history))
+    active.update(_rollback_action_cooldown_exclusions(state.optimization_history))
+
+    for key in state.blocked_action_attempts:
+        current = history.baseline_fingerprint(
+            state.index_config,
+            key.action_key,
+            state.runtime_capabilities,
+        )
+        if key.baseline_fingerprint == current:
+            active.add(key.action_key)
+
+    for key in state.completed_action_studies:
+        current = history.baseline_fingerprint(
+            state.index_config,
+            key.action_key,
+            state.runtime_capabilities,
+        )
+        if key.baseline_fingerprint == current:
+            active.add(key.action_key)
+
+    return active
+
+
 def _block_action_study(
     state: AgentDoctorState,
     item: OptimizationHistoryItem,
@@ -428,12 +479,9 @@ def _log_optimize_input(state: AgentDoctorState) -> None:
     print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations} (진단 입력)")
     _log_eval_line(state.report)
     print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(state.report)}")
-    # 차단은 (action, baseline, 후보값) 단위라 baseline 이 바뀌면 풀린다. 로그에는
-    # 사람이 읽을 수 있는 action key 만 중복 없이 보여준다.
-    blocked_keys = sorted(
-        {key.action_key for key in state.blocked_action_attempts}
-        | {key.action_key for key in state.completed_action_studies}
-    )
+    # baseline 이 바뀌어 이미 풀린 과거 차단은 표시하지 않는다. 로그에 찍힌 action 이
+    # 바로 아래에서 선택되면 원인 추적이 꼬이므로, 현재 baseline 기준으로만 보여준다.
+    blocked_keys = sorted(_active_excluded_action_keys(state))
     if blocked_keys:
         print(f"[Optimize] 제외된 action: [{', '.join(blocked_keys)}]")
 
@@ -736,6 +784,9 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         visit_exclusions.update(state.completed_action_studies)
         visit_exclusions.update(
             _unjudgeable_exclusions(state.optimization_history)
+        )
+        visit_exclusions.update(
+            _rollback_action_cooldown_exclusions(state.optimization_history)
         )
         deferred_runtime: list[dict[str, Any]] = []
         if (
