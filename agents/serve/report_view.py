@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+from agents.optimize import gate
 from core.state import AgentDoctorState
 
 _EVAL_MODE_LABELS = {
@@ -121,6 +122,7 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
     # 헤드라인 '종합 점수' = 설계 종합점수(composite, 0~100). 없으면 overall×100 폴백.
     headline_after = _headline_score(report)
     headline_before = _first_headline(history, headline_after)
+    gate_summary = _gate_summary(report)
 
     depth_key = (depth or os.getenv("EVAL_MODE", "")).strip().lower()
     return {
@@ -134,7 +136,10 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
             "before": headline_before,
             "after": headline_after,
             "delta": round(headline_after - headline_before, 1),
-            "pass_threshold": bool(report and report.pass_threshold),
+            # 통과 배지 기준은 Eval 원시 판정이 아니라 Optimize gate(= graph 라우팅과 동일).
+            # Eval 판정은 gate.eval_pass_threshold 로 따로 남긴다.
+            "pass_threshold": gate_summary["pass"],
+            "gate": gate_summary,
             "findings_count": len(findings),
             "kept": kept,
             "rolled": rolled,
@@ -191,6 +196,18 @@ def _headline_score(report) -> float:
         return total
     overall = report.overall_score if report and report.overall_score is not None else 0.0
     return _to_100(overall)
+
+
+def _gate_summary(report) -> dict[str, Any]:
+    """Optimize gate 판정과 근거. 판정 규칙은 gate.explain_report 가 단독으로 갖고,
+    여기서는 표시용 반올림과 Eval 원시 판정(비교용)만 얹는다."""
+    summary = dict(gate.explain_report(report))
+    summary["eval_pass_threshold"] = bool(getattr(report, "pass_threshold", False))
+    if summary["composite_total"] is not None:
+        summary["composite_total"] = round(summary["composite_total"], 1)
+    if summary["mean_recall_at_k"] is not None:
+        summary["mean_recall_at_k"] = round(summary["mean_recall_at_k"], 4)
+    return summary
 
 
 def _first_headline(history: list, fallback: float) -> float:

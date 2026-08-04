@@ -89,7 +89,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 ### 분기 로직
 `graph.py`의 `route_after_eval()` / `route_after_optimize()`가 흐름을 결정합니다.
-- `report.pass_threshold`가 `True` → **Serve** (종료)
+- `gate.passes_report(report)`가 `True`(composite ≥ 90 + recall 바닥선) → **Serve** (종료)
 - `iteration >= max_iterations` → **Serve**. 단, 마지막 처방이 아직 유지/롤백 판정 전(pending)이면 마지막으로 한 번 더 **Optimize**
 - 그 외(품질 미달) → **Optimize**
 - Optimize 후: `status`가 `applied`/`rolled_back`(config 변경) → **Index** 재색인, 그 외(제안·유지·수동·스킵) → **Serve**

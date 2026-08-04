@@ -97,5 +97,47 @@ class PassesReportCompositeTest(unittest.TestCase):
         self.assertFalse(gate.passes_report(r))
 
 
+class ExplainReportTest(unittest.TestCase):
+    """explain_report 는 passes_report 와 같은 판정에 실패 사유를 붙인 것이어야 한다.
+    표시 계층이 이 사유를 그대로 쓰므로 둘이 어긋나면 배지와 설명이 따로 논다."""
+
+    CASES = [
+        (_FakeReport(True, {"mean_recall_at_k": 0.9}, _composite(92)), "passed"),
+        (_FakeReport(True, {"mean_recall_at_k": 0.9}, _composite(12)),
+         "composite_below_threshold"),
+        (_FakeReport(True, {"mean_recall_at_k": 0.4}, _composite(92)), "recall_below_floor"),
+        (_FakeReport(False, {"mean_recall_at_k": 0.9}), "eval_pass_threshold_false"),
+        (_FakeReport(True, {}), "passed"),
+        (None, "report_missing"),
+    ]
+
+    def test_reason_matches_case(self):
+        for report, reason in self.CASES:
+            with self.subTest(reason=reason):
+                self.assertEqual(gate.explain_report(report)["reason"], reason)
+
+    def test_pass_agrees_with_passes_report(self):
+        for report, reason in self.CASES:
+            with self.subTest(reason=reason):
+                self.assertEqual(gate.explain_report(report)["pass"],
+                                 gate.passes_report(report))
+
+    def test_score_source_names_the_axis_actually_used(self):
+        self.assertEqual(
+            gate.explain_report(_FakeReport(True, {}, _composite(92)))["score_source"],
+            "composite_score.total")
+        self.assertEqual(
+            gate.explain_report(_FakeReport(True, {}))["score_source"],
+            "report.pass_threshold")
+
+    def test_unreadable_numbers_fall_back_to_unmeasured(self):
+        # 숫자로 못 읽는 값이 들어와도 터지지 않고 '미측정' 경로로 떨어진다.
+        r = _FakeReport(True, {"mean_recall_at_k": "n/a"}, _composite("n/a"))
+        summary = gate.explain_report(r)
+        self.assertTrue(summary["pass"])
+        self.assertEqual(summary["score_source"], "report.pass_threshold")
+        self.assertIsNone(summary["mean_recall_at_k"])
+
+
 if __name__ == "__main__":
     unittest.main()

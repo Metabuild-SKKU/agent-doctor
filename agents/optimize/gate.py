@@ -9,6 +9,7 @@ serve/optimize 게이트 정책 — "이제 충분히 좋은가"의 단일 기�
   - graph.route_after_eval           : serve vs optimize 라우팅
   - planner._decide                  : already_optimal 조기 종료
   - _report_metrics → internal_adapter._trial_passed : 후보 sweep 종료
+  - report_view._gate_summary        : 리포트 통과 배지·실패 사유(explain_report)
 같은 함수라 "1차 처방 후 종합점수가 좋으면 처방/탐색을 종료" 같은 판단에도 그대로 재사용된다.
 
 게이트 = 종합점수 판정 통과 AND 검색 바닥선 통과:
@@ -46,18 +47,63 @@ def passes(score_pass: bool, mean_recall_at_k: float | None = None) -> bool:
     return mean_recall_at_k is None or mean_recall_at_k >= RECALL_FLOOR
 
 
-def _composite_pass(report) -> bool:
-    """설계 종합점수(composite) 기준 통과 여부. composite 미측정(None)이면 Eval 의
-    pass_threshold(평가 신호 없음 → 막지 않음) 정책을 그대로 승계한다."""
-    total = (getattr(report, "composite_score", None) or {}).get("total")
-    if total is None:
-        return report.pass_threshold
-    return float(total) >= COMPOSITE_PASS_THRESHOLD
+def _as_float(value) -> float | None:
+    """숫자로 못 읽는 값(None·문자열 등)은 '미측정'으로 떨어뜨린다."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def explain_report(report) -> dict:
+    """passes_report() 와 같은 판정을, 각 축의 값과 실패 사유까지 붙여 돌려준다.
+    표시 계층(report_view 등)이 판정 규칙을 다시 구현하지 않게 하려는 단일 창구."""
+    if report is None:
+        return {
+            "pass": False,
+            "reason": "report_missing",
+            "score_pass": False,
+            "score_source": "missing",
+            "composite_total": None,
+            "composite_threshold": COMPOSITE_PASS_THRESHOLD,
+            "mean_recall_at_k": None,
+            "recall_floor": RECALL_FLOOR,
+            "recall_pass": None,
+        }
+
+    composite_total = _as_float((getattr(report, "composite_score", None) or {}).get("total"))
+    if composite_total is None:
+        score_pass = bool(report.pass_threshold)
+        score_source = "report.pass_threshold"
+        score_fail_reason = "eval_pass_threshold_false"
+    else:
+        score_pass = composite_total >= COMPOSITE_PASS_THRESHOLD
+        score_source = "composite_score.total"
+        score_fail_reason = "composite_below_threshold"
+
+    recall = _as_float(report.ragas_scores.get("mean_recall_at_k")) if report.ragas_scores else None
+    recall_pass = None if recall is None else recall >= RECALL_FLOOR
+
+    if not score_pass:
+        reason = score_fail_reason
+    elif recall_pass is False:
+        reason = "recall_below_floor"
+    else:
+        reason = "passed"
+
+    return {
+        "pass": passes(score_pass, recall),
+        "reason": reason,
+        "score_pass": score_pass,
+        "score_source": score_source,
+        "composite_total": composite_total,
+        "composite_threshold": COMPOSITE_PASS_THRESHOLD,
+        "mean_recall_at_k": recall,
+        "recall_floor": RECALL_FLOOR,
+        "recall_pass": recall_pass,
+    }
 
 
 def passes_report(report) -> bool:
     """DiagnosticReport 에서 종합점수 판정 + recall 을 뽑아 passes() 판정. report 없으면 통과 아님."""
-    if report is None:
-        return False
-    recall = report.ragas_scores.get("mean_recall_at_k") if report.ragas_scores else None
-    return passes(_composite_pass(report), recall)
+    return explain_report(report)["pass"]
