@@ -136,9 +136,9 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
             "before": headline_before,
             "after": headline_after,
             "delta": round(headline_after - headline_before, 1),
+            # 통과 배지 기준은 Eval 원시 판정이 아니라 Optimize gate(= graph 라우팅과 동일).
+            # Eval 판정은 gate.eval_pass_threshold 로 따로 남긴다.
             "pass_threshold": gate_summary["pass"],
-            "gate_pass": gate_summary["pass"],
-            "eval_pass_threshold": gate_summary["eval_pass_threshold"],
             "gate": gate_summary,
             "findings_count": len(findings),
             "kept": kept,
@@ -198,71 +198,16 @@ def _headline_score(report) -> float:
     return _to_100(overall)
 
 
-def _safe_float(value) -> Optional[float]:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _mean_recall_at_k(report) -> Optional[float]:
-    scores = getattr(report, "ragas_scores", None) or {}
-    return _safe_float(scores.get("mean_recall_at_k"))
-
-
 def _gate_summary(report) -> dict[str, Any]:
-    if report is None:
-        return {
-            "pass": False,
-            "reason": "report_missing",
-            "eval_pass_threshold": False,
-            "score_pass": False,
-            "score_source": "missing",
-            "composite_total": None,
-            "composite_threshold": gate.COMPOSITE_PASS_THRESHOLD,
-            "mean_recall_at_k": None,
-            "recall_floor": gate.RECALL_FLOOR,
-            "recall_pass": None,
-        }
-
-    composite_total = _safe_float((getattr(report, "composite_score", None) or {}).get("total"))
-    eval_pass = bool(getattr(report, "pass_threshold", False))
-    if composite_total is None:
-        score_pass = eval_pass
-        score_source = "report.pass_threshold"
-    else:
-        score_pass = composite_total >= gate.COMPOSITE_PASS_THRESHOLD
-        score_source = "composite_score.total"
-
-    recall = _mean_recall_at_k(report)
-    recall_pass = None if recall is None else recall >= gate.RECALL_FLOOR
-    gate_pass = gate.passes_report(report)
-
-    if gate_pass:
-        reason = "passed"
-    elif not score_pass:
-        reason = (
-            "composite_below_threshold"
-            if composite_total is not None
-            else "eval_pass_threshold_false"
-        )
-    elif recall_pass is False:
-        reason = "recall_below_floor"
-    else:
-        reason = "gate_failed"
-
-    return {
-        "pass": gate_pass,
-        "reason": reason,
-        "eval_pass_threshold": eval_pass,
-        "score_pass": score_pass,
-        "score_source": score_source,
-        "composite_total": round(composite_total, 1) if composite_total is not None else None,
-        "composite_threshold": gate.COMPOSITE_PASS_THRESHOLD,
-        "mean_recall_at_k": round(recall, 4) if recall is not None else None,
-        "recall_floor": gate.RECALL_FLOOR,
-        "recall_pass": recall_pass,
-    }
+    """Optimize gate 판정과 근거. 판정 규칙은 gate.explain_report 가 단독으로 갖고,
+    여기서는 표시용 반올림과 Eval 원시 판정(비교용)만 얹는다."""
+    summary = dict(gate.explain_report(report))
+    summary["eval_pass_threshold"] = bool(getattr(report, "pass_threshold", False))
+    if summary["composite_total"] is not None:
+        summary["composite_total"] = round(summary["composite_total"], 1)
+    if summary["mean_recall_at_k"] is not None:
+        summary["mean_recall_at_k"] = round(summary["mean_recall_at_k"], 4)
+    return summary
 
 
 def _first_headline(history: list, fallback: float) -> float:

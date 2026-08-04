@@ -71,8 +71,7 @@ class ReportViewCompositeTest(unittest.TestCase):
         score = build_report_view(make_state(report))["score"]
 
         self.assertFalse(score["pass_threshold"])
-        self.assertFalse(score["gate_pass"])
-        self.assertTrue(score["eval_pass_threshold"])
+        self.assertTrue(score["gate"]["eval_pass_threshold"])
         self.assertEqual(score["gate"]["reason"], "composite_below_threshold")
 
     def test_high_composite_can_pass_even_if_eval_threshold_is_false(self):
@@ -82,8 +81,7 @@ class ReportViewCompositeTest(unittest.TestCase):
         score = build_report_view(make_state(report))["score"]
 
         self.assertTrue(score["pass_threshold"])
-        self.assertTrue(score["gate_pass"])
-        self.assertFalse(score["eval_pass_threshold"])
+        self.assertFalse(score["gate"]["eval_pass_threshold"])
         self.assertEqual(score["gate"]["reason"], "passed")
 
     def test_recall_floor_failure_is_visible_in_gate_summary(self):
@@ -95,6 +93,36 @@ class ReportViewCompositeTest(unittest.TestCase):
         self.assertFalse(score["pass_threshold"])
         self.assertEqual(score["gate"]["reason"], "recall_below_floor")
         self.assertEqual(score["gate"]["mean_recall_at_k"], 0.4)
+
+    def test_missing_composite_inherits_eval_threshold(self):
+        # composite 미측정이면 gate 가 Eval 판정을 승계한다(근거 없는 축은 막지 않음).
+        score = build_report_view(make_state(
+            make_report(composite_total=None, pass_threshold=True)))["score"]
+
+        self.assertTrue(score["pass_threshold"])
+        self.assertEqual(score["gate"]["score_source"], "report.pass_threshold")
+        self.assertEqual(score["gate"]["reason"], "passed")
+
+        score = build_report_view(make_state(
+            make_report(composite_total=None, pass_threshold=False)))["score"]
+
+        self.assertFalse(score["pass_threshold"])
+        self.assertEqual(score["gate"]["reason"], "eval_pass_threshold_false")
+
+    def test_missing_recall_does_not_block_pass(self):
+        # gold 청크가 없어 recall 미측정이면 바닥선을 적용하지 않는다.
+        score = build_report_view(make_state(
+            make_report(composite_total=92, pass_threshold=False)))["score"]
+
+        self.assertTrue(score["pass_threshold"])
+        self.assertIsNone(score["gate"]["recall_pass"])
+        self.assertEqual(score["gate"]["reason"], "passed")
+
+    def test_missing_report_fails_gate(self):
+        score = build_report_view(AgentDoctorState(source_url="a.pdf"))["score"]
+
+        self.assertFalse(score["pass_threshold"])
+        self.assertEqual(score["gate"]["reason"], "report_missing")
 
 
 class TreatmentCourseViewTest(unittest.TestCase):
