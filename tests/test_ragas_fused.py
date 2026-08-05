@@ -319,12 +319,26 @@ class FusedPromptSplitTest(unittest.TestCase):
         self.assertEqual(first, second)
 
     def test_prefix_clears_sonnet5_cache_minimum(self):
-        # 최소 1024 토큰 미달이면 에러 없이 캐시가 무시된다. 대략 4자/토큰(거의 영문).
+        """캐시 최소치(sonnet-5 는 1024 토큰) 미달이면 에러 없이 캐시가 무시된다.
+
+        토큰 수를 오프라인에서 정확히 알 수는 없으므로 글자수÷4 를 **하한**으로만 쓴다.
+        실측(count_tokens, 스키마 포함)은 실제 4,325 / 오라클 3,211 토큰으로 이 어림보다
+        1.35 배 크다 — 즉 이 단언을 통과하면 실제로도 통과한다.
+
+        어림값으로 모델별 최소치를 판정하지 말 것: haiku-4-5 / opus-4-6 의 최소 4096 은
+        실측 기준으로 실제 트랙만 넘고 오라클 트랙은 미달이라 한쪽만 캐시된다."""
         for blocks in (_REAL_BLOCKS, _ORACLE_BLOCKS):
             prefix, _ = metrics_ragas._fused_prompt_parts(
                 blocks, "q", "a", ["c"], "r")
             with self.subTest(n=len(blocks)):
                 self.assertGreater(len(prefix) // 4, 1024)
+
+    def test_real_prefix_is_larger_than_oracle(self):
+        # 블록이 더 많으니 당연하지만, 이 순서가 뒤집히면 위 실측 표(4,325 > 3,211)와
+        # 모델별 캐시 판정이 통째로 어긋난다.
+        real, _ = metrics_ragas._fused_prompt_parts(_REAL_BLOCKS, "q", "a", ["c"], "r")
+        oracle, _ = metrics_ragas._fused_prompt_parts(_ORACLE_BLOCKS, "q", "a", ["c"], "r")
+        self.assertGreater(len(real), len(oracle))
 
 
 class FusedSchemaReachesTransportTest(_FusedTestBase):
