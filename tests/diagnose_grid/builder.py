@@ -56,39 +56,49 @@ _WRONG_TEXT = "질문과 무관한 다른 사항을 설명하는 문장입니다
 
 @dataclass
 class Case:
+    """판정에 관여하는 축은 전부 필수다 — 기본값을 두면 케이스에 안 적힌 값이 라벨을 가른다.
+
+    실제로 answer 기본값(WRONG)이 C 슬롯 전제(실제 답 틀림)를 대신 세우고 있었고,
+    GOLD_FULL 로 바꾸면 10건 중 5건이 깨졌다. 케이스만 읽어선 그 의존이 안 보였다.
+    '없음'이 곧 의미인 필드(중복 없음·랭킹 미측정·심판 미측정)만 기본값을 남긴다.
+    """
     id: str
 
     # 코퍼스 기하
-    docs: list[Doc] = field(default_factory=lambda: [Doc("d1", 1200)])
-    chunk_strategy: str = "fixed"             # Index 의 CHUNK_STRATEGIES 키
-    chunk_size: int = 200
-    chunk_overlap: int = 0
-    duplicates: list[tuple[int, int]] = field(default_factory=list)  # (사본 인덱스, 원본 인덱스)
-    corpus_exclude: list[int] = field(default_factory=list)          # 코퍼스에서 뺄 청크 인덱스
+    docs: list[Doc]
+    chunk_strategy: str                       # Index 의 CHUNK_STRATEGIES 키
+    chunk_size: int
+    chunk_overlap: int
 
     # probe
-    gold_spans: list[tuple[str, int, int]] = field(default_factory=list)
-    span_grounding: Optional[str] = None      # None(=exact) | "exact" | "chunk_fallback" | "partial"
-    ground_truth: str = "1972년 12월 27일에 제7차 개정 헌법이 공포되었다"
-    qtype: Optional[str] = None
-    answer_exists: Optional[bool] = None
+    gold_spans: list[tuple[str, int, int]]
+    span_grounding: Optional[str]             # None(=exact) | "exact" | "chunk_fallback" | "partial"
+    ground_truth: str
+    qtype: Optional[str]
+    answer_exists: Optional[bool]
 
     # 검색기 출력 (청크 인덱스)
-    retrieved: list[int] = field(default_factory=list)
-    wide_ranking: Optional[list[int]] = None
-    dense_ranking: Optional[list[int]] = None
-    lexical_ranking: Optional[list[int]] = None
-    pre_rerank: Optional[list[int]] = None
-    search_mode: str = "dense"
-    reranked: bool = False
-    mmr_applied: bool = False
+    retrieved: list[int]
+    search_mode: str
+    reranked: bool
+    mmr_applied: bool
 
     # 생성
-    answer: Answer = Answer.WRONG
-    oracle_answer: Optional[Answer] = Answer.GOLD_FULL
+    answer: Answer
+    oracle_answer: Optional[Answer]
 
-    # 심판 (없으면 그 트랙은 미측정)
-    judge_real: dict = field(default_factory=dict)
+    # 검증
+    assert_derived: dict
+    expect: dict
+
+    # ── 아래는 '미지정 = 없음'이 곧 의미라 기본값을 남긴다 ──
+    duplicates: list[tuple[int, int]] = field(default_factory=list)  # (사본 인덱스, 원본 인덱스)
+    corpus_exclude: list[int] = field(default_factory=list)          # 코퍼스에서 뺄 청크 인덱스
+    wide_ranking: Optional[list[int]] = None        # None = 재검색 미측정
+    dense_ranking: Optional[list[int]] = None
+    lexical_ranking: Optional[list[int]] = None
+    pre_rerank: Optional[list[int]] = None          # None = 후보 목록 미기록
+    judge_real: dict = field(default_factory=dict)  # 빈 dict = 그 트랙 미측정
     judge_oracle: dict = field(default_factory=dict)
     judge_abstention: Optional[bool] = None
     judge_reasoning_mode: Optional[str] = None
@@ -97,10 +107,6 @@ class Case:
     # 켜면 케이스마다 LLM 호출이 나가고 값이 실행마다 흔들린다 — 골든 비교가 아니라
     # '실제 심판으로도 같은 라벨이 나오나'를 볼 때만 쓴다.
     compute_ragas: bool = False
-
-    # 검증
-    assert_derived: dict = field(default_factory=dict)
-    expect: dict = field(default_factory=dict)
 
 
 # ── 빌드 ──────────────────────────────────────────────────────────
