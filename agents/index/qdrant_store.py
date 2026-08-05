@@ -92,6 +92,9 @@ _failed_models: dict[tuple[str, str], float] = {}
 # model_name → tokenizer(또는 로드 실패를 뜻하는 None). 전체 모델과 별개로 캐시한다 —
 # API provider 로 색인하면 모델은 안 올라오지만 token_count 는 여전히 필요하다.
 _tokenizers: dict[str, Any | None] = {}
+# 임베딩 경로 안내를 실행당 한 번만 찍기 위한 플래그(색인은 스레드로 병렬 호출한다).
+_embed_route_notified = False
+_embed_route_lock = threading.Lock()
 _FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
 # reranker_model → 마지막 로드 실패 시각(monotonic). embedding 모델과 같은 쿨다운
 # 정책을 따른다 — 영구 캐시하면 일시적 실패 후에도 프로세스 내내 리랭킹이 죽는다.
@@ -955,6 +958,21 @@ def _openrouter_embed_model(model_name: str) -> str:
     return model_name.lower()
 
 
+def _notify_embed_route_once(message: str) -> None:
+    """임베딩 경로를 실행당 한 번만 알린다.
+
+    청크마다 찍으면 정작 봐야 할 로그를 덮는다(graph_index 의
+    _notify_llm_extraction_once 와 같은 패턴). 한 번은 반드시 남겨야 하는 이유는,
+    provider 가 env 로 정해져 실행 기록만 봐서는 이 색인이 어디서 계산됐는지
+    알 수 없기 때문이다 — 비용과 속도가 100배 넘게 갈리는 축이다."""
+    global _embed_route_notified
+    with _embed_route_lock:
+        if _embed_route_notified:
+            return
+        _embed_route_notified = True
+    print(message)
+
+
 def _embed_via_openrouter(texts: list[str], model_name: str) -> list[list[float]]:
     """OpenRouter 임베딩. 실패는 예외로 올린다(해시 fallback 없음).
 
@@ -977,6 +995,10 @@ def _embed_via_openrouter(texts: list[str], model_name: str) -> list[list[float]
     batch_size = _env_int("INDEX_EMBED_API_BATCH", 64)
     concurrency = max(1, _env_int("INDEX_EMBED_CONCURRENCY", 8))
     groups = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
+    _notify_embed_route_once(
+        f"[Index] 임베딩을 OpenRouter({model})로 계산합니다 — 요청당 {batch_size}건, "
+        f"동시 {concurrency}. 로컬로 돌리려면 INDEX_EMBED_PROVIDER=local."
+    )
 
     def _one(group: list[str]) -> list[list[float]]:
         return run_with_retry(
@@ -1188,7 +1210,15 @@ def embed_batch(
 
     model, actual_device = _load_embedding_model(model_name, device)
     if model is None:
+        _notify_embed_route_once(
+            f"[Index] 임베딩 모델 '{model_name}' 을 못 써 해시 fallback 벡터로 "
+            f"색인합니다 — 의미 검색이 되지 않습니다."
+        )
         return [_fallback_embedding(text, dimension) for text in texts]
+    _notify_embed_route_once(
+        f"[Index] 임베딩을 로컬 {actual_device.upper()}({model_name})로 계산합니다 "
+        f"— 비용 0, 외부 호출 없음."
+    )
 
     try:
         return _encode_batch(model, texts, batch_size, actual_device)

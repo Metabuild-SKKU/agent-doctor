@@ -43,7 +43,9 @@ class _ApiRouted(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         store._models.clear()
+        store._embed_route_notified = False
         self.addCleanup(store._models.clear)
+        self.addCleanup(setattr, store, "_embed_route_notified", False)
 
 
 class OpenRouterRoutingTests(_ApiRouted):
@@ -85,6 +87,23 @@ class OpenRouterRoutingTests(_ApiRouted):
         with patch.object(store, "openai_embed") as embed:
             self.assertEqual(store.embed_batch([], model_name="BAAI/bge-m3"), [])
         embed.assert_not_called()
+
+
+class RouteNoticeTests(_ApiRouted):
+    """provider 는 env 로 정해져 실행 기록만 봐선 어디서 계산됐는지 알 수 없다.
+    비용과 속도가 100배 넘게 갈리는 축이라 실행당 한 번은 남겨야 한다."""
+
+    def test_api_route_is_announced_once(self):
+        with patch.object(store, "openai_embed") as embed, \
+             patch("builtins.print") as printed:
+            embed.side_effect = lambda texts, model, **kw: [[1.0] for _ in texts]
+            store.embed_batch(["a"], model_name="BAAI/bge-m3")
+            store.embed_batch(["b"], model_name="BAAI/bge-m3")
+
+        notices = [c.args[0] for c in printed.call_args_list if "임베딩" in str(c.args[0])]
+        self.assertEqual(len(notices), 1)          # 청크마다 찍으면 로그를 덮는다
+        self.assertIn("OpenRouter", notices[0])
+        self.assertIn("baai/bge-m3", notices[0])
 
 
 class OrderAndRetryTests(_ApiRouted):
