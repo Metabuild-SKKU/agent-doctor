@@ -218,6 +218,80 @@ class ChunkingTests(unittest.TestCase):
 
         self.assertEqual(len(drafts), 1)
         self.assertIsNone(drafts[0].section)
+
+    # ── issue #100: 트림이 만든 좌표 틈 ────────────────────────────
+    #
+    # char_span 은 앞뒤 공백을 뗀 좌표라 섹션 경계마다 틈이 남는다. raw_start/raw_end
+    # 는 트림 전 경계라 그 틈이 닫혀야 하고, 동시에 각 청크가 제 char_span 을 덮어야
+    # 한다(안 그러면 그 청크만 검색됐을 때 제 본문을 못 덮는다).
+
+    def _raw_gaps(self, drafts):
+        return [(a.raw_end, b.raw_start) for a, b in zip(drafts, drafts[1:])
+                if b.raw_start > a.raw_end]
+
+    def _char_gaps(self, drafts):
+        return [(a.end, b.start) for a, b in zip(drafts, drafts[1:]) if b.start > a.end]
+
+    def _assert_raw_span_contract(self, document, drafts):
+        self.assertTrue(drafts)
+        self.assertEqual(self._raw_gaps(drafts), [], "raw 좌표에 틈이 남았다")
+        for draft in drafts:
+            self.assertLessEqual(draft.raw_start, draft.start)
+            self.assertGreaterEqual(draft.raw_end, draft.end)
+            # char_span 쪽 불변식은 그대로여야 한다 — probe_gen 이 이걸 검증한다.
+            self.assertEqual(document.content[draft.start : draft.end], draft.text)
+
+    def test_section_strategies_leave_char_span_gaps_but_no_raw_gaps(self):
+        document = _document(
+            "policy",
+            "# 1장 총칙\n이 규정은 인사 원칙을 정한다.\n\n"
+            "## 2장 연차\n연차는 15일이다.\n\n"
+            "## 3장 평가\n평가는 연 2회 실시한다.",
+        )
+
+        for strategy in ("markdown", "markdown_recursive"):
+            with self.subTest(strategy=strategy):
+                drafts = _chunk_document(document, 512, 50, strategy=strategy)
+                # 이 전략들은 겹침이 없어 트림 틈이 실제로 생긴다(재현 조건 고정).
+                self.assertTrue(self._char_gaps(drafts), "틈이 안 생기면 회귀가 무의미")
+                self._assert_raw_span_contract(document, drafts)
+
+    def test_raw_spans_survive_subsection_recursive_split(self):
+        """섹션이 chunk_size 를 넘어 하위 재귀분할될 때도 섹션 경계가 이어져야 한다."""
+        document = _document(
+            "big",
+            "\n\n".join(f"## {i}장\n" + ("이 절의 설명 문장입니다. " * 40) for i in range(1, 5)),
+        )
+
+        drafts = _chunk_document(document, 200, 20, strategy="markdown_recursive")
+
+        self.assertGreater(len(drafts), 4, "하위분할이 일어나야 의미 있는 케이스")
+        self._assert_raw_span_contract(document, drafts)
+
+    def test_gapless_strategies_keep_raw_spans_gapless(self):
+        document = _document(
+            "guide",
+            "# 설치\n" + ("설치 설명 문장입니다. " * 20) + "\n\n## Windows\n"
+            + ("PowerShell 설명입니다. " * 20),
+        )
+
+        for strategy in ("fixed", "recursive", "recursive_sentence"):
+            with self.subTest(strategy=strategy):
+                drafts = _chunk_document(document, 200, 20, strategy=strategy)
+                self.assertEqual(self._char_gaps(drafts), [])
+                self._assert_raw_span_contract(document, drafts)
+
+    def test_math_sections_keep_raw_spans_contiguous(self):
+        document = _document(
+            "math",
+            "\n".join(["# 미적분", "핵심 정의입니다.", "1. 첫 문제입니다.", "2. 둘째 문제입니다."]),
+        )
+        document.metadata["document_type"] = "math"
+
+        drafts = _chunk_document(document, 120, 20, strategy="markdown_recursive")
+
+        self._assert_raw_span_contract(document, drafts)
+
     def test_default_chunk_strategy_is_fixed(self):
         document = _document(
             "guide",

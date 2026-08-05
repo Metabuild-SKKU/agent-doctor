@@ -168,6 +168,7 @@ def _chunk_to_dict(chunk: Chunk | dict) -> dict:
             "page": chunk.get("page"),
             "section": chunk.get("section"),
             "char_span": chunk.get("char_span"),
+            "original_char_span": chunk.get("original_char_span"),
             "token_count": chunk.get("token_count"),
             "parent_id": chunk.get("parent_id"),
             "hash": chunk.get("hash"),
@@ -182,6 +183,7 @@ def _chunk_to_dict(chunk: Chunk | dict) -> dict:
         "page": chunk.page,
         "section": chunk.section,
         "char_span": chunk.char_span,
+        "original_char_span": chunk.original_char_span,
         "token_count": chunk.token_count,
         "parent_id": chunk.parent_id,
         "hash": chunk.hash,
@@ -220,6 +222,12 @@ def _chunk_from_dict(data: dict) -> Chunk:
     span = data.get("char_span")
     if isinstance(span, list):
         span = tuple(span)
+    original_span = data.get("original_char_span")
+    if original_span is None:
+        # 이 필드 이전에 색인된 청크 — char_span 으로 떨어져 기존과 같이 동작한다.
+        original_span = data.get("metadata", {}).get("original_char_span")
+    if isinstance(original_span, list):
+        original_span = tuple(original_span)
     return Chunk(
         chunk_id=data.get("chunk_id", ""),
         doc_id=data.get("doc_id", ""),
@@ -227,6 +235,7 @@ def _chunk_from_dict(data: dict) -> Chunk:
         page=data.get("page"),
         section=data.get("section"),
         char_span=span,
+        original_char_span=original_span,
         token_count=data.get("token_count"),
         parent_id=data.get("parent_id"),
         hash=data.get("hash"),
@@ -401,6 +410,7 @@ class Retriever:
                     "text": chunk.get("text", ""),
                     "section": chunk.get("section"),
                     "char_span": chunk.get("char_span"),
+                    "original_char_span": chunk.get("original_char_span"),
                     "token_count": chunk.get("token_count"),
                     "parent_id": chunk.get("parent_id"),
                     "hash": chunk.get("hash"),

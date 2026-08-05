@@ -40,6 +40,16 @@ class Chunk:
     section: Optional[str] = None
     char_span: Optional[tuple[int, int]] = None  # (start, end) — 부모 Document.content 기준 위치.
     # 재청킹돼도 안 깨지는 기준. Eval이 gold_char_span과 겹치는 청크를 찾아 gold를 재판정하는 데 씀.
+    # content[start:end] == text 가 성립한다(앞뒤 공백을 뗀 좌표). 원문 대조·인용·페이지
+    # 계산은 반드시 이쪽을 쓴다.
+    original_char_span: Optional[tuple[int, int]] = None  # 공백을 떼기 "전"의 (start, end).
+    # 커버리지 판정 전용. char_span 은 청크마다 앞뒤 공백을 떼므로 인접 청크 사이에 좌표
+    # 틈이 남는다(섹션 단위로 자르는 markdown/markdown_recursive 는 겹침이 없어 특히).
+    # 그 틈 때문에 gold span 을 다 검색하고도 span_recall 이 0이 됐다(issue #100).
+    # 이 필드는 트림 전 경계라 인접 청크끼리 맞닿아, 트림이 만든 틈은 닫힌다.
+    # 반면 dedup 으로 청크가 통째로 빠진 자리는 그대로 틈으로 남는다 — 그건 실제 누락이라
+    # 0점이 맞다. 덕분에 원문 없이도 두 종류의 틈이 갈린다.
+    # 주의: content[start:end] != text 다. 텍스트 대조에 쓰면 안 된다.
     token_count: Optional[int] = None            # 실제 임베딩 모델 토크나이저 기준 토큰 수
     parent_id: Optional[str] = None              # Small-to-Big(부모 섹션) 확장 대비. 현재는 미사용
     hash: Optional[str] = None                   # sha256(text) 앞부분. 중복 판별/증분 인덱싱용

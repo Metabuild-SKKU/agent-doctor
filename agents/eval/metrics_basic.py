@@ -251,6 +251,63 @@ def recall_at_k(gold_chunk_ids: list[str], retrieved_chunk_ids: list[str]) -> fl
     return hit / len(gold_chunk_ids)
 
 
+def _valid_span(raw) -> tuple[int, int] | None:
+    """(start, end) 꼴의 좌표를 안전하게 읽는다. 형식 불량이면 None."""
+    if (
+        not isinstance(raw, (list, tuple))
+        or len(raw) != 2
+        or isinstance(raw[0], bool)
+        or isinstance(raw[1], bool)
+        or not isinstance(raw[0], int)
+        or not isinstance(raw[1], int)
+        or raw[0] < 0
+        or raw[1] <= raw[0]
+    ):
+        return None
+    return raw[0], raw[1]
+
+
+def _chunk_coverage_span(chunk) -> tuple[int, int] | None:
+    """커버리지 판정에 쓸 좌표. original_char_span 우선, 없으면 char_span.
+
+    char_span 은 청크마다 앞뒤 공백을 뗀 좌표라 인접 청크 사이에 좌표 틈이 남는다.
+    그 틈을 지나는 gold span 은 청크를 다 검색하고도 '못 덮음'으로 떨어졌다(issue #100).
+    original_char_span 은 트림 전 경계라 그 틈이 닫혀 있다. 반대로 dedup 으로 청크가
+    통째로 빠진 자리는 여기서도 틈으로 남는다 — 실제 누락이라 0점이 맞다.
+
+    이 필드가 없던 시절에 색인된 청크는 char_span 으로 떨어져 종전과 같이 동작한다.
+    주의: 원문 대조·인용·페이지 계산에는 쓰면 안 된다(_chunk_char_span 을 쓸 것).
+    """
+    char_span = _chunk_char_span(chunk)
+    if char_span is None:
+        return None
+    raw = getattr(chunk, "original_char_span", None)
+    if raw is None and isinstance(getattr(chunk, "metadata", None), dict):
+        raw = chunk.metadata.get("original_char_span")
+    original = _valid_span(raw)
+    # 제 char_span 을 못 덮는 값은 신뢰하지 않는다(직렬화 사고 방어).
+    if original is not None and original[0] <= char_span[0] and original[1] >= char_span[1]:
+        return original
+    return char_span
+
+
+def _span_is_covered(start: int, end: int, positions: list[tuple[int, int]]) -> bool:
+    """[start, end) 가 positions 의 합집합으로 빈틈없이 덮이는지."""
+    intersections = sorted(
+        (max(start, c_start), min(end, c_end))
+        for c_start, c_end in positions
+        if c_start < end and c_end > start
+    )
+    cursor = start
+    for covered_start, covered_end in intersections:
+        if covered_start > cursor:      # 틈 발견 → 덮지 못함
+            break
+        cursor = max(cursor, covered_end)
+        if cursor >= end:
+            break
+    return cursor >= end
+
+
 def span_recall_at_k(
     gold_spans: list[dict],
     retrieved_chunk_ids: list[str],
@@ -261,6 +318,9 @@ def span_recall_at_k(
     한 청크가 span 전체를 포함해도 성공이고, 여러 검색 청크의 좌표 합집합이
     빈틈없이 span을 덮어도 성공이다. 청크 좌표가 없어 계산할 수 없는 legacy
     환경에서는 None을 반환해 호출부가 기존 chunk-id Recall로 폴백하게 한다.
+
+    좌표는 _chunk_coverage_span(트림 전 경계 우선)을 쓴다 — 청크 사이 공백 틈이
+    gold span 을 갈라 0점이 되던 문제(issue #100) 때문이다.
     """
 
     valid_spans: list[tuple[str, int, int]] = []
@@ -291,26 +351,13 @@ def span_recall_at_k(
     for chunk in chunks:
         doc_id = getattr(chunk, "doc_id", None)
         chunk_id = getattr(chunk, "chunk_id", None)
-        raw = getattr(chunk, "char_span", None)
-        metadata = getattr(chunk, "metadata", None)
-        if raw is None and isinstance(metadata, dict):
-            raw = metadata.get("char_span")
-        if (
-            not isinstance(raw, (list, tuple))
-            or len(raw) != 2
-            or isinstance(raw[0], bool)
-            or isinstance(raw[1], bool)
-            or not isinstance(raw[0], int)
-            or not isinstance(raw[1], int)
-            or raw[0] < 0
-            or raw[1] <= raw[0]
-        ):
+        position = _chunk_coverage_span(chunk)
+        if position is None:
             if doc_id in gold_doc_ids and chunk_id in retrieved:
                 retrieved_gold_chunk_without_position = True
             continue
         if not isinstance(doc_id, str):
             continue
-        position = (raw[0], raw[1])
         all_positions.setdefault(doc_id, []).append(position)
         if chunk_id in retrieved:
             retrieved_positions.setdefault(doc_id, []).append(position)
@@ -322,22 +369,11 @@ def span_recall_at_k(
     ):
         return None
 
-    covered = 0
-    for doc_id, start, end in valid_spans:
-        intersections = sorted(
-            (max(start, c_start), min(end, c_end))
-            for c_start, c_end in retrieved_positions.get(doc_id, [])
-            if c_start < end and c_end > start
-        )
-        cursor = start
-        for covered_start, covered_end in intersections:
-            if covered_start > cursor:
-                break
-            cursor = max(cursor, covered_end)
-            if cursor >= end:
-                break
-        if cursor >= end:
-            covered += 1
+    covered = sum(
+        1
+        for doc_id, start, end in valid_spans
+        if _span_is_covered(start, end, retrieved_positions.get(doc_id, []))
+    )
     return covered / len(valid_spans)
 
 
@@ -484,6 +520,9 @@ def _gold_span_boundary_analysis(record: EvalRecord):
       boundary_split 단일 청크엔 안 들어가지만 인접 청크들의 합집합이 빈틈없이 덮음 → 경계에 잘림
       uncovered      합쳐도 못 덮음(틈 있음/겹치는 청크 없음) → 누락
     청크 좌표가 없는 환경은 미확정(None).
+
+    좌표는 span_recall_at_k 과 같은 _chunk_coverage_span 을 쓴다 — 둘이 다른 좌표를
+    보면 "recall 은 0인데 경계 분석은 contained" 같은 모순이 생긴다.
     """
     if not _ctx.chunks:
         return None
@@ -494,7 +533,7 @@ def _gold_span_boundary_analysis(record: EvalRecord):
             return None
         chunks_by_doc: dict[str, list[tuple[int, int]]] = {}
         for chunk in _ctx.chunks:
-            position = _chunk_char_span(chunk)
+            position = _chunk_coverage_span(chunk)
             doc_id = getattr(chunk, "doc_id", None)
             if position is None or not isinstance(doc_id, str):
                 continue
@@ -512,20 +551,8 @@ def _gold_span_boundary_analysis(record: EvalRecord):
                 contained_count += 1
                 continue
 
-            # span 과 겹치는 조각만 모아 좌표순으로 훑으며 빈틈 없이 이어지는지 본다.
-            intersections = sorted(
-                (max(start, c_start), min(end, c_end))
-                for c_start, c_end in positions
-                if c_start < end and c_end > start
-            )
-            cursor = start
-            for covered_start, covered_end in intersections:
-                if covered_start > cursor:   # 틈 발견 → 덮지 못함
-                    break
-                cursor = max(cursor, covered_end)
-                if cursor >= end:
-                    break
-            if intersections and cursor >= end:
+            overlapping = any(c_start < end and c_end > start for c_start, c_end in positions)
+            if overlapping and _span_is_covered(start, end, positions):
                 split_count += 1
             else:
                 uncovered_count += 1

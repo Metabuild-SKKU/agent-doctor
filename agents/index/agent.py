@@ -40,12 +40,18 @@ from core.schema import Chunk, Document, IndexSnapshot
 from core.state import AgentDoctorState
 
 
+# start/end 는 공백을 뗀 좌표(content[start:end] == text), raw_start/raw_end 는 떼기 전
+# 좌표다. 후자는 인접 조각끼리 맞닿아 있어 Eval 의 커버리지 판정이 트림 틈에 걸리지
+# 않게 한다(issue #100). 외부 chunker(register_chunk_strategy)가 raw 를 안 채울 수 있어
+# None 을 허용하고, Chunk 를 만들 때 start/end 로 폴백한다.
 @dataclass
 class _ChunkDraft:
     text: str
     section: str | None = None
     start: int = 0
     end: int = 0
+    raw_start: int | None = None
+    raw_end: int | None = None
 
 
 @dataclass
@@ -54,6 +60,8 @@ class _SectionDraft:
     section: str | None
     start: int
     end: int
+    raw_start: int | None = None
+    raw_end: int | None = None
 
 
 @dataclass(frozen=True)
@@ -141,8 +149,12 @@ def _split_markdown_sections(text: str) -> list[_SectionDraft]:
     current_section: str | None = None
     section_start = 0
     cursor = 0
+    # 아직 어느 섹션에도 안 실린 원문 시작점. 본문이 공백뿐이라 건너뛴 섹션의 구간을
+    # 다음 섹션이 흡수해, raw 좌표가 끊기지 않게 한다.
+    pending_raw_start = 0
 
     def flush(end: int) -> None:
+        nonlocal pending_raw_start
         body, body_start, body_end = _trimmed_slice(text, section_start, end)
         if body:
             sections.append(
@@ -151,8 +163,11 @@ def _split_markdown_sections(text: str) -> list[_SectionDraft]:
                     section=current_section,
                     start=body_start,
                     end=body_end,
+                    raw_start=pending_raw_start,
+                    raw_end=end,
                 )
             )
+            pending_raw_start = end
 
     for line in text.splitlines(keepends=True):
         match = heading_pattern.match(line.rstrip("\r\n"))
@@ -172,7 +187,20 @@ def _split_markdown_sections(text: str) -> list[_SectionDraft]:
     if sections:
         return sections
     body, start, end = _trimmed_slice(text, 0, len(text))
-    return [_SectionDraft(text=body, section=None, start=start, end=end)] if body else []
+    return (
+        [
+            _SectionDraft(
+                text=body,
+                section=None,
+                start=start,
+                end=end,
+                raw_start=0,
+                raw_end=len(text),
+            )
+        ]
+        if body
+        else []
+    )
 
 
 _MATH_PROBLEM_MARKER_RE = re.compile(
@@ -208,6 +236,8 @@ def _split_math_problem_sections(document: Document) -> list[_SectionDraft]:
 
     sections: list[_SectionDraft] = []
     first_start = starts[0][0]
+    # _split_markdown_sections 와 같은 규약 — 건너뛴 구간은 다음 섹션이 흡수한다.
+    pending_raw_start = 0
     preamble, preamble_start, preamble_end = _trimmed_slice(text, 0, first_start)
     if preamble:
         sections.append(
@@ -216,8 +246,11 @@ def _split_math_problem_sections(document: Document) -> list[_SectionDraft]:
                 section="preamble",
                 start=preamble_start,
                 end=preamble_end,
+                raw_start=pending_raw_start,
+                raw_end=first_start,
             )
         )
+        pending_raw_start = first_start
     for index, (start, marker) in enumerate(starts):
         end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
         body, body_start, body_end = _trimmed_slice(text, start, end)
@@ -228,8 +261,11 @@ def _split_math_problem_sections(document: Document) -> list[_SectionDraft]:
                     section=marker,
                     start=body_start,
                     end=body_end,
+                    raw_start=pending_raw_start,
+                    raw_end=end,
                 )
             )
+            pending_raw_start = end
     return sections
 
 
@@ -265,6 +301,26 @@ def _preferred_sentence_boundary(text: str, start: int, hard_end: int) -> int:
     return hard_end
 
 
+# 조각들의 raw 좌표를 이어 붙인다: 조각 사이에 남은 틈은 앞 조각이 흡수하고,
+# 양 끝은 이 조각들이 나온 구간(섹션/문서)의 트림 전 경계까지 늘린다. 트림이 만든
+# 틈만 닫히고, 청크가 통째로 빠진 자리(dedup)는 이후 단계라 여기서 안 닫힌다.
+def _seal_raw_spans(
+    chunks: list[_ChunkDraft],
+    raw_start: int,
+    raw_end: int,
+) -> list[_ChunkDraft]:
+    if not chunks:
+        return chunks
+    for index in range(len(chunks) - 1):
+        following = chunks[index + 1].raw_start
+        if following is not None and following > (chunks[index].raw_end or 0):
+            chunks[index].raw_end = following
+    first, last = chunks[0], chunks[-1]
+    first.raw_start = min(first.raw_start, raw_start) if first.raw_start is not None else raw_start
+    last.raw_end = max(last.raw_end, raw_end) if last.raw_end is not None else raw_end
+    return chunks
+
+
 def _fixed_chunks(
     text: str,
     chunk_size: int,
@@ -272,6 +328,8 @@ def _fixed_chunks(
     *,
     base_offset: int = 0,
     section: str | None = None,
+    raw_start: int | None = None,
+    raw_end: int | None = None,
 ) -> list[_ChunkDraft]:
     if not text:
         return []
@@ -287,11 +345,17 @@ def _fixed_chunks(
                     section=section,
                     start=base_offset + trimmed_start,
                     end=base_offset + trimmed_end,
+                    raw_start=base_offset + start,
+                    raw_end=base_offset + end,
                 )
             )
         if end >= len(text):
             break
-    return chunks
+    return _seal_raw_spans(
+        chunks,
+        base_offset if raw_start is None else raw_start,
+        base_offset + len(text) if raw_end is None else raw_end,
+    )
 
 
 def _recursive_chunks(
@@ -302,9 +366,13 @@ def _recursive_chunks(
     base_offset: int = 0,
     section: str | None = None,
     boundary: Callable[[str, int, int], int] = _preferred_boundary,
+    raw_start: int | None = None,
+    raw_end: int | None = None,
 ) -> list[_ChunkDraft]:
     if not text:
         return []
+    sealed_start = base_offset if raw_start is None else raw_start
+    sealed_end = base_offset + len(text) if raw_end is None else raw_end
     if len(text) <= chunk_size:
         return [
             _ChunkDraft(
@@ -312,6 +380,8 @@ def _recursive_chunks(
                 section=section,
                 start=base_offset,
                 end=base_offset + len(text),
+                raw_start=sealed_start,
+                raw_end=sealed_end,
             )
         ]
 
@@ -328,6 +398,8 @@ def _recursive_chunks(
                     section=section,
                     start=base_offset + trimmed_start,
                     end=base_offset + trimmed_end,
+                    raw_start=base_offset + start,
+                    raw_end=base_offset + end,
                 )
             )
         if end >= len(text):
@@ -336,7 +408,7 @@ def _recursive_chunks(
         while next_start < end and text[next_start].isspace():
             next_start += 1
         start = next_start
-    return chunks
+    return _seal_raw_spans(chunks, sealed_start, sealed_end)
 
 
 def _fixed_strategy(
@@ -350,6 +422,8 @@ def _fixed_strategy(
         chunk_size,
         chunk_overlap,
         base_offset=start,
+        raw_start=0,
+        raw_end=len(document.content),
     )
 
 
@@ -364,6 +438,8 @@ def _markdown_strategy(
             section=section.section,
             start=section.start,
             end=section.end,
+            raw_start=section.raw_start,
+            raw_end=section.raw_end,
         )
         for section in _split_document_sections(document)
     ]
@@ -380,6 +456,8 @@ def _recursive_strategy(
         chunk_size,
         chunk_overlap,
         base_offset=start,
+        raw_start=0,
+        raw_end=len(document.content),
     )
 
 
@@ -391,12 +469,16 @@ def _markdown_recursive_strategy(
     drafts: list[_ChunkDraft] = []
     for section in _split_document_sections(document):
         drafts.extend(
+            # 섹션의 트림 전 경계를 하위 재귀분할까지 내려보낸다. 이게 없으면 섹션
+            # 첫/마지막 조각이 트림된 섹션 좌표에서 시작·끝나 섹션 사이에 틈이 남는다.
             _recursive_chunks(
                 section.text,
                 chunk_size,
                 chunk_overlap,
                 base_offset=section.start,
                 section=section.section,
+                raw_start=section.raw_start,
+                raw_end=section.raw_end,
             )
         )
     return drafts
@@ -419,6 +501,8 @@ def _recursive_sentence_strategy(
         chunk_overlap,
         base_offset=start,
         boundary=_preferred_sentence_boundary,
+        raw_start=0,
+        raw_end=len(document.content),
     )
 
 
@@ -893,6 +977,7 @@ def _chunk_metadata(
     signature: str,
     embedding_dimension: int,
     embedding_fallback: bool = False,
+    original_char_span: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     # page_spans 는 문서 단위 정보라 청크마다 복사하면 payload 가 페이지 수만큼 불어난다.
     # 아래에서 이 청크의 "page" 하나로 접어 넣으므로 원본 목록은 뺀다.
@@ -911,9 +996,17 @@ def _chunk_metadata(
         "document_hash": document_hash,
         "chunk_hash": chunk_hash,
         "char_span": [char_span[0], char_span[1]],
+        # 커버리지 판정용 트림 전 좌표(core/schema.py::Chunk.original_char_span 참고).
+        # Chunk 필드가 없는 legacy 경로(qdrant payload 왕복 등)도 여기서 복원한다.
+        "original_char_span": (
+            [original_char_span[0], original_char_span[1]]
+            if original_char_span
+            else [char_span[0], char_span[1]]
+        ),
         # 출처 표기용 페이지 번호. document.metadata 의 page_spans 를 그대로 물려받으면
         # 청크마다 문서 전체 span 목록이 payload 에 복사되므로, 여기서 이 청크의
         # 페이지 하나로 접고 원본 목록은 뺀다.
+        # 트림된 char_span 을 쓴다 — 원문 대조 좌표라야 페이지가 맞다.
         "page": _page_of_span(document, char_span),
         "chunk_strategy": chunk_strategy,
         "index_signature": signature,
@@ -947,6 +1040,24 @@ def _span_from_chunk(chunk: Chunk) -> tuple[int, int]:
     return 0, len(chunk.text)
 
 
+def _original_span_from_chunk(chunk: Chunk, char_span: tuple[int, int]) -> tuple[int, int]:
+    """트림 전 좌표. 필드가 비면 metadata → char_span 순으로 폴백한다.
+
+    이 필드가 생기기 전에 색인된 청크(캐시 재사용 경로)는 char_span 으로 떨어져
+    지금까지와 똑같이 동작한다 — 재청킹이 한 번 돌면 제 좌표를 얻는다.
+    """
+    for candidate in (chunk.original_char_span, chunk.metadata.get("original_char_span")):
+        if isinstance(candidate, (list, tuple)) and len(candidate) == 2:
+            try:
+                start, end = int(candidate[0]), int(candidate[1])
+            except (TypeError, ValueError):
+                continue
+            # 제 char_span 을 못 덮는 값은 신뢰하지 않는다(직렬화 사고 방어).
+            if 0 <= start <= char_span[0] and end >= char_span[1]:
+                return start, end
+    return char_span
+
+
 def _parent_id(document: Document, section: str | None) -> str:
     if section:
         return f"{document.doc_id}:section:{_sha256(section)[:12]}"
@@ -966,6 +1077,7 @@ def _refresh_reused_chunk(
 ) -> Chunk:
     # 임베딩은 재사용하되, top_k 같은 실험값은 최신 config로 맞춘다.
     char_span = _span_from_chunk(chunk)
+    original_char_span = _original_span_from_chunk(chunk, char_span)
     vector_dim = len(chunk.embedding or []) or int(config.get("embedding_dimension", 1024))
     return replace(
         chunk,
@@ -974,6 +1086,7 @@ def _refresh_reused_chunk(
         # 재청킹되면 char_span 이 달라지므로 페이지도 다시 계산한다(replace 는 옛 값을 남긴다).
         page=_page_of_span(document, char_span),
         char_span=char_span,
+        original_char_span=original_char_span,
         parent_id=_parent_id(document, chunk.section),
         hash=chunk_hash[:16],
         metadata=_chunk_metadata(
@@ -983,6 +1096,7 @@ def _refresh_reused_chunk(
             document_hash=document_hash,
             chunk_hash=chunk_hash,
             char_span=char_span,
+            original_char_span=original_char_span,
             chunk_strategy=chunk_strategy,
             signature=signature,
             embedding_dimension=vector_dim,
@@ -1029,6 +1143,7 @@ def _reembed_stale_chunks(
 
     for (chunk_index, chunk, chunk_hash), vector in zip(stale, vectors):
         char_span = _span_from_chunk(chunk)
+        original_char_span = _original_span_from_chunk(chunk, char_span)
         metadata = _chunk_metadata(
             document,
             config,
@@ -1036,6 +1151,7 @@ def _reembed_stale_chunks(
             document_hash=document_hash,
             chunk_hash=chunk_hash,
             char_span=char_span,
+            original_char_span=original_char_span,
             chunk_strategy=chunk_strategy,
             signature=signature,
             embedding_dimension=len(vector),
@@ -1047,6 +1163,7 @@ def _reembed_stale_chunks(
             doc_id=document.doc_id,
             page=metadata.get("page"),
             char_span=char_span,
+            original_char_span=original_char_span,
             parent_id=_parent_id(document, chunk.section),
             hash=chunk_hash[:16],
             embedding=vector,
@@ -1225,6 +1342,11 @@ def _process_document(
     for (draft, chunk_hash), vector in zip(survivors, vectors):
         chunk_index = len(document_chunks)
         char_span = (draft.start, draft.end)
+        # 외부 chunker 가 raw 를 안 채웠으면 char_span 으로 떨어진다(= 기존 동작).
+        original_char_span = (
+            draft.raw_start if draft.raw_start is not None else draft.start,
+            draft.raw_end if draft.raw_end is not None else draft.end,
+        )
         metadata = _chunk_metadata(
             document,
             config,
@@ -1232,6 +1354,7 @@ def _process_document(
             document_hash=document_hash,
             chunk_hash=chunk_hash,
             char_span=char_span,
+            original_char_span=original_char_span,
             chunk_strategy=chunk_strategy,
             signature=signature,
             embedding_dimension=len(vector),
@@ -1244,6 +1367,7 @@ def _process_document(
             page=metadata.get("page"),
             section=draft.section,
             char_span=char_span,
+            original_char_span=original_char_span,
             token_count=tools.count_tokens(
                 draft.text,
                 model_name=config["embedding_model"],
