@@ -26,7 +26,7 @@
 state.chunks → chunks.json 저장 (임베딩 포함)
 agent.py → api.py 백그라운드 기동 (FastAPI: /health /documents /search /answer)
              /search: Qdrant 벡터 검색   /answer: agents/rag 기반 RAG 답변 생성
-mcp_server.py → 검색을 직접 하지 않고 api.py에 HTTP로 위임
+mcp_server.py → 검색/상태확인을 직접 하지 않고 api.py에 HTTP로 위임
 claude_desktop_config.json → 자동 등록
 Claude Desktop 재시작 → 연결 완료
 ```
@@ -149,7 +149,7 @@ Notion 수집 → 인덱싱 → Serve까지 전체 실행. 완료 후 Claude Des
 agents/serve/
 ├── agent.py       # run() — 청크 저장 + api.py 기동 + Claude Desktop 설정 자동 등록
 ├── api.py         # FastAPI 서버 (/health /documents /search /answer)
-├── mcp_server.py  # FastMCP 서버 (search_docs, ask_docs, list_documents 툴) — api.py에 위임
+├── mcp_server.py  # FastMCP 서버 (health_check, search_docs, ask_docs, list_documents 툴) — api.py에 위임
 └── README.md      # 이 파일
 ```
 
@@ -159,6 +159,7 @@ agents/serve/
 
 | 툴 | 설명 |
 |----|------|
-| `search_docs(query)` | 문서에서 관련 청크 검색 (벡터 검색, top 3 반환) |
-| `ask_docs(question)` | 검색 + RAG 답변 생성 (`/answer` 호출, 출처 포함) |
+| `health_check()` | Serve API 상태, 청크 수, 현재 검색 설정 확인 |
+| `search_docs(query, top_k=3)` | 문서에서 관련 청크 검색 (벡터/키워드 fallback 결과 반환) |
+| `ask_docs(query, top_k=5)` | 검색 + RAG 답변 생성 (`/answer` 호출, 출처 포함) |
 | `list_documents()` | 인덱싱된 문서 목록 조회 |
