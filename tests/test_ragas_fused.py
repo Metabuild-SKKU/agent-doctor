@@ -10,6 +10,7 @@ fused 는 '판정을 한 번에 받아오기'만 바꾸고 점수 계산식은 l
   4. 결손 격리/보수 — 블록 하나가 빠져도 나머지 지표는 살고, 빠진 지표만 개별 호출로 메운다.
 실제 LLM 은 부르지 않는다(_chat/_embed 스텁).
 """
+import json
 import os
 import sys
 import unittest
@@ -60,11 +61,19 @@ class _Stub:
         self.fused_payload = fused_payload
         self.chat_calls: list[str] = []
         self.embed_calls: list[list[str]] = []
+        self.schemas: list[dict | None] = []
+        self.systems: list[str] = []
 
-    def chat(self, judge, prompt, max_output_tokens=None, label=""):
-        self.chat_calls.append(prompt)
+    def chat(self, judge, prompt, max_output_tokens=None, label="",
+             system="", json_schema=None):
+        # fused 경로는 지시문을 system(캐시 지점)으로, 입력만 prompt 로 보낸다.
+        # 어느 호출인지 가리는 마커는 지시문 쪽에 있으므로 둘을 합쳐서 본다 —
+        # prompt 만 보면 fused 호출을 legacy 로 오인한다.
+        self.chat_calls.append(system + prompt)
+        self.schemas.append(json_schema)
+        self.systems.append(system)
         for marker, reply in _LEGACY_REPLIES:
-            if marker in prompt:
+            if marker in system + prompt:
                 return dict(self.fused_payload) if reply is None else dict(reply)
         return {}
 
@@ -220,6 +229,117 @@ class FusedMaterialGuardTest(_FusedTestBase):
         self.assertEqual(out["response_relevancy"], 0.0)
         self.assertEqual(self.stub.chat_calls, [])                  # 물을 게 없으면 호출도 없다
         self.assertEqual(self.stub.embed_calls, [])
+
+
+_REAL_BLOCKS = ["answer_statements", "faithfulness_verdicts", "relevancy",
+                "context_verdicts", "reference_statements", "correctness",
+                "recall_classifications"]
+_ORACLE_BLOCKS = ["answer_statements", "faithfulness_verdicts", "relevancy",
+                  "reference_statements", "correctness"]
+
+
+class FusedJsonSchemaTest(unittest.TestCase):
+    """anthropic output_config.format 에 실리는 스키마의 유효성.
+
+    이 스키마가 틀리면 심판 호출이 400 으로 죽거나(구조 위반), 강제가 헐거워져
+    결손 보수 경로가 되살아난다(이 transport 를 만든 이유가 사라진다)."""
+
+    def _walk_objects(self, node):
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                yield node
+            for value in node.values():
+                yield from self._walk_objects(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from self._walk_objects(value)
+
+    def test_block_and_schema_tables_are_in_sync(self):
+        # 두 표가 갈라지면 프롬프트가 요구하는 키와 스키마가 강제하는 키가 어긋난다.
+        self.assertEqual(set(metrics_ragas._FUSED_BLOCKS),
+                         set(metrics_ragas._FUSED_SCHEMA_PROPS))
+
+    def test_required_matches_prompt_required(self):
+        for blocks in (_REAL_BLOCKS, _ORACLE_BLOCKS):
+            with self.subTest(n=len(blocks)):
+                schema = metrics_ragas._fused_json_schema(blocks)
+                self.assertEqual(schema["required"],
+                                 metrics_ragas._fused_required_keys(blocks))
+
+    def test_every_object_closes_and_requires_all(self):
+        # additionalProperties: false 와 required 전량은 Anthropic structured outputs 의
+        # 필수 조건이다. 하나라도 빠지면 요청이 400 이다.
+        for obj in self._walk_objects(metrics_ragas._fused_json_schema(_REAL_BLOCKS)):
+            self.assertIs(obj.get("additionalProperties"), False, obj)
+            self.assertEqual(set(obj["required"]), set(obj["properties"]), obj)
+
+    def test_no_unsupported_keywords(self):
+        # minimum/maxLength 류 수치·길이 제약과 $ref 는 미지원이다.
+        text = json.dumps(metrics_ragas._fused_json_schema(_REAL_BLOCKS))
+        for keyword in ("minimum", "maximum", "minLength", "maxLength",
+                        "multipleOf", "$ref"):
+            self.assertNotIn(keyword, text)
+
+    def test_binary_verdicts_use_enum(self):
+        # 0/1 판정은 minimum/maximum 을 못 쓰므로 enum 으로 좁힌다.
+        schema = metrics_ragas._fused_json_schema(_REAL_BLOCKS)
+        verdict = (schema["properties"]["faithfulness_verdicts"]
+                   ["items"]["properties"]["verdict"])
+        self.assertEqual(verdict, {"type": "integer", "enum": [0, 1]})
+        self.assertEqual(schema["properties"]["noncommittal"]["enum"], [0, 1])
+
+    def test_no_blocks_means_no_schema(self):
+        self.assertIsNone(metrics_ragas._fused_json_schema([]))
+
+
+class FusedPromptSplitTest(unittest.TestCase):
+    """캐시 지점 분할 — 프리픽스가 매 호출 동일해야 캐시가 걸린다."""
+
+    def test_split_is_lossless(self):
+        # 다른 provider 는 두 부분을 이어붙여 예전과 같은 한 덩어리를 받는다.
+        prefix, suffix = metrics_ragas._fused_prompt_parts(
+            _REAL_BLOCKS, "질문", "답변", ["컨텍스트"], "정답")
+        self.assertEqual(
+            prefix + suffix,
+            metrics_ragas._fused_prompt(_REAL_BLOCKS, "질문", "답변",
+                                        ["컨텍스트"], "정답"))
+
+    def test_variable_input_never_leaks_into_prefix(self):
+        # 가변 내용이 한 바이트라도 앞에 끼면 캐시가 probe 마다 무효화된다.
+        prefix, _ = metrics_ragas._fused_prompt_parts(
+            _REAL_BLOCKS, "질문", "답변", ["컨텍스트"], "정답")
+        for leaked in ("질문", "답변", "컨텍스트", "정답", "input:"):
+            self.assertNotIn(leaked, prefix)
+
+    def test_prefix_is_stable_across_inputs(self):
+        first, _ = metrics_ragas._fused_prompt_parts(
+            _REAL_BLOCKS, "q1", "a1", ["c1"], "r1")
+        second, _ = metrics_ragas._fused_prompt_parts(
+            _REAL_BLOCKS, "완전히 다른 질문", "다른 답변", ["다른 컨텍스트"], "다른 정답")
+        self.assertEqual(first, second)
+
+    def test_prefix_clears_sonnet5_cache_minimum(self):
+        # 최소 1024 토큰 미달이면 에러 없이 캐시가 무시된다. 대략 4자/토큰(거의 영문).
+        for blocks in (_REAL_BLOCKS, _ORACLE_BLOCKS):
+            prefix, _ = metrics_ragas._fused_prompt_parts(
+                blocks, "q", "a", ["c"], "r")
+            with self.subTest(n=len(blocks)):
+                self.assertGreater(len(prefix) // 4, 1024)
+
+
+class FusedSchemaReachesTransportTest(_FusedTestBase):
+    """스키마가 실제로 호출까지 도달하는지 — 조립만 되고 안 실리면 의미가 없다."""
+
+    def test_fused_call_carries_schema_and_cached_prefix(self):
+        metrics_ragas.evaluate_real_track(_record(), object())
+        self.assertEqual(len(self.stub.schemas), 1)
+        schema = self.stub.schemas[0]
+        self.assertIsNotNone(schema)
+        self.assertEqual(schema["required"],
+                         metrics_ragas._fused_required_keys(_REAL_BLOCKS))
+        # 지시문은 system(캐시 지점), 입력은 user 로 갈려야 한다.
+        self.assertIn("evaluation judge", self.stub.systems[0])
+        self.assertNotIn("질문", self.stub.systems[0])
 
 
 if __name__ == "__main__":
