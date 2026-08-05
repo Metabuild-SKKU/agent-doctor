@@ -15,6 +15,15 @@ from agents.eval.types import EvalRecord, Mode
 
 
 FIXTURE_PATH = Path(__file__).with_name("fixtures") / "eval_diagnosis_cases.jsonl"
+MEASURED_METRIC_KEYS = {
+    "recall_at_k",
+    "recall_basis",
+    "f1_score",
+    "oracle_f1",
+    "raw_f1_score",
+    "raw_oracle_f1",
+    "exact_match",
+}
 
 
 class _FakeRetriever:
@@ -122,16 +131,13 @@ def _expected_labels(case: dict) -> list[str]:
     return [] if label in (None, "", []) else [label]
 
 
+def _metric_overrides(case: dict) -> dict:
+    metrics = case.get("metrics") or {}
+    return {key: metrics[key] for key in MEASURED_METRIC_KEYS if key in metrics}
+
+
 def _apply_measured_metrics(record: EvalRecord, metrics: dict) -> None:
-    for key in (
-        "recall_at_k",
-        "recall_basis",
-        "f1_score",
-        "oracle_f1",
-        "raw_f1_score",
-        "raw_oracle_f1",
-        "exact_match",
-    ):
+    for key in MEASURED_METRIC_KEYS:
         if key in metrics:
             setattr(record, key, metrics[key])
     record.raw_f1_score = metrics.get("raw_f1_score", record.f1_score)
@@ -169,13 +175,18 @@ def _record_from_case(case: dict) -> EvalRecord:
         ],
     )
 
-    metrics = case.get("metrics", {})
-    _apply_measured_metrics(record, metrics)
-    record.ragas = dict(metrics.get("ragas", {}))
-    record.oracle_ragas = dict(metrics.get("oracle_ragas", {}))
-    record.aspect = dict(metrics.get("aspect", case.get("aspect", {})))
-    record.ragas_done = True
-    record.oracle_ragas_done = True
+    metrics = case.get("metrics") or {}
+    overrides = _metric_overrides(case)
+    if overrides:
+        _apply_measured_metrics(record, overrides)
+    if "ragas" in metrics:
+        record.ragas = dict(metrics["ragas"])
+        record.ragas_done = True
+    if "oracle_ragas" in metrics:
+        record.oracle_ragas = dict(metrics["oracle_ragas"])
+        record.oracle_ragas_done = True
+    if "aspect" in metrics or "aspect" in case:
+        record.aspect = dict(metrics.get("aspect", case.get("aspect", {})))
     record.retrieval_details = dict(case.get("retrieval_details", {}))
     return record
 
@@ -192,12 +203,16 @@ def _run_case(case: dict) -> list[str]:
         max_rerank_candidates=int(config.get("max_rerank_candidates", 50)),
     )
     record = _record_from_case(case)
-    with patch.object(
-        diagnose,
-        "_compute_metrics",
-        side_effect=lambda rec: _apply_measured_metrics(rec, case.get("metrics", {})),
-    ):
+    overrides = _metric_overrides(case)
+    if not overrides:
         findings = diagnose.diagnose(record, mode=_mode(case.get("mode")))
+    else:
+        with patch.object(
+            diagnose,
+            "_compute_metrics",
+            side_effect=lambda rec: _apply_measured_metrics(rec, overrides),
+        ):
+            findings = diagnose.diagnose(record, mode=_mode(case.get("mode")))
     return [finding.label for finding in findings]
 
 
@@ -223,12 +238,18 @@ class EvalDiagnosisPipelineFixtureTest(unittest.TestCase):
                 self.assertIn("qar", case)
                 self.assertIn("gold", case)
                 self.assertIn("retrieved", case)
-                self.assertIn("metrics", case)
                 self.assertIn("expected_labels", case)
 
                 top_k = case.get("config", {}).get("top_k")
                 if top_k is not None:
                     self.assertEqual(int(top_k), len(case.get("retrieved", [])))
+
+    def test_metricless_fixture_cases_are_allowed(self):
+        metricless = [case for case in self.cases if not _metric_overrides(case)]
+        self.assertTrue(metricless, "at least one fixture should let the runner compute metrics")
+        for case in metricless:
+            with self.subTest(case=case.get("case_id"), source=case.get("_source")):
+                self.assertEqual(sorted(_expected_labels(case)), sorted(_run_case(case)))
 
 
 if __name__ == "__main__":
