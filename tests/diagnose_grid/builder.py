@@ -82,6 +82,11 @@ class Case:
     judge_oracle: dict = field(default_factory=dict)
     judge_abstention: Optional[bool] = None
     judge_reasoning_mode: Optional[str] = None
+    # True 면 심판 LLM 을 실제로 태워 RAGAS 를 계산한다. 위 judge_* 에 적은 키는 계산값을
+    # 덮어써서 그 지표만 고정할 수 있다(나머지는 계산). 기본 False = LLM 0회.
+    # 켜면 케이스마다 LLM 호출이 나가고 값이 실행마다 흔들린다 — 골든 비교가 아니라
+    # '실제 심판으로도 같은 라벨이 나오나'를 볼 때만 쓴다.
+    compute_ragas: bool = False
 
     # 검증
     assert_derived: dict = field(default_factory=dict)
@@ -160,8 +165,36 @@ def _hits(indices: Optional[list[int]], chunks: list[Chunk]) -> Optional[list[di
             for n, i in enumerate(indices)]
 
 
+def _fixed_judge(case: Case, track: str) -> dict:
+    """케이스가 못 박은 심판 값. 미지정 키는 넣지 않는다(계산 모드에서 계산값을 살리려고)."""
+    if track == "real":
+        return dict(case.judge_real)
+    if track == "oracle":
+        return dict(case.judge_oracle)
+    if track == "abstention":
+        return {} if case.judge_abstention is None else {"abstention": case.judge_abstention}
+    if track == "reasoning_mode":
+        return ({} if case.judge_reasoning_mode is None
+                else {"reasoning_mode": case.judge_reasoning_mode})
+    return {}
+
+
+def _require_judge_llm() -> None:
+    """compute_ragas 전제 확인. 못 갖췄으면 조용한 미측정 대신 즉시 실패시킨다 —
+    _ragas_track 은 비활성·키없음에 {} 를 돌려주므로, 그대로 두면 케이스가 의도한
+    지표 없이 통과해 '심판으로도 같은 라벨'을 검증한 척하게 된다."""
+    from agents.eval import llm_provider
+    from agents.eval.types import llm_eval_enabled
+    if not llm_eval_enabled():
+        raise RuntimeError("compute_ragas=True 인데 EVAL_ENABLE_LLM 이 꺼져 있다")
+    if not llm_provider.has_key():
+        raise RuntimeError("compute_ragas=True 인데 심판 LLM 키가 없다")
+
+
 def build(case: Case) -> tuple[EvalRecord, list[Chunk]]:
     """케이스 → (EvalRecord, 코퍼스 청크). set_context 까지 마친 상태로 돌려준다."""
+    if case.compute_ragas:
+        _require_judge_llm()
     chunks = build_chunks(case)
     corpus = [c for i, c in enumerate(chunks) if i not in set(case.corpus_exclude)]
 
@@ -205,16 +238,14 @@ def build(case: Case) -> tuple[EvalRecord, list[Chunk]]:
     dense = _hits(case.dense_ranking, chunks)
     lexical = _hits(case.lexical_ranking, chunks)
 
-    def ragas_fn(_record, track):
-        if track == "real":
-            return dict(case.judge_real)
-        if track == "oracle":
-            return dict(case.judge_oracle)
-        if track == "abstention":
-            return {"abstention": case.judge_abstention}
-        if track == "reasoning_mode":
-            return {"reasoning_mode": case.judge_reasoning_mode}
-        return {}
+    def ragas_fn(rec, track):
+        fixed = _fixed_judge(case, track)
+        if not case.compute_ragas:
+            return fixed
+        from agents.eval.agent import _ragas_track      # LLM 경로일 때만 import
+        computed = dict(_ragas_track(rec, track) or {})
+        computed.update(fixed)                          # 케이스에 적은 키가 계산값을 이긴다
+        return computed
 
     metrics_common.set_context(
         client=object(),

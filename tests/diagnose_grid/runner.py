@@ -21,6 +21,7 @@ from agents.eval.metrics_basic import (
     _oversized_gold_spans, _context_char_total, _gold_position_band,
 )
 from agents.eval.metrics_search import _gold_ranks, _gold_pre_rerank_ranks, _bm25_hits_gold
+from agents.eval.metrics_ragas import _faith, _faith_oracle, _rel, _rel_oracle, _ctx_precision
 from agents.eval.types import Mode
 from tests.diagnose_grid.builder import Case, build
 
@@ -51,6 +52,13 @@ def _derived(record) -> dict:
         "missed_pre_rerank_ranks": {g: pre.get(g) for g in missed},
         "gold_count": len(record.probe.gold_chunk_ids),
         "missed_count": len(missed),
+        # 심판 값 — compute_ragas 케이스에서 계산 결과가 의도한 구간에 들었는지 본다.
+        # diagnose 가 이미 트랙을 채운 뒤라 여기서 새 LLM 호출은 나지 않는다(ragas_done).
+        "faithfulness": _faith(record),
+        "oracle_faithfulness": _faith_oracle(record),
+        "response_relevancy": _rel(record),
+        "oracle_response_relevancy": _rel_oracle(record),
+        "context_precision": _ctx_precision(record),
     }
 
 
