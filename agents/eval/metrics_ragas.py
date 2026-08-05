@@ -51,6 +51,7 @@ from typing import Any, Callable
 from agents.eval import llm_provider
 from agents.eval.types import Mode, EvalRecord
 from agents.eval.metrics_common import _ctx, active_mode
+from core.llm_clients import SCHEMA_INT01, SCHEMA_STR, array_of, strict_object
 from core.parallel import parallel_map
 
 
@@ -479,21 +480,12 @@ _FUSED_BLOCKS: dict[str, tuple[str, str, Any]] = {
 #   - minimum/maximum/minLength 류 수치·길이 제약은 미지원이다. 그래서 0/1 판정은
 #     {"type":"integer"} 가 아니라 enum 으로 좁힌다 — 프롬프트 문자열 스키마보다 강하다.
 #   - 재귀 스키마는 미지원(여기선 쓰지 않는다).
-_INT01 = {"type": "integer", "enum": [0, 1]}
-
-
-def _obj(props: dict) -> dict:
-    """모든 키가 required 이고 추가 키를 막는 object 스키마. 구조적 강제의 핵심이라
-    한 곳에서만 만든다 — 블록마다 손으로 쓰면 additionalProperties 를 빠뜨리기 쉽다."""
-    return {"type": "object", "properties": props,
-            "required": list(props), "additionalProperties": False}
-
-
-def _arr(items: dict) -> dict:
-    return {"type": "array", "items": items}
-
-
-_STR = {"type": "string"}
+# 조립 헬퍼는 core 가 소유한다 — 제약이 Anthropic API 규칙이고 쓰는 곳이 여럿이라
+# (probe_gen.py 도 같은 헬퍼를 쓴다) 규칙이 갈라지지 않게 한 곳에 둔다.
+_obj = strict_object
+_arr = array_of
+_STR = SCHEMA_STR
+_INT01 = SCHEMA_INT01
 _TPFPFN_ITEM_SCHEMA = _arr(_obj({"statement": _STR, "reason": _STR}))
 
 # 블록 이름 → 그 블록이 채우는 최상위 프로퍼티들. relevancy 만 키가 2개다

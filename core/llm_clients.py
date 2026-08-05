@@ -153,6 +153,32 @@ def _anthropic_caps(model: str) -> tuple:
     return _ANTHROPIC_UNKNOWN
 
 
+# ── JSON Schema 조립 헬퍼 (output_config.format 용) ────────────────
+# Anthropic structured outputs 는 모든 object 에 additionalProperties: false 와
+# required 전량 명시를 요구한다. 하나만 빠져도 요청이 400 이고, 스키마를 쓰는 곳은
+# 여럿이라(agents/eval/metrics_ragas.py, agents/eval/probe_gen.py) 규칙의 소유자를
+# 한 곳에 둔다 — 손으로 쓰면 additionalProperties 를 빠뜨리기 쉽다.
+#
+# 미지원 키워드도 함께 기억해 둘 것: minimum/maximum/minLength/maxLength/multipleOf
+# 같은 수치·길이 제약과 재귀 스키마는 쓸 수 없다. 값의 범위를 좁혀야 하면 enum 을 쓴다.
+
+def strict_object(props: dict) -> dict:
+    """모든 키가 required 이고 추가 키를 막는 object 스키마."""
+    return {"type": "object", "properties": props,
+            "required": list(props), "additionalProperties": False}
+
+
+def array_of(items: dict) -> dict:
+    """항목 스키마가 items 인 배열."""
+    return {"type": "array", "items": items}
+
+
+SCHEMA_STR = {"type": "string"}
+SCHEMA_INT = {"type": "integer"}
+# 0/1 이진 판정. minimum/maximum 을 못 쓰므로 enum 으로 좁힌다.
+SCHEMA_INT01 = {"type": "integer", "enum": [0, 1]}
+
+
 def _openrouter_reasoning_disabled() -> bool:
     """OpenRouter 호출에서 추론 토큰을 끌지. 기본 끔(=True).
 
