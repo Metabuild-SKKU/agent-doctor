@@ -625,6 +625,53 @@ class GuardReasonAttributionTest(unittest.TestCase):
         )
 
 
+class ReversalGuardCoverageTest(unittest.TestCase):
+    """견제가 실제로 닿는 축을 못 박는다.
+
+    되돌리기 견제는 **양방향이 모두 카탈로그에 있는 축**에만 걸린다. 한쪽만 선언된
+    축(대부분의 generation 플래그)은 되돌리는 action 자체가 없어 문턱을 계산해도
+    아무 후보와 만나지 않는다. 이 사실이 문서와 어긋나면 "지켜 준다고 읽었는데 안
+    지켜지는" 축이 생기므로 테스트로 고정한다.
+    """
+
+    def _reversible_axes(self):
+        from agents.optimize import action_catalog, history
+
+        keys = set(action_catalog.ACTION_CATALOG)
+        return {
+            key.rsplit(":", 1)[0]
+            for key in keys
+            if history._reverse_action_key(key) in keys
+        }
+
+    def test_todays_reversible_axes(self):
+        self.assertEqual(
+            self._reversible_axes(),
+            {"reranker.enabled", "retriever.top_k", "chunker.chunk_size"},
+            "되돌리기 쌍이 늘거나 줄면 reversal_guard_thresholds 의 실효 범위가 "
+            "바뀐다 — docstring 과 함께 갱신할 것",
+        )
+
+    def test_one_directional_actions_produce_unreachable_thresholds(self):
+        """한쪽만 있는 축은 문턱이 나와도 매칭될 후보가 없다(무해함을 확인)."""
+        from agents.optimize import action_catalog, history
+
+        item = _kept_item(
+            "generation.require_citation:enable",
+            _config(),
+            {**_config(), "require_citation": True},
+            support=3.0,
+        )
+        thresholds = history.reversal_guard_thresholds(
+            [item], {**_config(), "require_citation": True}
+        )
+
+        self.assertIn("generation.require_citation:disable", thresholds)
+        self.assertNotIn(
+            "generation.require_citation:disable", action_catalog.ACTION_CATALOG
+        )
+
+
 class ProjectChangesIsolationTest(unittest.TestCase):
     """도착 config 계산이 원본을 오염시키지 않는다(중첩 dict 포함)."""
 

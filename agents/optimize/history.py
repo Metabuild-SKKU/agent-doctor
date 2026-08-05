@@ -377,6 +377,13 @@ def no_progress_config_fingerprints(
     state.report 는 되돌리기 전의 열화된 Eval 이라, 그걸 기준으로 삼으면 문턱이
     낮아져 이미 실패한 config 가 다시 통과한다. 복원된 config 의 점수는 이력에
     남아 있으므로 그쪽을 먼저 본다.
+
+    ⚠️ 양쪽 모두 measured_config_scores 의 **최댓값**을 쓰는데, 그 효과는 방향이
+    다르다. 후보 쪽 최댓값은 "노이즈로 낮게 나온 한 번의 측정이 멀쩡한 축을 닫지
+    않게" 하지만, 기준(현재) 쪽 최댓값은 문턱을 올려 오히려 더 많이 막는다. 후자를
+    택한 이유는 이 판정이 막는 것이 **이미 측정해 본 config 의 재측정**뿐이기
+    때문이다 — 아는 답을 다시 재는 데 iteration 을 쓰느니 보수적으로 거르는 편이
+    낫다. 새 config 는 어느 쪽으로도 걸리지 않는다.
     """
     scores = measured_config_scores(optimization_history)
     if not scores:
@@ -417,6 +424,13 @@ def reversal_guard_thresholds(
 
     반환은 {되돌리는 action key: 필요한 지지 크기}. 그 축을 뒤에 다른 처방이 덮어써
     현재 config 에 남아 있지 않으면 보호하지 않는다(지킬 이득이 이미 없다).
+
+    ⚠️ 실효 범위는 **양방향이 모두 카탈로그에 있는 축뿐**이다. 현재는 셋이다 —
+    ``reranker.enabled``·``retriever.top_k``·``chunker.chunk_size``. 나머지 방향성
+    action(대부분의 generation 플래그)은 켜는 쪽만 선언돼 있어 되돌리는 action 자체가
+    없고, 여기서 계산한 문턱은 아무 후보와도 만나지 않는다. 무해하지만, 이 함수가
+    모든 축을 지켜 준다고 읽으면 안 된다. 반대 방향 action 이 카탈로그에 추가되면
+    그 축은 자동으로 보호 범위에 들어온다.
     """
     current = canonical_config_view(index_config or {})
     thresholds: dict[str, float] = {}
