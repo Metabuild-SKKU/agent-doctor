@@ -96,7 +96,9 @@ def to_dict(case: Case) -> dict:
         "assert_derived": dict(case.assert_derived),
     }
     if case.span_grounding is not None:
-        out["gold"]["span_grounding"] = case.span_grounding
+        # Probe.metadata 와 같은 구조로 싣는다 — metrics_basic._exact_probe_gold_spans 가
+        # metadata["span_grounding"]["status"] 를 읽어 span 채택 여부를 정한다.
+        out["probe_metadata"] = {"span_grounding": {"status": case.span_grounding}}
     if case.wide_ranking is not None:
         out["retriever_candidates"] = _ranking(case.wide_ranking, chunks)
     if case.dense_ranking is not None:
