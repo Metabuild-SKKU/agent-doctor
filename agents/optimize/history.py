@@ -266,6 +266,19 @@ _INERT_WHEN_OFF: dict[str, str] = {
     "reranker.candidate_count": "reranker.enabled",
 }
 
+# 선행 조건은 있지만 **config 정체성에는 영향이 없는** 쌍. 비어 있는 것이 정상이다.
+#
+# 이 둘을 나눠 두는 이유: action_catalog 의 ``prerequisites`` 는 "이 처방을 지금 적용할
+# 수 있는가"(실행 가능성)를 말하고, 위 _INERT_WHEN_OFF 는 "이 축이 지금 파이프라인
+# 동작에 영향을 주는가"(config 정체성)를 말한다. 대개 겹치지만 같은 질문은 아니다.
+# 겹치는 것을 자동 파생하지 않고 손으로 선언하게 둔 것은, 축을 잘못 빼면 서로 다른
+# 동작이 같은 지문을 갖게 되어 **정당한 시도가 조용히 막히기** 때문이다 — 헐거운 쪽
+# (중복 측정)보다 이쪽이 훨씬 나쁘다.
+#
+# 대신 새 선행 조건이 카탈로그에 생기면 판단을 강제한다. 두 집합 중 어느 쪽에도 없는
+# 쌍이 생기면 test_prescription_oscillation 의 InertAxisContractTest 가 깨진다.
+_NOT_INERT_DESPITE_PREREQUISITE: frozenset[tuple[str, str]] = frozenset()
+
 # 되돌리기 견제(reversal guard)용 방향 쌍. 여기 없는 operation(replace/adjust)은
 # "되돌린다"를 정의할 수 없으므로 견제 대상이 아니다.
 _REVERSE_OPERATIONS: dict[str, str] = {

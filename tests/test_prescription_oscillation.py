@@ -659,6 +659,52 @@ class GuardReasonAttributionTest(unittest.TestCase):
         )
 
 
+class InertAxisContractTest(unittest.TestCase):
+    """새 gate 축이 생기면 config 정체성에서의 취급을 강제로 정하게 한다.
+
+    리뷰에서 나온 후속 관리 포인트다. `_INERT_WHEN_OFF` 가 손으로 관리되는 표라,
+    앞으로 "A 가 꺼지면 B 는 의미 없다"는 축이 추가됐는데 여기 반영되지 않으면
+    같은 종류의 재시도 문제(도착 지점이 같은데 지문이 달라 다시 측정)가 조용히
+    재발한다. 카탈로그의 선행 조건 선언과 교차 검증해 그 드리프트를 막는다.
+    """
+
+    def _prerequisite_pairs(self):
+        from agents.optimize import action_catalog
+
+        return {
+            (definition.canonical_path, gate)
+            for definition in action_catalog.ACTION_CATALOG.values()
+            for gate in definition.prerequisites
+        }
+
+    def test_every_catalog_prerequisite_has_a_decision(self):
+        from agents.optimize import history
+
+        decided = set(history._INERT_WHEN_OFF.items()) | set(
+            history._NOT_INERT_DESPITE_PREREQUISITE
+        )
+        undecided = self._prerequisite_pairs() - decided
+
+        self.assertEqual(
+            undecided,
+            set(),
+            "카탈로그에 새 선행 조건이 생겼다. 그 축이 게이트가 꺼졌을 때 파이프라인"
+            " 동작에 영향을 주지 않는다면 history._INERT_WHEN_OFF 에, 영향을 준다면"
+            " history._NOT_INERT_DESPITE_PREREQUISITE 에 넣어 판단을 남길 것"
+            " — 어느 쪽도 아니면 도착 config 기억이 두 동작을 구분하지 못하거나,"
+            " 반대로 같은 동작을 다른 config 로 오인한다",
+        )
+
+    def test_todays_inert_mapping(self):
+        from agents.optimize import history
+
+        self.assertEqual(
+            history._INERT_WHEN_OFF,
+            {"reranker.candidate_count": "reranker.enabled"},
+        )
+        self.assertEqual(history._NOT_INERT_DESPITE_PREREQUISITE, frozenset())
+
+
 class ReversalGuardCoverageTest(unittest.TestCase):
     """견제가 실제로 닿는 축을 못 박는다.
 
