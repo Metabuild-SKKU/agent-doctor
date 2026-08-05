@@ -163,9 +163,13 @@ def chat_json(
 
 
 # ── 임베딩 (metrics_ragas.py 가 사용) ─────────────────────────────
-# GitHub Models 와 OpenRouter 는 embeddings 엔드포인트를 제공하지 않는다(OpenRouter 는
-# 카탈로그 337개 중 임베딩 모델 0개 — 붙일 대상 자체가 없다). 그 조합에서는
-# OPENAI_API_KEY 로 폴백하고, 그것도 없으면 Index 가 이미 쓰는 로컬 BGE-M3 로 계산한다.
+# OpenRouter 는 임베딩 엔드포인트(/api/v1/embeddings)를 제공한다. 예전 주석은 "카탈로그에
+# 임베딩 모델 0개" 라고 적혀 있었는데 사실이 아니었다 — baai/bge-m3 를 포함해 31개가 있고,
+# bge-m3 는 $0.01/1M 이라 사실상 공짜다. Index 가 쓰는 로컬 모델과 같은 모델이고
+# 벡터도 코사인 0.99997 로 사실상 동일하다(tools/bench_embedding.py 실측).
+#
+# GitHub Models 는 여전히 임베딩 엔드포인트가 없다. 그 조합에서는 OPENAI_API_KEY 로
+# 폴백하고, 그것도 없으면 Index 가 이미 쓰는 로컬 BGE-M3 로 계산한다.
 # 셋 다 불가할 때만 결측이 된다.
 
 # 임베딩 경로 전환/불가를 실행당 한 번만 알린다. 안 그러면 probe·트랙마다 같은 줄이 찍혀
@@ -185,8 +189,11 @@ def _notify_embed_once(message: str) -> None:
 
 def _api_embeddings_available() -> bool:
     """활성 provider 로 임베딩 API 를 부를 수 있는지. 키 유무만 본다(호출은 안 한다)."""
-    if _provider() == "gemini":
+    provider = _provider()
+    if provider == "gemini":
         return bool(os.getenv("GEMINI_API_KEY"))
+    if provider == "openrouter":
+        return bool(os.getenv("OPENROUTER_API_KEY"))
     return bool(os.getenv("OPENAI_API_KEY"))
 
 
@@ -195,10 +202,14 @@ def _local_embeddings_available() -> bool:
 
     모델 로드에 실패하면 qdrant_store 는 해시 기반 벡터를 돌려준다 — 검색에서는 '품질
     저하'지만 채점에 쓰면 무의미한 코사인 값이 정상 점수처럼 리포트에 박힌다. 결측보다
-    나쁘므로 그 경우는 쓰지 않는다."""
+    나쁘므로 그 경우는 쓰지 않는다.
+
+    provider="local" 을 못 박는다. Index 의 기본 임베딩 provider 는 openrouter 라
+    그냥 물으면 "해시 fallback 아님"(=API 경로엔 그 상태가 없음)이 돌아와, 정작
+    로컬 모델이 못 뜨는 환경에서도 True 가 된다."""
     try:
         from agents.index.qdrant_store import embedding_is_fallback
-        return not embedding_is_fallback()
+        return not embedding_is_fallback(provider="local")
     except Exception:
         return False
 
@@ -212,8 +223,10 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
     """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파; rate limit 은 재시도)
 
     우선순위: 활성 provider 의 임베딩 API > 로컬 BGE-M3 > 결측(빈 리스트).
-    API 키가 있으면 기존 동작 그대로다 — 로컬은 임베딩 API 가 없는 조합
-    (OpenRouter·GitHub Models 등)에서만 쓰인다.
+    로컬은 임베딩 API 가 없는 조합(GitHub Models 등)이나 키가 없을 때만 쓰인다.
+
+    주의: provider 를 바꾸면 임베딩 모델이 바뀌고 코사인 분포도 달라진다.
+    response_relevancy 를 실행 간에 비교하려면 한 번 정한 뒤 고정할 것.
 
     로컬 폴백이 필요한 이유: response_relevancy 가 결측이면 diagnose 의
     bad_gold_answer / bad_gold_answer_oracle 이 rel 을 AND 조건으로 요구해 영구히
@@ -224,8 +237,14 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
 
     if _api_embeddings_available():
         def _do():
-            if _provider() == "gemini":
+            provider = _provider()
+            if provider == "gemini":
                 return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
+            if provider == "openrouter":
+                return _openrouter_embed(
+                    texts,
+                    model or os.getenv("EVAL_EMBED_MODEL_OPENROUTER", "baai/bge-m3"),
+                )
             return _openai_embed(texts, model or os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small"))
 
         return _run_with_retry(_do, "임베딩")
@@ -238,12 +257,14 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
             f"로컬 임베딩(BGE-M3)으로 계산합니다 — 비용 0, 외부 호출 없음. "
             f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
             f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요.")
-        return embed_batch(texts)
+        # provider 를 못 박는다 — Index 의 기본값은 openrouter 라 그냥 부르면
+        # "비용 0, 외부 호출 없음" 이라 찍어놓고 실제로는 과금 호출을 한다.
+        return embed_batch(texts, provider="local")
 
     _notify_embed_once(
-        f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없고 "
-        f"OPENAI_API_KEY 도, 로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표"
-        f"(response_relevancy)를 건너뜁니다 — bad_gold_answer 라벨도 함께 침묵합니다.")
+        f"[Eval] EVAL_LLM_PROVIDER={_provider()} 의 임베딩 키도, OPENAI_API_KEY 도, "
+        f"로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표(response_relevancy)를 "
+        f"건너뜁니다 — bad_gold_answer 라벨도 함께 침묵합니다.")
     return []
 
 
@@ -281,6 +302,13 @@ def _openrouter_generate(
 ) -> str:
     return openai_chat(
         system, user, model, json_mode=json_mode, max_output_tokens=max_output_tokens,
+        api_key=os.getenv("OPENROUTER_API_KEY"), base_url=OPENROUTER_BASE_URL, tag="Eval",
+    )
+
+
+def _openrouter_embed(texts: list[str], model: str) -> list[list[float]]:
+    return openai_embed(
+        texts, model,
         api_key=os.getenv("OPENROUTER_API_KEY"), base_url=OPENROUTER_BASE_URL, tag="Eval",
     )
 
