@@ -460,6 +460,14 @@ def filter_keep_protected_actions(
     kept: list[ActionCandidate] = []
     rejected: list[ActionCandidate] = []
     for candidate in candidates:
+        # 이미 다른 사유로 막힌 후보의 사유를 덮어쓰지 않는다. 되돌리기 action 은
+        # 롤백 직후 방문에서 전이 차단(excluded)에도 함께 걸리는 일이 흔한데, 그때
+        # 여기서 사유를 바꿔 버리면 리포트가 "지지가 부족했다"고 설명한다 — 실제로는
+        # 그 전이를 이미 시도해 봤고 나빠서 막힌 것이다. 통과시켜 두면 아래
+        # filter_ineligible_actions 가 원래 사유 그대로 rejected 로 넘긴다.
+        if candidate.status == "blocked":
+            kept.append(candidate)
+            continue
         threshold = guard_thresholds.get(candidate.action_key)
         support = candidate.score_breakdown.get("weighted_probe_support", 0.0)
         if threshold is None or (

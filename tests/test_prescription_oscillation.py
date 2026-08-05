@@ -586,5 +586,62 @@ def _stub_candidate(action_key, *, support):
     )
 
 
+class GuardReasonAttributionTest(unittest.TestCase):
+    """견제는 이미 막힌 후보의 사유를 덮어쓰지 않는다.
+
+    되돌리기 action 은 롤백 직후 방문에서 전이 차단(excluded)에도 함께 걸린다.
+    그때 사유가 바뀌면 리포트가 "지지가 부족했다"고 설명하는데, 실제로는 그 전이를
+    이미 시도해 봤고 나빠서 막힌 것이다 — 사용자에게 다른 이야기다.
+    """
+
+    def test_an_already_blocked_candidate_keeps_its_reason(self):
+        from agents.optimize import action_aggregator
+
+        candidate = _stub_candidate(DISABLE, support=1.0)
+        candidate.status = "blocked"
+        candidate.reason = "excluded"
+
+        kept, rejected = action_aggregator.filter_keep_protected_actions(
+            [candidate], {DISABLE: 7.0}
+        )
+
+        self.assertEqual(rejected, [])
+        self.assertIs(kept[0], candidate)
+        self.assertEqual(candidate.reason, "excluded")
+        self.assertNotIn("keep_protection", candidate.metadata)
+
+    def test_an_open_candidate_below_threshold_is_attributed_to_the_guard(self):
+        from agents.optimize import action_aggregator
+
+        candidate = _stub_candidate(DISABLE, support=1.0)
+
+        kept, rejected = action_aggregator.filter_keep_protected_actions(
+            [candidate], {DISABLE: 7.0}
+        )
+
+        self.assertEqual(kept, [])
+        self.assertEqual(
+            rejected[0].reason, action_aggregator.REASON_KEEP_PROTECTED_AXIS
+        )
+
+
+class ProjectChangesIsolationTest(unittest.TestCase):
+    """도착 config 계산이 원본을 오염시키지 않는다(중첩 dict 포함)."""
+
+    def test_nested_values_are_not_shared_with_the_source(self):
+        from agents.optimize import config_mapper
+
+        source = {**_config(), "rerank_candidate_policy": {"max_candidates": 50}}
+
+        projected = config_mapper.project_changes(
+            source, {"reranker.enabled": False}
+        )
+        projected["rerank_candidate_policy"]["max_candidates"] = 999
+
+        self.assertEqual(source["rerank_candidate_policy"]["max_candidates"], 50)
+        self.assertFalse(projected["use_reranker"])
+        self.assertTrue(source["use_reranker"])
+
+
 if __name__ == "__main__":
     unittest.main()

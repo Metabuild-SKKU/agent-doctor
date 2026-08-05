@@ -178,11 +178,18 @@ def project_changes(
 
     "적용해 보기 전에 도착 지점을 알아야 하는" 판정에 쓴다(예: 이미 측정해 본
     config 로 되돌아가는 처방인지). apply_config_patch 와 같은 매핑을 거치므로
-    상호배제 플래그 정리까지 실제 적용과 동일하게 반영된다.
+    상호배제 플래그 정리까지 실제 적용과 동일하게 반영된다 — 그쪽도 결국
+    ``map_changes_to_index_config`` 결과를 그대로 update 한다.
+
+    deepcopy 로 끊는다. 얕은 복사면 중첩 dict(rerank_candidate_policy 등)가 원본과
+    같은 객체라, 결과를 읽기만 하는 지금은 괜찮아도 나중에 손대는 호출자가 생기면
+    조용히 index_config 를 오염시킨다. config 는 작아 비용이 문제되지 않는다.
     """
 
     mapped_changes, _ignored_keys, _warnings = map_changes_to_index_config(changes)
-    return {**(index_config or {}), **mapped_changes}
+    projected = deepcopy(index_config or {})
+    projected.update(mapped_changes)
+    return projected
 
 
 # ConfigPatch/best_config 적용 ----------------------------------------------
