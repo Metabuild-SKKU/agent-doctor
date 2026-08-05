@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from tools.eval_ablation_report import (
+    DERIVED_PRESCRIPTIONS,
     PRESCRIPTION_ACTIONS,
     _parse_config_assignments,
     build_markdown,
@@ -135,9 +136,16 @@ class EvalAblationReportTest(unittest.TestCase):
             if prescription.get("id") and prescription.get("patch")
         }
 
-        self.assertEqual(sorted(actual - set(PRESCRIPTION_ACTIONS)), [])
-        self.assertNotIn("disable_reranker", PRESCRIPTION_ACTIONS)
-        self.assertNotIn("relax_reranker_threshold", PRESCRIPTION_ACTIONS)
+        # 모든 처방은 고정 매핑이거나 유도 전용이거나 둘 중 하나로 분류돼 있어야 한다.
+        self.assertEqual(
+            sorted(actual - set(PRESCRIPTION_ACTIONS) - DERIVED_PRESCRIPTIONS),
+            [],
+        )
+        # 방향이 갈리는 처방은 고정 매핑이 아니라 유도 전용에 있어야 한다.
+        self.assertIn("disable_reranker", DERIVED_PRESCRIPTIONS)
+        self.assertIn("relax_reranker_threshold", DERIVED_PRESCRIPTIONS)
+        # 한 처방이 양쪽에 동시에 있으면 유도 전용 선언이 무력해진다.
+        self.assertEqual(set(PRESCRIPTION_ACTIONS) & DERIVED_PRESCRIPTIONS, set())
 
     def test_sweep_candidates_are_counted_as_one_action(self):
         parsed = parse_log_text(SWEEP_LOG, source="sweep.log")

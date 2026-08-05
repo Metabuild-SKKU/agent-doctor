@@ -54,6 +54,7 @@ PRESCRIPTION_ACTIONS = {
     "increase_top_k": "top_k:increase",
     "llm_verification_pass": "verifier_on:enable",
     "lower_temperature": "generation.temperature:decrease",
+    "relax_abstention": "generation.abstention_relaxed:enable",
     "reorder_context_edges": "context_ordering:most_relevant_edges",
     "require_citation": "generation.require_citation:enable",
     "require_numeric_citation": "numeric_citation_required:enable",
@@ -68,6 +69,21 @@ PRESCRIPTION_ACTIONS = {
     "tighten_reranker_threshold": "reranker_threshold:increase",
     "upgrade_generation_model": "generation.model:upgrade",
     "widen_rerank_candidates": "rerank_candidates:increase",
+}
+
+# 방향이 실행 데이터에 따라 갈리는 처방 — PRESCRIPTION_ACTIONS 에 박으면
+# OptimizeAction.canonical_action 이 고정값으로 실제 config 변화를 덮어써
+# 리포트가 틀린 action 을 집계한다. before/after 유도에 맡긴다.
+DERIVED_PRESCRIPTIONS = {
+    # 리랭커를 되돌리는 롤백이냐 새로 끄는 적용이냐에 따라 방향이 갈린다 (66415ac)
+    "disable_reranker",
+    # 위와 같은 이유 (0616917). 지금은 rules.py 에서 주석 처리된 상태라
+    # 커버리지 검사에는 안 잡히지만, 되살아날 때 표로 가지 않도록 남겨둔다.
+    "relax_reranker_threshold",
+    # patch 가 retriever.hybrid_dense_weight="shift_to_favored_channel" 이라
+    # 실측된 우세 채널에 따라 0.7->0.8(dense) 또는 0.7->0.6(lexical) 로 갈린다.
+    # 값이 숫자라 _direction() 이 increase/decrease 를 바르게 뽑는다.
+    "rebalance_hybrid_weight",
 }
 
 SCORE_LINE_RE = re.compile(
