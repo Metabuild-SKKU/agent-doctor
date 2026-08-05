@@ -1,6 +1,6 @@
 """
 core/llm_clients.py
-LLM provider transport 공용 구현 (OpenAI / GitHub Models / OpenRouter / Gemini).
+LLM provider transport 공용 구현 (OpenAI / GitHub Models / OpenRouter / Gemini / Anthropic).
 
 agents/eval/llm_provider.py 와 agents/rag/generator.py 에 복붙돼 있던
 "클라이언트 생성 → 호출 → usage 로깅" 계층만 모은다. provider 선택·폴백 체인,
@@ -9,6 +9,11 @@ env 규약(EVAL_LLM_PROVIDER vs RAG_LLM_PROVIDER), 키 부재 처리, 재시도 
 
 GitHub Models 와 OpenRouter 는 둘 다 OpenAI 호환이라 openai_chat 의 base_url/api_key
 인자만으로 붙는다. 전용 transport 함수는 없다.
+
+Anthropic 만 전용 transport(anthropic_chat)를 둔다. OpenRouter 로 anthropic/claude-*
+를 부르면 코드 변경이 0 이지만, Messages API 의 output_config.format(json_schema)·
+prompt caching·thinking 제어에 닿을 수 없다. RAGAS fused 판정은 그 셋이 전부 필요하다
+(스키마 강제로 결손 보수 경로가 불필요해지고, 지시문 캐싱으로 입력비가 0.1 배가 된다).
 """
 from __future__ import annotations
 
@@ -81,6 +86,71 @@ _LARGE_OUTPUT_MIN_TOKENS = _REASONING_MIN_OUTPUT_TOKENS
 # Optimize 의 generation.temperature sweep 이 조용히 no-op 이 되는 걸 드러내기 위함.
 _warned_ignored_temperature: set[str] = set()
 _warn_lock = threading.Lock()
+
+# 이미 출력한 1회성 경고 키. Eval 은 스레드로 병렬 호출하므로 _warn_lock 으로 보호한다.
+_warned_once: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> bool:
+    """같은 key 의 경고를 프로세스당 한 번만 출력한다. 출력했으면 True.
+
+    probe·트랙마다 같은 줄이 찍히면 정작 봐야 할 진단 로그를 덮는다
+    (agents/eval/llm_provider.py 의 _notify_embed_once 와 같은 패턴)."""
+    with _warn_lock:
+        if key in _warned_once:
+            return False
+        _warned_once.add(key)
+    print(message)
+    return True
+
+
+# ── Anthropic 모델 능력표 ─────────────────────────────────────────
+# .env 에서 모델명만 갈아끼워도 동작하게 하려면 모델별로 갈리는 축을 코드가 알아야 한다.
+# 이 표가 없으면 갈림이 전부 "조용한 저하"로 나타난다 — haiku 로 내리면 캐시가 안 걸리고
+# (최소 4096 토큰 미달), sonnet-4-6 으로 내리면 스키마 강제가 사라져 결손 보수 경로가
+# 되살아나는데, 어느 쪽도 에러를 내지 않는다.
+#
+# 필드: (입력 $/1M, 출력 $/1M, 캐시 최소 토큰, output_config.format 지원, thinking 끌 수 있음)
+#
+# thinking 축이 특히 중요하다 — 이 transport 는 판정용이라 thinking 을 끄는 것이 기본인데:
+#   fable/mythos : {"type":"disabled"} 가 400. thinking 을 끌 수 없다(항상 켜짐).
+#   opus-5       : effort<=high 에서만 disabled 허용. effort 를 안 보내면 기본 high 라 통과.
+#   그 외        : disabled 허용.
+# 생략하면 안 된다는 점도 같이 봐야 한다 — sonnet-5/opus-5 는 thinking 을 생략하면
+# adaptive 가 켜지고, max_tokens 가 사고+본문을 함께 제한해 본문이 잘린다.
+_ANTHROPIC_MODELS: dict[str, tuple[float, float, int, bool, bool]] = {
+    # (in, out, cache_min, schema, can_disable_thinking)
+    "claude-fable-5":    (10.00, 50.00,  512, True,  False),
+    "claude-mythos-5":   (10.00, 50.00,  512, True,  False),
+    "claude-opus-5":     ( 5.00, 25.00,  512, True,  True),
+    "claude-opus-4-8":   ( 5.00, 25.00, 1024, True,  True),
+    "claude-opus-4-7":   ( 5.00, 25.00, 2048, False, True),
+    "claude-opus-4-6":   ( 5.00, 25.00, 4096, False, True),
+    "claude-opus-4-5":   ( 5.00, 25.00, 4096, True,  True),
+    # sonnet-5 정가. 2026-08-31 까지는 인트로 $2/$10 이지만 정가로 잡는다 —
+    # 추정이 과소되는 것보다 과대되는 쪽이 안전하고, 인트로가 끝나도 표를 안 고쳐도 된다.
+    "claude-sonnet-5":   ( 3.00, 15.00, 1024, True,  True),
+    "claude-sonnet-4-6": ( 3.00, 15.00, 1024, False, True),
+    "claude-sonnet-4-5": ( 3.00, 15.00, 1024, False, True),
+    "claude-haiku-4-5":  ( 1.00,  5.00, 4096, True,  True),
+}
+# 표에 없는 모델의 기본값. 신모델은 대개 현세대 규약을 따르므로 그쪽에 맞추고,
+# 단가만 None 으로 둬서 "단가 미등록" 으로 드러나게 한다(0 으로 뭉개지 않는다).
+_ANTHROPIC_UNKNOWN = (None, None, 1024, True, True)
+
+# 캐시 토큰 과금 배수(5분 TTL 기준). 쓰기는 입력가의 1.25 배, 읽기는 0.1 배다.
+# 이걸 무시하고 전부 입력가로 계산하면 캐시가 잘 걸릴수록 비용이 과대집계된다.
+_ANTHROPIC_CACHE_WRITE_MULT = 1.25
+_ANTHROPIC_CACHE_READ_MULT = 0.10
+
+
+def _anthropic_caps(model: str) -> tuple:
+    """모델 능력표 조회. 접두 매칭(긴 키 우선) — 표에 없으면 현세대 기본값."""
+    name = _bare_model_name(model)
+    for key in sorted(_ANTHROPIC_MODELS, key=len, reverse=True):
+        if name.startswith(key):
+            return _ANTHROPIC_MODELS[key]
+    return _ANTHROPIC_UNKNOWN
 
 
 def _openrouter_reasoning_disabled() -> bool:
@@ -294,6 +364,151 @@ def gemini_chat(
         out = (usage.candidates_token_count or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
         log_usage(model, usage.prompt_token_count, out, tag=tag)
     return resp.text or ""
+
+
+def _anthropic_text(content) -> str:
+    """응답 content 블록에서 text 만 이어붙인다. text 블록이 없으면 ""."""
+    return "".join(getattr(b, "text", "") or ""
+                   for b in (content or []) if getattr(b, "type", None) == "text")
+
+
+def _anthropic_cost_usd(caps: tuple, usage) -> float | None:
+    """Anthropic usage → 실제 과금 추정(USD). 단가 미등록이면 None.
+
+    캐시 토큰을 입력가 그대로 세면 안 된다 — 쓰기는 1.25 배, 읽기는 0.1 배다.
+    RAGAS 판정처럼 지시문이 매번 같은 호출은 대부분이 캐시 읽기라, 이걸 무시하면
+    실제보다 몇 배 비싸게 집계돼 "캐싱이 효과가 없다" 는 잘못된 결론이 나온다."""
+    in_rate, out_rate = caps[0], caps[1]
+    if in_rate is None or out_rate is None:
+        return None
+    fresh = getattr(usage, "input_tokens", 0) or 0
+    write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    out = getattr(usage, "output_tokens", 0) or 0
+    return (
+        fresh * in_rate
+        + write * in_rate * _ANTHROPIC_CACHE_WRITE_MULT
+        + read * in_rate * _ANTHROPIC_CACHE_READ_MULT
+        + out * out_rate
+    ) / 1_000_000
+
+
+def anthropic_chat(
+    system: str,
+    user: str,
+    model: str,
+    *,
+    json_schema: dict | None = None,
+    api_key: str | None = None,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    cache_system: bool = True,
+    tag: str = "LLM",
+) -> str:
+    """Anthropic Messages API 1회 호출 → 응답 텍스트("" 가능).
+
+    openai_chat 과 달리 **temperature 인자가 없다.** Sonnet 5 이후 세대는 기본값이 아닌
+    sampling 파라미터(temperature/top_p/top_k)를 400 으로 거부한다. 인자를 두지 않으면
+    호출부가 실수로 넘길 수도 없다 — 이 transport 는 판정·합성 전용이라 결정성을 프롬프트로
+    잡고, 온도를 흔들어야 하는 RAG 답변 생성은 애초에 이 함수를 쓰지 않는다.
+
+    json_schema 를 주면 output_config.format 으로 **스키마를 강제**한다. OpenAI 의
+    json_object 처럼 "아무 JSON" 을 강제하는 모드는 Messages API 에 없고, 개방형 스키마도
+    불가하다(additionalProperties: false 가 강제). 그래서 스키마를 안 주면 강제 없이
+    프롬프트에만 의존한다 — 그 경우 OpenRouter 로 부르는 것과 차이가 없다.
+
+    system 은 캐시 지점이다. 매 호출 동일한 지시문·스키마·few-shot 을 system 에 두고
+    질문·컨텍스트는 user 에 두면, 두 번째 호출부터 그 몫이 입력가의 0.1 배가 된다.
+    (모델별 최소 길이 미달이면 조용히 캐시가 안 걸리므로 첫 호출에서 확인해 경고한다.)"""
+    import anthropic
+
+    caps = _anthropic_caps(model)
+    _, _, cache_min, supports_schema, can_disable_thinking = caps
+
+    kwargs: dict = {}
+
+    # ── thinking: 판정에는 불필요하고, max_tokens 를 본문과 나눠 쓰므로 끄는 게 안전하다.
+    cap = max_output_tokens
+    if can_disable_thinking:
+        kwargs["thinking"] = {"type": "disabled"}
+    else:
+        # fable/mythos 계열은 thinking 을 끌 수 없다(파라미터를 보내면 400). 생략하면
+        # 항상 켜진 채로 돌고 사고 토큰이 max_tokens 를 함께 소진하므로 상한을 올려 잡는다.
+        cap = max(cap, _REASONING_MIN_OUTPUT_TOKENS)
+        _warn_once(
+            f"anthropic-thinking-{model}",
+            f"[{tag}] {model} 은 thinking 을 끌 수 없어 사고 토큰이 함께 과금됩니다 "
+            f"— 출력 상한을 {cap} 으로 올려 잡습니다(판정 비용이 크게 늘 수 있습니다).")
+
+    # ── 스키마 강제: 지원 모델에서만. 미지원 모델에서 조용히 빠지면 이 transport 를
+    #    만든 이유(결손 보수 경로 제거)가 사라지므로 반드시 알린다.
+    if json_schema:
+        if supports_schema:
+            kwargs["output_config"] = {
+                "format": {"type": "json_schema", "schema": json_schema}}
+        else:
+            _warn_once(
+                f"anthropic-schema-{model}",
+                f"[{tag}] {model} 은 output_config.format(스키마 강제)을 지원하지 않습니다 "
+                f"— JSON 은 프롬프트 지시로만 유도되고, 결손 시 보수 경로가 다시 돕니다.")
+
+    # ── 캐시 지점: system 블록. 본문이 비면 아예 보내지 않는다.
+    if system and system.strip():
+        block: dict = {"type": "text", "text": system}
+        if cache_system:
+            block["cache_control"] = {"type": "ephemeral"}
+        kwargs["system"] = [block]
+
+    client = anthropic.Anthropic(**({"api_key": api_key} if api_key else {}))
+
+    def _call(limit: int):
+        resp = client.messages.create(
+            model=model,
+            max_tokens=limit,
+            messages=[{"role": "user", "content": user}],
+            **kwargs,
+        )
+        usage = getattr(resp, "usage", None)
+        if usage:
+            fresh = getattr(usage, "input_tokens", 0) or 0
+            write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            read = getattr(usage, "cache_read_input_tokens", 0) or 0
+            # 입력 토큰은 세 갈래의 합으로 넘긴다 — fresh 만 넘기면 캐시가 잘 걸릴수록
+            # 토큰 열이 작아져 "입력이 줄었다" 는 거짓 인상을 준다(비용만 준 것이다).
+            log_usage(model, fresh + write + read,
+                      getattr(usage, "output_tokens", 0) or 0,
+                      tag=tag, cost_usd=_anthropic_cost_usd(caps, usage))
+            if cache_system and system and system.strip() and not (write or read):
+                _warn_once(
+                    f"anthropic-cache-{model}",
+                    f"[{tag}] {model} 에서 프롬프트 캐시가 걸리지 않았습니다 "
+                    f"(캐시 최소 {cache_min}토큰, 이번 입력 {fresh}토큰) "
+                    f"— 지시문이 최소 길이에 못 미치면 에러 없이 무시됩니다.")
+        return resp, _anthropic_text(getattr(resp, "content", None))
+
+    resp, content = _call(cap)
+    stop = getattr(resp, "stop_reason", None)
+
+    # 안전 분류기 거부는 HTTP 200 + stop_reason="refusal" 로 온다. content 가 비어
+    # 있으므로 여기서 안 찍으면 호출부가 "빈 응답" 으로 흡수해 원인 추적이 불가능하다.
+    if stop == "refusal":
+        details = getattr(resp, "stop_details", None)
+        print(f"[{tag}] {model} 이 요청을 거부했습니다"
+              f"(refusal, category={getattr(details, 'category', None)}).")
+        return content
+
+    # openai_chat 의 finish_reason=="length" 대응물. 잘린 JSON 은 파싱이 통째로 실패하므로
+    # 상한을 올려 딱 1회만 다시 부른다(재시도 1회 고정 = 비용 상한이 예측 가능).
+    if stop == "max_tokens" and (json_schema or not content.strip()):
+        retry_cap = _REASONING_MIN_OUTPUT_TOKENS
+        if retry_cap > cap:
+            print(f"[{tag}] {model} 응답이 출력 상한({cap})에서 잘렸습니다 "
+                  f"— 상한 {retry_cap} 으로 1회 재시도합니다.")
+            resp, content = _call(retry_cap)
+            stop, cap = getattr(resp, "stop_reason", None), retry_cap
+
+    if stop == "max_tokens":
+        print(f"[{tag}] {model} 응답이 출력 상한({cap})에서 잘렸습니다(stop_reason=max_tokens).")
+    return content
 
 
 def openai_embed(texts: list[str], model: str, *, tag: str = "LLM") -> list[list[float]]:
