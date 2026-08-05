@@ -121,7 +121,7 @@ def _warn_temperature_ignored_once(model: str, temperature: float, tag: str) -> 
           f"— Optimize 의 generation.temperature 조정도 이 모델에선 no-op 입니다.")
 
 
-def _openrouter_reported_cost(usage) -> float | None:
+def openrouter_reported_cost(usage) -> float | None:
     """OpenRouter 응답 usage 에서 실제 과금액(USD)을 꺼낸다. 없으면 None.
 
     OpenRouter 는 요청에 usage.include 를 주면 응답 usage 에 cost 를 실어 보낸다.
@@ -148,7 +148,7 @@ def _known_cost_usd(base_url: str | None, usage) -> float | None:
         return 0.0   # GitHub Models 무료 티어
     if base_url == OPENROUTER_BASE_URL:
         # 못 읽으면 None → "단가 미등록"으로 드러난다. $0 으로 뭉개지 않는다.
-        return _openrouter_reported_cost(usage)
+        return openrouter_reported_cost(usage)
     return None
 
 
@@ -296,13 +296,44 @@ def gemini_chat(
     return resp.text or ""
 
 
-def openai_embed(texts: list[str], model: str, *, tag: str = "LLM") -> list[list[float]]:
-    """OpenAI embeddings 1회 호출 → 벡터 리스트(입력 순서 유지)."""
+def openai_embed(
+    texts: list[str],
+    model: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    tag: str = "LLM",
+) -> list[list[float]]:
+    """OpenAI 호환 embeddings 1회 호출 → 벡터 리스트(입력 순서 유지).
+
+    base_url/api_key 를 주면 OpenRouter 등 OpenAI 호환 엔드포인트 겸용 —
+    openai_chat 과 같은 규약이다. OpenRouter 는 임베딩 엔드포인트에서도
+    usage.include 로 실제 과금액을 실어 보낸다(실측 확인).
+
+    재시도는 하지 않는다. 호출부가 core.llm_retry.run_with_retry 로 감쌀 것 —
+    OpenRouter 임베딩은 동시성과 무관하게 429 가 상시 섞여 나오고(실측:
+    동시 1 에서도 요청의 19%), 재시도 없이 삼키면 그 청크의 벡터가 조용히
+    빠진 컬렉션이 만들어진다."""
     from openai import OpenAI
 
-    resp = OpenAI().embeddings.create(model=model, input=texts)
+    client_kwargs = {}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    if api_key:
+        client_kwargs["api_key"] = api_key
+
+    create_kwargs: dict = {"model": model, "input": texts}
+    if base_url == OPENROUTER_BASE_URL:
+        create_kwargs["extra_body"] = {"usage": {"include": True}}
+
+    resp = OpenAI(**client_kwargs).embeddings.create(**create_kwargs)
     if resp.usage:
-        log_usage(model, resp.usage.prompt_tokens, 0, tag=tag)
+        # 임베딩은 출력 토큰이 없다. cost 를 안 넘기면 OpenRouter 유료 호출이
+        # 전부 $0 으로 조용히 집계된다.
+        log_usage(
+            model, resp.usage.prompt_tokens, 0, tag=tag,
+            cost_usd=_known_cost_usd(base_url, resp.usage),
+        )
     return [d.embedding for d in resp.data]
 
 

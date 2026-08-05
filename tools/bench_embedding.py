@@ -9,7 +9,7 @@
                  않으면 "색인은 API, 질의는 로컬" 같은 혼용은 불가능하다.
 
 비용은 추정하지 않고 OpenRouter 가 응답 usage 에 실어 보내는 실제 과금액을 읽는다
-(core.llm_clients._openrouter_reported_cost 와 같은 경로). --max-cost 를 넘으면 즉시 멈춘다.
+(core.llm_clients.openrouter_reported_cost 와 같은 경로). --max-cost 를 넘으면 즉시 멈춘다.
 
 사용 예:
     # 비용 없이 계획만 확인
@@ -53,7 +53,7 @@ try:
 except ImportError:
     pass                         # python-dotenv 없으면 셸 환경변수로만 동작
 
-from core.llm_clients import OPENROUTER_BASE_URL, _openrouter_reported_cost  # noqa: E402
+from core.llm_clients import OPENROUTER_BASE_URL, openrouter_reported_cost  # noqa: E402
 
 DEFAULT_API_MODEL = "baai/bge-m3"      # OpenRouter 철자. 로컬은 "BAAI/bge-m3"
 DEFAULT_LOCAL_MODEL = "BAAI/bge-m3"
@@ -130,13 +130,16 @@ def run_local(chunks: list[str], batch_sizes: list[int], model_name: str) -> lis
 
     print(f"\n[로컬] 모델 로드 중: {model_name} …")
     t0 = time.perf_counter()
-    warm = embed_batch(chunks[:2], model_name=model_name, batch_size=2)
+    # provider 를 못 박는다 — 기본값이 openrouter 라 그냥 부르면 "로컬 측정" 이
+    # 그대로 API 호출이 되어 비교 자체가 무의미해진다.
+    warm = embed_batch(chunks[:2], model_name=model_name, batch_size=2,
+                       provider="local")
     load_sec = time.perf_counter() - t0
 
     # ★ 중요: 모델 로드에 실패하면 embed_batch 는 조용히 해시 fallback 벡터를 낸다.
     #   그건 행렬곱을 아예 안 하므로 "로컬이 API 보다 100배 빠르다"는 완전히 틀린
     #   결과가 나온다. 반드시 여기서 걸러야 벤치마크가 의미를 갖는다.
-    if embedding_is_fallback(model_name):
+    if embedding_is_fallback(model_name, provider="local"):
         raise SystemExit(
             f"[로컬] 모델 '{model_name}' 로드 실패 → 해시 fallback 임베딩 상태다.\n"
             "       이 상태의 측정치는 무의미하므로 중단한다. sentence-transformers 설치와\n"
@@ -147,7 +150,8 @@ def run_local(chunks: list[str], batch_sizes: list[int], model_name: str) -> lis
     results = []
     for bs in batch_sizes:
         t0 = time.perf_counter()
-        embed_batch(chunks, model_name=model_name, batch_size=bs)
+        embed_batch(chunks, model_name=model_name, batch_size=bs,
+                    provider="local")
         dt = time.perf_counter() - t0
         r = LocalResult(bs, dt, len(chunks))
         results.append(r)
@@ -228,7 +232,7 @@ def _one_request(client, model: str, texts: list[str]) -> dict:
         "n": len(resp.data),
         "dim": len(resp.data[0].embedding) if resp.data else 0,
         "tokens": getattr(usage, "prompt_tokens", 0) or 0,
-        "cost": _openrouter_reported_cost(usage) if usage else None,
+        "cost": openrouter_reported_cost(usage) if usage else None,
     }
 
 
@@ -277,7 +281,8 @@ def compare_vectors(client, api_model: str, local_model: str, texts: list[str]) 
     from agents.index.qdrant_store import embedding_is_fallback
 
     print(f"\n[벡터 호환성] 같은 텍스트 {len(texts)}건을 양쪽에서 임베딩해 비교")
-    local_vecs = embed_batch(texts, model_name=local_model, batch_size=len(texts))
+    local_vecs = embed_batch(texts, model_name=local_model,
+                             batch_size=len(texts), provider="local")
     if embedding_is_fallback(local_model):
         print(f"  로컬 '{local_model}' 로드 실패(해시 fallback) — 비교는 무의미하므로 생략")
         return

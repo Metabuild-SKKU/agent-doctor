@@ -69,13 +69,21 @@ class ResolveDeviceTests(unittest.TestCase):
 
 
 class _CacheIsolated(unittest.TestCase):
-    """모델 캐시는 전역이라 테스트마다 비운다."""
+    """모델 캐시는 전역이라 테스트마다 비운다.
+
+    provider 도 local 로 고정한다 — 이 파일은 로컬 경로(장치 선택·OOM)를 다루고,
+    기본값 provider 로 두면 실행 환경의 env 에 따라 API 경로로 새어 나간다."""
 
     def setUp(self):
+        patcher = patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "local"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         store._models.clear()
         store._failed_models.clear()
+        store._tokenizers.clear()
         self.addCleanup(store._models.clear)
         self.addCleanup(store._failed_models.clear)
+        self.addCleanup(store._tokenizers.clear)
 
 
 class DeviceKeyedCacheTests(_CacheIsolated):
@@ -142,11 +150,49 @@ class CountTokensCacheTests(_CacheIsolated):
         # tokenizer.encode 는 문자 단위라 길이가 그대로 나온다.
         self.assertEqual(store.count_tokens("hello", model_name="m"), 5)
 
-    def test_falls_back_to_heuristic_when_not_loaded(self):
-        # 부작용 없는 조회여야 한다 — 여기서 지연 로드하면 모델 없는 환경에서
-        # 토큰 세기 한 번이 HF 다운로드를 유발한다(리뷰 #36).
-        self.assertGreaterEqual(store.count_tokens("a b c", model_name="m"), 1)
+    def test_falls_back_to_heuristic_when_tokenizer_unavailable(self):
+        # tokenizer 마저 못 받으면 어림짐작으로 떨어지되, 전체 모델을 지연 로드하지는
+        # 않는다 — 그러면 토큰 세기 한 번이 2.2GB 다운로드를 유발한다(리뷰 #36).
+        with patch.dict(sys.modules, {"transformers": None}), patch("builtins.print"):
+            self.assertGreaterEqual(store.count_tokens("a b c", model_name="m"), 1)
         self.assertEqual(store._models, {})
+
+    def test_tokenizer_loaded_separately_for_api_provider(self):
+        """API provider 는 전체 모델을 안 올리므로 tokenizer 만 따로 받아야 한다."""
+        fake_tf = types.ModuleType("transformers")
+        calls = []
+
+        class _AutoTokenizer:
+            @staticmethod
+            def from_pretrained(name):
+                calls.append(name)
+                return types.SimpleNamespace(encode=lambda text: list(text))
+
+        fake_tf.AutoTokenizer = _AutoTokenizer
+        with patch.dict(sys.modules, {"transformers": fake_tf}):
+            self.assertEqual(store.count_tokens("hello", model_name="m"), 5)
+            self.assertEqual(store.count_tokens("hi", model_name="m"), 2)
+
+        # 전체 모델은 올라오지 않고, tokenizer 는 한 번만 받는다.
+        self.assertEqual(store._models, {})
+        self.assertEqual(calls, ["m"])
+
+    def test_tokenizer_failure_is_cached(self):
+        # 실패를 캐시하지 않으면 청크마다 네트워크를 두드려 색인이 기어간다.
+        fake_tf = types.ModuleType("transformers")
+        calls = []
+
+        class _AutoTokenizer:
+            @staticmethod
+            def from_pretrained(name):
+                calls.append(name)
+                raise OSError("offline")
+
+        fake_tf.AutoTokenizer = _AutoTokenizer
+        with patch.dict(sys.modules, {"transformers": fake_tf}), patch("builtins.print"):
+            store.count_tokens("a b", model_name="m")
+            store.count_tokens("c d", model_name="m")
+        self.assertEqual(calls, ["m"])
 
 
 class BatchOomTests(_CacheIsolated):
