@@ -880,9 +880,13 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
             supporting_labels=["retrieval_reranker_demotion"],
             supporting_probes=["p1"],
             metadata={
+                # ⚠️ 이 파일의 점수 규약은 make_report 가 쓰는 0~100 이다(overall_score
+                # 를 그대로 _read_score 가 돌려준다). 이력 점수만 0~1 로 적으면 리포트
+                # 기준값과 스케일이 어긋나, 도착 config 기억이 "측정한 모든 config 가
+                # 현재보다 한참 나쁘다"고 오판해 멀쩡한 재시도까지 막는다.
                 "pending": False,
-                "before_score": 0.78,
-                "after_score": 0.75,
+                "before_score": 78.0,
+                "after_score": 75.0,
                 "unjudgeable": False,
             },
         )
@@ -1044,6 +1048,14 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertIn("제외된 action: [retriever.top_k:increase]", buf.getvalue())
 
     def test_rollback_then_followup_application_logs_both_prescriptions(self):
+        # 검증 대상은 "한 방문에 롤백과 새 적용이 **둘 다** 로그에 남는가"다.
+        #
+        # ⚠️ 후속 처방이 무엇인지는 바뀌었다. 롤백이 config 와 함께 진단서도 되돌리게
+        # 되면서(구멍 3), 후속은 여기서 손으로 넣은 열화 리포트(retrieval_semantic_
+        # mismatch)가 아니라 **복원된 리포트**(방문1 의 too_long_context)에서 나온다.
+        # 열화 리포트는 롤백으로 사라진 config 를 측정한 것이라 복원된 config 의 근거가
+        # 못 된다 — Eval 도 다음 방문에 롤백 진단 캐시로 같은 리포트를 돌려준다.
+        # 그래서 too_long_context 의 남은 처방(decrease_top_k)이 뽑힌다.
         state = agent.run(make_state(overall=60.0))
         state.report = make_report(40.0, label="retrieval_semantic_mismatch")
 
@@ -1055,10 +1067,10 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertEqual(
             state.optimization_history[-1].action_key,
-            "chunker.chunk_size:decrease",
+            "retriever.top_k:decrease",
         )
         self.assertIn("context.compression.enabled:enable", out)   # 롤백된 action
-        self.assertIn("chunker.chunk_size:decrease", out)          # 새로 적용된 action
+        self.assertIn("retriever.top_k:decrease", out)             # 새로 적용된 action
         self.assertIn("판정 결과: keep=false, before=60.00, after=40.00", out)
         verdict_block = out[:out.index("판정 결과: keep=false")]
         self.assertIn("Eval 결과:", verdict_block)
@@ -1068,7 +1080,7 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertNotIn("다음 단계:", verdict_block)
         self.assertLess(
             out.index("이전 처방 판정: ROLLBACK"),
-            out.index("action 적용: chunker.chunk_size:decrease"),
+            out.index("action 적용: retriever.top_k:decrease"),
         )
 
     def test_keep_then_followup_application_logs_previous_verdict(self):
@@ -1125,13 +1137,44 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         # 재색인이 검색시점 needs_reindex=False 에 덮여 사라지면 안 된다. reindex_required
         # 가 True 로 유지돼야 실제 인덱스가 baseline 청킹으로 복원된다(config/인덱스
         # 불일치 방지, 버그 A). 버그가 있으면 이 값이 False 가 된다.
-        state = agent.run(make_state(overall=60.0, label="retrieval_semantic_mismatch"))
-        pending = history.find_pending(state.optimization_history)
-        self.assertEqual(pending.action_key, "chunker.chunk_size:decrease")
-        self.assertTrue(pending.metadata["reindex_required"])   # 방문1 = index-time
+        # ⚠️ 방문1을 agent.run 으로 만들지 않고 손으로 세운다. 롤백이 config 와 함께
+        # 진단서도 되돌리게 되면서(구멍 3), 방문2의 처방은 **복원된 리포트**에서
+        # 나온다. 그래서 이 시나리오가 성립하려면 복원 대상 리포트가 검색시점 레버를
+        # 갖고 있어야 하는데, retrieval_semantic_mismatch 는 처방이 전부 index-time 이라
+        # 그 조합을 자연 선택으로는 만들 수 없다. 검증 대상은 "index-time 롤백의
+        # 재색인 요구가 검색시점 후속 처방에 덮이지 않는가"이지 어떤 라벨이 뽑히는지가
+        # 아니므로, 그 조합을 setup 으로 직접 세운다.
+        baseline = {"top_k": 4, "chunk_size": 512, "chunk_overlap": 50}
+        restored_report = make_report(60.0, label="retrieval_incomplete_enumeration")
+        state = AgentDoctorState(
+            report=make_report(50.0, label="retrieval_incomplete_enumeration"),
+            index_config={**baseline, "chunk_size": 256},
+            iteration=1,
+            max_iterations=3,
+        )
+        state.optimization_history.append(
+            OptimizationHistoryItem(
+                trial_id="t1",
+                request_id="r1",
+                iteration=1,
+                failure_labels=["retrieval_semantic_mismatch"],
+                optimizer="rules",
+                status="pending",
+                selected_prescription_id="shrink_chunk_size",
+                action_key="chunker.chunk_size:decrease",
+                supporting_labels=["retrieval_semantic_mismatch"],
+                supporting_probes=["p1"],
+                before_config=baseline,
+                after_config={**baseline, "chunk_size": 256},
+                metadata={
+                    "pending": True,
+                    "before_report": restored_report,
+                    "reindex_required": True,      # 방문1 = index-time
+                },
+            )
+        )
 
-        # 방문2: 악화 + 검색시점 라벨 → 롤백(재색인 요구) 후 MMR(재색인 불필요) 적용
-        state.report = make_report(50.0, label="retrieval_incomplete_enumeration")
+        # 방문2: 악화 → 롤백(재색인 요구) 후 검색시점 처방(재색인 불필요) 적용
         buf = StringIO()
         with redirect_stdout(buf):
             state = agent.run(state)

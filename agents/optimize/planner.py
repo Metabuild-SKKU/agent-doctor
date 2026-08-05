@@ -225,13 +225,25 @@ def _select_action(
     candidates = action_aggregator.aggregate_action_candidates(
         supports, state, exclusions=blocked_keys
     )
-    eligible, rejected = action_aggregator.filter_ineligible_actions(
+    # 유지 판정을 받은 변경을 되돌리려는 action 을 먼저 견제한다. 실행 가능성 판정
+    # 앞에 두는 이유는 사유를 섞지 않기 위해서다 — "실행할 수 없다"와 "되돌릴 근거가
+    # 부족하다"는 사용자에게 다른 이야기다.
+    guarded, guard_rejected = action_aggregator.filter_keep_protected_actions(
         candidates,
+        history.reversal_guard_thresholds(
+            state.optimization_history, state.index_config
+        ),
+    )
+    eligible, rejected = action_aggregator.filter_ineligible_actions(
+        guarded,
         state,
         backend="rules",
         runtime_capabilities=state.runtime_capabilities,
         constraints=_policy_constraints(state),
         blocked_attempts=blocked_attempts,
+        no_progress_configs=history.no_progress_config_fingerprints(
+            state.optimization_history, state.index_config, state.report
+        ),
     )
     kept, deferred = action_aggregator.resolve_action_conflicts(eligible)
     ranked = action_aggregator.rank_action_candidates(kept)
@@ -239,7 +251,7 @@ def _select_action(
     return _ActionSelection(
         selected=ranked[0] if ranked else None,
         ranked=ranked,
-        rejected=rejected,
+        rejected=[*guard_rejected, *rejected],
         deferred=deferred,
         evidence_cache=evidence_cache,
         findings_by_label=grouped,
@@ -288,6 +300,10 @@ def _rejected_action_entries(selection: _ActionSelection) -> list[dict[str, Any]
         grounding = _selected_grounding(candidate)
         if grounding:
             entry["candidate_grounding"] = grounding
+        # 되돌리기 견제는 "얼마가 필요했는데 얼마였다"까지 있어야 설명이 된다.
+        keep_protection = candidate.metadata.get("keep_protection")
+        if keep_protection:
+            entry["keep_protection"] = dict(keep_protection)
         entries.append(entry)
     return entries
 
