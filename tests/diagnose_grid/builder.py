@@ -19,17 +19,26 @@ from typing import Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from core.schema import Chunk, Probe
+from core.schema import Chunk, Document, Probe
 from agents.eval import metrics_common
 from agents.eval.types import EvalRecord, Mode
+from agents.index.agent import CHUNK_STRATEGIES
 
 
 # ── 1차 입력 ──────────────────────────────────────────────────────
 
 @dataclass
 class Doc:
+    """격자용 문서. text 를 직접 주거나 length 로 생성한다.
+
+    space_every>0 이면 그 주기로 공백을 섞는다 — Index 의 청킹이 청크마다 앞뒤 공백을
+    떼면서 좌표를 당기므로(_trimmed_slice), 공백이 있어야 청크 사이 '틈'이 재현된다.
+    그 틈이 gold span 을 boundary_split 이 아니라 uncovered 로 만든다.
+    """
     id: str
-    length: int
+    length: int = 0
+    text: Optional[str] = None
+    space_every: int = 0
 
 
 class Answer(str, Enum):
@@ -51,6 +60,7 @@ class Case:
 
     # 코퍼스 기하
     docs: list[Doc] = field(default_factory=lambda: [Doc("d1", 1200)])
+    chunk_strategy: str = "fixed"             # Index 의 CHUNK_STRATEGIES 키
     chunk_size: int = 200
     chunk_overlap: int = 0
     duplicates: list[tuple[int, int]] = field(default_factory=list)  # (사본 인덱스, 원본 인덱스)
@@ -95,37 +105,36 @@ class Case:
 
 # ── 빌드 ──────────────────────────────────────────────────────────
 
-def _doc_text(doc_id: str, length: int) -> str:
+def doc_text(doc: Doc) -> str:
     """문서 원문. 위치마다 다른 음절이 나오게 해서 near-duplicate 오탐을 막는다."""
-    seed = sum(ord(c) for c in doc_id)
-    return "".join(chr(0xAC00 + ((i * 7919 + seed * 131) % 11172)) for i in range(length))
-
-
-def _split(doc: Doc, chunk_size: int, overlap: int) -> list[tuple[int, int]]:
-    """청크 좌표 [start, end). overlap 만큼 겹치며 전진."""
-    stride = max(1, chunk_size - overlap)
-    spans = []
-    start = 0
-    while start < doc.length:
-        end = min(start + chunk_size, doc.length)
-        spans.append((start, end))
-        if end >= doc.length:
-            break
-        start += stride
-    return spans
+    if doc.text is not None:
+        return doc.text
+    seed = sum(ord(c) for c in doc.id)
+    chars = [chr(0xAC00 + ((i * 7919 + seed * 131) % 11172)) for i in range(doc.length)]
+    if doc.space_every > 0:
+        for i in range(doc.space_every - 1, len(chars), doc.space_every):
+            chars[i] = " "
+    return "".join(chars)
 
 
 def build_chunks(case: Case) -> list[Chunk]:
-    """케이스 기하로 Chunk 리스트를 만든다. 인덱스는 전체 문서를 이어붙인 순서."""
+    """Index 의 실제 청킹 전략으로 Chunk 리스트를 만든다.
+
+    청킹 규칙을 여기서 다시 구현하지 않는다 — 격자가 재려는 게 청킹 라벨이라, 구현을
+    흉내내면 정작 재야 할 것(공백 트림으로 생기는 청크 사이 틈, 전략별 청크 모양)이 빠진다.
+    chunk_id 만 격자 규약(c0, c1, ...)으로 붙인다 — 케이스가 인덱스로 청크를 참조하므로.
+    """
+    strategy = CHUNK_STRATEGIES[case.chunk_strategy]
     chunks: list[Chunk] = []
     for doc in case.docs:
-        text = _doc_text(doc.id, doc.length)
-        for start, end in _split(doc, case.chunk_size, case.chunk_overlap):
+        document = Document(doc_id=doc.id, source="grid", format="md", content=doc_text(doc))
+        for draft in strategy(document, case.chunk_size, case.chunk_overlap):
             chunks.append(Chunk(
                 chunk_id=f"c{len(chunks)}",
                 doc_id=doc.id,
-                text=text[start:end],
-                char_span=(start, end),
+                text=draft.text,
+                section=draft.section,
+                char_span=(draft.start, draft.end),
             ))
     for copy_idx, origin_idx in case.duplicates:      # 사본은 원본 텍스트를 그대로 갖는다
         chunks[copy_idx].text = chunks[origin_idx].text

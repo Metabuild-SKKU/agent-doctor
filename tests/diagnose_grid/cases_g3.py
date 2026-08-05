@@ -89,6 +89,36 @@ CASES = [
         expect={"A": "chunking_overchunking"},
     ),
 
+    # ── 섹션 경계의 좌표 틈 — gold 청크를 다 집었는데도 recall=0 이 된다 ──
+    # markdown_recursive 는 섹션마다 따로 자르고 청크 앞뒤 공백을 떼므로(Index _trimmed_slice)
+    # 섹션 경계에 좌표 틈이 남는다(실측: sample_docs/hr_policy.md 21청크 중 20건).
+    # gold span 이 그 틈을 지나면 span_recall 이 '빈틈없이 덮기'에 실패해 0 을 낸다 —
+    # 검색은 gold 청크를 전부 가져왔는데도. 그러면 A 슬롯이 열리지만 missed_gold 가 비어
+    # 구체 라벨이 전부 침묵하고, 롤업(retrieval_failure)만 남아 '검색을 고쳐라'가 나간다.
+    Case(
+        id="g3_section_gap_zeroes_recall",
+        chunk_strategy="markdown_recursive",
+        docs=[Doc("d1", text="# 가\n\n" + "정" * 120 + "\n\n# 나\n\n" + "책" * 120 + "\n")],
+        chunk_size=512, chunk_overlap=50,
+        gold_spans=[("d1", 100, 140)],           # 청크0 끝(125)과 청크1 시작(127) 사이를 지난다
+        retrieved=[0, 1],                        # gold 청크는 전부 검색됨
+        answer=Answer.WRONG, oracle_answer=Answer.GOLD_FULL,
+        assert_derived={"recall_at_k": 0.0, "uncovered": 1, "missed_count": 0},
+        expect={"A": "retrieval_failure"},
+    ),
+    Case(
+        # 대조 — 같은 문서·전략인데 span 이 틈을 안 지나면 recall=1 로 정상 판정된다.
+        id="g3_section_gap_control",
+        chunk_strategy="markdown_recursive",
+        docs=[Doc("d1", text="# 가\n\n" + "정" * 120 + "\n\n# 나\n\n" + "책" * 120 + "\n")],
+        chunk_size=512, chunk_overlap=50,
+        gold_spans=[("d1", 60, 100)],
+        retrieved=[0, 1],
+        answer=Answer.WRONG, oracle_answer=Answer.GOLD_FULL,
+        assert_derived={"recall_at_k": 1.0, "uncovered": 0},
+        expect={"C": "context_failure"},
+    ),
+
     # ── P2: span_grounding 이 chunk_fallback 이면 청킹 신호가 통째로 꺼진다 ──
     Case(
         id="g3_span_grounding_fallback",
