@@ -505,6 +505,40 @@ class RollbackPlanningInputTest(unittest.TestCase):
         applied = [item.action_key for item in state.optimization_history]
         self.assertNotIn("generation.abstention_relaxed:enable", applied)
 
+    def test_the_degraded_measurement_survives_in_history(self):
+        """되돌아가는 것은 state.report 포인터뿐 — 무엇을 쟀는지는 이력에 남는다.
+
+        리뷰에서 나온 질문이다. "마지막 Eval 결과"를 보고 싶은 소비처가 있다면
+        복원으로 그 값이 사라지는지 확인이 필요하다.
+        """
+        from agents.optimize import agent
+
+        restored_report = _report(
+            [_finding("p0", "retrieval_low_rank")], composite=78.0
+        )
+        degraded_report = _report(
+            [_finding("p13", "generation_wrongful_abstention")], composite=67.0
+        )
+        state = AgentDoctorState(
+            report=degraded_report,
+            index_config={**_config(), "abstention_strict": True},
+            optimization_history=[self._pending_item(restored_report)],
+            iteration=1,
+            max_iterations=5,
+        )
+
+        agent.run(state)
+
+        item = state.optimization_history[0]
+        self.assertEqual(item.status, "failed")
+        # 열화된 측정은 그대로 보존된다.
+        self.assertAlmostEqual(item.metadata["after_score"], 0.67)
+        self.assertEqual(item.metadata["after_composite"], 67.0)
+        self.assertTrue(item.after_metrics)
+        self.assertTrue(item.after_config["abstention_strict"])  # 측정된 config
+        # 복원되는 것은 '지금 서 있는 config 의 진단서'뿐이다.
+        self.assertIs(state.report, restored_report)
+
     def test_an_unmeasured_rollback_leaves_the_report_alone(self):
         """되돌릴 진단서가 없으면(before_report 부재) 건드리지 않는다."""
         from agents.optimize import agent

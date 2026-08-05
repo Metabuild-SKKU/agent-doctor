@@ -1653,6 +1653,12 @@ def _judge_pending_trial(
         # 복원'). 즉 한 스텝 뒤에 성립할 상태를 지금 맞춰 주는 것이지 새 값을 지어
         # 내는 것이 아니다. 측정이 없어(before_report 부재) 롤백한 경우는 되돌릴
         # 진단서 자체가 없으므로 건드리지 않는다.
+        #
+        # ⚠️ 되돌아가는 것은 **state.report 포인터뿐**이다. 열화된 측정 자체는 이 처방의
+        # 이력 항목에 그대로 남는다 — 바로 위에서 after_report 를 먼저 잡아 두고(복원 전),
+        # finalize_item 이 after_score·after_composite·after_metrics·after_config 로
+        # 기록한다. 즉 "무엇을 쟀는가"는 보존되고 "지금 서 있는 config 의 진단서가
+        # 무엇인가"만 복원된다. 마지막 Eval 원본이 필요한 소비처는 그 이력을 봐야 한다.
         if before_report is not None:
             state.report = before_report
         # 측정이 없어(unjudgeable) 롤백한 경우는 '나빴다는 증거'가 아니므로 차단
