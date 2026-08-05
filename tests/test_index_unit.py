@@ -959,7 +959,9 @@ class ModelLoadCooldownTests(unittest.TestCase):
         # 각 테스트가 깨끗한 실패 캐시에서 시작하도록 초기화한다.
         store._failed_models.clear()
         store._failed_rerankers.clear()
-        store._models.pop("m", None)
+        # 임베딩 모델 캐시 키는 (model_name, device) 다 — 장치가 달라도 같은 모델을
+        # 동시에 들고 있어야 하기 때문. 리랭커는 아직 이름만으로 캐시한다.
+        store._models.pop(("m", "cpu"), None)
         store._rerankers.pop("m", None)
         self.addCleanup(store._failed_models.clear)
         self.addCleanup(store._failed_rerankers.clear)
@@ -970,20 +972,23 @@ class ModelLoadCooldownTests(unittest.TestCase):
         with patch.dict(sys.modules, {"sentence_transformers": None}), \
              patch.object(store, "_FAILED_MODEL_RETRY_SEC", 300.0), \
              patch.object(store.time, "monotonic") as clock:
+            # device 를 고정한다 — 생략하면 실행 머신의 CUDA 유무로 캐시 키가
+            # 달라져 테스트가 환경 의존이 된다.
+            key = ("m", "cpu")
             clock.return_value = 1000.0
-            self.assertIsNone(store._get_embedding_model("m"))
-            self.assertIn("m", store._failed_models)
+            self.assertIsNone(store._get_embedding_model("m", device="cpu"))
+            self.assertIn(key, store._failed_models)
 
             # 쿨다운 중(=재시도 안 함): 실패 시각이 그대로여야 한다.
             clock.return_value = 1100.0   # +100s < 300s
-            first_failed_at = store._failed_models["m"]
-            self.assertIsNone(store._get_embedding_model("m"))
-            self.assertEqual(store._failed_models["m"], first_failed_at)
+            first_failed_at = store._failed_models[key]
+            self.assertIsNone(store._get_embedding_model("m", device="cpu"))
+            self.assertEqual(store._failed_models[key], first_failed_at)
 
             # 쿨다운 경과 후: 재시도하여 실패 시각이 갱신된다.
             clock.return_value = 1400.0   # +400s > 300s
-            self.assertIsNone(store._get_embedding_model("m"))
-            self.assertEqual(store._failed_models["m"], 1400.0)
+            self.assertIsNone(store._get_embedding_model("m", device="cpu"))
+            self.assertEqual(store._failed_models[key], 1400.0)
 
     def test_reranker_retries_after_cooldown(self):
         store = self.store

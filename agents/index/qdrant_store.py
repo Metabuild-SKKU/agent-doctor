@@ -72,11 +72,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-_models: dict[str, Any] = {}
-# model_name → 마지막 로드 실패 시각(monotonic). 실패를 영구 캐시하면 일시적
-# 원인(네트워크 등) 후에도 프로세스 내내 fallback 임베딩만 조용히 쓰게 되므로,
-# 쿨다운이 지나면 재시도한다.
-_failed_models: dict[str, float] = {}
+# (model_name, device) → 로드된 모델. 장치가 키에 들어가는 이유는 같은 모델을
+# CUDA 와 CPU 로 동시에 들고 있어야 하기 때문이다 — GPU OOM 이 계속되면 CPU 로
+# 폴백하는데, 그때 CPU 모델을 새로 로드해도 GPU 모델은 캐시에 남는다.
+# 키를 문자열과 튜플로 섞어 쓰면 같은 모델이 두 벌 상주하고(각 수 GB),
+# count_tokens 처럼 한쪽 키로만 조회하는 곳이 조용히 캐시 미스가 된다.
+_models: dict[tuple[str, str], Any] = {}
+# (model_name, device) → 마지막 로드 실패 시각(monotonic). 실패를 영구 캐시하면
+# 일시적 원인(네트워크 등) 후에도 프로세스 내내 fallback 임베딩만 조용히 쓰게
+# 되므로, 쿨다운이 지나면 재시도한다.
+_failed_models: dict[tuple[str, str], float] = {}
 _FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
 # reranker_model → 마지막 로드 실패 시각(monotonic). embedding 모델과 같은 쿨다운
 # 정책을 따른다 — 영구 캐시하면 일시적 실패 후에도 프로세스 내내 리랭킹이 죽는다.
@@ -914,52 +919,155 @@ def _fallback_embedding(text: str, vector_dim: int) -> list[float]:
     return [value / norm for value in vector]
 
 
-def _get_embedding_model(model_name: str) -> Any | None:
-    # 프로세스 내 1회 로드(전역 캐시). 실패 시 None → 호출부가 fallback 사용.
-    # 실패는 쿨다운(_FAILED_MODEL_RETRY_SEC) 후 재시도한다 — fallback 임베딩은
-    # 의미 검색이 안 되는 해시 벡터라, 이 상태로 Eval/Optimize가 돌면 점수 전체가
-    # 무효가 되므로 일시적 실패에서 반드시 복구 기회를 줘야 한다.
-    if model_name not in _models:
-        failed_at = _failed_models.get(model_name)
-        in_cooldown = (
-            failed_at is not None
-            and time.monotonic() - failed_at < _FAILED_MODEL_RETRY_SEC
+def resolve_embedding_device(device: str | None = None) -> str:
+    """요청한 임베딩 장치를 실제 사용 가능한 장치로 정규화한다.
+
+    None → env INDEX_EMBED_DEVICE(기본 auto). auto 는 CUDA 가 있으면 cuda, 없으면
+    cpu. cuda 를 명시했는데 쓸 수 없으면 경고하고 cpu 로 내린다 — 조용히 내리면
+    "GPU 로 돌리는 중" 이라 믿은 실행이 CPU 속도(실측 2 chunks/sec)로 기어간다."""
+    requested = str(
+        device if device is not None else os.getenv("INDEX_EMBED_DEVICE", "auto")
+    ).strip().lower() or "auto"
+    if requested == "auto":
+        try:
+            import torch
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+    if requested.startswith("cuda"):
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                return requested
+        except Exception:
+            pass
+        print("[Index] CUDA 를 사용할 수 없어 CPU 임베딩으로 전환합니다.")
+        return "cpu"
+    return requested
+
+
+def _load_embedding_model(
+    model_name: str,
+    device: str | None = None,
+) -> tuple[Any | None, str]:
+    """(모델, 실제 장치). 장치별로 캐시하고 실패 쿨다운·GPU→CPU 폴백을 함께 적용한다.
+
+    실패 시 None → 호출부가 fallback 사용. 실패는 쿨다운(_FAILED_MODEL_RETRY_SEC)
+    후 재시도한다 — fallback 임베딩은 의미 검색이 안 되는 해시 벡터라, 이 상태로
+    Eval/Optimize 가 돌면 점수 전체가 무효가 되므로 반드시 복구 기회를 줘야 한다."""
+    actual_device = resolve_embedding_device(device)
+    key = (model_name, actual_device)
+    cached = _models.get(key)
+    if cached is not None:
+        return cached, actual_device
+
+    failed_at = _failed_models.get(key)
+    in_cooldown = (
+        failed_at is not None
+        and time.monotonic() - failed_at < _FAILED_MODEL_RETRY_SEC
+    )
+    if in_cooldown:
+        # GPU 가 쿨다운 중이면 해시 fallback 보다 CPU 실모델이 낫다. CPU 마저
+        # 쿨다운이면 아래 재귀가 곧바로 None 을 돌려준다(무한 재귀 없음).
+        if actual_device != "cpu":
+            return _load_embedding_model(model_name, "cpu")
+        return None, actual_device
+
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        _models[key] = SentenceTransformer(model_name, device=actual_device)
+        _failed_models.pop(key, None)
+    except Exception as exc:
+        _failed_models[key] = time.monotonic()
+        if actual_device != "cpu":
+            print(
+                f"[Index] 임베딩 모델 '{model_name}' 을 {actual_device} 로 로드하지 "
+                f"못해 CPU 로 재시도합니다 ({_FAILED_MODEL_RETRY_SEC:.0f}초 후 "
+                f"{actual_device} 재시도): {exc}"
+            )
+            return _load_embedding_model(model_name, "cpu")
+        print(
+            f"[Index] 임베딩 모델 '{model_name}' 로드 실패, deterministic "
+            f"fallback 사용, {_FAILED_MODEL_RETRY_SEC:.0f}초 후 재시도: {exc}"
         )
-        if not in_cooldown:
-            try:
-                from sentence_transformers import SentenceTransformer
-
-                _models[model_name] = SentenceTransformer(model_name)
-                _failed_models.pop(model_name, None)
-            except Exception as exc:
-                _failed_models[model_name] = time.monotonic()
-                print(
-                    f"[Index] 임베딩 모델 '{model_name}' 로드 실패, deterministic "
-                    f"fallback 사용, {_FAILED_MODEL_RETRY_SEC:.0f}초 후 재시도: {exc}"
-                )
-    return _models.get(model_name)
+    return _models.get(key), actual_device
 
 
-def embedding_is_fallback(model_name: str = DEFAULT_EMBEDDING_MODEL) -> bool:
+def _get_embedding_model(
+    model_name: str,
+    device: str | None = None,
+) -> Any | None:
+    """_load_embedding_model 의 모델만 돌려주는 얇은 래퍼(기존 호출부 호환)."""
+    model, _actual_device = _load_embedding_model(model_name, device)
+    return model
+
+
+def embedding_is_fallback(
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+    device: str | None = None,
+) -> bool:
     """지금 이 모델로 임베딩하면 (해시) fallback 이 되는지 여부.
 
     호출부(index)가 청크에 임베딩 provenance 를 기록하고, 모델 복구 후 fallback 으로
-    색인된 청크를 강제 재임베딩할지 판단하는 데 쓴다. 쿨다운 중이면 로드를 시도하지
-    않으므로 계속 True 를 돌려준다(복구 시도는 쿨다운 경과 후). None → fallback."""
-    return _get_embedding_model(model_name) is None
+    색인된 청크를 강제 재임베딩할지 판단하는 데 쓴다. GPU 가 쿨다운이어도 CPU 실모델을
+    쓸 수 있으면 False 다 — 해시 벡터를 쓰는지가 기준이지 어느 장치인지가 아니다.
+    Eval 의 로컬 임베딩 가용성 판정(agents/eval/llm_provider.py)도 이 함수를 본다."""
+    return _get_embedding_model(model_name, device) is None
 
 
-def embed(
-    text: str,
-    model_name: str = DEFAULT_EMBEDDING_MODEL,
-    vector_dim: int | None = None,
-) -> list[float]:
-    # sentence-transformers가 있으면 실제 모델, 없으면 fallback을 쓴다.
-    dimension = int(vector_dim or VECTOR_DIM)
-    model = _get_embedding_model(model_name)
-    if model is None:
-        return _fallback_embedding(text, dimension)
-    return model.encode(text, normalize_embeddings=True).tolist()
+def _is_cuda_oom(exc: Exception) -> bool:
+    """PyTorch 버전별 CUDA OOM 예외 표현 차이를 흡수한다."""
+    try:
+        import torch
+
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+    except Exception:
+        pass
+    message = str(exc).lower()
+    return "cuda" in message and "out of memory" in message
+
+
+def _encode_batch(
+    model: Any,
+    texts: list[str],
+    batch_size: int,
+    device: str,
+) -> list[list[float]]:
+    """CUDA OOM 이면 배치 크기를 절반씩 줄여 같은 모델로 재시도한다.
+
+    batch_size 는 한 번에 GPU 로 올리는 양이라 OOM 의 직접 원인이고, 줄여서 다시
+    하면 대개 통과한다. 1 까지 줄여도 안 되면 포기하고 올려보낸다 — 호출부가
+    CPU 로 내린다."""
+    current_batch_size = batch_size
+    while True:
+        try:
+            vectors = model.encode(
+                texts,
+                batch_size=current_batch_size,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            return [vector.tolist() for vector in vectors]
+        except Exception as exc:
+            if not device.startswith("cuda") or not _is_cuda_oom(exc):
+                raise
+            if current_batch_size <= 1:
+                raise
+            current_batch_size = max(1, current_batch_size // 2)
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            print(
+                f"[Index] GPU 메모리 부족 — 배치 크기를 {current_batch_size} 로 "
+                f"줄여 재시도합니다."
+            )
 
 
 def embed_batch(
@@ -967,14 +1075,16 @@ def embed_batch(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
     vector_dim: int | None = None,
     batch_size: int | None = None,
+    device: str | None = None,
 ) -> list[list[float]]:
     """텍스트 리스트를 배치 인코딩한다(색인용). 결과는 입력 순서 그대로.
 
-    batch_size: None → env INDEX_EMBED_BATCH(기본 32). 1이면 텍스트별 단건
-    encode 루프로 폴백해 기존 embed() 결과와 완전히 동일하게 만든다(kill-switch).
-    질의 임베딩은 계속 단건 embed()를 쓴다 — 저장 벡터만 같은 방식으로 일괄
-    전환되므로 배치 인코딩의 float 미세차가 검색 순위 비교를 왜곡하지 않는다.
-    """
+    batch_size: None → env INDEX_EMBED_BATCH(기본 32). 1이면 모델이 텍스트별로
+    인코딩하므로 단건 embed() 와 결과가 같아진다(kill-switch).
+    device: None → env INDEX_EMBED_DEVICE(기본 auto).
+
+    CUDA OOM 은 두 단계로 흡수한다 — 먼저 배치를 절반씩 줄여 재시도하고,
+    1 까지 줄여도 안 되면 CPU 모델로 옮겨 같은 텍스트를 다시 인코딩한다."""
     if not texts:
         return []
     dimension = int(vector_dim or VECTOR_DIM)
@@ -983,17 +1093,38 @@ def embed_batch(
             batch_size = int(os.getenv("INDEX_EMBED_BATCH", "32"))
         except ValueError:
             batch_size = 32
-    model = _get_embedding_model(model_name)
+    batch_size = max(1, batch_size)
+
+    model, actual_device = _load_embedding_model(model_name, device)
     if model is None:
         return [_fallback_embedding(text, dimension) for text in texts]
-    if batch_size <= 1:
-        return [model.encode(text, normalize_embeddings=True).tolist() for text in texts]
-    return [
-        vector.tolist()
-        for vector in model.encode(
-            texts, normalize_embeddings=True, batch_size=batch_size
-        )
-    ]
+
+    try:
+        return _encode_batch(model, texts, batch_size, actual_device)
+    except Exception as exc:
+        if not actual_device.startswith("cuda") or not _is_cuda_oom(exc):
+            raise
+        print(f"[Index] GPU 메모리 부족이 계속되어 CPU 임베딩으로 전환합니다: {exc}")
+        cpu_model, cpu_device = _load_embedding_model(model_name, "cpu")
+        if cpu_model is None:
+            return [_fallback_embedding(text, dimension) for text in texts]
+        return _encode_batch(cpu_model, texts, batch_size, cpu_device)
+
+
+def embed(
+    text: str,
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+    vector_dim: int | None = None,
+    device: str | None = None,
+) -> list[float]:
+    """단건 임베딩(질의용). batch_size=1 로 embed_batch 를 한 번 타 경로를 통일한다."""
+    return embed_batch(
+        [text],
+        model_name=model_name,
+        vector_dim=vector_dim,
+        batch_size=1,
+        device=device,
+    )[0]
 
 
 def count_tokens(
@@ -1005,7 +1136,15 @@ def count_tokens(
     # (index/agent.py)는 항상 embed 뒤에 불려 모델이 이미 캐시에 있으므로 실제
     # tokenizer를 쓴다. 여기서 _get_embedding_model 로 지연 로드하면 모델 없는
     # 환경에서 HF 다운로드를 유발해 토큰 세기 한 번이 수 초 블로킹된다(리뷰 #36).
-    model = _models.get(model_name)
+    #
+    # 캐시 키가 (model_name, device) 라 장치를 모르는 여기서는 이름이 같은 항목
+    # 아무거나 쓴다 — tokenizer 는 장치와 무관하게 같다. 이름만으로 조회하면
+    # 항상 캐시 미스가 나서 실제 tokenizer 대신 어림짐작으로 조용히 떨어진다
+    # (그 토큰 수는 optimize 의 chunk_size 처방에 쓰인다).
+    model = next(
+        (value for (name, _device), value in _models.items() if name == model_name),
+        None,
+    )
     tokenizer = getattr(model, "tokenizer", None) if model is not None else None
     if tokenizer is None:
         return max(1, len(_tokens(text)))
