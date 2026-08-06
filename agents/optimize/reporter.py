@@ -83,9 +83,10 @@ def build_trial_report(
 
     if verdict.keep:
         status = "applied"
+        before, after = _display_scores(verdict)
         summary = (
             f"{subject}(으)로 점수가 "
-            f"{verdict.before_score:.1f}→{verdict.after_score:.1f}로 올라 적용을 유지했습니다."
+            f"{before:.1f}→{after:.1f}로 올라 적용을 유지했습니다."
         )
         # "지지받았다"와 "해결됐다"는 다른 사실이다. 유지된 경우에만 해결 여부를
         # 말할 수 있고(롤백은 설정을 되돌렸으므로 귀속 자체가 성립하지 않는다),
@@ -142,9 +143,10 @@ def _report_apply(
         summary = f"{_support_phrase(supporting, request)} {subject}을(를) 적용했습니다."
     elif kept:
         status = "applied"
+        before, after = _display_scores(verdict)
         summary = (
             f"{subject}(으)로 점수가 "
-            f"{verdict.before_score:.1f}→{verdict.after_score:.1f}로 올라 적용을 유지했습니다."
+            f"{before:.1f}→{after:.1f}로 올라 적용을 유지했습니다."
         )
     else:
         status = "failed"
@@ -383,6 +385,26 @@ def _next_steps_apply(kept: bool | None) -> list[str]:
     return ["변경을 반영하고 서빙을 진행합니다."]
 
 
+def _display_scores(verdict: Verdict) -> tuple[float, float]:
+    """사용자 요약에 쓰는 표시용 점수 쌍(0~100).
+
+    before_score/after_score 는 마진 판정용 탐색 신호(0~1)라 그대로 표시하면
+    "0.7→0.8" 처럼 뭉개진다. 표시용 composite(0~100)를 우선 쓰고, composite
+    미측정이면 report_view._to_100 과 같은 규약으로 탐색 신호×100 으로 폴백한다.
+    """
+    before = (
+        verdict.before_composite
+        if verdict.before_composite is not None
+        else verdict.before_score * 100
+    )
+    after = (
+        verdict.after_composite
+        if verdict.after_composite is not None
+        else verdict.after_score * 100
+    )
+    return before, after
+
+
 def _score_metadata(verdict: Verdict | None) -> dict:
     """UI 표시용 점수/위반 정보."""
     if verdict is None:
@@ -390,5 +412,9 @@ def _score_metadata(verdict: Verdict | None) -> dict:
     return {
         "before_score": verdict.before_score,
         "after_score": verdict.after_score,
+        # 표시용 종합점수(0~100). 하류 UI 가 0~1 탐색 신호를 스케일 오인하지
+        # 않도록 표시 값은 여기서 함께 싣는다(없으면 None — 미측정).
+        "before_composite": verdict.before_composite,
+        "after_composite": verdict.after_composite,
         "floor_violations": verdict.floor_violations,
     }
