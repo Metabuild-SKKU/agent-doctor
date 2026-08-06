@@ -574,6 +574,11 @@ def _gold_chunk_evidence_density(record: EvalRecord):
     chunking_underchunking 과 context_noise_interference 를 가르는 신호다.
     gold 를 안 담은 청크는 분모에서 뺀다(그건 top_k·리랭커 문제지 청크 크기 문제가 아니다).
     반환: 0~1 / 좌표·span 없으면 None.
+
+    좌표는 _chunk_char_span(트림된 쪽)을 쓴다 — _chunk_coverage_span 과 일부러 다르다.
+    여기 분모는 "청크가 실제로 담고 있는 본문의 크기"라, 트림된 공백까지 세면 밀도가
+    실제보다 낮게 나와 underchunking 으로 오진한다. 커버리지 판정(span_recall_at_k,
+    _gold_span_boundary_analysis)만 트림 전 좌표를 쓴다.
     """
     if not _ctx.chunks:
         return None
@@ -637,6 +642,11 @@ def _oversized_gold_spans(record: EvalRecord):
     청크 i 가 [i·(c-o), i·(c-o)+c) 를 덮으므로 담김 가능 조건이 L <= c 이기 때문이다(기하 사실).
     그래서 처방이 overlap 이 아니라 chunk_size 증가다 — chunking_overchunking 판별.
     반환: {"oversized_count", "max_chunk_len", "max_span_len"} / 재료 없으면 None.
+
+    좌표는 _chunk_char_span(트림된 쪽)을 쓴다 — _chunk_coverage_span 과 일부러 다르다.
+    max_chunk_len 은 chunk_size 와 견줄 값이라 청크가 실제로 담은 길이여야 한다.
+    트림 전 좌표는 섹션 사이 공백까지 품어 청크를 실제보다 크게 보이게 만들고,
+    그러면 담을 수 없는 span 을 담을 수 있다고 판정해 처방이 뒤집힌다.
     """
     if not _ctx.chunks:
         return None

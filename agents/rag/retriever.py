@@ -225,7 +225,7 @@ def _chunk_from_dict(data: dict) -> Chunk:
     original_span = data.get("original_char_span")
     if original_span is None:
         # 이 필드 이전에 색인된 청크 — char_span 으로 떨어져 기존과 같이 동작한다.
-        original_span = data.get("metadata", {}).get("original_char_span")
+        original_span = (data.get("metadata") or {}).get("original_char_span")
     if isinstance(original_span, list):
         original_span = tuple(original_span)
     return Chunk(
