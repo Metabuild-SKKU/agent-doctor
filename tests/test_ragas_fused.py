@@ -10,14 +10,17 @@ fused 는 '판정을 한 번에 받아오기'만 바꾸고 점수 계산식은 l
   4. 결손 격리/보수 — 블록 하나가 빠져도 나머지 지표는 살고, 빠진 지표만 개별 호출로 메운다.
 실제 LLM 은 부르지 않는다(_chat/_embed 스텁).
 """
+import io
 import json
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from agents.eval import metrics_ragas
+from agents.eval import llm_provider, metrics_ragas
 from agents.eval.types import EvalRecord
 from core.schema import Probe
 
@@ -65,15 +68,15 @@ class _Stub:
         self.systems: list[str] = []
 
     def chat(self, judge, prompt, max_output_tokens=None, label="",
-             system="", json_schema=None):
-        # fused 경로는 지시문을 system(캐시 지점)으로, 입력만 prompt 로 보낸다.
-        # 어느 호출인지 가리는 마커는 지시문 쪽에 있으므로 둘을 합쳐서 본다 —
-        # prompt 만 보면 fused 호출을 legacy 로 오인한다.
-        self.chat_calls.append(system + prompt)
+             cache_prefix="", json_schema=None):
+        # fused 경로는 지시문을 cache_prefix(anthropic 에서 캐시 지점)로, 입력만
+        # prompt 로 보낸다. 어느 호출인지 가리는 마커는 지시문 쪽에 있으므로 둘을
+        # 합쳐서 본다 — prompt 만 보면 fused 호출을 legacy 로 오인한다.
+        self.chat_calls.append(cache_prefix + prompt)
         self.schemas.append(json_schema)
-        self.systems.append(system)
+        self.systems.append(cache_prefix)
         for marker, reply in _LEGACY_REPLIES:
-            if marker in system + prompt:
+            if marker in cache_prefix + prompt:
                 return dict(self.fused_payload) if reply is None else dict(reply)
         return {}
 
@@ -341,6 +344,44 @@ class FusedPromptSplitTest(unittest.TestCase):
         self.assertGreater(len(real), len(oracle))
 
 
+class CachePrefixIsProviderScopedTest(unittest.TestCase):
+    """캐시 지점 분리가 anthropic 밖으로 새지 않는지.
+
+    cache_prefix 를 그냥 system 에 실으면 지시문이 user → system 으로 역할이 바뀌어,
+    캐싱과 무관한 provider 의 판정 분포까지 건드리게 된다. 여기서 막는다."""
+
+    def _sent(self, provider):
+        seen = {}
+
+        def fake(system, user, model, **kw):
+            seen.update(system=system, user=user)
+            return "{}"
+
+        env = {"EVAL_LLM_PROVIDER": provider,
+               "ANTHROPIC_API_KEY": "k", "OPENROUTER_API_KEY": "k",
+               "OPENAI_API_KEY": "k", "GEMINI_API_KEY": "k"}
+        target = {"anthropic": "anthropic_chat", "openrouter": "openai_chat",
+                  "openai": "openai_chat", "gemini": "gemini_chat"}[provider]
+        with patch.dict(os.environ, env, clear=False), \
+                patch.object(llm_provider, target, fake), \
+                redirect_stdout(io.StringIO()):
+            llm_provider.chat_json("", "INPUT", cache_prefix="PREFIX")
+        return seen
+
+    def test_anthropic_gets_prefix_as_system(self):
+        sent = self._sent("anthropic")
+        self.assertEqual(sent["system"], "PREFIX")
+        self.assertEqual(sent["user"], "INPUT")
+
+    def test_other_providers_get_one_concatenated_user_message(self):
+        # 예전(분리 전)과 바이트가 같아야 한다 — system 은 비어 있고 user 는 한 덩어리.
+        for provider in ("openrouter", "openai", "gemini"):
+            with self.subTest(provider=provider):
+                sent = self._sent(provider)
+                self.assertEqual(sent["system"], "")
+                self.assertEqual(sent["user"], "PREFIXINPUT")
+
+
 class FusedSchemaReachesTransportTest(_FusedTestBase):
     """스키마가 실제로 호출까지 도달하는지 — 조립만 되고 안 실리면 의미가 없다."""
 
@@ -351,7 +392,7 @@ class FusedSchemaReachesTransportTest(_FusedTestBase):
         self.assertIsNotNone(schema)
         self.assertEqual(schema["required"],
                          metrics_ragas._fused_required_keys(_REAL_BLOCKS))
-        # 지시문은 system(캐시 지점), 입력은 user 로 갈려야 한다.
+        # 지시문은 cache_prefix(캐시 지점), 입력은 prompt 로 갈려야 한다.
         self.assertIn("evaluation judge", self.stub.systems[0])
         self.assertNotIn("질문", self.stub.systems[0])
 

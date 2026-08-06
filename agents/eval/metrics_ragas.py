@@ -626,8 +626,9 @@ def _fused_prompt_parts(blocks: list[str], question: str, answer: str,
         # 중간에 묻히므로 끝에서 키 목록을 한 번 더 못박는다.
         #
         # anthropic(output_config.format)에서는 디코딩 단계가 키를 강제하므로 이 줄이
-        # 없어도 된다. 그래도 남겨둔다 — 프리픽스가 아니라 여기 있어서 캐시를 깨지 않고,
-        # 나머지 provider 에는 여전히 필요하다. 짧아서 비용도 무시할 수준이다.
+        # 없어도 되지만, 나머지 provider 에는 여전히 필요해서 남긴다. 위치가 프리픽스가
+        # 아니라 여기인 건 "입력 바로 뒤에서 못박는다"는 원래 의도 때문이다 — required 는
+        # 블록 구성에만 의존하므로 프리픽스에 둬도 캐시는 깨지지 않는다(무해한 선택).
         + "IMPORTANT: the JSON object MUST contain ALL of these top-level keys, even if an "
           f"array would be empty: {json.dumps(required)}. Do not omit any of them.\n"
           "Output: "
@@ -739,7 +740,7 @@ def _fused_required_keys(blocks: list[str]) -> list[str]:
 
 
 def _refetch_fused_if_incomplete(judge, d: dict, prompt: str, blocks: list[str],
-                                 system: str = "", json_schema: dict | None = None) -> dict:
+                                 cache_prefix: str = "", json_schema: dict | None = None) -> dict:
     """필수 키가 빠졌으면 같은 프롬프트로 딱 1회 다시 받아 채운다.
 
     누락은 모델의 간헐적 비준수다 — json_object 모드가 스키마를 강제하지 않아서, 같은
@@ -763,7 +764,7 @@ def _refetch_fused_if_incomplete(judge, d: dict, prompt: str, blocks: list[str],
         return d
     print(f"[Eval] RAGAS fused 응답에 키 누락 {absent} → 같은 프롬프트로 1회 재요청")
     retry = _chat(judge, prompt, max_output_tokens=_fused_max_tokens(),
-                  label="fused.refetch", system=system, json_schema=json_schema)
+                  label="fused.refetch", cache_prefix=cache_prefix, json_schema=json_schema)
     if not retry:
         return d
     # 재요청분으로 빈 자리만 메운다 — 처음 받은 값이 더 신뢰할 근거는 없지만, 바꿔 끼우면
@@ -809,9 +810,9 @@ def _fused_track(judge, question: str, answer: str, contexts: list[str], referen
     prefix, user_input = _fused_prompt_parts(blocks, question, answer, contexts, reference)
     schema = _fused_json_schema(blocks)
     d = _chat(judge, user_input, max_output_tokens=_fused_max_tokens(),
-              label="fused", system=prefix, json_schema=schema) if blocks else {}
+              label="fused", cache_prefix=prefix, json_schema=schema) if blocks else {}
     d = _refetch_fused_if_incomplete(judge, d, user_input, blocks,
-                                     system=prefix, json_schema=schema)
+                                     cache_prefix=prefix, json_schema=schema)
 
     out: dict = {}
     if not has_answer:
@@ -1272,17 +1273,18 @@ def _average_precision(verdicts: list[int]) -> float:
     return numerator / denominator
 
 def _chat(judge, prompt: str, max_output_tokens: int | None = None, label: str = "",
-          system: str = "", json_schema: dict | None = None) -> dict:
+          cache_prefix: str = "", json_schema: dict | None = None) -> dict:
     """RAGAS 형식 프롬프트를 JSON 강제로 호출 → dict. 실패 시 {}.
 
     max_output_tokens 는 fused 처럼 응답 구조가 큰 호출만 명시한다(미지정=provider 기본).
     label 은 실패 로그에 찍히는 호출 이름 — 호출부가 여럿인데 로그가 전부 같은 문구라
     어느 지표의 심판이 죽었는지 못 가렸다(정답 판정 degrade 원인 추적).
 
-    system 은 anthropic 에서 **캐시 지점**이 된다 — 매 호출 동일한 지시문을 여기 두고
-    가변 입력만 prompt 로 보내면 두 번째 호출부터 그 몫이 입력가의 0.1 배다. 다른
-    provider 에서는 그냥 system 메시지라 동작이 같다. 기본값 "" 은 기존 호출부(지표별
-    legacy 경로)가 한 덩어리 프롬프트를 그대로 쓰게 둔다.
+    cache_prefix 는 매 호출 동일한 앞부분이다. anthropic 에서만 system 블록으로 올라가
+    캐시 지점이 되고(두 번째 호출부터 그 몫이 입력가의 0.1 배), 다른 provider 에서는
+    prompt 앞에 도로 붙어 예전과 바이트가 같은 한 덩어리가 된다 — 캐싱과 무관한
+    provider 의 프롬프트를 바꾸지 않기 위해서다. 기본값 "" 은 기존 호출부(지표별 legacy
+    경로)가 한 덩어리 프롬프트를 그대로 쓰게 둔다.
 
     json_schema 도 anthropic 전용이다(output_config.format). 나머지 provider 는 무시한다."""
     kwargs: dict = {"label": label}
@@ -1290,7 +1292,9 @@ def _chat(judge, prompt: str, max_output_tokens: int | None = None, label: str =
         kwargs["max_output_tokens"] = max_output_tokens
     if json_schema is not None:
         kwargs["json_schema"] = json_schema
-    return llm_provider.chat_json(system, prompt, **kwargs)
+    if cache_prefix:
+        kwargs["cache_prefix"] = cache_prefix
+    return llm_provider.chat_json("", prompt, **kwargs)
 
 
 def _embed(judge, texts: list[str]) -> list[list[float]]:
