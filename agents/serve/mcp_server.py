@@ -7,22 +7,31 @@ Agent Doctor MCP server.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
 import time
-import importlib.util
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import requests
 
+
 def _fastmcp_available() -> bool:
     try:
         return importlib.util.find_spec("mcp.server.fastmcp") is not None
     except (ModuleNotFoundError, ValueError):
         return False
+
+
+def _missing_fastmcp_message() -> str:
+    return (
+        "MCP 실행에는 `mcp.server.fastmcp.FastMCP`가 필요합니다. "
+        "`pip install 'mcp[cli]<2'`로 MCP 1.x를 설치하거나, "
+        "MCP 2.x용 서버 구현(`mcp.server.mcpserver.MCPServer`)으로 갱신하세요."
+    )
 
 
 if _fastmcp_available():
@@ -41,7 +50,7 @@ else:  # pragma: no cover - 테스트 환경에서 mcp 패키지가 없는 경�
             return decorator
 
         def run(self, *, transport: str = "stdio") -> None:
-            raise RuntimeError("MCP 실행에는 `mcp[cli]` 패키지가 필요합니다.")
+            raise RuntimeError(_missing_fastmcp_message())
 
 
 def _log(message: str) -> None:
@@ -78,7 +87,6 @@ SNIPPET_CHARS = _env_int("AGENT_DOCTOR_MCP_SNIPPET_CHARS", 0, minimum=0)
 mcp = FastMCP("agent-doctor")
 
 _api_autostart_attempted = False
-_api_autostart_process: subprocess.Popen | None = None
 
 
 def _is_local_api() -> bool:
@@ -110,7 +118,7 @@ def _api_get(
 
 def _ensure_api_running() -> bool:
     """로컬 MCP 데모에서 Serve API가 꺼져 있으면 chunks.json으로 자동 기동한다."""
-    global _api_autostart_attempted, _api_autostart_process
+    global _api_autostart_attempted
 
     if _health_ok():
         return True
@@ -128,7 +136,7 @@ def _ensure_api_running() -> bool:
         return False
 
     api_py = Path(__file__).parent / "api.py"
-    _api_autostart_process = subprocess.Popen(
+    subprocess.Popen(
         [
             sys.executable,
             str(api_py),

@@ -74,7 +74,6 @@ class ServeMcpTests(unittest.TestCase):
             patch.object(mcp_server, "AUTO_START_API", True),
             patch.object(mcp_server, "STARTUP_RETRIES", 0),
             patch.object(mcp_server, "_api_autostart_attempted", False),
-            patch.object(mcp_server, "_api_autostart_process", None),
             patch.object(mcp_server, "_health_ok", return_value=False),
             patch.object(mcp_server.subprocess, "Popen") as popen,
         ):
@@ -86,11 +85,17 @@ class ServeMcpTests(unittest.TestCase):
     def test_default_snippet_limit_keeps_full_chunk_text(self):
         text = "가" * 900
 
-        self.assertEqual(text, mcp_server._shorten(text, limit=0))
+        self.assertEqual(text, mcp_server._shorten(text))
 
     def test_invalid_integer_env_uses_default_without_import_failure(self):
         with patch.dict("os.environ", {"AGENT_DOCTOR_MCP_MAX_TOP_K": "not-int"}):
             self.assertEqual(20, mcp_server._env_int("AGENT_DOCTOR_MCP_MAX_TOP_K", 20))
+
+    def test_missing_fastmcp_message_names_supported_mcp_version(self):
+        message = mcp_server._missing_fastmcp_message()
+
+        self.assertIn("mcp.server.fastmcp.FastMCP", message)
+        self.assertIn("mcp[cli]<2", message)
 
     def test_search_docs_delegates_query_and_top_k_to_serve_api(self):
         payload = {

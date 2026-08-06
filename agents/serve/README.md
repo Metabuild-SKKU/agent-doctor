@@ -164,6 +164,9 @@ agents/serve/
 | `ask_docs(query, top_k=5)` | 검색 + RAG 답변 생성 (`/answer` 호출, 출처 포함) |
 | `list_documents()` | 인덱싱된 문서 목록 조회 |
 
+`health_check()`는 상태 조회 전용이라 로컬 API 자동 기동을 시도하지 않는다.
+로컬 API가 꺼져 있으면 `search_docs`, `ask_docs`, `list_documents` 호출 시 한 번만 자동 기동을 시도한다.
+
 ---
 
 ## MCP 환경 변수
