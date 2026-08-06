@@ -1,0 +1,182 @@
+"""
+tests/test_clean_qa_gold.py
+골든 QA 정제 — 골드가 '정답이 실제로 있는 좁은 구간'을 가리키는지 고정한다.
+
+배경: qa_pairs.jsonl 의 골드는 정답 위치가 아니라 **정답이 든 청크 통째**(중앙값 497자,
+정답은 7자)를 가리킨다. span_recall_at_k 는 그 구간을 빈틈없이 덮어야 1점을 주는 이진
+판정이라, corpus 청크 경계와 Index 재청킹 경계가 다르면 정답을 맞힌 실행도 recall=0 이
+된다. 실측(corpus_20260804_103059) 30문항 중 4건(13%)이 그랬다.
+
+더 나쁜 건 골드가 **엉뚱한 곳**을 가리키는 경우다 — 정답 텍스트를 문서에서 다시 찾는
+방식이라 표 문서에서 같은 값이 여러 행에 나오면 앞의 것에 꽂힌다.
+
+    "파스칼레 소틸레의 스파이크 높이는?" → "332cm" 가 문서에 8곳
+    골드 1188~2028(다른 선수) vs 실제 5268("소틸레" 는 문서에 1회)
+
+여기서 고정하는 계약은 둘이다.
+  - 로더는 명시 gold_spans 를 우선하되, 없으면 기존 청크 id 환산으로 흐른다(하위호환)
+  - 빌더는 정답이 문서에 **정확히 한 번** 나오는 QA 만 남기고 골드를 그 위치로 좁힌다
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+import unittest
+import pathlib
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from agents.eval.datasets.korquad import _gold_spans_of
+from tools.build_clean_qa import build, covering_chunk_ids
+
+
+class GoldSpanResolutionTest(unittest.TestCase):
+    """로더 — 명시 좌표 우선, 없으면 청크 환산."""
+
+    SPAN_OF = {("d1", "d1_0"): (0, 500), ("d1", "d1_1"): (450, 950)}
+
+    def test_explicit_spans_win_over_chunk_ids(self):
+        qa = {"gold_spans": [{"doc_id": "d1", "start": 300, "end": 306}],
+              "positive_chunk_ids": ["d1_0", "d1_1"]}
+        self.assertEqual(_gold_spans_of(qa, "d1", self.SPAN_OF),
+                         [{"doc_id": "d1", "start": 300, "end": 306}])
+
+    def test_falls_back_to_chunk_ids(self):
+        """기존 qa_pairs.jsonl 이 그대로 돌아야 한다 — 정제본은 선택이지 강제가 아니다."""
+        qa = {"positive_chunk_ids": ["d1_0", "d1_1"]}
+        self.assertEqual(_gold_spans_of(qa, "d1", self.SPAN_OF),
+                         [{"doc_id": "d1", "start": 0, "end": 500},
+                          {"doc_id": "d1", "start": 450, "end": 950}])
+
+    def test_malformed_spans_fall_back_instead_of_yielding_empty(self):
+        """좌표가 깨졌는데 빈 골드로 흘리면 recall 이 조용히 미측정(None)이 된다."""
+        qa = {"gold_spans": [{"start": "300", "end": None}],
+              "positive_chunk_ids": ["d1_0"]}
+        self.assertEqual(_gold_spans_of(qa, "d1", self.SPAN_OF),
+                         [{"doc_id": "d1", "start": 0, "end": 500}])
+
+    def test_reversed_or_negative_span_is_rejected(self):
+        qa = {"gold_spans": [{"doc_id": "d1", "start": 400, "end": 100}],
+              "positive_chunk_ids": ["d1_0"]}
+        self.assertEqual(_gold_spans_of(qa, "d1", self.SPAN_OF),
+                         [{"doc_id": "d1", "start": 0, "end": 500}])
+
+    def test_unknown_chunk_id_is_dropped(self):
+        qa = {"positive_chunk_ids": ["d1_0", "d1_없음"]}
+        self.assertEqual(len(_gold_spans_of(qa, "d1", self.SPAN_OF)), 1)
+
+
+class CleanQaBuilderTest(unittest.TestCase):
+    """빌더 — 모호한 정답을 걸러내고 골드를 정답 위치로 좁힌다."""
+
+    # "332cm" 가 두 번 나오는 표 문서(실제 실패 사례의 축소판)와, 한 번만 나오는 문서.
+    DOC_TABLE = "가" * 100 + "선수A 332cm " + "나" * 300 + "소틸레 332cm " + "다" * 100
+    DOC_UNIQUE = "라" * 200 + "정답은 MKS 벵진 이다" + "마" * 200
+
+    def _write(self, tmp, corpus_rows, qa_rows):
+        cp = pathlib.Path(tmp) / "corpus.jsonl"
+        qp = pathlib.Path(tmp) / "qa.jsonl"
+        op = pathlib.Path(tmp) / "out.jsonl"
+        cp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in corpus_rows),
+                      encoding="utf-8")
+        qp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in qa_rows),
+                      encoding="utf-8")
+        return str(cp), str(qp), str(op)
+
+    def _corpus(self, doc_id, text, size=200):
+        return [{"doc_id": doc_id, "chunk_id": f"{doc_id}_{i // size}", "title": "t",
+                 "text": text[i:i + size], "char_start": i, "char_end": min(i + size, len(text))}
+                for i in range(0, len(text), size)]
+
+    def _run(self, corpus_rows, qa_rows, **kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            cp, qp, op = self._write(tmp, corpus_rows, qa_rows)
+            stats = build(cp, qp, op, kw.get("max_answer", 50), kw.get("min_answer", 2))
+            rows = [json.loads(l) for l in open(op, encoding="utf-8") if l.strip()]
+        return rows, stats
+
+    def test_ambiguous_answer_is_dropped(self):
+        """정답이 여러 곳이면 어느 쪽이 정답인지 모르므로 골드를 만들 수 없다."""
+        rows, stats = self._run(
+            self._corpus("d1", self.DOC_TABLE),
+            [{"qa_id": "1", "question": "소틸레의 높이는?", "answer_text": "332cm",
+              "doc_id": "d1", "positive_chunk_ids": ["d1_0"]}])
+        self.assertEqual(rows, [])
+        self.assertEqual(stats["정답이 여러 곳(모호)"], 1)
+
+    def test_unique_answer_gets_a_narrow_gold(self):
+        rows, _ = self._run(
+            self._corpus("d2", self.DOC_UNIQUE),
+            [{"qa_id": "2", "question": "어느 팀?", "answer_text": "MKS 벵진",
+              "doc_id": "d2", "positive_chunk_ids": ["d2_0", "d2_1", "d2_2"]}])
+        self.assertEqual(len(rows), 1)
+        span = rows[0]["gold_spans"][0]
+        # 골드 폭이 정답 길이와 같다 — 청크 통째(200자)가 아니라.
+        self.assertEqual(span["end"] - span["start"], len("MKS 벵진"))
+        self.assertEqual(self.DOC_UNIQUE[span["start"]:span["end"]], "MKS 벵진")
+
+    def test_positive_chunk_ids_are_rebuilt_not_inherited(self):
+        """원본의 넓은(때로 엉뚱한) 청크 목록을 그대로 물려주면 하위호환 경로가 계속 틀린다."""
+        rows, _ = self._run(
+            self._corpus("d2", self.DOC_UNIQUE),
+            [{"qa_id": "2", "question": "어느 팀?", "answer_text": "MKS 벵진",
+              "doc_id": "d2", "positive_chunk_ids": ["d2_0", "d2_1", "d2_2"]}])
+        self.assertLess(len(rows[0]["positive_chunk_ids"]), 3)
+        self.assertNotIn("d2_0", rows[0]["positive_chunk_ids"])   # 정답은 뒤쪽에 있다
+
+    def test_long_answer_is_dropped(self):
+        """1회 등장 필터는 긴 서술형 정답 쪽으로 치우친다 — char-F1 이 요약을 오답으로 깎는다."""
+        long_answer = "정답" * 40                       # 80자
+        text = "바" * 50 + long_answer + "사" * 50
+        rows, stats = self._run(
+            self._corpus("d3", text),
+            [{"qa_id": "3", "question": "왜?", "answer_text": long_answer,
+              "doc_id": "d3", "positive_chunk_ids": ["d3_0"]}])
+        self.assertEqual(rows, [])
+        self.assertEqual(stats["정답이 50자 초과"], 1)
+
+    def test_too_short_answer_is_dropped(self):
+        """1~2자 정답은 우연 일치라 '1회 등장' 판정 자체를 못 믿는다."""
+        rows, stats = self._run(
+            self._corpus("d4", "아" * 100 + "2" + "자" * 100),
+            [{"qa_id": "4", "question": "몇 회?", "answer_text": "2",
+              "doc_id": "d4", "positive_chunk_ids": ["d4_0"]}])
+        self.assertEqual(rows, [])
+        self.assertEqual(stats["정답이 2자 미만"], 1)
+
+    def test_answer_absent_from_document_is_dropped(self):
+        rows, stats = self._run(
+            self._corpus("d5", "차" * 300),
+            [{"qa_id": "5", "question": "?", "answer_text": "없는정답",
+              "doc_id": "d5", "positive_chunk_ids": ["d5_0"]}])
+        self.assertEqual(rows, [])
+        self.assertEqual(stats["정답이 문서에 없음"], 1)
+
+    def test_output_is_loadable_by_the_loader_contract(self):
+        """빌더가 쓴 형식을 로더가 그대로 읽어야 한다 — 두 파일이 어긋나면 조용히 폴백한다."""
+        rows, _ = self._run(
+            self._corpus("d2", self.DOC_UNIQUE),
+            [{"qa_id": "2", "question": "어느 팀?", "answer_text": "MKS 벵진",
+              "doc_id": "d2", "positive_chunk_ids": ["d2_0"]}])
+        resolved = _gold_spans_of(rows[0], "d2", {})     # span_of 가 비어도 명시 좌표로 해결
+        self.assertEqual(resolved, rows[0]["gold_spans"])
+
+
+class CoveringChunkIdsTest(unittest.TestCase):
+    SPANS = [("c0", 0, 100), ("c1", 100, 200), ("c2", 200, 300)]
+
+    def test_picks_only_overlapping_chunks(self):
+        self.assertEqual(covering_chunk_ids(self.SPANS, 150, 160), ["c1"])
+
+    def test_span_across_a_boundary_needs_both(self):
+        self.assertEqual(covering_chunk_ids(self.SPANS, 95, 105), ["c0", "c1"])
+
+    def test_touching_edge_does_not_count(self):
+        """[100,105) 는 c0 의 끝(100)에 닿기만 한다 — 겹침이 아니다."""
+        self.assertEqual(covering_chunk_ids(self.SPANS, 100, 105), ["c1"])
+
+
+if __name__ == "__main__":
+    unittest.main()
