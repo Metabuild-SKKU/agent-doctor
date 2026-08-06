@@ -4,9 +4,10 @@ from __future__ import annotations
 진단 fixture 러너.
 
 JSONL 한 줄을 하나의 QAR/gold/retrieval 케이스로 읽어 diagnose 라벨을 검증한다.
-이 테스트는 LLM·인덱스를 띄우지 않는 단위 테스트이며, 실제 retriever 배선 계약은 별도
-통합 테스트에서 다룬다. 규칙 지표(recall/f1/oracle_f1)는 fixture 숫자를 믿지 않고
-항상 텍스트·청크 좌표에서 계산한다.
+이 테스트는 새 파이프라인을 만들지 않고, Eval agent가 쓰는 `_prepare_record()`와
+`diagnose()`를 그대로 호출한다. 규칙 지표(recall/f1/oracle_f1)는 fixture 숫자를 믿지 않고
+항상 텍스트·청크 좌표에서 계산한다. RAGAS/AspectCritic처럼 LLM judge가 필요한 케이스는
+fixture에 점수를 박지 않고, `EVAL_DIAGNOSIS_USE_LLM=1`일 때 실제 judge로 계산한다.
 """
 
 import json
@@ -14,12 +15,20 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.schema import Chunk, Probe
 from agents.eval import diagnose, metrics_common
 from agents.eval.agent import _prepare_record
+from agents.eval.metrics_ragas import (
+    evaluate_abstention,
+    evaluate_oracle_track,
+    evaluate_real_track,
+    evaluate_reasoning_mode,
+    _judge as _ragas_judge,
+)
 from agents.eval.types import EvalRecord, Mode
 
 
@@ -33,6 +42,8 @@ RULE_METRIC_KEYS = {
     "raw_oracle_f1",
     "exact_match",
 }
+JUDGE_METRIC_KEYS = {"ragas", "oracle_ragas", "aspect"}
+TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 class _FakeRetriever:
@@ -153,6 +164,51 @@ def _expected_labels(case: dict) -> list[str]:
     return list(case["expected_labels"])
 
 
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in TRUE_VALUES
+
+
+def _case_requires_llm(case: dict) -> bool:
+    return bool(case.get("requires_llm"))
+
+
+def _llm_fixture_enabled() -> bool:
+    return _env_flag("EVAL_DIAGNOSIS_USE_LLM")
+
+
+def _llm_required() -> bool:
+    return _env_flag("EVAL_DIAGNOSIS_REQUIRE_LLM")
+
+
+def _llm_unavailable_reason(case: dict) -> str | None:
+    if not _case_requires_llm(case):
+        return None
+    if not _llm_fixture_enabled():
+        return "requires_llm case; set EVAL_DIAGNOSIS_USE_LLM=1 to run judge-backed label check"
+    if _ragas_judge() is None:
+        message = (
+            "requires_llm case but no Eval judge key is configured "
+            "(set EVAL_LLM_PROVIDER and the provider API key)"
+        )
+        if _llm_required():
+            raise AssertionError(message)
+        return message
+    return None
+
+
+def _llm_ragas_track(record: EvalRecord, track: str) -> dict:
+    judge = _ragas_judge()
+    if judge is None:
+        return {}
+    if track == "oracle":
+        return evaluate_oracle_track(record, judge) if record.oracle_answer is not None else {}
+    if track == "abstention":
+        return evaluate_abstention(record, judge)
+    if track == "reasoning_mode":
+        return evaluate_reasoning_mode(record, judge) if record.oracle_answer is not None else {}
+    return evaluate_real_track(record, judge)
+
+
 def _probe_metadata(case: dict) -> dict:
     metadata: dict = {}
     nested_probe = case.get("probe")
@@ -175,19 +231,6 @@ def _optional_retriever(case: dict, key: str):
     if key not in case:
         return None
     return _FakeRetriever(case.get(key) or [])
-
-
-def _case_metrics(case: dict) -> dict:
-    metrics = dict(case.get("metrics") or {})
-    for key in ("ragas", "oracle_ragas", "aspect"):
-        if key in case:
-            metrics[key] = case[key]
-    illegal = sorted(RULE_METRIC_KEYS & set(metrics))
-    if illegal:
-        raise AssertionError(
-            f"rule metrics must be computed by the runner, not fixture values: {illegal}"
-        )
-    return metrics
 
 
 def _record_from_case(case: dict) -> EvalRecord:
@@ -224,26 +267,18 @@ def _record_from_case(case: dict) -> EvalRecord:
     record.oracle_answer = case.get("oracle_answer", qar.get("oracle_answer", gold.get("answer")))
     if "oracle_context" in case:
         record.oracle_context = list(case["oracle_context"])
-
-    metrics = _case_metrics(case)
-    if "ragas" in metrics:
-        record.ragas = dict(metrics["ragas"])
-        record.ragas_done = True
-    if "oracle_ragas" in metrics:
-        record.oracle_ragas = dict(metrics["oracle_ragas"])
-        record.oracle_ragas_done = True
-    if "aspect" in metrics or "aspect" in case:
-        record.aspect = dict(metrics.get("aspect", case.get("aspect", {})))
     return record
 
 
 def _run_case(case: dict) -> list[str]:
     config = case.get("config", {})
+    use_llm = _case_requires_llm(case) and _llm_fixture_enabled() and _ragas_judge() is not None
     metrics_common.set_context(
         chunks=_fixture_chunks(case),
         retrieve_fn=_optional_retriever(case, "retriever_candidates"),
         dense_fn=_optional_retriever(case, "dense_candidates"),
         keyword_fn=_optional_retriever(case, "keyword_candidates"),
+        ragas_fn=_llm_ragas_track if use_llm else None,
         wide_n=int(config.get("wide_n", 100)),
         rerank_candidates=int(config.get("rerank_candidates", 20)),
         max_rerank_candidates=int(config.get("max_rerank_candidates", 50)),
@@ -264,9 +299,19 @@ class EvalDiagnosisPipelineFixtureTest(unittest.TestCase):
 
     def test_fixture_cases_match_expected_labels(self):
         self.assertTrue(self.cases, "at least one diagnosis fixture is required")
+        evaluated = 0
         for case in self.cases:
             with self.subTest(case=case.get("case_id"), source=case.get("_source")):
+                reason = _llm_unavailable_reason(case)
+                if reason:
+                    continue
+                evaluated += 1
                 self.assertEqual(sorted(_expected_labels(case)), sorted(_run_case(case)))
+        self.assertGreater(
+            evaluated,
+            0,
+            "at least one non-LLM or judge-enabled diagnosis fixture must be evaluated",
+        )
 
     def test_fixture_cases_carry_review_inputs(self):
         for case in self.cases:
@@ -279,10 +324,10 @@ class EvalDiagnosisPipelineFixtureTest(unittest.TestCase):
                 self.assertNotIn("expected_label", case)
 
                 metrics = case.get("metrics") or {}
-                self.assertFalse(
-                    RULE_METRIC_KEYS & set(metrics),
-                    "recall/f1/oracle_f1/exact_match은 fixture에 쓰지 않고 runner가 계산한다",
-                )
+                self.assertFalse(RULE_METRIC_KEYS & set(metrics))
+                self.assertFalse(JUDGE_METRIC_KEYS & set(metrics))
+                for key in JUDGE_METRIC_KEYS:
+                    self.assertNotIn(key, case)
 
                 # top_k는 retriever cut에만 쓰이고 diagnose는 len(retrieved_chunk_ids)를 본다.
                 # 그래서 fixture가 top_k를 적으면 retrieved 길이와 맞춰 두어야 한다.
@@ -369,10 +414,6 @@ class EvalDiagnosisPipelineFixtureTest(unittest.TestCase):
             "retriever_candidates": [
                 {"chunk_id": "retrieved_chunk", "text": "The retrieved fact is different."}
             ],
-            "metrics": {
-                "ragas": {"faithfulness": 1.0, "answer_correctness": 0.0},
-                "oracle_ragas": {"faithfulness": 1.0, "answer_correctness": 1.0},
-            },
             "expected_labels": ["retrieval_missing_gold"],
         }
 
@@ -402,15 +443,33 @@ class EvalDiagnosisPipelineFixtureTest(unittest.TestCase):
                 {"chunk_id": "retrieved_chunk", "text": "The retrieved fact is different."}
             ],
             "keyword_candidates": [],
-            "metrics": {
-                "ragas": {"faithfulness": 1.0, "answer_correctness": 0.0},
-                "oracle_ragas": {"faithfulness": 1.0, "answer_correctness": 1.0},
-            },
         }
 
         _run_case(case)
 
         self.assertIsNotNone(metrics_common._ctx.keyword_fn)
+
+    def test_llm_ragas_track_delegates_to_eval_judge_functions(self):
+        case = {
+            "case_id": "llm_delegate_contract",
+            "qar": {"question": "q", "rag_answer": "answer"},
+            "gold": {"answer": "gold"},
+            "retrieved": [{"chunk_id": "hit", "text": "context"}],
+            "expected_labels": [],
+        }
+        record = _record_from_case(case)
+
+        with (
+            patch(__name__ + "._ragas_judge", return_value=object()),
+            patch(
+                __name__ + ".evaluate_real_track",
+                return_value={"faithfulness": 1.0},
+            ) as real,
+        ):
+            result = _llm_ragas_track(record, "real")
+
+        self.assertEqual({"faithfulness": 1.0}, result)
+        real.assert_called_once()
 
 
 if __name__ == "__main__":
