@@ -52,8 +52,8 @@ CASES = [
         oracle_answer="1907년 소위로 임관하였다",              # 근거만 주면 맞힌다
         assert_derived={"recall_at_k": 1.0, "evidence_density": "<0.2"},
         expect={"A": "chunking_underchunking"},
-        # 이 라벨만 심판의 context_precision 을 함께 요구한다 — 심판을 안 붙이면
-        # 근거 밀도가 아무리 낮아도 C 슬롯 롤업으로 떨어진다.
+        needs_judge="chunking_underchunking 만 심판의 context_precision 을 함께 요구한다 — "
+                    "심판이 없으면 근거 밀도가 아무리 낮아도 C 슬롯 롤업으로 떨어진다.",
     ),
 
     Case(

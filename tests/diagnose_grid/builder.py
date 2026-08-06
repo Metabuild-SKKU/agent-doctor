@@ -130,7 +130,7 @@ def parse_marks(doc: Doc) -> tuple[str, dict[str, tuple[int, int]]]:
 class Answer(str, Enum):
     """답변 텍스트 생성 규칙. 정확한 F1 값은 지정하지 않고 계산에 맡긴다."""
     GOLD_FULL = "gold_full"          # ground_truth 그대로
-    GOLD_PARTIAL = "gold_partial"    # 앞 절반만
+    GOLD_PARTIAL = "gold_partial"    # 앞 절반 + 무관한 문장(부분 점수는 뒤에 붙는 오답 때문)
     WRONG = "wrong"                  # 무관한 답
     ABSTAIN = "abstain"              # 기권 마커
     EMPTY = "empty"                  # 빈 문자열
@@ -184,6 +184,9 @@ class Case:
     # 현재 진단이 expect 를 못 맞추는 케이스. 사유·이슈를 적는다.
     # 기대를 코드 동작에 맞춰 고치는 대신 불일치로 남겨, 데이터셋이 '이래야 한다'를 말하게 한다.
     known_gap: Optional[str] = None
+    # 심판 값이 붙어야 성립하는 케이스. known_gap 과 다르다 — 진단이 틀린 게 아니라
+    # 판정에 필요한 측정이 아직 없는 것이다.
+    needs_judge: Optional[str] = None
     gold_marks: list[str] = field(default_factory=list)   # 쓸 마커 이름(비면 전부)
     # KorQuAD QA 를 쓰면 question·ground_truth·gold_spans 를 데이터에서 가져온다.
     # question/ground_truth 를 케이스에 적으면 그쪽이 우선(오답 시나리오용).
