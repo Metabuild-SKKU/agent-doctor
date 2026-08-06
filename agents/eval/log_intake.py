@@ -35,7 +35,7 @@ REQUIRED_KEYS = ("question", "answer")
 # assess_capability 가 판정하는 수준. 숫자가 클수록 깊은 진단이 가능하다.
 TIER_NONE = "none"          # 유효 레코드 없음 → 평가 불가
 TIER_QA_ONLY = "qa_only"    # 질문+답변만 → answer relevancy(동문서답)만
-TIER_TRIAD = "triad"        # +컨텍스트 → reference-free RAGAS 풀셋(환각/검색헛돔 분리)
+TIER_TRIAD = "triad"        # +컨텍스트 → faithfulness/relevancy(환각·동문서답) 실측 가능
 
 
 @dataclass
@@ -159,7 +159,8 @@ def assess_capability(records: list[ExternalLogRecord]) -> dict:
         notes.append("검색 컨텍스트가 없거나 부족 - answer relevancy(동문서답)만 평가 가능, "
                      "faithfulness(환각)·검색/생성 원인 분리 불가")
     if tier == TIER_TRIAD:
-        notes.append("질문·컨텍스트·답변 확보 - reference-free RAGAS 풀셋 + 검색/생성 원인 분리 가능")
+        notes.append("질문·컨텍스트·답변 확보 - faithfulness(환각)·answer relevancy(동문서답) 실측 가능. "
+                     "검색축 지표(context precision/recall)와 원인 라벨은 정답 텍스트 확보 시 확장")
         if with_scores == 0:
             notes.append("유사도 score 없음 - 랭킹 문제 vs 커버리지 문제 세부 진단은 제한")
     if with_config == 0:

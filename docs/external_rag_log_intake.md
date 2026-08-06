@@ -13,26 +13,39 @@ Agent Doctor의 Eval이 자체 RAG를 돌려 만들어내는 재료가 정확히
 
 외부 RAG의 로그에 이 triad가 남아 있으면, STEP2(자체 검색·생성)를 건너뛰고
 로그 값을 EvalRecord에 채워 STEP3~5(지표·진단·리포트)를 재사용할 수 있다
-(= **로그 리플레이 모드**). 정답(GT)이 없어도 reference-free 평가가 성립한다:
+(= **로그 리플레이 모드**). 정답(GT)이 없어도 reference-free 평가가 성립한다.
+
+**단, 현행 코드 기준으로 gold 없이 실측되는 지표는 둘뿐이다** (§4 감사 결과):
 
 - **faithfulness** — 답변이 자기가 찾아온 컨텍스트에 근거했나 → 환각 검출
 - **answer relevancy** — 답변이 질문에 대한 답인가 → 동문서답 검출
-- **context relevancy** — 컨텍스트가 질문과 관련 있나 → 검색 실패 검출
 
-컨텍스트가 있어야 실패 원인을 **검색 쪽 vs 생성 쪽**으로 가를 수 있다.
+"컨텍스트가 질문과 관련 있나"(검색 실패 검출)는 이 코드베이스에서
+context_precision/recall의 **WithReference 변형**으로만 구현돼 있어
+(`metrics_ragas.py`의 `want_prec = ... and has_ref`), **정답 텍스트가 있어야**
+검색축 지표가 나온다. 즉 검색/생성 원인 분리를 온전히 하려면 로그에
+`ground_truth`(정답 텍스트)를 함께 받는 것이 결정적으로 유리하다.
+
 이것이 QA셋(질문+정답지)과의 결정적 차이 — QA셋은 시험지고, 로그는 답안지다.
-진단에는 답안지(실행 증거)가 필요하다.
+진단에는 답안지(실행 증거)가 필요하다. QA셋(정답)은 답안지를 채점하는
+보충재로서만 의미가 있다.
 
 ## 2. 로그 내용별 평가 가능 수준
 
-| 로그에 있는 것 | 가능한 진단 | log_intake tier |
+| 로그에 있는 것 | 가능한 진단 (현행 코드 기준) | log_intake tier |
 |---|---|---|
 | 질문 + 답변 | answer relevancy만 (환각·검색 진단 불가) | `qa_only` |
-| + 검색 컨텍스트 원문 | reference-free RAGAS 풀셋, 검색/생성 원인 분리 | `triad` |
-| + 청크별 score/rank/chunk_id | 랭킹 문제 vs 커버리지 문제 세부 분리 | (가산 정보) |
-| + config (top_k, chunk_size, …) | 처방에 현재값 반영 ("512→768로 늘려라") | (가산 정보) |
+| + 검색 컨텍스트 원문 | faithfulness + answer relevancy(환각·동문서답) + 점수 리포트. **원인 라벨은 0개** (§4) | `triad` |
+| + 정답(GT) 텍스트 | + answer correctness, **context_precision/recall(검색축)** — 검색/생성 분리가 지표 수준에서 완성. 라벨 게이트 개방의 재료 | (강력 권장) |
+| + config (top_k, chunk_size, …) | 권고문에 현재값 반영 ("512→768로 늘려라") | (가산 정보) |
 | + 사용자 피드백 (👍/👎) | 불만족 케이스 우선 진단 표본 선별 | (가산 정보) |
-| + 정답(GT) 또는 원본 코퍼스 | correctness/F1, recall@k, 재인덱싱 A/B 실험까지 | (후속) |
+| + 청크별 score/rank/chunk_id | **현행 diagnose는 미소비** — 미래 확장용으로만 수용 | (가산 정보) |
+| + 원본 코퍼스 | recall@k, 재인덱싱 A/B 실험까지 | (후속) |
+
+주의: gold 정답 청크 ID(recall용)는 상대 청크 네임스페이스와 정합해야 해서
+사실상 요구 불가(우리 워크스페이스에서도 네임스페이스 불일치로 recall 거짓 0을
+겪었다). **요구는 "정답 텍스트"까지만** — correctness/context 계열은 청크 정합이
+필요 없다.
 
 주의: **top_k·chunk_size 같은 설정값은 로그에 자동으로 남지 않는다**
 (요청마다 나오는 출력이 아니라 시스템에 박힌 설정이라서). 우리도 LangSmith
@@ -76,9 +89,14 @@ Agent Doctor의 Eval이 자체 RAG를 돌려 만들어내는 재료가 정확히
  "contexts": [{"text": "청크 원문...", "chunk_id": "doc3_c12", "score": 0.83,
                "rank": 1, "source_doc": "세금가이드.pdf"}],
  "answer": "700만원입니다",
+ "ground_truth": "700만원",
  "config": {"top_k": 5, "chunk_size": 512, "embedding_model": "bge-m3", "use_reranker": false},
  "feedback": "thumbs_down", "latency_ms": 1840, "timestamp": "2026-08-06T14:02:11"}
 ```
+
+`ground_truth`(정답 텍스트, 선택)는 §4 감사상 "지표 2개 vs 5개"를 가르는
+필드다 — 리플레이 모드가 raw에서 읽어 correctness/context precision·recall과
+규칙 char F1을 살린다(적재기 공식 필드화·tier 반영은 후속).
 
 `question`/`answer`만 필수, `contexts`는 강력 권장(없으면 tier가 `qa_only`로
 떨어진다), 나머지는 선택. `contexts` 항목은 문자열도 허용(원문만 있는 로그 수용).
@@ -86,23 +104,97 @@ Agent Doctor의 Eval이 자체 RAG를 돌려 만들어내는 재료가 정확히
 받은 로그는 `python -m agents.eval.log_intake <log.jsonl>`로 적재 검증과
 진단 가능 수준(tier) 판정을 바로 확인할 수 있다.
 
-## 4. 후속 작업 (이 PR 범위 밖)
+## 4. 코드 감사 결과 — 현행 코드로 가능한 것의 정확한 경계 (2026-08-06)
 
-1. **Eval 로그 리플레이 모드** — seam 2곳 수정:
-   - retriever가 내부 고정 생성(`get_retriever`, agents/eval/agent.py)이라
-     "로그에서 해당 질문의 컨텍스트를 돌려주는 리플레이 retriever" 주입 훅 필요.
+diagnose/rules/metrics_ragas/scoring 전수 감사 결론:
+
+**외부 로그(gold·우리 인덱스 없음)만으로는 진단 라벨 30개 전부 발동하지 않는다.**
+개별 라벨 조건 이전에 관문 구조가 막는다:
+
+- `diagnose.py`의 성공/실패 게이트(`_is_success`)가 `probe.ground_truth` 없으면
+  판정 불가(None) → **finding 없이 즉시 반환**. 라벨 루프 진입 자체가 안 된다.
+- 검색(A)/생성(B)/컨텍스트(C) 슬롯 진입 조건이 각각 recall(gold 청크) /
+  oracle 트랙(gold 컨텍스트 재생성) / recall+oracle을 전제한다.
+- Optimize planner는 `confirmed` 라벨만 소비 → **라벨 0개 = 처방 0개** =
+  "권고 리포트"가 점수 말고는 빈 껍데기.
+
+추가 확인 사항:
+
+- **A그룹 세부 라벨(순위 손실·리랭커 강등·채널 불일치 등)은 원리적으로 불가** —
+  우리 retriever를 재검색해서 얻는 신호(dense/BM25/wide-N 순위, `metrics_search.py`의
+  `_ctx.retrieve_fn`/`dense_fn`/`keyword_fn`) 전제라, 로그에 뭘 더 담아도 안 된다.
+  로그의 score/rank 필드는 현행 diagnose 어디서도 소비되지 않는다.
+- **gold 없이 실측되는 RAGAS는 faithfulness + response_relevancy(+기권 critic)뿐.**
+  context_precision/recall·correctness·reasoning_mode는 reference(정답 텍스트) 필요.
+- **scoring은 우아하게 저하된다**: 미측정 지표는 0 취급이 아니라 분모에서 제외
+  (재정규화). 외부 로그에서는 composite가 quality 성분(faithfulness+relevancy
+  재정규화)만으로 산출되고 reliability는 None으로 빠진다.
+
+따라서 리플레이 모드의 산출물 수준은 두 갈래다:
+
+- **(a) 점수 리포트만**: 코드 수정 최소(STEP1·2 대체). "환각도 X, 동문서답도 Y".
+- **(b) reference-free 라벨 세트 추가**(§5 초안): 원인 라벨→권고까지 이어진다.
+
+## 5. 리플레이 라벨 세트 초안 (v0) — 산출물 수준 (b)의 설계
+
+원칙: **기존 30개 라벨과 게이트는 손대지 않는다.** 리플레이 모드에서만 쓰는
+`ext_` 접두어 라벨 세트를 분리 정의한다 — 기존 라벨의 gold 전제 의미를
+오염시키지 않기 위해서다. 게이트는 reference-free로 재정의한다:
+`failed = faithfulness < 문턱 ∨ relevancy < 문턱` (GT 있으면 correctness 추가),
+지표 미측정(LLM 키 없음)이면 판정 불가 → 라벨 없음(기존 폴백 철학).
+
+| 라벨 | 축 | 발동 조건 | 권고 (기존 rules 처방 재사용) |
+|---|---|---|---|
+| `ext_generation_hallucination` | 생성 | faithfulness 낮음 ∧ relevancy 정상 (질문엔 답하는데 근거가 없음) | require_citation / lower_temperature / strengthen_abstention |
+| `ext_answer_off_topic` | 생성 | relevancy 낮음 (동문서답) | restate_question |
+| `ext_retrieval_irrelevant` | 검색 | GT 있으면 context_precision 낮음; GT 없으면 **신규 reference-free context-relevance judge** 낮음 | 검색 설정 점검 목록 (top_k/하이브리드/임베딩 — config 있으면 현재값 명시) |
+| `ext_wrongful_abstention` | 생성 | 기권(critic) ∧ 컨텍스트 관련성 정상 | relax_abstention |
+| `ext_retrieval_starved_abstention` | 검색 | 기권 ∧ 컨텍스트 무관/빈약 | 검색 설정 점검 + 코퍼스 보강 권고 |
+| `ext_context_overflow` | 컨텍스트 | 컨텍스트 총길이 > CONTEXT_CHARS_MAX ∧ faithfulness 낮음 | decrease_top_k / context_compression |
+| `ext_grounded_but_wrong` (GT 전용) | 검색/데이터 | faithfulness 높음 ∧ correctness 낮음 → 근거 자체가 틀림/부족 (context_recall 낮음이 방증) | 코퍼스 보강 (corpus_gap 계열) |
+
+설계 노트:
+
+- **신규 신호 1개 필요**: reference-free context relevance judge(질문 vs 컨텍스트
+  관련성, LLM 프롬프트 1개, `metrics_ragas.py`에 추가). 없으면 `ext_retrieval_*`
+  두 개가 GT 전용이 되어 GT 없는 로그에서 검색축 라벨이 사라진다.
+- confirmed 규칙 유지: 지표가 실측된 경우만 `confirmed=True`(예비 강등 철학 그대로).
+- 처방은 자동 적용 없이 **권고 카드**로만 렌더 — planner의 적용 루프를 타지 않고
+  리포트가 rules의 patch를 권고 문구로 변환한다.
+- `ext_retrieval_*`의 상한은 "검색이 나빴다 + 설정 점검 목록"이다. 순위/리랭커/채널
+  수준의 세부 원인 분리는 상대 인덱스 없이는 불가(§4).
+
+## 6. 후속 작업 (이 PR 범위 밖)
+
+1. **Eval 로그 리플레이 모드** — ✅ **구현됨: `agents/eval/replay.py`**
+   (`python -m agents.eval.replay <log.jsonl> [--limit=N]`, 산출물 수준 (a) 점수
+   리포트, `tests/test_replay.py` 11건). STEP1·2를 코드 수정 없이 우회한다 —
+   로그에서 Probe/EvalRecord를 직접 합성해 `build_report`(STEP5)로 바로 간다.
+   정직성 장치: recall은 -1 센티널(기본 0.0은 "진짜 0"으로 집계됨), faithfulness
+   실측 시 `retrieval_axis` seam으로 reliability의 recall(-1→0) 오염 방지,
+   GT+LLM 없음 조합은 신뢰도 보수 집계 경고 출력. 원래 설계했던 seam 3곳:
+   - STEP1: probe 생성(`generate_probes`)을 우회하고 **로그 레코드에서 Probe 합성**
+     (probe = 로그의 질문). oracle 트랙도 gold 전제라 스킵.
+   - STEP2 검색: "로그에서 해당 질문의 컨텍스트를 돌려주는 리플레이 retriever" 주입.
      duck-typed `search()` 계약은 이미 열려 있다(agent.py의 외부 주입 주석 참고).
-   - 답변 생성이 `generate_answer` 직접 호출(Phase B)이라, 로그 답변이 있으면
-     생성을 건너뛰는 분기 필요.
-2. **파이프라인 분기** — 외부 진단 모드는 Ingest/Index를 건너뛰고
+     `metrics_common.set_context`의 재검색 자원(retrieve_fn 등)은 None으로 주입.
+   - STEP2 생성: 로그 답변이 있으면 `generate_answer` 호출을 건너뛰는 분기.
+2. **스키마 v0에 `ground_truth` 선택 필드 추가** — §4 감사상 정답 텍스트 유무가
+   "지표 2개 vs 5개 + 라벨 게이트"를 가른다. 상대에게 "정답 아는 질문은 정답도
+   같이"를 처음부터 요청.
+3. **리플레이 라벨 세트 구현** — §5 초안. 산출물 수준 (a)로 1차 PR을 끊고
+   (b)는 라벨 설계 리뷰 후 후속 PR 권장.
+4. **파이프라인 분기** — 외부 진단 모드는 Ingest/Index를 건너뛰고
    `LoadLogs → Eval(리플레이) → Report`로 흐른다. Optimize의 처방은 남의
    인덱스에 자동 적용할 수 없으므로 **권고 리포트**로만 출력한다.
-3. **LangSmith 커넥터** — 트랙 A 채택 시 `list_runs` → 스키마 v0 변환 어댑터.
-4. **정답/코퍼스 확보 시 확장** — correctness/F1, 재인덱싱 A/B 실험
+5. **LangSmith 커넥터** — 트랙 A 채택 시 `list_runs` → 스키마 v0 변환 어댑터.
+6. **정답/코퍼스 확보 시 확장** — recall@k, 재인덱싱 A/B 실험
    (이때 비로소 Optimize 루프가 외부 RAG에도 의미를 가진다).
 
-## 5. 한 줄 요약
+## 7. 한 줄 요약
 
-로그에 triad(질문·컨텍스트·답변)만 있으면 정답지 없이도 외부 RAG 진단이 성립하고,
-수집은 상대 스택에 따라 LangSmith(자동·클라우드) 또는 JSONL(수동·로컬) 두 트랙 중
-고르며, 어느 쪽이든 우리 쪽 수용구는 스키마 v0 하나로 통일된다.
+로그에 triad(질문·컨텍스트·답변)만 있으면 정답지 없이도 증상 측정(환각·동문서답
+점수)이 성립하고, 원인 라벨→권고까지 가려면 리플레이 라벨 세트(§5) 구현과 —
+가능하면 — 정답 텍스트 수령이 필요하며, 수집은 상대 스택에 따라 LangSmith(자동·
+클라우드) 또는 JSONL(수동·로컬) 두 트랙 중 고르되 어느 쪽이든 우리 쪽 수용구는
+스키마 v0 하나로 통일된다.
