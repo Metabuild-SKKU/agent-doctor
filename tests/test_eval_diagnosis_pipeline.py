@@ -1,21 +1,30 @@
 from __future__ import annotations
 
+"""
+진단 fixture 러너.
+
+JSONL 한 줄을 하나의 QAR/gold/retrieval 케이스로 읽어 diagnose 라벨을 검증한다.
+이 테스트는 LLM·인덱스를 띄우지 않는 단위 테스트이며, 실제 retriever 배선 계약은 별도
+통합 테스트에서 다룬다. 규칙 지표(recall/f1/oracle_f1)는 fixture 숫자를 믿지 않고
+항상 텍스트·청크 좌표에서 계산한다.
+"""
+
 import json
 import os
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.schema import Chunk, Probe
 from agents.eval import diagnose, metrics_common
+from agents.eval.agent import _prepare_record
 from agents.eval.types import EvalRecord, Mode
 
 
 FIXTURE_PATH = Path(__file__).with_name("fixtures") / "eval_diagnosis_cases.jsonl"
-MEASURED_METRIC_KEYS = {
+RULE_METRIC_KEYS = {
     "recall_at_k",
     "recall_basis",
     "f1_score",
@@ -35,6 +44,20 @@ class _FakeRetriever:
         if top_n is None and args:
             top_n = args[-1]
         return self.results[: int(top_n or len(self.results))]
+
+
+class _StubRetriever:
+    def __init__(self, results: list[dict], details: dict | None = None):
+        self.results = [dict(item) for item in results]
+        self.details = dict(details or {})
+
+    def search_with_details(self, question: str, top_k: int = 5):
+        payload = {key: value for key, value in self.details.items() if key != "results"}
+        payload["results"] = self.results[: int(top_k or len(self.results))]
+        return payload
+
+    def search(self, question: str, top_k: int = 5):
+        return self.results[: int(top_k or len(self.results))]
 
 
 def _mode(value) -> int:
@@ -101,6 +124,8 @@ def _fixture_chunks(case: dict) -> list[Chunk]:
     entries: list = []
     entries.extend(case.get("corpus_chunks", []))
     entries.extend(case.get("retriever_candidates", []))
+    entries.extend(case.get("dense_candidates", []))
+    entries.extend(case.get("keyword_candidates", []))
     entries.extend(case.get("retrieved", []))
     entries.extend(case.get("gold", {}).get("chunks", []))
 
@@ -125,31 +150,53 @@ def _ids(entries: list) -> list[str]:
 
 
 def _expected_labels(case: dict) -> list[str]:
-    if "expected_labels" in case:
-        return list(case["expected_labels"])
-    label = case.get("expected_label")
-    return [] if label in (None, "", []) else [label]
+    return list(case["expected_labels"])
 
 
-def _metric_overrides(case: dict) -> dict:
-    metrics = case.get("metrics") or {}
-    return {key: metrics[key] for key in MEASURED_METRIC_KEYS if key in metrics}
+def _probe_metadata(case: dict) -> dict:
+    metadata: dict = {}
+    nested_probe = case.get("probe")
+    if isinstance(nested_probe, dict) and isinstance(nested_probe.get("metadata"), dict):
+        metadata.update(nested_probe["metadata"])
+    if isinstance(case.get("probe_metadata"), dict):
+        metadata.update(case["probe_metadata"])
+    return metadata
 
 
-def _apply_measured_metrics(record: EvalRecord, metrics: dict) -> None:
-    for key in MEASURED_METRIC_KEYS:
-        if key in metrics:
-            setattr(record, key, metrics[key])
-    record.raw_f1_score = metrics.get("raw_f1_score", record.f1_score)
-    record.raw_oracle_f1 = metrics.get("raw_oracle_f1", record.oracle_f1)
+def _span_tuple(value):
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    return (int(value[0]), int(value[1]))
+
+
+def _optional_retriever(case: dict, key: str):
+    if key not in case:
+        return None
+    return _FakeRetriever(case.get(key) or [])
+
+
+def _case_metrics(case: dict) -> dict:
+    metrics = dict(case.get("metrics") or {})
+    for key in ("ragas", "oracle_ragas", "aspect"):
+        if key in case:
+            metrics[key] = case[key]
+    illegal = sorted(RULE_METRIC_KEYS & set(metrics))
+    if illegal:
+        raise AssertionError(
+            f"rule metrics must be computed by the runner, not fixture values: {illegal}"
+        )
+    return metrics
 
 
 def _record_from_case(case: dict) -> EvalRecord:
     qar = case.get("qar", {})
     gold = case.get("gold", {})
     retrieved = case.get("retrieved", [])
-    retrieved_ids = _ids(retrieved)
     gold_ids = list(gold.get("chunk_ids", []))
+    config = case.get("config", {})
+    top_k = int(config.get("top_k", len(retrieved) or 5))
 
     probe = Probe(
         probe_id=case.get("case_id", "fixture_case"),
@@ -160,25 +207,25 @@ def _record_from_case(case: dict) -> EvalRecord:
         gold_chunk_ids=gold_ids,
         qtype=case.get("qtype") or gold.get("qtype"),
         gold_spans=list(gold.get("spans", [])),
+        metadata=_probe_metadata(case),
+        gold_doc_id=gold.get("doc_id") or case.get("gold_doc_id"),
+        gold_char_span=_span_tuple(gold.get("char_span") or case.get("gold_char_span")),
     )
-    record = EvalRecord(
-        probe=probe,
-        retrieved=[dict(item) if isinstance(item, dict) else {"chunk_id": item} for item in retrieved],
-        retrieved_chunk_ids=retrieved_ids,
-        retrieved_context=[
-            item.get("text", "") for item in retrieved if isinstance(item, dict)
-        ],
-        generated_answer=qar.get("rag_answer") or case.get("generated_answer", ""),
-        oracle_answer=case.get("oracle_answer", qar.get("oracle_answer", gold.get("answer"))),
-        oracle_context=[
-            item.get("text", "") for item in gold.get("chunks", []) if isinstance(item, dict)
-        ],
+    chunk_text = {chunk.chunk_id: chunk.text for chunk in _fixture_chunks(case)}
+    record = _prepare_record(
+        probe,
+        _StubRetriever(retrieved, case.get("retrieval_details", {})),
+        chunk_text,
+        top_k,
+        {},
     )
 
-    metrics = case.get("metrics") or {}
-    overrides = _metric_overrides(case)
-    if overrides:
-        _apply_measured_metrics(record, overrides)
+    record.generated_answer = qar.get("rag_answer") or case.get("generated_answer", "")
+    record.oracle_answer = case.get("oracle_answer", qar.get("oracle_answer", gold.get("answer")))
+    if "oracle_context" in case:
+        record.oracle_context = list(case["oracle_context"])
+
+    metrics = _case_metrics(case)
     if "ragas" in metrics:
         record.ragas = dict(metrics["ragas"])
         record.ragas_done = True
@@ -187,7 +234,6 @@ def _record_from_case(case: dict) -> EvalRecord:
         record.oracle_ragas_done = True
     if "aspect" in metrics or "aspect" in case:
         record.aspect = dict(metrics.get("aspect", case.get("aspect", {})))
-    record.retrieval_details = dict(case.get("retrieval_details", {}))
     return record
 
 
@@ -195,24 +241,15 @@ def _run_case(case: dict) -> list[str]:
     config = case.get("config", {})
     metrics_common.set_context(
         chunks=_fixture_chunks(case),
-        retrieve_fn=_FakeRetriever(case.get("retriever_candidates", [])),
-        dense_fn=_FakeRetriever(case.get("dense_candidates", [])),
-        keyword_fn=_FakeRetriever(case.get("keyword_candidates", [])),
+        retrieve_fn=_optional_retriever(case, "retriever_candidates"),
+        dense_fn=_optional_retriever(case, "dense_candidates"),
+        keyword_fn=_optional_retriever(case, "keyword_candidates"),
         wide_n=int(config.get("wide_n", 100)),
         rerank_candidates=int(config.get("rerank_candidates", 20)),
         max_rerank_candidates=int(config.get("max_rerank_candidates", 50)),
     )
     record = _record_from_case(case)
-    overrides = _metric_overrides(case)
-    if not overrides:
-        findings = diagnose.diagnose(record, mode=_mode(case.get("mode")))
-    else:
-        with patch.object(
-            diagnose,
-            "_compute_metrics",
-            side_effect=lambda rec: _apply_measured_metrics(rec, overrides),
-        ):
-            findings = diagnose.diagnose(record, mode=_mode(case.get("mode")))
+    findings = diagnose.diagnose(record, mode=_mode(case.get("mode")))
     return [finding.label for finding in findings]
 
 
@@ -239,17 +276,141 @@ class EvalDiagnosisPipelineFixtureTest(unittest.TestCase):
                 self.assertIn("gold", case)
                 self.assertIn("retrieved", case)
                 self.assertIn("expected_labels", case)
+                self.assertNotIn("expected_label", case)
 
+                metrics = case.get("metrics") or {}
+                self.assertFalse(
+                    RULE_METRIC_KEYS & set(metrics),
+                    "recall/f1/oracle_f1/exact_match은 fixture에 쓰지 않고 runner가 계산한다",
+                )
+
+                # top_k는 retriever cut에만 쓰이고 diagnose는 len(retrieved_chunk_ids)를 본다.
+                # 그래서 fixture가 top_k를 적으면 retrieved 길이와 맞춰 두어야 한다.
                 top_k = case.get("config", {}).get("top_k")
                 if top_k is not None:
                     self.assertEqual(int(top_k), len(case.get("retrieved", [])))
 
-    def test_metricless_fixture_cases_are_allowed(self):
-        metricless = [case for case in self.cases if not _metric_overrides(case)]
-        self.assertTrue(metricless, "at least one fixture should let the runner compute metrics")
-        for case in metricless:
-            with self.subTest(case=case.get("case_id"), source=case.get("_source")):
-                self.assertEqual(sorted(_expected_labels(case)), sorted(_run_case(case)))
+    def test_case_ids_are_unique(self):
+        ids = [case.get("case_id") for case in self.cases]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_probe_metadata_is_carried_into_eval_record(self):
+        case = {
+            "case_id": "span_grounding_contract",
+            "qar": {"question": "q"},
+            "gold": {},
+            "retrieved": [],
+            "probe_metadata": {
+                "span_grounding": {
+                    "status": "exact",
+                    "span_qualities": ["exact"],
+                }
+            },
+        }
+
+        record = _record_from_case(case)
+
+        self.assertEqual(record.probe.metadata["span_grounding"]["status"], "exact")
+        self.assertEqual(
+            record.probe.metadata["span_grounding"]["span_qualities"],
+            ["exact"],
+        )
+
+    def test_record_builder_uses_eval_prepare_record_contract(self):
+        case = {
+            "case_id": "prepare_record_contract",
+            "config": {"top_k": 1},
+            "qar": {
+                "question": "q",
+                "gold_answer": "gold",
+                "rag_answer": "generated",
+            },
+            "gold": {
+                "chunk_ids": ["gold_chunk"],
+                "answer": "gold",
+                "chunks": [{"chunk_id": "gold_chunk", "text": "gold context"}],
+            },
+            "retrieved": [{"chunk_id": "hit", "text": "retrieved context"}],
+            "retrieval_details": {
+                "search_mode": "hybrid",
+                "reranked": True,
+                "reranker_status": "applied",
+                "pre_rerank_ids": ["gold_chunk", "hit"],
+                "mmr_applied": False,
+            },
+            "expected_labels": [],
+        }
+
+        record = _record_from_case(case)
+
+        self.assertEqual(record.retrieved_chunk_ids, ["hit"])
+        self.assertEqual(record.retrieved_context, ["retrieved context"])
+        self.assertEqual(record.oracle_context, ["gold context"])
+        self.assertTrue(record.retrieval_details["reranked"])
+        self.assertEqual(record.retrieval_details["search_mode"], "hybrid")
+
+    def test_missing_keyword_candidates_keeps_keyword_channel_unmeasured(self):
+        case = {
+            "case_id": "keyword_unmeasured_contract",
+            "mode": "deep",
+            "config": {"top_k": 1, "wide_n": 20},
+            "qar": {
+                "question": "Which fact is required?",
+                "gold_answer": "The gold fact is required.",
+                "rag_answer": "The retrieved fact is different.",
+            },
+            "gold": {
+                "chunk_ids": ["gold_chunk"],
+                "answer": "The gold fact is required.",
+            },
+            "retrieved": [
+                {"chunk_id": "retrieved_chunk", "text": "The retrieved fact is different."}
+            ],
+            "retriever_candidates": [
+                {"chunk_id": "retrieved_chunk", "text": "The retrieved fact is different."}
+            ],
+            "metrics": {
+                "ragas": {"faithfulness": 1.0, "answer_correctness": 0.0},
+                "oracle_ragas": {"faithfulness": 1.0, "answer_correctness": 1.0},
+            },
+            "expected_labels": ["retrieval_missing_gold"],
+        }
+
+        labels = _run_case(case)
+
+        self.assertIsNone(metrics_common._ctx.keyword_fn)
+        self.assertNotIn("retrieval_semantic_mismatch", labels)
+
+    def test_empty_keyword_candidates_measure_keyword_miss_when_explicit(self):
+        case = {
+            "case_id": "keyword_empty_contract",
+            "mode": "deep",
+            "config": {"top_k": 1, "wide_n": 20},
+            "qar": {
+                "question": "Which fact is required?",
+                "gold_answer": "The gold fact is required.",
+                "rag_answer": "The retrieved fact is different.",
+            },
+            "gold": {
+                "chunk_ids": ["gold_chunk"],
+                "answer": "The gold fact is required.",
+            },
+            "retrieved": [
+                {"chunk_id": "retrieved_chunk", "text": "The retrieved fact is different."}
+            ],
+            "retriever_candidates": [
+                {"chunk_id": "retrieved_chunk", "text": "The retrieved fact is different."}
+            ],
+            "keyword_candidates": [],
+            "metrics": {
+                "ragas": {"faithfulness": 1.0, "answer_correctness": 0.0},
+                "oracle_ragas": {"faithfulness": 1.0, "answer_correctness": 1.0},
+            },
+        }
+
+        _run_case(case)
+
+        self.assertIsNotNone(metrics_common._ctx.keyword_fn)
 
 
 if __name__ == "__main__":
