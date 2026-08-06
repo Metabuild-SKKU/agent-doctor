@@ -88,6 +88,13 @@ OpenRouter 동시 8에서 371 chunks/sec. 26MB 코퍼스 환산으로 **2.3시�
 차원도 같아, provider를 바꿔도 컬렉션을 다시 만들 필요가 없고 색인·질의를 서로 다른
 경로로 계산해도 순위가 흔들리지 않습니다.
 
+색인 중 임베딩 API가 **일시적으로** 실패(5xx·타임아웃)해 문서가 빠지면
+`state.status`가 `indexed`가 아니라 `partial`이 됩니다. 라우팅은 `error`만 보므로
+파이프라인은 계속 진행되지만, 불완전한 컬렉션 위에서 나온 Eval 점수가 "이 코퍼스의
+성능"으로 오인되지 않게 표시가 남습니다. 빈 문서나 `doc_id` 충돌 같은 **영구** 실패는
+다시 돌려도 같으므로 `partial`로 올리지 않습니다(`index_artifacts['failed_documents']`의
+`transient` 플래그로 구분).
+
 **`openrouter`는 `OPENROUTER_API_KEY`가 필요합니다.** 없으면 색인은 예외로 멈추고,
 질의는 retriever 진입 시 preflight가 끊습니다 — 둘 다 조용히 로컬로 새지 않습니다.
 질의를 폴백에 맡기면 모든 검색이 keyword로 떨어지면서 증상은 "검색 품질이 좀 나쁘다"

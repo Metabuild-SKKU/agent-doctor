@@ -1,14 +1,19 @@
 """
 core/llm_retry.py
-LLM rate limit(429) 재시도 공용 구현.
-agents/eval/llm_provider.py 와 agents/rag/generator.py 가 공용으로 쓴다.
+LLM/임베딩 일시적 실패 재시도 공용 구현.
+agents/eval/llm_provider.py, agents/rag/generator.py, agents/index/qdrant_store.py 가 쓴다.
+
+재시도 기준은 "다시 부르면 성공할 가능성이 있나" 하나다.
+    재시도함  : 429/quota(붐빔), 5xx(서버가 잠깐 흔들림), 타임아웃·연결 끊김
+    재시도 안 함: 401/403(키), 404(모델명), 400(요청 형식), insufficient_quota(크레딧)
+후자는 다시 불러도 똑같이 실패하므로 재시도가 실패를 늦출 뿐이다.
 
 Gemini 무료 티어 등에서 "too many requests"(429)가 나면 잠시 대기 후 재시도한다.
     EVAL_LLM_RETRY_WAIT   기본 대기 시간(초, 기본 5). 실제 대기는 여기에 full jitter
                           (×1.0~2.0 무작위 배수)를 곱한다 — 병렬 워커들이 동시에 429를
                           맞고 같은 시각에 재돌진(thundering herd)하는 것을 막기 위함.
     EVAL_LLM_MAX_RETRIES  재시도 횟수 상한(기본 5). 소진하면 마지막 예외를 그대로 올린다.
-rate limit 이 아닌 예외(인증 실패·잘못된 모델명 등)는 재시도 없이 즉시 전파한다.
+영구 실패(인증 실패·잘못된 모델명 등)는 재시도 없이 즉시 전파한다.
 """
 from __future__ import annotations
 
@@ -52,10 +57,44 @@ def is_rate_limit(exc: Exception) -> bool:
     return any(m in msg for m in markers)
 
 
+def is_transient(exc: Exception) -> bool:
+    """다시 부르면 성공할 가능성이 있는 실패인지(재시도 대상).
+
+    rate limit 에 더해 5xx·타임아웃·연결 끊김을 포함한다. 색인 임베딩이 이 경로를
+    타면서 필요해졌다 — 문서 하나가 청크 800개면 API 를 13번 부르는데, 그중 한 번의
+    5xx 로 문서 전체가 색인에서 빠진다(agents/index/agent.py 의 문서 단위 except).
+    429 는 이미 흡수하면서 정작 5xx 가 빠져 있어, 재시도가 가장 필요한 쪽이 무방비였다.
+
+    영구 실패(401/403/404/400)는 여기서 False 다. 다시 불러도 같은 결과라 재시도는
+    실패를 수십 초 늦출 뿐이고, 그동안 원인(키 오타 등)이 로그에 안 드러난다."""
+    if is_rate_limit(exc):
+        return True
+    if any(m in str(exc).lower() or m == str(getattr(exc, "code", "") or "").lower()
+           for m in _NON_RETRYABLE_MARKERS):
+        return False
+
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if isinstance(status, int) and 500 <= status < 600:
+        return True
+
+    # 타입 이름으로도 본다 — provider 별 예외 클래스를 직접 import 하지 않기 위함
+    # (httpx.ReadTimeout, openai.APIConnectionError, socket.timeout 등).
+    name = type(exc).__name__.lower()
+    if any(m in name for m in ("timeout", "connection", "apierror", "serviceunavailable")):
+        return True
+
+    msg = str(exc).lower()
+    markers = ("500", "502", "503", "504", "internal server error", "bad gateway",
+               "service unavailable", "gateway timeout", "timed out", "timeout",
+               "connection reset", "connection aborted", "connection error",
+               "remote end closed", "temporarily unavailable", "overloaded")
+    return any(m in msg for m in markers)
+
+
 def run_with_retry(fn, label: str = "LLM", tag: str = "Eval"):
-    """fn()을 호출하되 rate limit 예외면 대기 후 재시도.
+    """fn()을 호출하되 일시적 실패(429·5xx·타임아웃)면 대기 후 재시도.
     최대 EVAL_LLM_MAX_RETRIES회까지 재시도하고, 그래도 실패하면 마지막 예외를 전파한다.
-    tag 는 재시도 로그의 접두([Eval]/[RAG]) 표시용."""
+    tag 는 재시도 로그의 접두([Eval]/[RAG]/[Index]) 표시용."""
     max_retries = _env_int("EVAL_LLM_MAX_RETRIES", 5)
     base_wait = _env_float("EVAL_LLM_RETRY_WAIT", 5.0)
     attempt = 0
@@ -63,9 +102,10 @@ def run_with_retry(fn, label: str = "LLM", tag: str = "Eval"):
         try:
             return fn()
         except Exception as e:
-            if not is_rate_limit(e) or attempt >= max_retries:
+            if not is_transient(e) or attempt >= max_retries:
                 raise
             attempt += 1
             wait = base_wait * (1.0 + random.random())  # full jitter
-            print(f"[{tag}] {label} rate limit(429) — {wait:.0f}초 대기 후 재시도 ({attempt}/{max_retries})")
+            kind = "rate limit(429)" if is_rate_limit(e) else f"일시적 실패({type(e).__name__})"
+            print(f"[{tag}] {label} {kind} - {wait:.0f}초 대기 후 재시도 ({attempt}/{max_retries})")
             time.sleep(wait)
