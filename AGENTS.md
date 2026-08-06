@@ -57,7 +57,9 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 - **청킹/임베딩 전략 교체 지점**이 정해져 있습니다:
   - 청킹: `agents/index/agent.py`의 전략 레지스트리 — `state.index_config["chunk_strategy"]`로
     선택(`fixed`/`markdown`/`recursive`/`markdown_recursive`), 새 전략은 `register_chunk_strategy()`로 등록
-  - 임베딩 모델: `agents/index/qdrant_store.py`의 `embed()` (기본 `BAAI/bge-m3`, 1024차원)
+  - 임베딩 모델: `agents/index/qdrant_store.py`의 `embed()` (기본 `bge-m3`, 1024차원)
+  - 임베딩 실행 위치: `INDEX_EMBED_PROVIDER`(색인) / `INDEX_QUERY_EMBED_PROVIDER`(질의).
+    둘 다 기본 `openrouter`이며 `local`로 내릴 수 있습니다. 아래 "임베딩 provider" 참고
 - 문서 임베딩과 질의 임베딩은 반드시 같은 모델·차원을 사용해야 합니다. 기존 컬렉션과 차원이
   다르면 오류가 나며, 재생성을 허용하려면 `index_config["recreate_collection_on_dimension_mismatch"] = True`를
   명시적으로 설정합니다.
@@ -68,6 +70,37 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 - 개발 환경은 **Windows / PowerShell** 기준입니다. 경로 구분자와 셸 명령 구문에 유의하세요.
 
 ---
+
+### 임베딩 provider (색인·질의)
+
+임베딩은 **어느 모델**이냐와 **어디서 계산하느냐**가 분리돼 있습니다. 모델은 `bge-m3`로
+고정이고, 계산 위치만 env로 고릅니다.
+
+| env | 기본값 | 대상 |
+|---|---|---|
+| `INDEX_EMBED_PROVIDER` | `openrouter` | 문서 색인 |
+| `INDEX_QUERY_EMBED_PROVIDER` | `openrouter` | 검색 질의 |
+| `INDEX_EMBED_DEVICE` | `auto` | `local`일 때 `cuda`/`cpu` |
+
+실측(`tools/bench_embedding.py`, 한국어 1,000청크): 로컬 CPU 2 chunks/sec vs
+OpenRouter 동시 8에서 371 chunks/sec. 26MB 코퍼스 환산으로 **2.3시간 vs 0.7분 / $0.06**
+입니다. 로컬 `BAAI/bge-m3`와 OpenRouter `baai/bge-m3`의 벡터는 **코사인 0.99997**이고
+차원도 같아, provider를 바꿔도 컬렉션을 다시 만들 필요가 없고 색인·질의를 서로 다른
+경로로 계산해도 순위가 흔들리지 않습니다.
+
+**`openrouter`는 `OPENROUTER_API_KEY`가 필요합니다.** 없으면 색인은 예외로 멈추고,
+질의는 retriever 진입 시 preflight가 끊습니다 — 둘 다 조용히 로컬로 새지 않습니다.
+질의를 폴백에 맡기면 모든 검색이 keyword로 떨어지면서 증상은 "검색 품질이 좀 나쁘다"
+로만 보여 원인 추적이 불가능하기 때문입니다.
+
+두 축을 나눈 이유는 성질이 달라서입니다. 색인은 대량·일회성이라 429 재시도가 남는
+장사지만, 질의는 단건·대화형이라 재시도가 그대로 사용자 지연이 됩니다. 실측 429가
+19%라 단건 질의가 재시도에 걸리면 `/search` 한 건이 수십 초 블로킹될 수 있고,
+그때 `INDEX_QUERY_EMBED_PROVIDER=local`만 내리면 됩니다.
+
+Eval의 RAGAS `response_relevancy` 임베딩은 `EVAL_LLM_PROVIDER`를 따릅니다(별도 축).
+**provider를 바꾸면 코사인 분포가 달라지므로 실행 간 비교를 하려면 한 번 정한 뒤
+고정하세요.**
 
 ## 3. 아키텍처 요약
 
@@ -81,7 +114,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 ```
 
 - **Ingest** (`agents/ingest/`) — Notion·로컬 파일(txt/md/pdf)·json_corpus 수집 → `documents`. (`oauth.py`: Notion 인증)
-- **Index** (`agents/index/`) — 검증·중복제거 → 전략 청킹 → bge-m3 임베딩 → Qdrant 저장 → `chunks`, `index_artifacts`. (`qdrant_store.py`: 클라이언트·검색·임베딩 공통 모듈, `graph_index.py`: 그래프 산출물)
+- **Index** (`agents/index/`) — 검증·중복제거 → 전략 청킹 → bge-m3 임베딩(OpenRouter 또는 로컬, `INDEX_EMBED_PROVIDER`) → Qdrant 저장 → `chunks`, `index_artifacts`. (`qdrant_store.py`: 클라이언트·검색·임베딩 공통 모듈, `graph_index.py`: 그래프 산출물)
 - **Eval** (`agents/eval/`) — Probe 생성 → 검색·생성 → 규칙지표·RAGAS(옵션) → 16개 라벨 원인 진단 → `probes`, `report`. (`EVAL_MODE`로 진단 깊이 조절)
 - **Optimize** (`agents/optimize/`) — 진단 라벨 기반 처방을 한 번에 하나씩 적용/롤백 → `index_config`, `optimization_history`. (planner → optimizer → config_mapper → history → reporter)
 - **RAG** (`agents/rag/`) — 검색(`retriever.py`) + 답변 생성(`generator.py`, LLM 폴백 포함) 공통 모듈. Serve API와 Eval이 함께 사용. (그래프 노드는 아님)

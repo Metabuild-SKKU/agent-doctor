@@ -949,24 +949,44 @@ def resolve_embedding_provider(provider: str | None = None) -> str:
 
 
 def resolve_query_embedding_provider(provider: str | None = None) -> str:
-    """질의 임베딩을 어디서 계산할지. None → env INDEX_QUERY_EMBED_PROVIDER.
+    """질의 임베딩을 어디서 계산할지. None → env INDEX_QUERY_EMBED_PROVIDER(기본 openrouter).
 
-    색인과 분리한 축이다. 미설정이면 local 이고, 색인의 INDEX_EMBED_PROVIDER 를
-    따라가지 않는다. 이유가 셋이다.
+    색인(INDEX_EMBED_PROVIDER)과 별개 축으로 둔다. 값이 같아도 성질이 다르기 때문이다 —
+    색인은 대량·일회성이라 재시도가 남는 장사지만, 질의는 단건·대화형이라 재시도가
+    그대로 사용자 지연이 된다. 실측 429 가 19% 라 단건 질의가 재시도에 걸리면
+    /search 한 건이 수십 초 블로킹될 수 있다. 그때 이 축만 local 로 내리면 된다.
 
-      1) 질의 경로에는 "시끄럽게 실패" 가 성립하지 않는다. agents/rag/retriever.py 가
-         벡터 검색 예외를 잡아 keyword 로 내리므로, 키가 없거나 API 가 흔들리면
-         색인과 달리 멈추지 않고 검색 품질만 조용히 떨어진다.
-      2) 지연이 사용자에게 그대로 간다. 429 는 상시 섞여 나오는데(실측 19%)
-         단건 질의가 재시도에 걸리면 /search 한 건이 수십 초 블로킹된다.
-         색인은 대량·일회성이라 재시도가 남는 장사지만 질의는 아니다.
-      3) 섞어도 안전하다. 로컬과 OpenRouter 의 bge-m3 벡터는 코사인 0.99997 이라
-         색인을 API 로, 질의를 로컬로 계산해도 순위가 흔들리지 않는다
-         (tools/bench_embedding.py 실측).
+    섞어도 안전하다 — 로컬과 OpenRouter 의 bge-m3 벡터는 코사인 0.99997 이고 차원도
+    같아, 색인을 API 로 질의를 로컬로 계산해도 순위가 흔들리지 않는다
+    (tools/bench_embedding.py 실측).
 
-    질의까지 API 로 보내려면 INDEX_QUERY_EMBED_PROVIDER=openrouter 로 명시한다."""
+    주의: 질의 경로에는 색인 같은 "시끄럽게 실패" 가 없다. agents/rag/retriever.py 가
+    벡터 검색 예외를 잡아 keyword 로 내리므로, 키가 없거나 API 가 계속 실패하면
+    멈추는 대신 검색 품질만 조용히 떨어진다. 그래서 retriever 진입 시 preflight 로
+    한 번 끊는다(agents/rag/retriever.py 의 _preflight_query_embedding 참고)."""
     raw = provider if provider is not None else os.getenv("INDEX_QUERY_EMBED_PROVIDER")
-    return normalize_provider(raw) or "local"
+    return normalize_provider(raw) or "openrouter"
+
+
+def query_embedding_config_error(provider: str | None = None) -> str | None:
+    """질의 임베딩 설정이 애초에 불가능한 상태면 사유 문자열, 정상이면 None.
+
+    "설정이 틀렸다" 와 "API 가 잠깐 흔들린다" 를 가르기 위한 함수다. 후자는
+    retriever 의 keyword 폴백으로 흡수하는 게 맞지만, 전자는 폴백하면 안 된다 —
+    키를 안 넣은 실행이 영구히 keyword 검색으로 도는데 증상은 "검색 품질이 좀
+    나쁘다" 로만 나타나 원인을 찾을 수 없다. 호출은 하지 않고 키 유무만 본다.
+
+    색인 경로는 _embed_via_openrouter 가 곧바로 예외를 던져 이미 시끄럽지만,
+    질의 경로는 retriever 가 예외를 삼키므로 진입 시점에 한 번 끊어야 한다."""
+    if resolve_query_embedding_provider(provider) != "openrouter":
+        return None
+    if os.getenv("OPENROUTER_API_KEY"):
+        return None
+    return (
+        "INDEX_QUERY_EMBED_PROVIDER=openrouter 인데 OPENROUTER_API_KEY 가 없습니다. "
+        "키를 채우거나 INDEX_QUERY_EMBED_PROVIDER=local 로 두세요 "
+        "(그대로 두면 모든 질의가 keyword 검색으로 조용히 떨어집니다)."
+    )
 
 
 def _openrouter_embed_model(model_name: str) -> str:
@@ -1289,7 +1309,7 @@ def embed(
     """단건 임베딩(질의용). batch_size=1 로 embed_batch 를 한 번 타 경로를 통일한다.
 
     provider 를 명시하지 않으면 색인이 아니라 **질의 축**(INDEX_QUERY_EMBED_PROVIDER,
-    기본 local)을 읽는다 — 이유는 resolve_query_embedding_provider 참고."""
+    기본 openrouter)을 읽는다 — 두 축을 나눈 이유는 resolve_query_embedding_provider 참고."""
     return embed_batch(
         [text],
         model_name=model_name,

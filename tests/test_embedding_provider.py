@@ -193,36 +193,55 @@ class QueryAxisTests(unittest.TestCase):
         self.addCleanup(store._models.clear)
         self.addCleanup(store._embed_routes_notified.clear)
 
-    def test_default_is_local_even_when_index_is_openrouter(self):
-        """색인을 API 로 돌려도 질의는 기본이 로컬이다.
-
-        질의 경로에는 '시끄럽게 실패' 가 성립하지 않는다 — retriever 가 벡터 검색
-        예외를 잡아 keyword 로 내리므로, API 가 흔들리면 멈추는 대신 검색 품질만
-        조용히 떨어진다. 게다가 429 재시도가 단건 질의 지연으로 그대로 나타난다."""
-        with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "openrouter",
-                                       "OPENROUTER_API_KEY": "k",
-                                       "INDEX_QUERY_EMBED_PROVIDER": ""}):
-            self.assertEqual(store.resolve_query_embedding_provider(), "local")
-            self.assertEqual(store.resolve_embedding_provider(), "openrouter")
-
-    def test_env_opts_query_into_api(self):
-        with patch.dict("os.environ", {"INDEX_QUERY_EMBED_PROVIDER": "openrouter"}):
+    def test_default_is_openrouter(self):
+        with patch.dict("os.environ", {"INDEX_QUERY_EMBED_PROVIDER": ""}):
             self.assertEqual(store.resolve_query_embedding_provider(), "openrouter")
+
+    def test_can_be_pinned_local_independently_of_index(self):
+        """축을 나눈 값어치는 여기다 — 색인은 API 로 두고 질의만 로컬로 내릴 수 있다.
+
+        429 재시도가 단건 질의 지연으로 그대로 나타나면 이 축만 내리면 된다.
+        코사인 0.99997 이라 섞어도 순위가 흔들리지 않는다."""
+        with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "openrouter",
+                                       "INDEX_QUERY_EMBED_PROVIDER": "local"}):
+            self.assertEqual(store.resolve_embedding_provider(), "openrouter")
+            self.assertEqual(store.resolve_query_embedding_provider(), "local")
 
     def test_alias_is_normalized(self):
         with patch.dict("os.environ", {"INDEX_QUERY_EMBED_PROVIDER": "open-router"}):
             self.assertEqual(store.resolve_query_embedding_provider(), "openrouter")
 
-    def test_embed_does_not_call_api_by_default(self):
-        """기본 설정에서 질의가 API 로 새면 사용자 지연과 과금이 조용히 생긴다."""
+    def test_local_pin_does_not_call_api(self):
         with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "openrouter",
                                        "OPENROUTER_API_KEY": "k",
-                                       "INDEX_QUERY_EMBED_PROVIDER": ""}),              patch.object(store, "openai_embed") as embed,              patch.object(store, "_load_embedding_model",
+                                       "INDEX_QUERY_EMBED_PROVIDER": "local"}),              patch.object(store, "openai_embed") as embed,              patch.object(store, "_load_embedding_model",
                           return_value=(None, "cpu")),              patch("builtins.print"):
             vector = store.embed("q", model_name="BAAI/bge-m3")
 
         embed.assert_not_called()
         self.assertEqual(len(vector), store.VECTOR_DIM)   # 해시 fallback
+
+    def test_preflight_flags_missing_key(self):
+        """설정 오류는 keyword 폴백으로 흡수하면 안 된다.
+
+        키를 안 넣은 실행이 영구히 keyword 검색으로 도는데 증상은 "검색 품질이 좀
+        나쁘다" 로만 나타나 원인을 찾을 수 없다."""
+        with patch.dict("os.environ", {"INDEX_QUERY_EMBED_PROVIDER": "openrouter",
+                                       "OPENROUTER_API_KEY": ""}):
+            reason = store.query_embedding_config_error()
+        self.assertIsNotNone(reason)
+        self.assertIn("OPENROUTER_API_KEY", reason)
+
+    def test_preflight_silent_when_configured(self):
+        with patch.dict("os.environ", {"INDEX_QUERY_EMBED_PROVIDER": "openrouter",
+                                       "OPENROUTER_API_KEY": "k"}):
+            self.assertIsNone(store.query_embedding_config_error())
+
+    def test_preflight_silent_for_local(self):
+        # 로컬 경로는 키가 필요 없다.
+        with patch.dict("os.environ", {"INDEX_QUERY_EMBED_PROVIDER": "local",
+                                       "OPENROUTER_API_KEY": ""}):
+            self.assertIsNone(store.query_embedding_config_error())
 
 
 class ResponseIntegrityTests(_ApiRouted):
