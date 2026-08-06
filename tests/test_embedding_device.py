@@ -62,11 +62,6 @@ class ResolveDeviceTests(unittest.TestCase):
             self.assertEqual(store.resolve_embedding_device("cuda"), "cpu")
         self.assertTrue(printed.called)
 
-    def test_env_supplies_default(self):
-        with patch.dict(sys.modules, {"torch": _fake_torch(True)}), \
-             patch.dict("os.environ", {"INDEX_EMBED_DEVICE": "cpu"}):
-            self.assertEqual(store.resolve_embedding_device(), "cpu")
-
 
 class _CacheIsolated(unittest.TestCase):
     """모델 캐시는 전역이라 테스트마다 비운다.

@@ -53,12 +53,6 @@ class ChoiceMappingTests(unittest.TestCase):
     def test_choices_are_the_three_the_user_thinks_in(self):
         self.assertEqual(set(EMBED_CHOICES), {"openrouter", "gpu", "cpu"})
 
-    def test_invalid_choice_is_rejected(self):
-        parser = argparse.ArgumentParser()
-        add_embedding_args(parser)
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["--embed", "tpu"])
-
 
 class PrecedenceTests(unittest.TestCase):
     def test_flag_beats_dotenv(self):

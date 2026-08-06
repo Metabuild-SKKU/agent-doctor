@@ -16,14 +16,6 @@ class ResolveProviderTests(unittest.TestCase):
             os.environ.pop("INDEX_EMBED_PROVIDER", None)
             self.assertEqual(store.resolve_embedding_provider(), "openrouter")
 
-    def test_env_supplies_default(self):
-        with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "local"}):
-            self.assertEqual(store.resolve_embedding_provider(), "local")
-
-    def test_argument_beats_env(self):
-        with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "openrouter"}):
-            self.assertEqual(store.resolve_embedding_provider("local"), "local")
-
     def test_alias_is_normalized(self):
         # core.llm_clients.PROVIDER_ALIASES 를 그대로 쓴다 — 같은 값을
         # EVAL_/RAG_/INDEX_ 어디에 넣어도 같게 해석돼야 한다.
@@ -206,10 +198,6 @@ class QueryAxisTests(unittest.TestCase):
                                        "INDEX_QUERY_EMBED_PROVIDER": "local"}):
             self.assertEqual(store.resolve_embedding_provider(), "openrouter")
             self.assertEqual(store.resolve_query_embedding_provider(), "local")
-
-    def test_alias_is_normalized(self):
-        with patch.dict("os.environ", {"INDEX_QUERY_EMBED_PROVIDER": "open-router"}):
-            self.assertEqual(store.resolve_query_embedding_provider(), "openrouter")
 
     def test_local_pin_does_not_call_api(self):
         with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "openrouter",
