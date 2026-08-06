@@ -137,7 +137,7 @@ class OrderAndRetryTests(_ApiRouted):
     def test_429_is_retried_not_dropped(self):
         """재시도 없이 삼키면 그 청크의 벡터가 조용히 빠진 컬렉션이 만들어진다.
 
-        실측(tools/bench_embedding.py)에서 429 는 동시 1 에서도 요청의 19% 였고,
+        실측(AGENTS.md "임베딩 provider" 절)에서 429 는 동시 1 에서도 요청의 19% 였고,
         재시도가 없던 벤치는 1,000청크 중 170개 넘게 잃었다."""
         import openai
 

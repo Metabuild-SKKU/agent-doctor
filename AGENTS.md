@@ -82,7 +82,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 | `INDEX_QUERY_EMBED_PROVIDER` | `openrouter` | 검색 질의 |
 | `INDEX_EMBED_DEVICE` | `auto` | `local`일 때 `cuda`/`cpu` |
 
-실측(`tools/bench_embedding.py`, 한국어 1,000청크): 로컬 CPU 2 chunks/sec vs
+실측(한국어 1,000청크 — 측정 도구 `tools/bench_embedding.py` 는 측정값을 여기와 커밋에 박제한 뒤 제거했습니다. 재검증이 필요하면 `git log --diff-filter=D -- tools/bench_embedding.py` 로 복원): 로컬 CPU 2 chunks/sec vs
 OpenRouter 동시 8에서 371 chunks/sec. 26MB 코퍼스 환산으로 **2.3시간 vs 0.7분 / $0.06**
 입니다.
 

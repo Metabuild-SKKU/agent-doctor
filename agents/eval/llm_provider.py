@@ -166,7 +166,7 @@ def chat_json(
 # OpenRouter 는 임베딩 엔드포인트(/api/v1/embeddings)를 제공한다. 예전 주석은 "카탈로그에
 # 임베딩 모델 0개" 라고 적혀 있었는데 사실이 아니었다 — baai/bge-m3 를 포함해 31개가 있고,
 # bge-m3 는 $0.01/1M 이라 사실상 공짜다. Index 가 쓰는 로컬 모델과 같은 모델이고
-# 벡터도 코사인 0.99997 로 사실상 동일하다(tools/bench_embedding.py 실측).
+# 벡터도 코사인 0.99997 로 사실상 동일하다(실측 — AGENTS.md "임베딩 provider" 절 참고).
 #
 # GitHub Models 는 여전히 임베딩 엔드포인트가 없다. 그 조합에서는 OPENAI_API_KEY 로
 # 폴백하고, 그것도 없으면 Index 가 이미 쓰는 로컬 BGE-M3 로 계산한다.

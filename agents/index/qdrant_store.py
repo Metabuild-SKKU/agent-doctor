@@ -939,7 +939,7 @@ def resolve_embedding_provider(provider: str | None = None) -> str:
 
     [기본값이 openrouter 인 이유]
     이 프로젝트는 OpenRouter 예산이 확보된 상태로 운영한다는 전제다. 그 전제에서는
-    CPU 로 돌릴 이유가 사실상 없다 — 실측(tools/bench_embedding.py)에서 로컬 CPU 는
+    CPU 로 돌릴 이유가 사실상 없다 — 실측(AGENTS.md "임베딩 provider" 절)에서 로컬 CPU 는
     2 chunks/sec, OpenRouter 는 동시 8에서 371 chunks/sec 였다. 26MB 코퍼스 환산으로
     2.3시간 vs 0.7분이고 비용은 $0.06 다. 100배 넘는 시간 차이를 몇 센트로 사는
     셈이라, "예산이 있는데 CPU 를 쓰는" 선택지는 실질적으로 없다고 보고 기본값을
@@ -968,7 +968,7 @@ def resolve_query_embedding_provider(provider: str | None = None) -> str:
 
     섞어도 안전하다 — 로컬과 OpenRouter 의 bge-m3 벡터는 코사인 0.99997 이고 차원도
     같아, 색인을 API 로 질의를 로컬로 계산해도 순위가 흔들리지 않는다
-    (tools/bench_embedding.py 실측).
+    (실측 — AGENTS.md "임베딩 provider" 절 참고).
 
     주의: 질의 경로에는 색인 같은 "시끄럽게 실패" 가 없다. agents/rag/retriever.py 가
     벡터 검색 예외를 잡아 keyword 로 내리므로, 키가 없거나 API 가 계속 실패하면
