@@ -163,3 +163,16 @@ agents/serve/
 | `search_docs(query, top_k=3)` | 문서에서 관련 청크 검색 (벡터/키워드 fallback 결과 반환) |
 | `ask_docs(query, top_k=5)` | 검색 + RAG 답변 생성 (`/answer` 호출, 출처 포함) |
 | `list_documents()` | 인덱싱된 문서 목록 조회 |
+
+---
+
+## MCP 환경 변수
+
+| 변수 | 기본값 | 설명 |
+|---|---:|---|
+| `AGENT_DOCTOR_API_URL` | `http://localhost:8766` | MCP 툴이 위임 호출할 Serve API 주소. 원격 배포에서는 이 값만 배포 URL로 바꾼다. |
+| `AGENT_DOCTOR_CHUNKS_FILE` | 없음 | 로컬 API 자동 기동에 사용할 chunks JSON 경로. |
+| `AGENT_DOCTOR_MCP_AUTOSTART` | `1` | 로컬 API가 꺼져 있을 때 `api.py`를 자동으로 한 번만 띄울지 여부. `0/false/no/off`면 비활성화. |
+| `AGENT_DOCTOR_MCP_STARTUP_RETRIES` | `10` | 자동 기동 뒤 `/health`를 재시도할 횟수. 각 재시도 간격은 0.5초. |
+| `AGENT_DOCTOR_MCP_MAX_TOP_K` | `20` | MCP 툴에서 허용하는 최대 `top_k`. |
+| `AGENT_DOCTOR_MCP_SNIPPET_CHARS` | `0` | `search_docs` 결과 본문 절단 길이. `0`이면 청크 전문을 반환한다. |

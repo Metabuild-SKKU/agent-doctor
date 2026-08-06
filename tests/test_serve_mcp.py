@@ -30,12 +30,11 @@ class ServeMcpTests(unittest.TestCase):
                 "top_k": 5,
                 "use_reranker": True,
                 "embedding_model": "bge-m3",
-                "qdrant_api_key": "secret",
             },
         }
 
         with (
-            patch.object(mcp_server, "_ensure_api_running", return_value=True),
+            patch.object(mcp_server, "_ensure_api_running") as ensure,
             patch.object(mcp_server.requests, "get", return_value=_Response(payload)) as get,
         ):
             result = mcp_server.health_check()
@@ -44,8 +43,54 @@ class ServeMcpTests(unittest.TestCase):
         self.assertIn("청크 수: 7", result)
         self.assertIn("top_k=5", result)
         self.assertIn("use_reranker=True", result)
-        self.assertNotIn("secret", result)
+        ensure.assert_not_called()
         get.assert_called_once_with(f"{mcp_server.API_URL}/health", params={}, timeout=5)
+
+    def test_remote_api_call_skips_health_preflight(self):
+        payload = {
+            "search_mode": "dense",
+            "results": [{"doc_id": "policy", "chunk_id": "c1", "text": "본문"}],
+        }
+
+        with (
+            patch.object(mcp_server, "API_URL", "https://agent-doctor.example.com"),
+            patch.object(mcp_server, "_ensure_api_running") as ensure,
+            patch.object(mcp_server.requests, "get", return_value=_Response(payload)) as get,
+        ):
+            result = mcp_server.search_docs("휴가 규정", top_k=1)
+
+        self.assertIn("검색 결과 1개", result)
+        ensure.assert_not_called()
+        get.assert_called_once_with(
+            "https://agent-doctor.example.com/search",
+            params={"query": "휴가 규정", "top_k": 1},
+            timeout=15,
+        )
+
+    def test_local_autostart_is_attempted_only_once(self):
+        with (
+            patch.object(mcp_server, "API_URL", "http://localhost:8766"),
+            patch.object(mcp_server, "CHUNKS_FILE", __file__),
+            patch.object(mcp_server, "AUTO_START_API", True),
+            patch.object(mcp_server, "STARTUP_RETRIES", 0),
+            patch.object(mcp_server, "_api_autostart_attempted", False),
+            patch.object(mcp_server, "_api_autostart_process", None),
+            patch.object(mcp_server, "_health_ok", return_value=False),
+            patch.object(mcp_server.subprocess, "Popen") as popen,
+        ):
+            self.assertFalse(mcp_server._ensure_api_running())
+            self.assertFalse(mcp_server._ensure_api_running())
+
+        popen.assert_called_once()
+
+    def test_default_snippet_limit_keeps_full_chunk_text(self):
+        text = "가" * 900
+
+        self.assertEqual(text, mcp_server._shorten(text, limit=0))
+
+    def test_invalid_integer_env_uses_default_without_import_failure(self):
+        with patch.dict("os.environ", {"AGENT_DOCTOR_MCP_MAX_TOP_K": "not-int"}):
+            self.assertEqual(20, mcp_server._env_int("AGENT_DOCTOR_MCP_MAX_TOP_K", 20))
 
     def test_search_docs_delegates_query_and_top_k_to_serve_api(self):
         payload = {

@@ -11,15 +11,23 @@ import os
 import subprocess
 import sys
 import time
+import importlib.util
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import requests
 
-try:
+def _fastmcp_available() -> bool:
+    try:
+        return importlib.util.find_spec("mcp.server.fastmcp") is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
+
+
+if _fastmcp_available():
     from mcp.server.fastmcp import FastMCP
-except ImportError:  # pragma: no cover - 실제 MCP 실행 환경에서는 requirements.txt로 설치된다.
+else:  # pragma: no cover - 테스트 환경에서 mcp 패키지가 없는 경우만 대체한다.
     class FastMCP:  # type: ignore[no-redef]
         """테스트 환경에 mcp 패키지가 없어도 tool 함수는 import할 수 있게 하는 얇은 대체물."""
 
@@ -36,6 +44,25 @@ except ImportError:  # pragma: no cover - 실제 MCP 실행 환경에서는 requ
             raise RuntimeError("MCP 실행에는 `mcp[cli]` 패키지가 필요합니다.")
 
 
+def _log(message: str) -> None:
+    print(f"[MCP] {message}", file=sys.stderr, flush=True)
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        _log(f"{name}={raw!r} 값이 정수가 아니어서 기본값 {default}를 사용합니다.")
+        return default
+    if minimum is not None and value < minimum:
+        _log(f"{name}={raw!r} 값이 너무 작아서 기본값 {default}를 사용합니다.")
+        return default
+    return value
+
+
 API_URL = os.getenv("AGENT_DOCTOR_API_URL", "http://localhost:8766").rstrip("/")
 CHUNKS_FILE = os.getenv("AGENT_DOCTOR_CHUNKS_FILE", "")
 AUTO_START_API = os.getenv("AGENT_DOCTOR_MCP_AUTOSTART", "1").lower() not in {
@@ -44,15 +71,14 @@ AUTO_START_API = os.getenv("AGENT_DOCTOR_MCP_AUTOSTART", "1").lower() not in {
     "no",
     "off",
 }
-STARTUP_RETRIES = int(os.getenv("AGENT_DOCTOR_MCP_STARTUP_RETRIES", "10"))
-MAX_TOP_K = int(os.getenv("AGENT_DOCTOR_MCP_MAX_TOP_K", "20"))
-SNIPPET_CHARS = int(os.getenv("AGENT_DOCTOR_MCP_SNIPPET_CHARS", "700"))
+STARTUP_RETRIES = _env_int("AGENT_DOCTOR_MCP_STARTUP_RETRIES", 10, minimum=0)
+MAX_TOP_K = _env_int("AGENT_DOCTOR_MCP_MAX_TOP_K", 20, minimum=1)
+SNIPPET_CHARS = _env_int("AGENT_DOCTOR_MCP_SNIPPET_CHARS", 0, minimum=0)
 
 mcp = FastMCP("agent-doctor")
 
-
-def _log(message: str) -> None:
-    print(f"[MCP] {message}", file=sys.stderr, flush=True)
+_api_autostart_attempted = False
+_api_autostart_process: subprocess.Popen | None = None
 
 
 def _is_local_api() -> bool:
@@ -67,8 +93,14 @@ def _api_port() -> str:
     return "443" if parsed.scheme == "https" else "80"
 
 
-def _api_get(path: str, *, params: dict[str, Any] | None = None, timeout: float = 10) -> dict:
-    if not _ensure_api_running():
+def _api_get(
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    timeout: float = 10,
+    ensure_local_api: bool = True,
+) -> dict:
+    if ensure_local_api and _is_local_api() and not _ensure_api_running():
         raise RuntimeError("Serve API가 준비되지 않았습니다. 파이프라인 Serve 단계를 먼저 실행하세요.")
 
     response = requests.get(f"{API_URL}{path}", params=params or {}, timeout=timeout)
@@ -78,11 +110,17 @@ def _api_get(path: str, *, params: dict[str, Any] | None = None, timeout: float 
 
 def _ensure_api_running() -> bool:
     """로컬 MCP 데모에서 Serve API가 꺼져 있으면 chunks.json으로 자동 기동한다."""
+    global _api_autostart_attempted, _api_autostart_process
+
     if _health_ok():
         return True
 
     if not AUTO_START_API or not _is_local_api():
         return False
+
+    if _api_autostart_attempted:
+        return False
+    _api_autostart_attempted = True
 
     chunks_path = Path(CHUNKS_FILE) if CHUNKS_FILE else None
     if chunks_path is None or not chunks_path.exists():
@@ -90,7 +128,7 @@ def _ensure_api_running() -> bool:
         return False
 
     api_py = Path(__file__).parent / "api.py"
-    subprocess.Popen(
+    _api_autostart_process = subprocess.Popen(
         [
             sys.executable,
             str(api_py),
@@ -144,6 +182,8 @@ def _top_k(value: int | None, *, default: int) -> int:
 
 def _shorten(text: str, *, limit: int = SNIPPET_CHARS) -> str:
     text = " ".join((text or "").split())
+    if limit <= 0:
+        return text
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
@@ -207,7 +247,7 @@ def _format_answer_response(data: dict) -> str:
 def health_check() -> str:
     """Agent Doctor Serve API 상태와 현재 인덱스 설정을 확인합니다."""
     try:
-        data = _api_get("/health", timeout=5)
+        data = _api_get("/health", timeout=5, ensure_local_api=False)
     except Exception as exc:
         return f"상태 확인 실패: {exc}"
 
