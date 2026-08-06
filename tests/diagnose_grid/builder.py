@@ -12,6 +12,7 @@ metrics_* 의 실제 함수가 계산한다(signals 주입 없음, _compute_metr
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
@@ -29,16 +30,55 @@ from agents.index.agent import CHUNK_STRATEGIES
 
 @dataclass
 class Doc:
-    """격자용 문서. text 를 직접 주거나 length 로 생성한다.
+    """격자용 문서. docs/ 아래 파일(file)·인라인 텍스트(text)·합성(length) 중 하나.
 
-    space_every>0 이면 그 주기로 공백을 섞는다 — Index 의 청킹이 청크마다 앞뒤 공백을
-    떼면서 좌표를 당기므로(_trimmed_slice), 공백이 있어야 청크 사이 '틈'이 재현된다.
-    그 틈이 gold span 을 boundary_split 이 아니라 uncovered 로 만든다.
+    파일에는 `[[gold:이름]]정답 근거 문장[[/gold]]` 마커로 근거 위치를 표시한다. 빌더가
+    마커를 지운 본문을 문서로 쓰고 마커 자리에서 span 좌표를 뽑으므로, 케이스가 좌표를
+    직접 세지 않아도 된다(청크 크기를 바꿔도 좌표가 따라간다).
+
+    space_every>0 이면 그 주기로 공백을 섞는다 — Index 청킹이 청크마다 앞뒤 공백을 떼면서
+    좌표를 당기므로(_trimmed_slice), 공백이 있어야 청크 사이 '틈'이 재현된다.
     """
     id: str
     length: int = 0
     text: Optional[str] = None
+    file: Optional[str] = None
     space_every: int = 0
+
+
+_GOLD_MARK = re.compile(r"\[\[gold(?::([\w]+))?\]\](.*?)\[\[/gold\]\]", re.S)
+_DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
+
+
+def _raw_text(doc: Doc) -> str:
+    if doc.file is not None:
+        with open(os.path.join(_DOCS_DIR, doc.file), encoding="utf-8") as f:
+            return f.read()
+    if doc.text is not None:
+        return doc.text
+    seed = sum(ord(c) for c in doc.id)
+    chars = [chr(0xAC00 + ((i * 7919 + seed * 131) % 11172)) for i in range(doc.length)]
+    if doc.space_every > 0:
+        for i in range(doc.space_every - 1, len(chars), doc.space_every):
+            chars[i] = " "
+    return "".join(chars)
+
+
+def parse_marks(doc: Doc) -> tuple[str, dict[str, tuple[int, int]]]:
+    """마커를 지운 본문과 {이름: (start, end)} 를 돌려준다. 좌표는 지운 뒤 기준."""
+    raw = _raw_text(doc)
+    out: list[str] = []
+    marks: dict[str, tuple[int, int]] = {}
+    cursor = 0
+    for index, m in enumerate(_GOLD_MARK.finditer(raw)):
+        out.append(raw[cursor:m.start()])
+        start = sum(len(part) for part in out)
+        body = m.group(2)
+        out.append(body)
+        marks[m.group(1) or str(index)] = (start, start + len(body))
+        cursor = m.end()
+    out.append(raw[cursor:])
+    return "".join(out), marks
 
 
 class Answer(str, Enum):
@@ -71,7 +111,8 @@ class Case:
     chunk_overlap: int
 
     # probe
-    gold_spans: list[tuple[str, int, int]]
+    question: str
+    gold_spans: list[tuple[str, int, int]]     # 비우면 문서 마커에서 뽑는다
     span_grounding: Optional[str]             # None(=exact) | "exact" | "chunk_fallback" | "partial"
     ground_truth: str
     qtype: Optional[str]
@@ -84,12 +125,20 @@ class Case:
     mmr_applied: bool
 
     # 생성
-    answer: Answer
-    oracle_answer: Optional[Answer]
+    answer: object                 # Answer 열거형 또는 실제 답변 문자열
+    oracle_answer: object
+
+    # 상황 서술 — 케이스가 무엇을 재현하려는지. 기대 라벨은 여기서 나온다(코드가 아니라).
+    situation: str
 
     # 검증
     assert_derived: dict
-    expect: dict
+    expect: dict                              # 이 상황에서 나와야 하는 라벨
+
+    # 현재 진단이 expect 를 못 맞추는 케이스. 사유·이슈를 적는다.
+    # 기대를 코드 동작에 맞춰 고치는 대신 불일치로 남겨, 데이터셋이 '이래야 한다'를 말하게 한다.
+    known_gap: Optional[str] = None
+    gold_marks: list[str] = field(default_factory=list)   # 쓸 마커 이름(비면 전부)
 
     # ── 아래는 '미지정 = 없음'이 곧 의미라 기본값을 남긴다 ──
     duplicates: list[tuple[int, int]] = field(default_factory=list)  # (사본 인덱스, 원본 인덱스)
@@ -112,15 +161,24 @@ class Case:
 # ── 빌드 ──────────────────────────────────────────────────────────
 
 def doc_text(doc: Doc) -> str:
-    """문서 원문. 위치마다 다른 음절이 나오게 해서 near-duplicate 오탐을 막는다."""
-    if doc.text is not None:
-        return doc.text
-    seed = sum(ord(c) for c in doc.id)
-    chars = [chr(0xAC00 + ((i * 7919 + seed * 131) % 11172)) for i in range(doc.length)]
-    if doc.space_every > 0:
-        for i in range(doc.space_every - 1, len(chars), doc.space_every):
-            chars[i] = " "
-    return "".join(chars)
+    """마커를 지운 문서 본문."""
+    return parse_marks(doc)[0]
+
+
+def resolve_gold_spans(case: "Case") -> list[tuple[str, int, int]]:
+    """케이스의 gold span. 명시했으면 그대로, 비었으면 문서 마커에서 뽑는다.
+    gold_marks 로 쓸 마커 이름을 고를 수 있다(문서 하나를 여러 케이스가 나눠 쓴다)."""
+    if case.gold_spans:
+        return list(case.gold_spans)
+    spans = []
+    for doc in case.docs:
+        marks = parse_marks(doc)[1]
+        names = case.gold_marks or list(marks)
+        for name in names:
+            if name in marks:
+                start, end = marks[name]
+                spans.append((doc.id, start, end))
+    return spans
 
 
 def build_chunks(case: Case) -> list[Chunk]:
@@ -152,16 +210,18 @@ def gold_chunk_ids(case: Case, chunks: list[Chunk]) -> list[str]:
     ids = []
     for chunk in chunks:
         c_start, c_end = chunk.char_span
-        for doc_id, s_start, s_end in case.gold_spans:
+        for doc_id, s_start, s_end in resolve_gold_spans(case):
             if chunk.doc_id == doc_id and c_start < s_end and c_end > s_start:
                 ids.append(chunk.chunk_id)
                 break
     return ids
 
 
-def _answer_text(kind: Optional[Answer], ground_truth: str) -> Optional[str]:
+def _answer_text(kind, ground_truth: str) -> Optional[str]:
     if kind is None:
         return None
+    if isinstance(kind, str) and not isinstance(kind, Answer):
+        return kind
     if kind is Answer.GOLD_FULL:
         return ground_truth
     if kind is Answer.GOLD_PARTIAL:
@@ -219,13 +279,13 @@ def build(case: Case) -> tuple[EvalRecord, list[Chunk]]:
 
     probe = Probe(
         probe_id=case.id,
-        question="이 문서에서 묻는 사실은 무엇인가",
+        question=case.question,
         source="taxonomy",
         answer_exists=case.answer_exists,
         ground_truth=case.ground_truth,
         gold_chunk_ids=gold_chunk_ids(case, chunks),
         qtype=case.qtype,
-        gold_spans=[{"doc_id": d, "start": s, "end": e} for d, s, e in case.gold_spans],
+        gold_spans=[{"doc_id": d, "start": s, "end": e} for d, s, e in resolve_gold_spans(case)],
         metadata=probe_metadata,
     )
 
