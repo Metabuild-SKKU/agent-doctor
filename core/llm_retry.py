@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import time
 
 
@@ -40,6 +41,9 @@ def _env_float(name: str, default: float) -> float:
 # 재시도는 실패를 40초쯤 늦출 뿐이라 즉시 전파한다. Gemini 무료 티어의
 # RESOURCE_EXHAUSTED 에는 이 코드가 없어 재시도 동작이 그대로다.
 _NON_RETRYABLE_MARKERS = ("insufficient_quota",)
+
+# "code: 503", "status 502", "http 500" 처럼 상태 코드를 뜻하는 문맥의 5xx 만 잡는다.
+_HTTP_5XX_RE = re.compile(r"(?:code|status|http)[^0-9]{0,3}5[0-9]{2}(?![0-9])")
 
 
 def is_rate_limit(exc: Exception) -> bool:
@@ -80,14 +84,20 @@ def is_transient(exc: Exception) -> bool:
     # 타입 이름으로도 본다 — provider 별 예외 클래스를 직접 import 하지 않기 위함
     # (httpx.ReadTimeout, openai.APIConnectionError, socket.timeout 등).
     name = type(exc).__name__.lower()
-    if any(m in name for m in ("timeout", "connection", "apierror", "serviceunavailable")):
+    if any(m in name for m in ("timeout", "connection", "serviceunavailable")):
         return True
 
     msg = str(exc).lower()
-    markers = ("500", "502", "503", "504", "internal server error", "bad gateway",
-               "service unavailable", "gateway timeout", "timed out", "timeout",
-               "connection reset", "connection aborted", "connection error",
-               "remote end closed", "temporarily unavailable", "overloaded")
+    # 숫자만으로 판정하지 않는다. "500" 같은 부분 문자열은 토큰 수("maximum of 500
+    # tokens")·모델명("gpt-500-turbo")·청크 번호("chunk 5041")에 그대로 걸려서,
+    # 영구 실패를 5회씩 재시도하며 40초를 버리고 그동안 진짜 원인이 로그에 안 뜬다.
+    # 상태 코드를 뜻하는 문맥에서만 5xx 로 읽는다.
+    if _HTTP_5XX_RE.search(msg):
+        return True
+    markers = ("internal server error", "bad gateway", "service unavailable",
+               "gateway timeout", "timed out", "timeout", "connection reset",
+               "connection aborted", "connection error", "remote end closed",
+               "temporarily unavailable", "overloaded")
     return any(m in msg for m in markers)
 
 
