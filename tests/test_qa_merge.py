@@ -102,6 +102,34 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(stats["conflicts"], 1)
         self.assertEqual(stats["filled_ground_truth"], 0)
 
+    def test_gold_contexts_conflict_is_counted(self):
+        # GT 와 같은 규칙 - 불일치를 조용히 버리면 병합 리포트가 거짓말이 된다
+        with tempfile.TemporaryDirectory() as td:
+            log = _write(td, "log.jsonl", json.dumps(
+                {"question": "공제 한도는?", "answer": "a", "contexts": ["c"],
+                 "gold_contexts": ["로그가 준 근거"]}, ensure_ascii=False))
+            qa = _write(td, "qa.json", json.dumps(
+                [{"question": "공제 한도는", "gold_contexts": ["다른 근거"]}],
+                ensure_ascii=False))
+            out = os.path.join(td, "m.jsonl")
+            stats = merge_qa_into_log(log, qa, out)
+            with open(out, encoding="utf-8") as f:
+                merged = json.loads(f.read().strip())
+        self.assertEqual(merged["gold_contexts"], ["로그가 준 근거"])
+        self.assertEqual(stats["conflicts"], 1)
+
+    def test_duplicate_qa_question_is_reported(self):
+        with tempfile.TemporaryDirectory() as td:
+            qa = _write(td, "qa.json", json.dumps([
+                {"question": "공제 한도는?", "ground_truth": "700만원"},
+                {"question": "공제 한도는", "ground_truth": "800만원"},
+            ], ensure_ascii=False))
+            qa_map, errors = load_qa_set(qa)
+        self.assertEqual(len(qa_map), 1)
+        self.assertTrue(any("중복 질문" in e for e in errors))
+        # 마지막 항목 우선 규약
+        self.assertEqual(qa_map[normalize_question("공제 한도는")]["ground_truth"], "800만원")
+
     def test_broken_lines_pass_through(self):
         stats, lines = self._merge([{"question": "공제 한도는", "ground_truth": "x"}])
         self.assertEqual(lines[-1], "깨진 줄 {{{")               # 원문 그대로 통과

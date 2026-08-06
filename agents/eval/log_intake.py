@@ -102,21 +102,34 @@ def parse_record(obj: Any) -> ExternalLogRecord:
     if isinstance(raw_contexts, list):
         contexts = [c for c in (_normalize_context(e) for e in raw_contexts) if c]
 
-    # gold_contexts: 문자열 하나도, 배열도 허용(contexts 와 같은 관용 규칙). 빈 항목은 버린다.
+    # gold_contexts: 문자열 하나도, 배열도 허용(contexts 와 같은 관용 규칙). 빈 항목은
+    # 버리고, contexts 형식을 흉내낸 {"text": ...} 항목은 text 만 꺼낸다.
     raw_gold = obj.get("gold_contexts")
     if isinstance(raw_gold, str):
         raw_gold = [raw_gold]
-    gold_contexts = ([str(g).strip() for g in raw_gold if str(g or "").strip()]
-                     if isinstance(raw_gold, list) else [])
+    gold_contexts: list[str] = []
+    if isinstance(raw_gold, list):
+        for g in raw_gold:
+            if isinstance(g, dict):
+                g = g.get("text")
+            text = str(g or "").strip()
+            if text:
+                gold_contexts.append(text)
 
     config = obj.get("config")
     latency = obj.get("latency_ms")
     feedback = obj.get("feedback")
+    # ground_truth 가 리스트(KorQuAD식 복수 정답)면 첫 항목(v1 규약, qa_merge 와 동일).
+    # str() 통짜 변환하면 "['a','b']" 가 정답이 돼 char_f1/correctness 를 조용히 오염시킨다.
+    gt_raw = obj.get("ground_truth")
+    if isinstance(gt_raw, list):
+        gt_raw = gt_raw[0] if gt_raw else None
+
     return ExternalLogRecord(
         question=str(obj["question"]).strip(),
         answer=str(obj["answer"]).strip(),
         contexts=contexts,
-        ground_truth=str(obj.get("ground_truth") or "").strip() or None,
+        ground_truth=str(gt_raw or "").strip() or None,
         gold_contexts=gold_contexts,
         config=config if isinstance(config, dict) else {},
         feedback=str(feedback) if feedback not in (None, "") else None,

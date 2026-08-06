@@ -72,16 +72,32 @@ def _squash(text: str) -> str:
     return _WS.sub(" ", (text or "").strip())
 
 
+# 우연 일치 차단 문턱: 이 길이 미만의 매칭 블록(낱글자·짧은 조각)은 근거로 안 친다.
+# 없으면 '700만원' 같은 짧은 gold 가 무관한 문장의 흩어진 숫자·글자와 1.0 으로
+# 매칭되는 거짓 양성이 난다(→ 환각을 '확정'으로 오판). gold 가 이 길이보다
+# 짧으면 gold 전체 길이를 문턱으로 쓴다(정확 포함이면 여전히 점수가 나오게).
+_MIN_MATCH_BLOCK = 4
+
+
 def _coverage(gold: str, haystack: str) -> float:
     """gold 문단이 haystack(검색 결과 연결본)에 덮이는 비율(0~1).
 
-    SequenceMatcher 의 매칭 블록 합 / gold 길이. 부분 일치(청킹 경계로 잘린
-    gold, 조사·공백 미세 차이)에도 비례 점수가 나온다."""
+    SequenceMatcher 매칭 블록 중 _MIN_MATCH_BLOCK 이상 길이의 합 / gold 길이.
+    부분 일치(청킹 경계로 잘린 gold, 공백 미세 차이)에는 비례 점수가 나오고,
+    낱글자 우연 일치는 걸러진다."""
     if not gold or not haystack:
         return 0.0
+    threshold = min(_MIN_MATCH_BLOCK, len(gold))
     sm = SequenceMatcher(None, gold, haystack, autojunk=False)
-    matched = sum(block.size for block in sm.get_matching_blocks())
+    matched = sum(block.size for block in sm.get_matching_blocks()
+                  if block.size >= threshold)
     return matched / len(gold)
+
+
+# 이보다 짧은 gold 는 '근거 문단'이 아니라 정답 조각이다("700만원" 류). 무관한
+# 문맥에 통째로 우연 포함될 수 있어, 높은 겹침으로 환각을 '확정'으로 뒤집는
+# 근거가 못 된다 - 측정에서 제외한다(전부 짧으면 None = 판정 재료 없음).
+_MIN_GOLD_CHARS = 10
 
 
 def gold_context_recall(record: EvalRecord) -> Optional[float]:
@@ -89,7 +105,8 @@ def gold_context_recall(record: EvalRecord) -> Optional[float]:
 
     gold_contexts 는 build_replay_records 가 probe.metadata 에 실어둔다 -
     Probe/EvalRecord 스키마를 바꾸지 않기 위해서다(공유 계약 무변경)."""
-    golds = [_squash(g) for g in record.probe.metadata.get("gold_contexts", []) if _squash(g)]
+    golds = [_squash(g) for g in record.probe.metadata.get("gold_contexts", [])]
+    golds = [g for g in golds if len(g) >= _MIN_GOLD_CHARS]
     if not golds or not record.retrieved_context:
         return None
     haystack = _squash(" ".join(record.retrieved_context))
@@ -139,6 +156,8 @@ def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
             record, "ext_answer_off_topic", "generation", True,
             f"answer relevancy {rel:.2f} - 답이 질문을 비껴감"))
 
+    # rel 미측정(None)은 통과로 본다 - faithfulness 가 실측된 이상 "동문서답으로
+    # 판명되지 않음"이면 환각 소견을 낼 근거는 충분하다(완전 미측정 침묵과 구분).
     if faith is not None and faith < EXT_FAITH_LOW and (rel is None or rel >= EXT_REL_LOW):
         if overlap is not None and overlap >= GOLD_OVERLAP_FOUND:
             confirmed, why = True, (

@@ -144,6 +144,20 @@ class SchemaV1FieldsTest(unittest.TestCase):
                                 "gold_contexts": ["근거", "", None, " "]})
         self.assertEqual(as_list.gold_contexts, ["근거"])
 
+    def test_gold_contexts_dict_items_extract_text(self):
+        # contexts 형식({"text": ...})을 흉내낸 입력 - str(dict) 쓰레기가 되면 안 된다
+        rec = parse_record({"question": "q", "answer": "a",
+                            "gold_contexts": [{"text": "근거 문단"}, "평문", {"no_text": 1}]})
+        self.assertEqual(rec.gold_contexts, ["근거 문단", "평문"])
+
+    def test_ground_truth_list_takes_first(self):
+        # KorQuAD식 복수 정답 - str(list) 통짜 변환은 채점을 조용히 오염시킨다
+        rec = parse_record({"question": "q", "answer": "a",
+                            "ground_truth": ["700만원", "칠백만원"]})
+        self.assertEqual(rec.ground_truth, "700만원")
+        empty = parse_record({"question": "q", "answer": "a", "ground_truth": []})
+        self.assertIsNone(empty.ground_truth)
+
     def test_capability_counts_exam_fields(self):
         records = [
             parse_record({"question": "q", "answer": "a", "contexts": ["c"],

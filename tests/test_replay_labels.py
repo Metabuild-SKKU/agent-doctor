@@ -53,6 +53,20 @@ class TestGoldContextRecall(unittest.TestCase):
         self.assertIsNone(gold_context_recall(_record(contexts=["ctx"])))
         self.assertIsNone(gold_context_recall(_record(gold_contexts=[GOLD])))
 
+    def test_short_gold_is_excluded_from_measurement(self):
+        # "700만원" 같은 정답 조각은 무관한 문맥에 통째로 우연 포함될 수 있어
+        # 근거로 안 친다 - 전부 짧으면 None(판정 재료 없음) → 환각은 예비 유지
+        rec = _record(contexts=["대출 한도는 통상 연 700만원 수준이다."],
+                      gold_contexts=["700만원"])
+        self.assertIsNone(gold_context_recall(rec))
+
+    def test_scattered_char_matches_do_not_count(self):
+        # 낱글자·짧은 조각 우연 일치 누적 차단(_MIN_MATCH_BLOCK)
+        from agents.eval.replay_labels import _coverage, _squash
+        self.assertEqual(
+            _coverage(_squash("700만원"), _squash("3,700개의 만장일치 원안을 처리했다")),
+            0.0)
+
 
 class TestExtLabels(unittest.TestCase):
     def _labels(self, rec):

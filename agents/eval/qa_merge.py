@@ -106,6 +106,8 @@ def load_qa_set(path: str) -> tuple[dict[str, dict], list[str]]:
         if not question:
             errors.append(f"항목 {i}: 질문 없음")
             continue
+        if normalize_question(question) in qa_map:
+            errors.append(f"항목 {i}: 중복 질문(마지막 항목 우선): {question[:30]}")
         qa_map[normalize_question(question)] = {
             "ground_truth": _as_text(_first_key(entry, GROUND_TRUTH_KEYS)),
             "gold_contexts": _as_text_list(_first_key(entry, GOLD_CONTEXT_KEYS)),
@@ -145,9 +147,12 @@ def merge_qa_into_log(log_path: str, qa_path: str, out_path: str) -> dict:
                         stats["filled_ground_truth"] += 1
                     elif str(obj["ground_truth"]).strip() != qa["ground_truth"]:
                         stats["conflicts"] += 1
-                if qa["gold_contexts"] and not obj.get("gold_contexts"):
-                    obj["gold_contexts"] = qa["gold_contexts"]
-                    stats["filled_gold_contexts"] += 1
+                if qa["gold_contexts"]:
+                    if not obj.get("gold_contexts"):
+                        obj["gold_contexts"] = qa["gold_contexts"]
+                        stats["filled_gold_contexts"] += 1
+                    elif obj["gold_contexts"] != qa["gold_contexts"]:
+                        stats["conflicts"] += 1     # GT 와 같은 규칙 - 불일치를 조용히 버리지 않는다
             fout.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
     stats["qa_unmatched"] = len(qa_map) - len(matched_keys)
