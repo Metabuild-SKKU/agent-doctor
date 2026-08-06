@@ -15,6 +15,12 @@ gold_span_mode
   exact : 정답 텍스트가 원문에서 차지하는 구간. 청킹 기하를 재려면 이쪽이어야 한다.
   chunk : positive_chunk 전체 범위. KorQuAD 원래 라벨이고 실제 파이프라인이 쓰는 값이다.
 
+answer 는 검색 결과로 생성한 답, oracle_answer 는 골드 컨텍스트만 주고 생성한 답이다.
+가급적 실제 문장으로 적는다 — 정답을 그대로 복사하면 oracle_f1 이 1.0 으로 굳어 생성 실패(B)가
+안 열린다. 다만 정답이 긴 KorQuAD 항목은 오라클이 요약형이면 char-F1 이 문턱 아래로 떨어져
+(실측: 324자 정답에 55자 요약 → 0.29) 오라클 실패로 잡힌다. 그 경우만 Answer.GOLD_FULL 로 둔다.
+심판 의미축이 붙으면 요약형도 통과하므로 그때 실제 문장으로 바꿀 수 있다.
+
 심판 값(RAGAS·AspectCritic)은 케이스에 적지 않는다. 손으로 적으면 답변과 어긋난 값을
 넣을 수 있고, 그러면 진단의 임계값 비교만 검사하게 된다. 파이프라인이 심판 LLM 으로
 뽑아 채운다.
@@ -42,8 +48,8 @@ CASES = [
         question="", gold_spans=[], span_grounding=None, ground_truth="",
         qtype=None, answer_exists=None,
         retrieved=[3, 2, 4, 1, 5],
-        answer="니미츠는 1907년에 중위로 임관했다",
-        oracle_answer=Answer.GOLD_FULL,
+        answer="니미츠는 1907년에 중위로 임관했다",          # 계급이 틀렸다
+        oracle_answer="1907년 소위로 임관하였다",              # 근거만 주면 맞힌다
         assert_derived={"recall_at_k": 1.0, "evidence_density": "<0.2"},
         expect={"A": "chunking_underchunking"},
         # 이 라벨만 심판의 context_precision 을 함께 요구한다 — 심판을 안 붙이면
@@ -59,8 +65,8 @@ CASES = [
         question="", gold_spans=[], span_grounding=None, ground_truth="",
         qtype=None, answer_exists=None,
         retrieved=[1, 2, 0, 3, 4],
-        answer="장난으로 만들어진 낱말이라 실용 용어가 아니다",
-        oracle_answer=Answer.GOLD_FULL,
+        answer="장난으로 만들어진 낱말이라 실용 용어가 아니다",   # 사전 수록 경위가 빠졌다
+        oracle_answer=Answer.GOLD_FULL,          # 정답이 324자라 요약하면 char-F1 이 문턱 아래
         assert_derived={"recall_at_k": 1.0, "boundary_split": ">0", "oversized_count": 0},
         expect={"A": "chunking_context_mismatch"},
     ),
@@ -74,8 +80,8 @@ CASES = [
         question="", gold_spans=[], span_grounding=None, ground_truth="",
         qtype=None, answer_exists=None,
         retrieved=[1, 2, 0, 3, 4],
-        answer="고구려와 발해를 거쳐 고려의 영역이 되었다",
-        oracle_answer=Answer.GOLD_FULL,
+        answer="고구려와 발해를 거쳐 고려의 영역이 되었다",       # 고려 이후 연혁이 빠졌다
+        oracle_answer=Answer.GOLD_FULL,          # 정답이 492자라 요약하면 char-F1 이 문턱 아래
         assert_derived={"recall_at_k": 1.0, "oversized_count": ">0"},
         expect={"A": "chunking_overchunking"},
     ),
@@ -91,8 +97,8 @@ CASES = [
         qtype=None, answer_exists=None,
         retrieved=[2, 3, 4],
         wide_ranking=[2, 3, 4, 1, 0],
-        answer="1413년에 철산군으로 이름이 바뀌었다",
-        oracle_answer=Answer.GOLD_FULL,
+        answer="1413년에 철산군으로 이름이 바뀌었다",           # 앞 시기가 통째로 빠졌다
+        oracle_answer=Answer.GOLD_FULL,          # 정답이 492자라 요약하면 char-F1 이 문턱 아래
         assert_derived={"recall_at_k": "<1", "oversized_count": ">0"},
         expect={"A": "chunking_overchunking"},
         known_gap="현재 진단은 retrieval_low_rank 를 낸다. A 슬롯에서 청킹 라벨은 "
@@ -110,8 +116,8 @@ CASES = [
         question="", gold_spans=[], span_grounding=None, ground_truth="",
         qtype=None, answer_exists=None,
         retrieved=[0, 1, 2, 3, 4],
-        answer="사전 편집자가 실수로 수록한 것이다",
-        oracle_answer=Answer.GOLD_FULL,
+        answer="사전 편집자가 실수로 수록한 것이다",             # 근거와 어긋난다
+        oracle_answer=Answer.GOLD_FULL,          # 정답이 324자라 요약하면 char-F1 이 문턱 아래
         assert_derived={"missed_count": 0},
         expect={"A": "chunking_context_mismatch"},
         known_gap="섹션 경계의 좌표 틈 때문에 gold 청크를 다 집었는데도 span_recall 이 0 이 "
@@ -128,8 +134,8 @@ CASES = [
         qtype=None, answer_exists=None,
         retrieved=[5, 6, 7],
         corpus_exclude=[2, 3],                   # 근거가 걸친 청크를 코퍼스에서 제외
-        answer="니미츠는 대위로 임관했다",
-        oracle_answer=Answer.GOLD_FULL,
+        answer="니미츠는 대위로 임관했다",                      # 근거가 없는데 지어냈다
+        oracle_answer="1907년 소위로 임관하였다",
         assert_derived={"recall_at_k": "<1"},
         expect={"D": "corpus_gap", "B": "generation_abstention_failure"},
     ),
@@ -143,8 +149,8 @@ CASES = [
         question="", gold_spans=[], span_grounding=None, ground_truth="",
         qtype=None, answer_exists=None,
         retrieved=[4, 3, 5, 2, 6],
-        answer="1941년 12월 7일에 일어났다",
-        oracle_answer=Answer.GOLD_FULL,
+        answer="1941년 12월 7일에 일어났다",                    # 정답
+        oracle_answer="일본의 진주만 공습은 1941년 12월 7일에 일어났다",
         assert_derived={"recall_at_k": 1.0},
         expect={},
     ),
