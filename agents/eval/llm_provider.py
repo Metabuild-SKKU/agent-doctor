@@ -12,6 +12,12 @@ OpenAI API 토큰 승인 전까지 무료 대체 provider 로 브릿지한다:
 OpenRouter 는 브릿지가 아니라 상시 사용을 전제한 provider 다. 모델명은 "publisher/model"
 형식(예: anthropic/claude-sonnet-4.5)을 쓴다. 임베딩 엔드포인트는 제공하지 않는다
 (embed_texts 주석 참고).
+
+    EVAL_LLM_PROVIDER=anthropic → Anthropic Messages API(유료, 심판 전용 권장)
+심판 품질이 모든 최적화 판단의 타당성을 결정하므로 별도 축으로 둔다. OpenRouter 를 거치지
+않고 직접 붙는 이유는 output_config.format(JSON 스키마 강제)·prompt caching 때문이다 —
+그 둘이 fused RAGAS 의 결손 보수 경로와 입력 비용을 동시에 없앤다. 모델명은 접두사 없는
+정식 ID(예: claude-sonnet-5)를 쓰고, 임베딩 엔드포인트는 제공하지 않는다.
 """
 from __future__ import annotations
 
@@ -25,6 +31,7 @@ from core.llm_clients import (
     OPENROUTER_BASE_URL,
     PROVIDER_ALIASES,
     normalize_provider,
+    anthropic_chat,
     gemini_chat,
     gemini_embed,
     openai_chat,
@@ -36,7 +43,7 @@ from core.llm_retry import run_with_retry
 # 새 provider 를 추가할 때는 transport(_*_generate)·has_key()·여기 셋을 함께 고쳐야 한다.
 # 여기 빠뜨리면 그 provider 는 "미지원 값"으로 판정돼 openai 로 폴백하고 transport 는
 # 도달 불가 코드가 된다 — 파일 내 위치가 달라 git 이 충돌로 잡아주지 않는 실수다.
-_KNOWN_PROVIDERS = {"openai", "gemini", "github", "openrouter"}
+_KNOWN_PROVIDERS = {"openai", "gemini", "github", "openrouter", "anthropic"}
 # 같은 문자열을 EVAL_LLM_PROVIDER 와 RAG_LLM_PROVIDER 어느 쪽에 넣어도 동작하도록 맞춘
 # 철자표. agents/rag/generator.py 의 _PROVIDER_ALIASES 와 항상 같은 값을 유지할 것
 # (tests/test_provider_notices.py 가 두 표의 일치를 핀으로 잡는다).
@@ -53,7 +60,7 @@ def _warn_unknown_provider_once(raw: str) -> None:
             return
         _warned_providers.add(raw)
     print(f"[Eval] 알 수 없는 EVAL_LLM_PROVIDER '{raw}' — openai 로 폴백 "
-          f"(openai|gemini|github|openrouter)")
+          f"(openai|gemini|github|openrouter|anthropic)")
 
 
 def _provider() -> str:
@@ -78,6 +85,8 @@ def has_key() -> bool:
         return bool(os.getenv("GITHUB_TOKEN"))
     if provider == "openrouter":
         return bool(os.getenv("OPENROUTER_API_KEY"))
+    if provider == "anthropic":
+        return bool(os.getenv("ANTHROPIC_API_KEY"))
     return bool(os.getenv("OPENAI_API_KEY"))
 
 
@@ -99,6 +108,8 @@ def chat_json(
     *,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     label: str = "",
+    json_schema: dict | None = None,
+    cache_prefix: str = "",
 ) -> dict:
     """JSON 응답 강제 chat 호출 → dict. 실패 시 {} (API 예외는 호출부로 전파).
 
@@ -107,26 +118,49 @@ def chat_json(
     상한에 걸려 잘린 응답은 JSON 파싱에 실패해 {} 가 되므로, 구조가 큰 응답을 기대하는
     쪽은 max_output_tokens 를 올려 잡을 것.
 
-    label 은 실패 로그에 찍히는 호출 이름(어느 지표가 죽었는지 구분용)."""
+    label 은 실패 로그에 찍히는 호출 이름(어느 지표가 죽었는지 구분용).
+
+    json_schema 는 **anthropic provider 에서만** 쓰인다(output_config.format). 나머지
+    provider 는 "아무 JSON" 강제(json_object)만 지원하므로 무시한다 — 스키마를 넘겨도
+    동작이 나빠지지 않고, 호출부가 provider 를 알 필요도 없다.
+
+    cache_prefix 는 "매 호출 동일해서 캐시할 수 있는 앞부분" 이다. system 과 구분하는
+    이유는 **다른 provider 의 프롬프트를 바꾸지 않기 위해서**다 — anthropic 에서만
+    system 블록으로 올려 cache_control 을 걸고, 나머지 provider 에서는 user 앞에 도로
+    붙여 예전과 바이트가 같은 한 덩어리를 만든다. 그냥 system 에 실으면 지시문이
+    user → system 으로 역할이 바뀌어, 캐싱과 무관한 provider 의 판정 분포까지 건드리게
+    된다(같은 글자라도 역할이 다르면 모델이 다르게 받아들일 수 있다)."""
     def _do():
         provider = _provider()
+        # anthropic 이 아니면 캐시 지점이라는 개념이 없다 → 원래대로 user 앞에 이어붙인다.
+        sys_text = system
+        user_text = user
+        if cache_prefix:
+            if provider == "anthropic":
+                sys_text = f"{system}\n\n{cache_prefix}" if system else cache_prefix
+            else:
+                user_text = cache_prefix + user
         if provider == "gemini":
             return _gemini_generate(
-                system, user, model or os.getenv("EVAL_JUDGE_MODEL_GEMINI", "gemini-flash-latest"),
+                sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL_GEMINI", "gemini-flash-latest"),
                 json_mode=True, max_output_tokens=max_output_tokens)
         elif provider == "github":
             return _github_generate(
-                system, user, model or os.getenv("EVAL_JUDGE_MODEL_GITHUB", "openai/gpt-4o"),
+                sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL_GITHUB", "openai/gpt-4o"),
                 json_mode=True, max_output_tokens=max_output_tokens)
         elif provider == "openrouter":
             # 주의: response_format=json_object 지원은 OpenRouter 에서 모델마다 다르다.
             # 미지원 모델을 쓰면 파싱 실패 → 아래 {} 폴백으로 조용히 흘러가므로,
             # 심판 모델은 JSON 모드를 지원하는 것으로 고를 것.
             return _openrouter_generate(
-                system, user, model or os.getenv("EVAL_JUDGE_MODEL_OPENROUTER", "openai/gpt-4o"),
+                sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL_OPENROUTER", "openai/gpt-4o"),
                 json_mode=True, max_output_tokens=max_output_tokens)
+        elif provider == "anthropic":
+            return _anthropic_generate(
+                sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL_ANTHROPIC", "claude-sonnet-5"),
+                json_schema=json_schema, max_output_tokens=max_output_tokens)
         return _openai_generate(
-            system, user, model or os.getenv("EVAL_JUDGE_MODEL", "gpt-4o"),
+            sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL", "gpt-4o"),
             json_mode=True, max_output_tokens=max_output_tokens)
 
     raw = _run_with_retry(_do, "심판")
@@ -310,6 +344,20 @@ def _openrouter_embed(texts: list[str], model: str) -> list[list[float]]:
     return openai_embed(
         texts, model,
         api_key=os.getenv("OPENROUTER_API_KEY"), base_url=OPENROUTER_BASE_URL, tag="Eval",
+    )
+
+
+def _anthropic_generate(
+    system: str, user: str, model: str, json_schema: dict | None = None,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+) -> str:
+    """Anthropic transport. 다른 transport 와 달리 json_mode 대신 json_schema 를 받는다 —
+    Messages API 에는 스키마 없는 JSON 모드가 없기 때문이다(core/llm_clients.py 참고).
+    temperature 도 넘기지 않는다(Sonnet 5 이후 세대는 비기본 sampling 값을 400 으로 거부)."""
+    return anthropic_chat(
+        system, user, model, json_schema=json_schema,
+        max_output_tokens=max_output_tokens,
+        api_key=os.getenv("ANTHROPIC_API_KEY"), tag="Eval",
     )
 
 
