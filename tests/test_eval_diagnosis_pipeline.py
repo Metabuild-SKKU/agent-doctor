@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 진단 fixture 러너.
 
@@ -9,6 +7,8 @@ JSONL 한 줄을 하나의 QAR/gold/retrieval 케이스로 읽어 diagnose 라�
 항상 텍스트·청크 좌표에서 계산한다. RAGAS/AspectCritic처럼 LLM judge가 필요한 케이스는
 fixture에 점수를 박지 않고, `EVAL_DIAGNOSIS_USE_LLM=1`일 때 실제 judge로 계산한다.
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -96,10 +96,23 @@ def _load_jsonl(path: Path) -> list[dict]:
 
 
 def _case_paths() -> list[Path]:
-    paths = [FIXTURE_PATH]
+    paths: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        try:
+            key = str(path.expanduser().resolve())
+        except OSError:
+            key = str(path.expanduser().absolute())
+        if key in seen:
+            return
+        seen.add(key)
+        paths.append(path)
+
+    add(FIXTURE_PATH)
     extra = os.getenv("EVAL_DIAGNOSIS_CASES")
     if extra:
-        paths.append(Path(extra))
+        add(Path(extra))
     return paths
 
 
@@ -151,13 +164,6 @@ def _fixture_chunks(case: dict) -> list[Chunk]:
                 seen[chunk_id] = _chunk_from_entry(chunk_id, len(seen))
 
     return list(seen.values())
-
-
-def _ids(entries: list) -> list[str]:
-    out: list[str] = []
-    for entry in entries:
-        out.append(entry if isinstance(entry, str) else entry["chunk_id"])
-    return out
 
 
 def _expected_labels(case: dict) -> list[str]:
@@ -264,6 +270,9 @@ def _record_from_case(case: dict) -> EvalRecord:
     )
 
     record.generated_answer = qar.get("rag_answer") or case.get("generated_answer", "")
+    # oracle_answer 를 생략하면 gold answer 를 그대로 쓴다. 이 경우 오라클 트랙은 "gold 기준
+    # 재답변"을 흉내 내는 계약이라 만점에 가까워질 수 있으므로, bad_gold/generation 계열처럼
+    # 오라클 결과가 라벨을 좌우하는 fixture 는 oracle_answer 를 명시해야 한다.
     record.oracle_answer = case.get("oracle_answer", qar.get("oracle_answer", gold.get("answer")))
     if "oracle_context" in case:
         record.oracle_context = list(case["oracle_context"])
@@ -300,17 +309,26 @@ class EvalDiagnosisPipelineFixtureTest(unittest.TestCase):
     def test_fixture_cases_match_expected_labels(self):
         self.assertTrue(self.cases, "at least one diagnosis fixture is required")
         evaluated = 0
+        evaluated_with_expected_label = 0
         for case in self.cases:
             with self.subTest(case=case.get("case_id"), source=case.get("_source")):
                 reason = _llm_unavailable_reason(case)
                 if reason:
-                    continue
+                    self.skipTest(reason)
                 evaluated += 1
-                self.assertEqual(sorted(_expected_labels(case)), sorted(_run_case(case)))
+                expected = _expected_labels(case)
+                if expected:
+                    evaluated_with_expected_label += 1
+                self.assertEqual(sorted(expected), sorted(_run_case(case)))
         self.assertGreater(
             evaluated,
             0,
             "at least one non-LLM or judge-enabled diagnosis fixture must be evaluated",
+        )
+        self.assertGreater(
+            evaluated_with_expected_label,
+            0,
+            "at least one evaluated fixture must assert a concrete diagnosis label",
         )
 
     def test_fixture_cases_carry_review_inputs(self):
@@ -324,10 +342,25 @@ class EvalDiagnosisPipelineFixtureTest(unittest.TestCase):
                 self.assertNotIn("expected_label", case)
 
                 metrics = case.get("metrics") or {}
-                self.assertFalse(RULE_METRIC_KEYS & set(metrics))
-                self.assertFalse(JUDGE_METRIC_KEYS & set(metrics))
+                rule_overrides = RULE_METRIC_KEYS & set(metrics)
+                self.assertFalse(
+                    rule_overrides,
+                    "recall/f1/oracle_f1/exact_match/recall_basis are computed "
+                    f"from QAR, gold spans, and retrieved chunks; remove {sorted(rule_overrides)}",
+                )
+                judge_overrides = JUDGE_METRIC_KEYS & set(metrics)
+                self.assertFalse(
+                    judge_overrides,
+                    "ragas/oracle_ragas/aspect must be produced by the Eval judge, "
+                    f"not fixture literals; remove {sorted(judge_overrides)}",
+                )
                 for key in JUDGE_METRIC_KEYS:
-                    self.assertNotIn(key, case)
+                    self.assertNotIn(
+                        key,
+                        case,
+                        f"{key} belongs to the judge output path; do not store it "
+                        "as a top-level fixture value",
+                    )
 
                 # top_k는 retriever cut에만 쓰이고 diagnose는 len(retrieved_chunk_ids)를 본다.
                 # 그래서 fixture가 top_k를 적으면 retrieved 길이와 맞춰 두어야 한다.
@@ -338,6 +371,10 @@ class EvalDiagnosisPipelineFixtureTest(unittest.TestCase):
     def test_case_ids_are_unique(self):
         ids = [case.get("case_id") for case in self.cases]
         self.assertEqual(len(ids), len(set(ids)))
+
+    def test_case_paths_deduplicate_default_fixture(self):
+        with patch.dict(os.environ, {"EVAL_DIAGNOSIS_CASES": str(FIXTURE_PATH)}):
+            self.assertEqual(_case_paths(), [FIXTURE_PATH])
 
     def test_probe_metadata_is_carried_into_eval_record(self):
         case = {
