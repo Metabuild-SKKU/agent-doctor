@@ -21,7 +21,7 @@ from typing import Iterable
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from tests.diagnose_grid.builder import Case, build, build_chunks
+from tests.diagnose_grid.builder import Case, build
 
 
 def _chunk_entry(chunk) -> dict:
