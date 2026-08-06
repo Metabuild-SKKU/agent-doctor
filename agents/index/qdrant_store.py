@@ -937,10 +937,17 @@ def _fallback_embedding(text: str, vector_dim: int) -> list[float]:
 def resolve_embedding_provider(provider: str | None = None) -> str:
     """임베딩을 어디서 계산할지. None → env INDEX_EMBED_PROVIDER(기본 openrouter).
 
-    실측(tools/bench_embedding.py)에서 로컬 CPU 는 2 chunks/sec, OpenRouter 는 동시 8에서
-    371 chunks/sec 였다(26MB 코퍼스 환산 2.3시간 vs 0.7분, $0.06). 로컬 BAAI/bge-m3 와
-    OpenRouter baai/bge-m3 의 벡터는 코사인 0.99997 로 사실상 같고 차원도 1024 로
-    동일해, provider 를 바꿔도 컬렉션을 다시 만들 필요가 없다.
+    [기본값이 openrouter 인 이유]
+    이 프로젝트는 OpenRouter 예산이 확보된 상태로 운영한다는 전제다. 그 전제에서는
+    CPU 로 돌릴 이유가 사실상 없다 — 실측(tools/bench_embedding.py)에서 로컬 CPU 는
+    2 chunks/sec, OpenRouter 는 동시 8에서 371 chunks/sec 였다. 26MB 코퍼스 환산으로
+    2.3시간 vs 0.7분이고 비용은 $0.06 다. 100배 넘는 시간 차이를 몇 센트로 사는
+    셈이라, "예산이 있는데 CPU 를 쓰는" 선택지는 실질적으로 없다고 보고 기본값을
+    빠른 쪽에 뒀다. 예산이 없거나 오프라인이면 local 로 내린다.
+
+    바꿔도 안전하다: 로컬 BAAI/bge-m3 와 OpenRouter baai/bge-m3 의 벡터는 코사인
+    0.99997 로 사실상 같고 차원도 1024 로 동일해, provider 를 바꿔도 컬렉션을 다시
+    만들 필요가 없다.
 
     미지원 값은 openrouter 로 떨어뜨리지 않고 그대로 돌려준다 — 호출부가 로컬로
     처리하므로, 오타가 "조용히 API 과금" 이 아니라 "조용히 로컬" 로 끝난다."""
@@ -951,10 +958,13 @@ def resolve_embedding_provider(provider: str | None = None) -> str:
 def resolve_query_embedding_provider(provider: str | None = None) -> str:
     """질의 임베딩을 어디서 계산할지. None → env INDEX_QUERY_EMBED_PROVIDER(기본 openrouter).
 
-    색인(INDEX_EMBED_PROVIDER)과 별개 축으로 둔다. 값이 같아도 성질이 다르기 때문이다 —
-    색인은 대량·일회성이라 재시도가 남는 장사지만, 질의는 단건·대화형이라 재시도가
-    그대로 사용자 지연이 된다. 실측 429 가 19% 라 단건 질의가 재시도에 걸리면
-    /search 한 건이 수십 초 블로킹될 수 있다. 그때 이 축만 local 로 내리면 된다.
+    기본값은 색인과 같은 openrouter 다(그 이유는 resolve_embedding_provider 참고 —
+    예산이 있는 전제에서 CPU 를 쓸 이유가 없다는 판단).
+
+    그런데도 별개 축으로 둔다. 값이 같아도 성질이 다르기 때문이다 — 색인은
+    대량·일회성이라 재시도가 남는 장사지만, 질의는 단건·대화형이라 재시도가 그대로
+    사용자 지연이 된다. 실측 429 가 19% 라 단건 질의가 재시도에 걸리면 /search 한 건이
+    수십 초 블로킹될 수 있다. 그때 색인은 그대로 두고 이 축만 local 로 내리면 된다.
 
     섞어도 안전하다 — 로컬과 OpenRouter 의 bge-m3 벡터는 코사인 0.99997 이고 차원도
     같아, 색인을 API 로 질의를 로컬로 계산해도 순위가 흔들리지 않는다
@@ -962,8 +972,8 @@ def resolve_query_embedding_provider(provider: str | None = None) -> str:
 
     주의: 질의 경로에는 색인 같은 "시끄럽게 실패" 가 없다. agents/rag/retriever.py 가
     벡터 검색 예외를 잡아 keyword 로 내리므로, 키가 없거나 API 가 계속 실패하면
-    멈추는 대신 검색 품질만 조용히 떨어진다. 그래서 retriever 진입 시 preflight 로
-    한 번 끊는다(agents/rag/retriever.py 의 _preflight_query_embedding 참고)."""
+    멈추는 대신 검색 품질만 조용히 떨어진다. 그래서 retriever 진입 시
+    query_embedding_config_error() 로 설정 오류만 골라 한 번 끊는다."""
     raw = provider if provider is not None else os.getenv("INDEX_QUERY_EMBED_PROVIDER")
     return normalize_provider(raw) or "openrouter"
 

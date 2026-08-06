@@ -84,9 +84,21 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 실측(`tools/bench_embedding.py`, 한국어 1,000청크): 로컬 CPU 2 chunks/sec vs
 OpenRouter 동시 8에서 371 chunks/sec. 26MB 코퍼스 환산으로 **2.3시간 vs 0.7분 / $0.06**
-입니다. 로컬 `BAAI/bge-m3`와 OpenRouter `baai/bge-m3`의 벡터는 **코사인 0.99997**이고
-차원도 같아, provider를 바꿔도 컬렉션을 다시 만들 필요가 없고 색인·질의를 서로 다른
-경로로 계산해도 순위가 흔들리지 않습니다.
+입니다.
+
+**기본값이 `openrouter`인 이유**는 이 프로젝트가 OpenRouter 예산이 확보된 상태로
+운영된다는 전제 때문입니다. 그 전제에서는 CPU로 돌릴 이유가 사실상 없습니다 —
+100배 넘는 시간 차이를 몇 센트로 사는 셈이라 "예산이 있는데 CPU"라는 선택지가
+실질적으로 없다고 보고 기본값을 빠른 쪽에 뒀습니다. 예산이 없거나 오프라인이면
+`local`로 내리면 됩니다.
+
+바꿔도 안전합니다: 로컬 `BAAI/bge-m3`와 OpenRouter `baai/bge-m3`의 벡터는
+**코사인 0.99997**이고 차원도 같아, provider를 바꿔도 컬렉션을 다시 만들 필요가 없고
+색인·질의를 서로 다른 경로로 계산해도 순위가 흔들리지 않습니다.
+
+테스트는 예외입니다. `tests/conftest.py`가 스위트 전역에서 두 값을 `local`로 고정합니다
+— 키가 있는 개발 머신에서 스위트를 돌릴 때마다 실제 API가 호출돼 조용히 과금되는 것을
+막기 위함이며, **프로덕션 기본값과는 무관합니다.**
 
 색인 중 임베딩 API가 **일시적으로** 실패(5xx·타임아웃)해 문서가 빠지면
 `state.status`가 `indexed`가 아니라 `partial`이 됩니다. 라우팅은 `error`만 보므로

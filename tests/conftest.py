@@ -1,5 +1,11 @@
 """테스트 스위트 공통 설정.
 
+**여기서 정하는 값은 테스트 전용이다. 프로덕션 기본값이 아니다.**
+색인·질의 임베딩의 실제 기본값은 둘 다 `openrouter` 이고
+(agents/index/qdrant_store.py 의 resolve_embedding_provider /
+resolve_query_embedding_provider), 이 파일은 그걸 테스트 동안만 `local` 로 덮는다.
+이 파일만 보고 "기본값이 local" 이라고 읽지 말 것.
+
 임베딩 provider 를 local 로 못 박는다. 색인·질의 기본값이 openrouter 라, 이게 없으면
 테스트가 실행 머신의 `.env` 에 따라 갈린다:
 
@@ -21,6 +27,7 @@ import pytest
 
 @pytest.fixture(autouse=True, scope="session")
 def _pin_embedding_provider_to_local():
+    """테스트 동안만 local 로 고정한다(프로덕션 기본값은 openrouter)."""
     keys = {
         "INDEX_EMBED_PROVIDER": "local",
         "INDEX_QUERY_EMBED_PROVIDER": "local",
