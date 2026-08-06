@@ -38,14 +38,22 @@ class _ApiRouted(unittest.TestCase):
     def setUp(self):
         patcher = patch.dict(
             "os.environ",
-            {"INDEX_EMBED_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "k"},
+            {
+                "INDEX_EMBED_PROVIDER": "openrouter",
+                "OPENROUTER_API_KEY": "k",
+                # 질의 축은 색인과 분리돼 기본이 local 이다. 이 클래스는 색인 경로를
+                # 다루므로 질의도 API 로 못 박아 실제 모델 로드가 새지 않게 한다.
+                "INDEX_QUERY_EMBED_PROVIDER": "openrouter",
+            },
         )
         patcher.start()
         self.addCleanup(patcher.stop)
         store._models.clear()
-        store._embed_route_notified = False
+        # 안내 플래그는 경로별 집합이다(전역 bool 하나였을 때는 먼저 찍힌 경로가
+        # 나머지를 삼켰다). 비우지 않으면 앞 테스트의 안내가 남아 0건으로 보인다.
+        store._embed_routes_notified.clear()
         self.addCleanup(store._models.clear)
-        self.addCleanup(setattr, store, "_embed_route_notified", False)
+        self.addCleanup(store._embed_routes_notified.clear)
 
 
 class OpenRouterRoutingTests(_ApiRouted):
@@ -67,10 +75,12 @@ class OpenRouterRoutingTests(_ApiRouted):
             store.embed_batch(["a"], model_name="BAAI/bge-m3")
         self.assertEqual(embed.call_args.args[1], "other/model")
 
-    def test_query_embed_uses_same_provider(self):
+    def test_query_embed_follows_query_axis(self):
+        # 질의 축을 openrouter 로 명시하면 질의도 API 를 탄다(setUp 에서 지정).
         with patch.object(store, "openai_embed") as embed:
             embed.side_effect = lambda texts, model, **kw: [[7.0] for _ in texts]
             self.assertEqual(store.embed("q", model_name="BAAI/bge-m3"), [7.0])
+        embed.assert_called_once()
 
     def test_missing_key_raises_loudly(self):
         # 조용히 로컬로 새면 "API 로 돌리는 중" 이라 믿은 색인이 2 chunks/sec 가 된다.
@@ -172,6 +182,91 @@ class _FakeResponse:
     status_code = 429
     headers: dict[str, str] = {}
     request = None
+
+
+class QueryAxisTests(unittest.TestCase):
+    """질의 임베딩은 색인과 별개 축이다(INDEX_QUERY_EMBED_PROVIDER)."""
+
+    def setUp(self):
+        store._models.clear()
+        store._embed_routes_notified.clear()
+        self.addCleanup(store._models.clear)
+        self.addCleanup(store._embed_routes_notified.clear)
+
+    def test_default_is_local_even_when_index_is_openrouter(self):
+        """색인을 API 로 돌려도 질의는 기본이 로컬이다.
+
+        질의 경로에는 '시끄럽게 실패' 가 성립하지 않는다 — retriever 가 벡터 검색
+        예외를 잡아 keyword 로 내리므로, API 가 흔들리면 멈추는 대신 검색 품질만
+        조용히 떨어진다. 게다가 429 재시도가 단건 질의 지연으로 그대로 나타난다."""
+        with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "openrouter",
+                                       "OPENROUTER_API_KEY": "k",
+                                       "INDEX_QUERY_EMBED_PROVIDER": ""}):
+            self.assertEqual(store.resolve_query_embedding_provider(), "local")
+            self.assertEqual(store.resolve_embedding_provider(), "openrouter")
+
+    def test_env_opts_query_into_api(self):
+        with patch.dict("os.environ", {"INDEX_QUERY_EMBED_PROVIDER": "openrouter"}):
+            self.assertEqual(store.resolve_query_embedding_provider(), "openrouter")
+
+    def test_alias_is_normalized(self):
+        with patch.dict("os.environ", {"INDEX_QUERY_EMBED_PROVIDER": "open-router"}):
+            self.assertEqual(store.resolve_query_embedding_provider(), "openrouter")
+
+    def test_embed_does_not_call_api_by_default(self):
+        """기본 설정에서 질의가 API 로 새면 사용자 지연과 과금이 조용히 생긴다."""
+        with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "openrouter",
+                                       "OPENROUTER_API_KEY": "k",
+                                       "INDEX_QUERY_EMBED_PROVIDER": ""}),              patch.object(store, "openai_embed") as embed,              patch.object(store, "_load_embedding_model",
+                          return_value=(None, "cpu")),              patch("builtins.print"):
+            vector = store.embed("q", model_name="BAAI/bge-m3")
+
+        embed.assert_not_called()
+        self.assertEqual(len(vector), store.VECTOR_DIM)   # 해시 fallback
+
+
+class ResponseIntegrityTests(_ApiRouted):
+    def test_short_response_raises(self):
+        """호출부가 zip(청크, 벡터) 로 짝짓는다 — 짧게 오면 뒤쪽 청크가 조용히 사라진다.
+
+        벤치에서 429 를 삼켰을 때 1,000청크 중 170개가 없어진 것과 같은 실패 모양이고,
+        그때처럼 '성공한 색인' 으로 보이는 게 가장 나쁘다."""
+        with patch.object(store, "openai_embed") as embed:
+            embed.side_effect = lambda texts, model, **kw: [[1.0]]   # 항상 1건만
+            with self.assertRaises(RuntimeError) as ctx:
+                store.embed_batch(["a", "b", "c"], model_name="BAAI/bge-m3")
+        self.assertIn("개수", str(ctx.exception))
+
+    def test_long_response_also_raises(self):
+        with patch.object(store, "openai_embed") as embed:
+            embed.side_effect = lambda texts, model, **kw: [[1.0]] * (len(texts) + 1)
+            with self.assertRaises(RuntimeError):
+                store.embed_batch(["a"], model_name="BAAI/bge-m3")
+
+    def test_zero_api_batch_does_not_crash(self):
+        # 설정 오타가 ValueError: range() arg 3 must not be zero 로 끝나면 안 된다.
+        with patch.dict("os.environ", {"INDEX_EMBED_API_BATCH": "0"}),              patch.object(store, "openai_embed") as embed:
+            embed.side_effect = lambda texts, model, **kw: [[1.0] for _ in texts]
+            self.assertEqual(len(store.embed_batch(["a", "b"],
+                                                   model_name="BAAI/bge-m3")), 2)
+
+
+class RouteNoticePerRouteTests(unittest.TestCase):
+    def setUp(self):
+        store._embed_routes_notified.clear()
+        self.addCleanup(store._embed_routes_notified.clear)
+
+    def test_fallback_notice_is_not_swallowed_by_earlier_route(self):
+        """플래그가 하나면 먼저 찍힌 경로가 나머지를 삼킨다.
+
+        API 로 시작한 실행이 도중에 해시 fallback 으로 열화되는 게 정확히 그 경우고,
+        그때 안내가 사라지는 건 '어디서 계산됐는지 기록한다' 는 목적과 반대다."""
+        store._notify_embed_route_once("openrouter", "[Index] A")
+        with patch("builtins.print") as printed:
+            store._notify_embed_route_once("hash_fallback", "[Index] B")
+            store._notify_embed_route_once("hash_fallback", "[Index] B")
+
+        self.assertEqual([c.args[0] for c in printed.call_args_list], ["[Index] B"])
 
 
 if __name__ == "__main__":

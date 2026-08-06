@@ -334,7 +334,10 @@ def openai_embed(
             model, resp.usage.prompt_tokens, 0, tag=tag,
             cost_usd=_known_cost_usd(base_url, resp.usage),
         )
-    return [d.embedding for d in resp.data]
+    # index 로 정렬한다. 스펙상 입력 순서대로 오지만 그건 응답 본문이 보장하는 게
+    # 아니라 관례이고(그래서 index 필드가 따로 있다), 이제 색인 벡터가 이 경로를 탄다.
+    # 순서가 한 칸만 어긋나도 벡터가 엉뚱한 청크에 붙어 검색이 조용히 망가진다.
+    return [d.embedding for d in sorted(resp.data, key=lambda d: d.index)]
 
 
 def gemini_embed(texts: list[str], model: str, *, tag: str = "LLM") -> list[list[float]]:

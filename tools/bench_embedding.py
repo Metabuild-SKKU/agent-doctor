@@ -276,14 +276,16 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 def compare_vectors(client, api_model: str, local_model: str, texts: list[str]) -> None:
     """같은 텍스트의 로컬 벡터 vs API 벡터. 색인/질의 경로를 섞어도 되는지의 근거."""
-    from agents.index.qdrant_store import embed_batch
-
-    from agents.index.qdrant_store import embedding_is_fallback
+    from agents.index.qdrant_store import embed_batch, embedding_is_fallback
 
     print(f"\n[벡터 호환성] 같은 텍스트 {len(texts)}건을 양쪽에서 임베딩해 비교")
     local_vecs = embed_batch(texts, model_name=local_model,
                              batch_size=len(texts), provider="local")
-    if embedding_is_fallback(local_model):
+    # provider 를 못 박아야 한다. 생략하면 env 기본값(openrouter)으로 해석되고,
+    # API 경로는 해시 fallback 이라는 상태가 없어 항상 False 라 이 가드가 죽는다.
+    # 그러면 로컬 모델이 안 뜬 실행에서 해시 벡터와 API 벡터를 비교해
+    # "유의미하게 다르다 = 혼용 불가" 라는 정반대 결론을 출력한다.
+    if embedding_is_fallback(local_model, provider="local"):
         print(f"  로컬 '{local_model}' 로드 실패(해시 fallback) — 비교는 무의미하므로 생략")
         return
     try:

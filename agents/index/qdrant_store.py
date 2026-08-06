@@ -92,8 +92,10 @@ _failed_models: dict[tuple[str, str], float] = {}
 # model_name → tokenizer(또는 로드 실패를 뜻하는 None). 전체 모델과 별개로 캐시한다 —
 # API provider 로 색인하면 모델은 안 올라오지만 token_count 는 여전히 필요하다.
 _tokenizers: dict[str, Any | None] = {}
-# 임베딩 경로 안내를 실행당 한 번만 찍기 위한 플래그(색인은 스레드로 병렬 호출한다).
-_embed_route_notified = False
+# 이미 안내한 임베딩 경로(색인은 스레드로 병렬 호출한다). 경로별로 한 번씩 찍는다 —
+# 하나로 묶으면 먼저 찍힌 경로가 나머지를 삼켜, API 로 시작한 실행이 도중에
+# 해시 fallback 으로 열화돼도 그 안내가 나오지 않는다.
+_embed_routes_notified: set[str] = set()
 _embed_route_lock = threading.Lock()
 _FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
 # reranker_model → 마지막 로드 실패 시각(monotonic). embedding 모델과 같은 쿨다운
@@ -946,6 +948,27 @@ def resolve_embedding_provider(provider: str | None = None) -> str:
     return normalize_provider(raw) or "openrouter"
 
 
+def resolve_query_embedding_provider(provider: str | None = None) -> str:
+    """질의 임베딩을 어디서 계산할지. None → env INDEX_QUERY_EMBED_PROVIDER.
+
+    색인과 분리한 축이다. 미설정이면 local 이고, 색인의 INDEX_EMBED_PROVIDER 를
+    따라가지 않는다. 이유가 셋이다.
+
+      1) 질의 경로에는 "시끄럽게 실패" 가 성립하지 않는다. agents/rag/retriever.py 가
+         벡터 검색 예외를 잡아 keyword 로 내리므로, 키가 없거나 API 가 흔들리면
+         색인과 달리 멈추지 않고 검색 품질만 조용히 떨어진다.
+      2) 지연이 사용자에게 그대로 간다. 429 는 상시 섞여 나오는데(실측 19%)
+         단건 질의가 재시도에 걸리면 /search 한 건이 수십 초 블로킹된다.
+         색인은 대량·일회성이라 재시도가 남는 장사지만 질의는 아니다.
+      3) 섞어도 안전하다. 로컬과 OpenRouter 의 bge-m3 벡터는 코사인 0.99997 이라
+         색인을 API 로, 질의를 로컬로 계산해도 순위가 흔들리지 않는다
+         (tools/bench_embedding.py 실측).
+
+    질의까지 API 로 보내려면 INDEX_QUERY_EMBED_PROVIDER=openrouter 로 명시한다."""
+    raw = provider if provider is not None else os.getenv("INDEX_QUERY_EMBED_PROVIDER")
+    return normalize_provider(raw) or "local"
+
+
 def _openrouter_embed_model(model_name: str) -> str:
     """로컬 모델명을 OpenRouter 철자로. env 로 직접 지정할 수도 있다.
 
@@ -958,18 +981,21 @@ def _openrouter_embed_model(model_name: str) -> str:
     return model_name.lower()
 
 
-def _notify_embed_route_once(message: str) -> None:
-    """임베딩 경로를 실행당 한 번만 알린다.
+def _notify_embed_route_once(route: str, message: str) -> None:
+    """임베딩 경로를 경로마다 실행당 한 번씩 알린다.
 
     청크마다 찍으면 정작 봐야 할 로그를 덮는다(graph_index 의
     _notify_llm_extraction_once 와 같은 패턴). 한 번은 반드시 남겨야 하는 이유는,
     provider 가 env 로 정해져 실행 기록만 봐서는 이 색인이 어디서 계산됐는지
-    알 수 없기 때문이다 — 비용과 속도가 100배 넘게 갈리는 축이다."""
-    global _embed_route_notified
+    알 수 없기 때문이다 — 비용과 속도가 100배 넘게 갈리는 축이다.
+
+    플래그를 경로별로 나누는 이유: 하나로 묶으면 먼저 찍힌 경로가 나머지를 삼킨다.
+    특히 API 로 시작한 실행이 도중에 해시 fallback 으로 열화됐을 때 그 안내가
+    억제되는데, 그건 "어디서 계산됐는지 기록한다" 는 목적과 정확히 반대다."""
     with _embed_route_lock:
-        if _embed_route_notified:
+        if route in _embed_routes_notified:
             return
-        _embed_route_notified = True
+        _embed_routes_notified.add(route)
     print(message)
 
 
@@ -992,16 +1018,19 @@ def _embed_via_openrouter(texts: list[str], model_name: str) -> list[list[float]
         )
 
     model = _openrouter_embed_model(model_name)
-    batch_size = _env_int("INDEX_EMBED_API_BATCH", 64)
+    # 0 이나 음수면 range(step=0) 이 ValueError 로 죽는다. 바로 아래 concurrency 와
+    # 같은 방어를 건다 — 설정 오타가 크래시가 되면 안 된다.
+    batch_size = max(1, _env_int("INDEX_EMBED_API_BATCH", 64))
     concurrency = max(1, _env_int("INDEX_EMBED_CONCURRENCY", 8))
     groups = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
     _notify_embed_route_once(
+        "openrouter",
         f"[Index] 임베딩을 OpenRouter({model})로 계산합니다 — 요청당 {batch_size}건, "
         f"동시 {concurrency}. 로컬로 돌리려면 INDEX_EMBED_PROVIDER=local."
     )
 
     def _one(group: list[str]) -> list[list[float]]:
-        return run_with_retry(
+        result = run_with_retry(
             lambda: openai_embed(
                 group, model,
                 api_key=api_key, base_url=OPENROUTER_BASE_URL, tag="Index",
@@ -1009,6 +1038,17 @@ def _embed_via_openrouter(texts: list[str], model_name: str) -> list[list[float]
             label="임베딩",
             tag="Index",
         )
+        # 개수가 어긋나면 예외로 끊는다. 호출부가 zip(청크, 벡터) 로 짝짓기 때문에
+        # 짧게 온 응답은 뒤쪽 청크를 조용히 색인에서 지운다 — 벤치에서 재시도 없이
+        # 429 를 삼켰을 때 1,000청크 중 170개가 사라진 것과 같은 실패 모양이고,
+        # 그때처럼 "성공한 색인" 으로 보이는 게 가장 나쁘다.
+        if len(result) != len(group):
+            raise RuntimeError(
+                f"OpenRouter 임베딩 응답 개수가 어긋납니다: 요청 {len(group)} / "
+                f"응답 {len(result)} (model={model}). 부분 응답을 그대로 쓰면 "
+                f"벡터가 엉뚱한 청크에 붙습니다."
+            )
+        return result
 
     if len(groups) == 1:
         return _one(groups[0])
@@ -1172,8 +1212,13 @@ def _encode_batch(
                 torch.cuda.empty_cache()
             except Exception:
                 pass
+            # 이 print 는 except 안이라 문구에 cp949 불가 문자를 쓰면 안 된다.
+            # 터지면 UnicodeEncodeError 가 올라가는데, 아래 embed_batch 의
+            # _is_cuda_oom(exc) 가 False 라 그대로 재전파돼 배치 축소와 CPU 폴백이
+            # 통째로 죽는다 — OOM 을 처리하려던 코드가 OOM 처리를 없앤다.
+            # (AGENTS.md 코드 컨벤션, tests/test_console_encoding.py 가 고정한다)
             print(
-                f"[Index] GPU 메모리 부족 — 배치 크기를 {current_batch_size} 로 "
+                f"[Index] GPU 메모리 부족, 배치 크기를 {current_batch_size} 로 "
                 f"줄여 재시도합니다."
             )
 
@@ -1211,11 +1256,13 @@ def embed_batch(
     model, actual_device = _load_embedding_model(model_name, device)
     if model is None:
         _notify_embed_route_once(
+            "hash_fallback",
             f"[Index] 임베딩 모델 '{model_name}' 을 못 써 해시 fallback 벡터로 "
             f"색인합니다 — 의미 검색이 되지 않습니다."
         )
         return [_fallback_embedding(text, dimension) for text in texts]
     _notify_embed_route_once(
+        f"local:{actual_device}",
         f"[Index] 임베딩을 로컬 {actual_device.upper()}({model_name})로 계산합니다 "
         f"— 비용 0, 외부 호출 없음."
     )
@@ -1241,15 +1288,15 @@ def embed(
 ) -> list[float]:
     """단건 임베딩(질의용). batch_size=1 로 embed_batch 를 한 번 타 경로를 통일한다.
 
-    질의도 색인과 같은 provider 를 기본으로 쓴다. 실측 코사인이 0.99997 이라
-    섞여도 순위가 흔들리지는 않지만, 설정을 한 곳에서 읽어 일관되게 두는 편이 낫다."""
+    provider 를 명시하지 않으면 색인이 아니라 **질의 축**(INDEX_QUERY_EMBED_PROVIDER,
+    기본 local)을 읽는다 — 이유는 resolve_query_embedding_provider 참고."""
     return embed_batch(
         [text],
         model_name=model_name,
         vector_dim=vector_dim,
         batch_size=1,
         device=device,
-        provider=provider,
+        provider=resolve_query_embedding_provider(provider),
     )[0]
 
 
@@ -1292,8 +1339,12 @@ def count_tokens(
     # 아무거나 쓴다 — tokenizer 는 장치와 무관하게 같다. 이름만으로 조회하면
     # 항상 캐시 미스가 나서 실제 tokenizer 대신 어림짐작으로 조용히 떨어진다
     # (그 토큰 수는 optimize 의 chunk_size 처방에 쓰인다).
+    # list() 로 스냅샷을 뜬다 — 색인은 스레드로 병렬 호출하므로, 다른 스레드가
+    # 모델을 로드하는 중이면 순회 도중 "dictionary changed size during iteration"
+    # 이 난다. 토큰 세기 하나 때문에 문서 처리가 통째로 실패하면 안 된다.
     model = next(
-        (value for (name, _device), value in _models.items() if name == model_name),
+        (value for (name, _device), value in list(_models.items())
+         if name == model_name),
         None,
     )
     tokenizer = getattr(model, "tokenizer", None) if model is not None else None
