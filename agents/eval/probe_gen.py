@@ -56,6 +56,12 @@ from agents.eval.types import (
     resolve_probe_source,
     taxonomy_qa_path,
 )
+from core.llm_clients import (
+    SCHEMA_INT,
+    SCHEMA_STR,
+    array_of,
+    strict_object,
+)
 from core.parallel import parallel_map
 
 # 자동 생성 기본 개수 (설계: testset_size=5~10 으로 시작해 비용 확인 후 확대)
@@ -225,6 +231,28 @@ _HEURISTIC_EVIDENCE_MAX_CHARS = 240
 # evidence 배열은 길어질 수 있고, Gemini 추론 모델은 내부 사고(thoughts)까지 이 상한을
 # 함께 소진한다. 여기서 잘리면 JSON 파싱이 실패해 휴리스틱 폴백으로 떨어진다.
 _SYNTHESIS_MAX_OUTPUT_TOKENS = 4096
+
+# ── Probe 합성 응답 스키마 (anthropic output_config.format 전용) ───
+#
+# 파싱 실패의 대가가 파이프라인에서 가장 크다. RAGAS 심판이 실패하면 그 지표만 결측이고
+# 보수 경로가 되묻지만, 여기서 실패하면 휴리스틱 폴백으로 떨어져 **쓰레기 gold 가
+# eval_probes.json 에 박제**되고 이후 모든 채점이 그 gold 를 기준으로 오염된다.
+# 아래 print("... → 휴리스틱 폴백") 로그들이 그 사고의 흔적이다.
+#
+# system 프롬프트가 이미 같은 모양을 글자로 지시하고 있지만 그건 강제력이 없다.
+# 스키마를 실으면 디코딩 단계에서 강제돼 "빈 응답/파싱 실패" 자체가 불가능해진다.
+# (anthropic 이 아닌 provider 는 이 값을 무시하므로 동작이 예전과 같다.)
+_SCHEMA_QA = strict_object({"question": SCHEMA_STR, "ground_truth": SCHEMA_STR})
+_SCHEMA_TOPIC = strict_object({"topic": SCHEMA_STR})
+_SCHEMA_QUESTION = strict_object({"question": SCHEMA_STR})
+_SCHEMA_QA_EVIDENCE = strict_object({
+    "question": SCHEMA_STR,
+    "ground_truth": SCHEMA_STR,
+    # evidence 는 빈 배열도 유효하다(_parse_evidence 가 결측을 감당한다). required 에
+    # 남겨두는 이유는 키 자체가 사라지는 걸 막기 위함 — 값이 없으면 [] 로 오게 된다.
+    "evidence": array_of(strict_object({"source_index": SCHEMA_INT,
+                                        "quote": SCHEMA_STR})),
+})
 
 
 # ── Probe 품질 게이트 ─────────────────────────────────────────────
@@ -560,6 +588,7 @@ def _llm_generate_single_hop(chunk_text: str) -> tuple[str, str] | None:
             user=f"[컨텍스트]\n{chunk_text}",
             max_output_tokens=_SYNTHESIS_MAX_OUTPUT_TOKENS,
             label="probe.single_hop",
+            json_schema=_SCHEMA_QA,
         )
         question = (data.get("question") or "").strip()
         ground_truth = (data.get("ground_truth") or "").strip()
@@ -1409,6 +1438,7 @@ def _llm_topic(chunk_text: str) -> str | None:
                     "반드시 {\"topic\": str} 형태의 JSON으로만 답하라."),
             user=f"[컨텍스트]\n{chunk_text}",
             label="probe.topic",
+            json_schema=_SCHEMA_TOPIC,
         )
         topic = (data.get("topic") or "").strip()
         # LLM 결과에도 furniture 가 섞일 수 있으니 게이트를 태워 걸러낸다(잔여물이면 폐기 → 폴백).
@@ -1481,6 +1511,7 @@ def _false_premise_question(chunk_text: str) -> str | None:
                         "반드시 {\"question\": str} 형태의 JSON으로만 답하라."),
                 user=f"[컨텍스트]\n{chunk_text}",
                 label="probe.adversarial",
+                json_schema=_SCHEMA_QUESTION,
             )
             question = (data.get("question") or "").strip()
             if question:
@@ -1668,6 +1699,7 @@ def _llm_synthesize_query(
             user=f"[컨텍스트]\n{_format_sources_for_llm(nodes)}",
             max_output_tokens=_SYNTHESIS_MAX_OUTPUT_TOKENS,
             label="probe.quadrant",
+            json_schema=_SCHEMA_QA_EVIDENCE,
         )
         question = (data.get("question") or "").strip()
         ground_truth = (data.get("ground_truth") or "").strip()
