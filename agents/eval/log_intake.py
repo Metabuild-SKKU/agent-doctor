@@ -8,13 +8,19 @@ agents/eval/log_intake.py
 후속 PR - 이 모듈은 적재·검증·판정까지만 담당하고 core/agents 어디에도
 의존하지 않는다(순수 stdlib).
 
-스키마 v0 (한 줄 = 요청 1건, JSON Lines):
+스키마 v1 (한 줄 = 요청 1건, JSON Lines. 상세 규칙: docs/external_rag_log_intake.md §3):
     {"question": str,                                   # 필수
      "answer":   str,                                   # 필수
      "contexts": [str | {"text": str, "chunk_id"?, "score"?, "rank"?, "source_doc"?}],
-                                                        # 권장 - 있어야 검색/생성 원인 분리
+                                                        # 준필수 - 있어야 검색/생성 원인 분리
+     "ground_truth": str,                               # 권장 - 지표 2개→5개(correctness/context P·R)
+     "gold_contexts": str | [str],                      # 선택 - 정답 근거 문단 '원문 텍스트'
+                                                        #   (청크 ID 아님 - 텍스트 겹침으로 검색축 판정)
      "config":   {"top_k"?, "chunk_size"?, ...},        # 선택 - 있어야 처방에 현재값 반영
      "feedback": str,  "latency_ms": int,  "timestamp": str}   # 선택
+
+    ground_truth/gold_contexts 는 실행 로그가 아니라 QA셋(시험지)에서 오는 값 -
+    QA셋을 가진 상대만 채울 수 있으며, 없다고 요구하지 않는다(qa_merge 로 병합 가능).
 
 CLI: python -m agents.eval.log_intake <log.jsonl>
      → 적재 결과와 "이 로그로 가능한 진단 수준"을 요약 출력한다.
@@ -48,6 +54,8 @@ class ExternalLogRecord:
     question: str
     answer: str
     contexts: list[dict] = field(default_factory=list)
+    ground_truth: Optional[str] = None       # 정답 텍스트 (시험지 계열)
+    gold_contexts: list[str] = field(default_factory=list)  # 정답 근거 문단 원문 (시험지 계열)
     config: dict = field(default_factory=dict)
     feedback: Optional[str] = None
     latency_ms: Optional[int] = None
@@ -94,6 +102,13 @@ def parse_record(obj: Any) -> ExternalLogRecord:
     if isinstance(raw_contexts, list):
         contexts = [c for c in (_normalize_context(e) for e in raw_contexts) if c]
 
+    # gold_contexts: 문자열 하나도, 배열도 허용(contexts 와 같은 관용 규칙). 빈 항목은 버린다.
+    raw_gold = obj.get("gold_contexts")
+    if isinstance(raw_gold, str):
+        raw_gold = [raw_gold]
+    gold_contexts = ([str(g).strip() for g in raw_gold if str(g or "").strip()]
+                     if isinstance(raw_gold, list) else [])
+
     config = obj.get("config")
     latency = obj.get("latency_ms")
     feedback = obj.get("feedback")
@@ -101,6 +116,8 @@ def parse_record(obj: Any) -> ExternalLogRecord:
         question=str(obj["question"]).strip(),
         answer=str(obj["answer"]).strip(),
         contexts=contexts,
+        ground_truth=str(obj.get("ground_truth") or "").strip() or None,
+        gold_contexts=gold_contexts,
         config=config if isinstance(config, dict) else {},
         feedback=str(feedback) if feedback not in (None, "") else None,
         latency_ms=int(latency) if isinstance(latency, (int, float)) else None,
@@ -144,6 +161,8 @@ def assess_capability(records: list[ExternalLogRecord]) -> dict:
     with_scores = sum(1 for r in records if any(c["score"] is not None for c in r.contexts))
     with_config = sum(1 for r in records if r.config)
     with_feedback = sum(1 for r in records if r.feedback is not None)
+    with_ground_truth = sum(1 for r in records if r.ground_truth)
+    with_gold_contexts = sum(1 for r in records if r.gold_contexts)
 
     if n == 0:
         tier = TIER_NONE
@@ -167,6 +186,10 @@ def assess_capability(records: list[ExternalLogRecord]) -> dict:
         notes.append("config 없음 - 증상 진단은 되지만 처방(예: chunk_size 512→768)에 현재값을 못 쓴다")
     if with_feedback:
         notes.append(f"사용자 피드백 {with_feedback}건 - 불만족 케이스 우선 진단 표본으로 활용 가능")
+    if with_ground_truth:
+        notes.append(f"정답 텍스트 {with_ground_truth}건 - correctness·context P·R·규칙 F1 확장 가능")
+    if with_gold_contexts:
+        notes.append(f"정답 근거 문단 {with_gold_contexts}건 - 검색축(근거를 찾아왔나) 결정적 판정 가능")
 
     return {
         "records": n,
@@ -174,6 +197,8 @@ def assess_capability(records: list[ExternalLogRecord]) -> dict:
         "with_scores": with_scores,
         "with_config": with_config,
         "with_feedback": with_feedback,
+        "with_ground_truth": with_ground_truth,
+        "with_gold_contexts": with_gold_contexts,
         "tier": tier,
         "notes": notes,
     }
@@ -193,7 +218,8 @@ def _main(argv: list[str]) -> int:
     if len(errors) > 10:
         print(f"  ! ... 외 {len(errors) - 10}건")
     print(f"컨텍스트 포함 {cap['with_contexts']}건 (score 포함 {cap['with_scores']}건) · "
-          f"config {cap['with_config']}건 · feedback {cap['with_feedback']}건")
+          f"config {cap['with_config']}건 · feedback {cap['with_feedback']}건 · "
+          f"정답 {cap['with_ground_truth']}건 · 근거문단 {cap['with_gold_contexts']}건")
     print(f"진단 가능 수준: {cap['tier']}")
     for note in cap["notes"]:
         print(f"  - {note}")
@@ -201,4 +227,11 @@ def _main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    # CLI 로 직접 부를 때만 콘솔 인코딩 보정(cp949 콘솔 한글 깨짐 방지).
+    # 라이브러리로 쓸 땐 "순수 stdlib" 원칙 유지 - 여기서만 폴백 import 한다.
+    try:
+        from core.console import force_utf8_stdio
+        force_utf8_stdio()
+    except ImportError:
+        pass
     sys.exit(_main(sys.argv[1:]))

@@ -126,5 +126,36 @@ class AssessCapabilityTest(unittest.TestCase):
         self.assertEqual(cap["with_feedback"], 1)
 
 
+class SchemaV1FieldsTest(unittest.TestCase):
+    """스키마 v1 - 시험지 계열 필드(ground_truth/gold_contexts) 파싱·집계."""
+
+    def test_ground_truth_parsed_and_stripped(self):
+        rec = parse_record({"question": "q", "answer": "a", "ground_truth": " 700만원 "})
+        self.assertEqual(rec.ground_truth, "700만원")
+
+    def test_empty_ground_truth_is_none(self):
+        rec = parse_record({"question": "q", "answer": "a", "ground_truth": "  "})
+        self.assertIsNone(rec.ground_truth)
+
+    def test_gold_contexts_accepts_string_and_list(self):
+        as_str = parse_record({"question": "q", "answer": "a", "gold_contexts": "근거 문단"})
+        self.assertEqual(as_str.gold_contexts, ["근거 문단"])
+        as_list = parse_record({"question": "q", "answer": "a",
+                                "gold_contexts": ["근거", "", None, " "]})
+        self.assertEqual(as_list.gold_contexts, ["근거"])
+
+    def test_capability_counts_exam_fields(self):
+        records = [
+            parse_record({"question": "q", "answer": "a", "contexts": ["c"],
+                          "ground_truth": "정답", "gold_contexts": ["근거"]}),
+            parse_record({"question": "q2", "answer": "a2", "contexts": ["c"]}),
+        ]
+        cap = assess_capability(records)
+        self.assertEqual(cap["with_ground_truth"], 1)
+        self.assertEqual(cap["with_gold_contexts"], 1)
+        self.assertTrue(any("정답 텍스트" in n for n in cap["notes"]))
+        self.assertTrue(any("근거 문단" in n for n in cap["notes"]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

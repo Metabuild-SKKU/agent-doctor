@@ -64,6 +64,12 @@ class TestBuildReplayRecords(unittest.TestCase):
         self.assertIsNone(rec.probe.ground_truth)
         self.assertEqual(rec.f1_score, 0.0)
 
+    def test_gold_contexts_carried_via_probe_metadata(self):
+        # 공유 스키마(Probe/EvalRecord)를 바꾸지 않고 metadata 로 전달하는 규약
+        rec = replay.build_replay_records(
+            [_log(contexts=["ctx"], gold_contexts=["근거 문단"])])[0]
+        self.assertEqual(rec.probe.metadata["gold_contexts"], ["근거 문단"])
+
 
 class TestRunReplayWithoutLLM(unittest.TestCase):
     @patch.dict(os.environ, NO_LLM)
@@ -147,6 +153,21 @@ class TestDiagnoseExternalLog(unittest.TestCase):
             report, cap, errors = replay.diagnose_external_log(path)
         self.assertIsNone(report)
         self.assertEqual(cap["tier"], "none")
+
+    @patch.dict(os.environ, NO_LLM)
+    def test_qa_only_file_is_refused_by_default(self):
+        # 파일 단위 게이트(docs §3) - contexts 없는 로그에 "진단"을 내주지 않는다
+        lines = [json.dumps({"question": f"q{i}", "answer": "a"}) for i in range(3)]
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "log.jsonl")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            report, cap, _ = replay.diagnose_external_log(path)
+            self.assertIsNone(report)
+            self.assertEqual(cap["tier"], "qa_only")
+            # 옵트인하면 동문서답 검사용으로는 돌 수 있다
+            report, _, _ = replay.diagnose_external_log(path, allow_qa_only=True)
+            self.assertIsNotNone(report)
 
     @patch.dict(os.environ, NO_LLM)
     def test_limit_caps_records(self):

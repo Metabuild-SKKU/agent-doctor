@@ -28,10 +28,11 @@ import sys
 from core.schema import DiagnosticReport, Probe
 
 from agents.eval.log_intake import (
-    TIER_NONE, ExternalLogRecord, assess_capability, load_external_log,
+    TIER_NONE, TIER_QA_ONLY, ExternalLogRecord, assess_capability, load_external_log,
 )
 from agents.eval.metrics_basic import char_f1
 from agents.eval.metrics_ragas import _judge, evaluate_real_track
+from agents.eval.replay_labels import apply_ext_labels, recommendation_ids
 from agents.eval.report import build_report
 from agents.eval.types import EvalRecord, llm_eval_enabled
 from agents.eval.scoring import format_composite
@@ -47,12 +48,15 @@ def build_replay_records(logs: list[ExternalLogRecord]) -> list[EvalRecord]:
     (oracle_answer/context)는 gold 전제라 채우지 않는다(빈 값 = 스킵)."""
     records: list[EvalRecord] = []
     for i, log in enumerate(logs):
-        gt = str(log.raw.get("ground_truth") or "").strip() or None
+        gt = log.ground_truth
         probe = Probe(
             probe_id=f"ext_{i:04d}",
             question=log.question,
             source="user_log",
             ground_truth=gt,
+            # gold 근거 문단 텍스트는 공유 스키마를 바꾸지 않고 metadata 로 전달 -
+            # replay_labels.gold_context_recall 이 여기서 읽는다.
+            metadata={"gold_contexts": log.gold_contexts} if log.gold_contexts else {},
         )
         rec = EvalRecord(
             probe=probe,
@@ -73,11 +77,12 @@ def build_replay_records(logs: list[ExternalLogRecord]) -> list[EvalRecord]:
 # ── 리플레이 실행 ────────────────────────────────────────────────
 
 def run_replay(records: list[EvalRecord], *, iteration: int = 1) -> DiagnosticReport:
-    """RAGAS(가능하면)를 채우고 기존 build_report로 리포트를 만든다.
+    """RAGAS(가능하면) → ext_ 소견(replay_labels) → 기존 build_report.
 
-    STEP4(원인 진단)는 부르지 않는다 - 현행 라벨은 gold 전제라 전부 침묵하고
-    (docs §4), findings 없는 record는 report 규약상 "정상"으로 집계되기 때문에
-    빈 호출만 된다. LLM 비활성/실패는 기존 폴백 규약대로 {}로 넘어간다."""
+    STEP4(내부 원인 진단)는 부르지 않는다 - 현행 30라벨은 gold 전제라 전부
+    침묵한다(docs §4). 대신 리플레이 전용 ext_ 라벨(docs §5)이 record.findings
+    를 채우고, build_report 는 라벨 이름을 해석하지 않으므로 무변경 합류.
+    LLM 비활성/실패는 기존 폴백 규약대로 {}로 넘어간다(→ ext_ 라벨도 침묵)."""
     judge = _judge() if llm_eval_enabled() else None
     for rec in records:
         if judge is not None and not rec.ragas_done:
@@ -90,15 +95,22 @@ def run_replay(records: list[EvalRecord], *, iteration: int = 1) -> DiagnosticRe
         faith = rec.ragas.get("faithfulness")
         if faith is not None:
             rec.retrieval_axis = float(faith)
+    apply_ext_labels(records)
     return build_report(records, iteration=iteration)
 
 
-def diagnose_external_log(path: str, *, limit: int | None = None
+def diagnose_external_log(path: str, *, limit: int | None = None,
+                          allow_qa_only: bool = False,
                           ) -> tuple[DiagnosticReport | None, dict, list[str]]:
-    """파일 경로 → (리포트, 적재 판정, 적재 오류). 리포트는 유효 레코드가 없으면 None."""
+    """파일 경로 → (리포트, 적재 판정, 적재 오류). 리포트가 None 인 경우:
+    유효 레코드 없음(tier none), 또는 컨텍스트 부족(tier qa_only)인데
+    allow_qa_only=False - 파일 단위 게이트(docs §3). 줄 단위 결손은 관용하되
+    파일 전체가 contexts 없는 로그에 "진단"을 내주지 않는다."""
     logs, errors = load_external_log(path)
     cap = assess_capability(logs)
     if cap["tier"] == TIER_NONE:
+        return None, cap, errors
+    if cap["tier"] == TIER_QA_ONLY and not allow_qa_only:
         return None, cap, errors
     if limit is not None:
         logs = logs[:limit]
@@ -115,6 +127,8 @@ def _fmt(value) -> str:
 def _main(argv: list[str]) -> int:
     # graph.py와 같은 규약: CLI로 직접 부를 때만 .env를 읽는다(라이브러리 사용 시엔
     # 호출자 환경을 존중). 미설치면 조용히 넘어간다 - 키 없이도 규칙 지표는 돈다.
+    from core.console import force_utf8_stdio
+    force_utf8_stdio()
     try:
         from dotenv import load_dotenv
         load_dotenv(override=True)
@@ -126,14 +140,22 @@ def _main(argv: list[str]) -> int:
     for a in argv:
         if a.startswith("--limit="):
             limit = int(a.split("=", 1)[1])
+    allow_qa_only = "--allow-qa-only" in argv
     if len(args) != 1:
-        print("사용법: python -m agents.eval.replay <log.jsonl> [--limit=N]")
+        print("사용법: python -m agents.eval.replay <log.jsonl> [--limit=N] [--allow-qa-only]")
         return 2
 
-    report, cap, errors = diagnose_external_log(args[0], limit=limit)
+    report, cap, errors = diagnose_external_log(
+        args[0], limit=limit, allow_qa_only=allow_qa_only)
     print(f"적재: 정상 {cap['records']}건 / 오류 {len(errors)}건 / 진단 수준 {cap['tier']}")
     if report is None:
-        print("유효 레코드가 없어 진단 불가")
+        if cap["tier"] == TIER_QA_ONLY:
+            print("검색 컨텍스트(contexts)가 없거나 부족해 진단이 성립하지 않습니다.")
+            print("  - 답변 생성에 쓰인 검색 결과 원문을 로그에 추가해 주세요"
+                  " (환각 검출·검색/생성 원인 분리가 가능해집니다)")
+            print("  - 동문서답 검사만이라도 하려면: --allow-qa-only")
+        else:
+            print("유효 레코드가 없어 진단 불가")
         return 1
 
     scores = report.ragas_scores or {}
@@ -144,6 +166,26 @@ def _main(argv: list[str]) -> int:
     print("- 규칙 char F1               :", _fmt(scores.get("mean_f1")), "(정답 텍스트 필요)")
     print(f"overall_score: {_fmt(report.overall_score)}")
     print(f"종합점수: {format_composite(report.composite_score)}")
+
+    if report.findings:
+        # 같은 라벨의 probe 별 소견을 확정/예비로 갈라 요약. 권고는 rules 처방 재참조.
+        by_label: dict = {}
+        for f in report.findings:
+            groups = by_label.setdefault(f.label, {"확정": [], "예비": []})
+            groups["확정" if f.confirmed else "예비"].append(f)
+        print("소견:")
+        for label, groups in by_label.items():
+            for grade in ("확정", "예비"):
+                items = groups[grade]
+                if not items:
+                    continue
+                print(f"  [{items[0].severity}] {label} ({grade} {len(items)}건)")
+                print(f"      {items[0].metadata.get('reason', '')}")
+            recs = recommendation_ids(label)
+            if recs:
+                print(f"      권고: {', '.join(recs)}")
+    else:
+        print("소견: 없음 (지표 미측정이거나 문턱 이상)")
     if not llm_eval_enabled():
         print("(참고: EVAL_ENABLE_LLM=1 이 아니어서 RAGAS 지표는 미측정)")
         if scores.get("mean_f1") is not None:

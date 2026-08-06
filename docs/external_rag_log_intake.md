@@ -82,7 +82,7 @@ context_precision/recall의 **WithReference 변형**으로만 구현돼 있어
 콜백 핸들러(`on_retriever_end`/`on_llm_end`)를 우리가 만들어 건네줘서 매핑
 자체를 없앨 수도 있다.
 
-스키마 v0 (한 줄 = 요청 1건):
+**스키마 v1** (한 줄 = 요청 1건, JSON Lines, UTF-8):
 
 ```json
 {"question": "공제 한도는?",
@@ -90,16 +90,43 @@ context_precision/recall의 **WithReference 변형**으로만 구현돼 있어
                "rank": 1, "source_doc": "세금가이드.pdf"}],
  "answer": "700만원입니다",
  "ground_truth": "700만원",
+ "gold_contexts": ["연금저축 세액공제 한도는 연 700만원이다."],
  "config": {"top_k": 5, "chunk_size": 512, "embedding_model": "bge-m3", "use_reranker": false},
  "feedback": "thumbs_down", "latency_ms": 1840, "timestamp": "2026-08-06T14:02:11"}
 ```
 
-`ground_truth`(정답 텍스트, 선택)는 §4 감사상 "지표 2개 vs 5개"를 가르는
-필드다 — 리플레이 모드가 raw에서 읽어 correctness/context precision·recall과
-규칙 char F1을 살린다(적재기 공식 필드화·tier 반영은 후속).
+| 필드 | 타입 | 수준 | 규칙 |
+|---|---|---|---|
+| `question` | string | **필수** | 공백뿐이면 그 줄 거부(오류 집계) |
+| `answer` | string | **필수** | 사용자에게 반환된 최종 답변 원문(스트리밍이면 완성본) |
+| `contexts` | (string \| object)[] | **준필수** | 줄 단위는 관용, **파일 단위 게이트**: 절반 미만이면 tier `qa_only` → 진단 거부가 기본(--allow-qa-only 옵트인). object형 `{text*, chunk_id, score, rank, source_doc}`, 문자열 항목 허용 |
+| `ground_truth` | string | 선택·강력 권장 | 정답 텍스트. 지표 2개→5개(correctness, context P·R)를 가른다. v1은 단일 문자열(복수 정답 변형은 후속) |
+| `gold_contexts` | string \| string[] | 선택 | 정답 근거 문단의 **원문 텍스트**(청크 ID 아님 — ID는 네임스페이스 정합 불가로 요구 금지). 텍스트 겹침으로 "검색이 정답 근거를 찾았나"를 결정적으로 판정 → 검색축 라벨을 LLM judge 없이 켤 수 있다 |
+| `config` | object | 선택·권장 | top_k/chunk_size/embedding_model/use_reranker 등 자유 키. 시스템 설정이라 **1회만 받아 우리가 전 레코드에 병합해도 된다** |
+| `feedback` | string | 선택 | thumbs_up/down 권장, 자유 문자열 허용. 불만족 표본 선별용 |
+| `latency_ms` / `timestamp` | number / string(ISO 8601) | 선택 | 관측용 |
+| 그 외 키 | — | 허용 | raw 보존, 현행 미소비 |
 
-`question`/`answer`만 필수, `contexts`는 강력 권장(없으면 tier가 `qa_only`로
-떨어진다), 나머지는 선택. `contexts` 항목은 문자열도 허용(원문만 있는 로그 수용).
+**요구 수준 설계 원칙**: 요구는 상대의 획득 비용에 정렬한다 — 코드에 이미
+변수로 존재하는 것만 필수(question/answer/contexts), 사람이 만들어야 하는 것
+(ground_truth/gold_contexts)은 절대 필수로 두지 않으며, 변환 노동이 필요한
+값(score 방향 등)은 요구하느니 뺀다. 로그는 외부 전송 없이 로컬에서만
+처리됨을 요청서에 명시해 보안 승인 비용도 낮춘다.
+
+의미 규칙(형식보다 중요):
+
+- **`contexts`는 "실제 사용분"만** — 검색 후보 전체가 아니라 답변 생성 프롬프트에
+  실제로 들어간 top-k. 후보 전체를 넣으면 faithfulness/precision이 오염된다.
+- **`score`는 "높을수록 관련"일 때만** — retriever가 distance(낮을수록 가까움)를
+  주는 경우 방향 미명시가 랭킹 해석을 뒤집는 단골 사고다. 반전 변환이 번거로우면
+  **score를 아예 빼고 달라**(선택 필드다 — 상대에게 변환 코드를 요구하지 않는다).
+- **`rank`는 1부터.** `contexts` 배열 순서는 검색 순위순 권장.
+- **출처 구분**: question/contexts/answer는 실행 기록(답안지), ground_truth/
+  gold_contexts는 시험지 계열 — 실행 로그에 원래 존재하지 않으며 QA셋을 가진
+  상대만 채울 수 있다. 없다고 상대를 조르지 말 것.
+
+(적재기 코드는 v0 상태 — `ground_truth`/`gold_contexts` 공식 필드화, qa_only
+파일 게이트, gold_contexts 겹침 판정은 다음 PR에서 구현.)
 
 받은 로그는 `python -m agents.eval.log_intake <log.jsonl>`로 적재 검증과
 진단 가능 수준(tier) 판정을 바로 확인할 수 있다.
