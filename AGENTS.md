@@ -96,6 +96,20 @@ OpenRouter 동시 8에서 371 chunks/sec. 26MB 코퍼스 환산으로 **2.3시�
 **코사인 0.99997**이고 차원도 같아, provider를 바꿔도 컬렉션을 다시 만들 필요가 없고
 색인·질의를 서로 다른 경로로 계산해도 순위가 흔들리지 않습니다.
 
+실행할 때 바꾸려면 플래그를 씁니다. 엔트리포인트가 `load_dotenv(override=True)`라
+셸 값보다 `.env`가 이기므로, `INDEX_EMBED_PROVIDER=local python graph.py`는 조용히
+무시됩니다. 플래그는 `.env` 로드 뒤에 적용돼 항상 이깁니다.
+
+```bash
+python graph.py --embed openrouter        # API
+python graph.py --embed gpu               # 로컬 CUDA (없으면 경고 후 CPU)
+python graph.py --embed cpu               # 로컬 CPU
+python graph.py --embed openrouter --query-embed cpu   # 색인만 API
+```
+
+`run_local_pipeline.py`와 `tests/run_corpus.py`도 같은 플래그를 받습니다. 소스 선택
+(`SOURCE_TYPE`/`SOURCE_URL`)은 기존대로 env 규약입니다.
+
 테스트는 예외입니다. `tests/conftest.py`가 스위트 전역에서 두 값을 `local`로 고정합니다
 — 키가 있는 개발 머신에서 스위트를 돌릴 때마다 실제 API가 호출돼 조용히 과금되는 것을
 막기 위함이며, **프로덕션 기본값과는 무관합니다.**
