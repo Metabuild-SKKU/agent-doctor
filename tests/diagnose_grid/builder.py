@@ -11,10 +11,12 @@ metrics_* 의 실제 함수가 계산한다(signals 주입 없음, _compute_metr
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 from enum import Enum
 from typing import Optional
 
@@ -43,14 +45,58 @@ class Doc:
     length: int = 0
     text: Optional[str] = None
     file: Optional[str] = None
+    korquad: Optional[str] = None          # KorQuAD doc_id
     space_every: int = 0
 
 
 _GOLD_MARK = re.compile(r"\[\[gold(?::([\w]+))?\]\](.*?)\[\[/gold\]\]", re.S)
 _DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
 
+_KORQUAD_CORPUS = "data/corpus.jsonl"
+_KORQUAD_QA = "data/qa_pairs.jsonl"
+
+
+@lru_cache(maxsize=None)
+def korquad_doc(doc_id: str) -> tuple[str, tuple]:
+    """KorQuAD 문서 복원. (원문, ((chunk_id, start, end), ...)).
+
+    corpus 청크를 원문 좌표에 되붙인다 — datasets/korquad._stitch 와 같은 규칙이라
+    좌표계가 진단 파이프라인과 일치한다(gold_spans 좌표 == 여기 좌표).
+    """
+    rows = []
+    with open(_KORQUAD_CORPUS, encoding="utf-8") as f:
+        for line in f:
+            if f'"{doc_id}"' not in line:
+                continue
+            o = json.loads(line)
+            if o["doc_id"] == doc_id:
+                rows.append((o["chunk_id"], int(o["char_start"]), int(o["char_end"]), o["text"]))
+    if not rows:
+        raise KeyError(f"KorQuAD 문서를 찾지 못했다: {doc_id}")
+    total = max(max(e for _, _, e, _ in rows), max(s + len(t) for _, s, _, t in rows))
+    buf = [" "] * total
+    for _cid, start, _end, text in rows:
+        for i, ch in enumerate(text):
+            buf[start + i] = ch
+    return "".join(buf), tuple((c, s, e) for c, s, e, _ in rows)
+
+
+@lru_cache(maxsize=None)
+def korquad_qa(qa_id: str) -> dict:
+    """KorQuAD QA 한 건."""
+    with open(_KORQUAD_QA, encoding="utf-8") as f:
+        for line in f:
+            if f'"{qa_id}"' not in line:
+                continue
+            o = json.loads(line)
+            if str(o["qa_id"]) == str(qa_id):
+                return o
+    raise KeyError(f"KorQuAD QA 를 찾지 못했다: {qa_id}")
+
 
 def _raw_text(doc: Doc) -> str:
+    if doc.korquad is not None:
+        return korquad_doc(doc.korquad)[0]
     if doc.file is not None:
         with open(os.path.join(_DOCS_DIR, doc.file), encoding="utf-8") as f:
             return f.read()
@@ -139,6 +185,12 @@ class Case:
     # 기대를 코드 동작에 맞춰 고치는 대신 불일치로 남겨, 데이터셋이 '이래야 한다'를 말하게 한다.
     known_gap: Optional[str] = None
     gold_marks: list[str] = field(default_factory=list)   # 쓸 마커 이름(비면 전부)
+    # KorQuAD QA 를 쓰면 question·ground_truth·gold_spans 를 데이터에서 가져온다.
+    # question/ground_truth 를 케이스에 적으면 그쪽이 우선(오답 시나리오용).
+    korquad_qa: Optional[str] = None
+    # exact = 정답 텍스트가 원문에서 차지하는 구간(청킹 판정용)
+    # chunk = positive_chunk 전체 범위(KorQuAD 원래 라벨 — 청크 단위라 경계 판정이 무의미)
+    gold_span_mode: str = "exact"
 
     # ── 아래는 '미지정 = 없음'이 곧 의미라 기본값을 남긴다 ──
     duplicates: list[tuple[int, int]] = field(default_factory=list)  # (사본 인덱스, 원본 인덱스)
@@ -170,6 +222,8 @@ def resolve_gold_spans(case: "Case") -> list[tuple[str, int, int]]:
     gold_marks 로 쓸 마커 이름을 고를 수 있다(문서 하나를 여러 케이스가 나눠 쓴다)."""
     if case.gold_spans:
         return list(case.gold_spans)
+    if case.korquad_qa is not None:
+        return _korquad_gold_spans(case)
     spans = []
     for doc in case.docs:
         marks = parse_marks(doc)[1]
@@ -179,6 +233,26 @@ def resolve_gold_spans(case: "Case") -> list[tuple[str, int, int]]:
                 start, end = marks[name]
                 spans.append((doc.id, start, end))
     return spans
+
+
+def _korquad_gold_spans(case: "Case") -> list[tuple[str, int, int]]:
+    """KorQuAD QA 의 gold span. exact 는 정답 텍스트 위치, chunk 는 positive_chunk 범위."""
+    qa = korquad_qa(case.korquad_qa)
+    doc_id = qa["doc_id"]
+    text, chunks = korquad_doc(doc_id)
+    positive = [(s, e) for cid, s, e in chunks if cid in (qa.get("positive_chunk_ids") or [])]
+    if not positive:
+        return []
+    lo, hi = min(s for s, _ in positive), max(e for _, e in positive)
+    if case.gold_span_mode == "chunk":
+        return [(case.docs[0].id, lo, hi)]
+    answer = qa["answer_text"]
+    at = text.find(answer, lo)                 # positive 범위 안에서 먼저 찾는다
+    if at < 0 or at >= hi:
+        at = text.find(answer)
+    if at < 0:
+        return [(case.docs[0].id, lo, hi)]      # 원문에서 못 찾으면 청크 범위로 폴백
+    return [(case.docs[0].id, at, at + len(answer))]
 
 
 def build_chunks(case: Case) -> list[Chunk]:
@@ -277,12 +351,13 @@ def build(case: Case) -> tuple[EvalRecord, list[Chunk]]:
     if case.span_grounding is not None:
         probe_metadata["span_grounding"] = {"status": case.span_grounding}
 
+    qa = korquad_qa(case.korquad_qa) if case.korquad_qa is not None else {}
     probe = Probe(
         probe_id=case.id,
-        question=case.question,
+        question=case.question or qa.get("question", ""),
         source="taxonomy",
         answer_exists=case.answer_exists,
-        ground_truth=case.ground_truth,
+        ground_truth=case.ground_truth or qa.get("answer_text", ""),
         gold_chunk_ids=gold_chunk_ids(case, chunks),
         qtype=case.qtype,
         gold_spans=[{"doc_id": d, "start": s, "end": e} for d, s, e in resolve_gold_spans(case)],
@@ -304,8 +379,8 @@ def build(case: Case) -> tuple[EvalRecord, list[Chunk]]:
         retrieved_context=[chunks[i].text for i in case.retrieved],
         retrieved_chunk_ids=retrieved_ids,
         retrieval_details=details,
-        generated_answer=_answer_text(case.answer, case.ground_truth) or "",
-        oracle_answer=_answer_text(case.oracle_answer, case.ground_truth),
+        generated_answer=_answer_text(case.answer, probe.ground_truth) or "",
+        oracle_answer=_answer_text(case.oracle_answer, probe.ground_truth),
         oracle_context=[c.text for c in chunks if c.chunk_id in gold_ids],
     )
 
