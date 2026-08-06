@@ -493,5 +493,54 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
         self.assertEqual(probe.gold_chunk_ids, [])
 
 
+class ProbeSchemaEnforcementTest(unittest.TestCase):
+    """Probe 합성 호출이 전부 JSON 스키마를 싣고 나가는지.
+
+    여기서 파싱이 실패하면 휴리스틱 폴백으로 떨어져 쓰레기 gold 가 eval_probes.json 에
+    박제되고, 이후 모든 채점이 그 gold 를 기준으로 오염된다(RAGAS 심판 실패는 그 지표만
+    결측이라 대가가 훨씬 작다). 새 합성 호출을 추가하면서 스키마를 빠뜨리면 아무 에러 없이
+    예전 동작으로 돌아가므로 소스에서 직접 센다."""
+
+    def _source(self) -> str:
+        import pathlib
+
+        root = pathlib.Path(__file__).parent.parent
+        return (root / "agents" / "eval" / "probe_gen.py").read_text(encoding="utf-8")
+
+    def test_every_chat_json_call_carries_a_schema(self):
+        src = self._source()
+        self.assertEqual(src.count("llm_provider.chat_json("),
+                         src.count("json_schema=_SCHEMA"),
+                         "chat_json 호출 수와 json_schema 인자 수가 다르다 "
+                         "— 스키마 없는 합성 호출이 생겼다")
+
+    def test_schemas_satisfy_structured_output_rules(self):
+        # Anthropic structured outputs 는 모든 object 에 additionalProperties: false 와
+        # required 전량을 요구한다. 하나만 빠져도 요청이 400 이다.
+        from agents.eval import probe_gen
+
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get("type") == "object":
+                    self.assertIs(node.get("additionalProperties"), False, node)
+                    self.assertEqual(set(node["required"]), set(node["properties"]), node)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        for name in ("_SCHEMA_QA", "_SCHEMA_TOPIC", "_SCHEMA_QUESTION",
+                     "_SCHEMA_QA_EVIDENCE"):
+            with self.subTest(name=name):
+                walk(getattr(probe_gen, name))
+
+    def test_gold_schema_requires_both_question_and_answer(self):
+        # ground_truth 가 optional 이면 질문만 오고 gold 가 빈 probe 가 통과한다.
+        from agents.eval.probe_gen import _SCHEMA_QA
+
+        self.assertEqual(set(_SCHEMA_QA["required"]), {"question", "ground_truth"})
+
+
 if __name__ == "__main__":
     unittest.main()
