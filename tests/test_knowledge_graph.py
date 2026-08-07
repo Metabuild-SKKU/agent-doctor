@@ -4,7 +4,11 @@
 임베딩을 손으로 준 2차원 벡터로 결정적으로 검증한다 — BGE-M3 다운로드/API 불필요.
 """
 import math
+import os
+import random
+import sys
 import unittest
+from unittest.mock import patch
 
 from core.schema import Chunk
 from agents.eval import knowledge_graph as kg
@@ -65,6 +69,79 @@ class TopKGraphTest(unittest.TestCase):
         graph = kg.build_graph(chunks, top_k=3)
         weights = [w for _, w in graph.edges["A"]]
         self.assertEqual(weights, sorted(weights, reverse=True))
+
+
+class VectorizedEdgeParityTests(unittest.TestCase):
+    """벡터화 경로가 루프 경로와 같은 그래프를 만드는지 고정한다.
+
+    build_graph 는 모든 청크 쌍을 도는 O(n^2) 라, 순수 파이썬 루프로는 6,584청크에
+    약 16분이 걸린다(진행률 로그가 없어 '멈춤' 과 구분되지 않는다). numpy 행렬곱으로
+    바꾸되 **결과가 같아야** 한다 — 다르면 최적화가 아니라 동작 변경이고, 나중에
+    검색 점수가 흔들릴 때 원인을 여기서 찾을 수 없게 된다.
+    """
+
+    @staticmethod
+    def _chunks(n, seed, *, dim=32, drop_emb=0.0, no_kw=0.0):
+        rng = random.Random(seed)
+        vocab = [f"키워드{i}" for i in range(40)]
+        out = []
+        for i in range(n):
+            words = "" if rng.random() < no_kw else " ".join(
+                rng.sample(vocab, rng.randint(1, 6)))
+            emb = None if rng.random() < drop_emb else [
+                rng.random() for _ in range(dim)]
+            out.append(Chunk(chunk_id=f"c{i}", doc_id="d",
+                             text=f"본문 {i} {words}", embedding=emb))
+        return out
+
+    @staticmethod
+    def _loop_graph(chunks):
+        """벡터화를 꺼서 기존 루프 경로를 강제한다."""
+        with patch.object(kg, "_candidate_edges_vectorized",
+                          return_value=None):
+            return kg.build_graph(chunks)
+
+    def _assert_same(self, chunks, label):
+        fast = kg.build_graph(chunks)
+        slow = self._loop_graph(chunks)
+        fast_edges = {(cid, nid): w for cid, lst in fast.edges.items() for nid, w in lst}
+        slow_edges = {(cid, nid): w for cid, lst in slow.edges.items() for nid, w in lst}
+        self.assertEqual(set(fast_edges), set(slow_edges), f"{label}: 엣지 집합이 다르다")
+        for key, weight in fast_edges.items():
+            self.assertAlmostEqual(weight, slow_edges[key], places=12,
+                                   msg=f"{label}: {key} 가중치가 다르다")
+
+    def test_matches_loop_on_normal_corpus(self):
+        self._assert_same(self._chunks(60, seed=7), "일반")
+
+    def test_matches_loop_when_some_embeddings_missing(self):
+        # 임베딩이 없는 청크는 코사인 0 이어야 한다(cosine() 규약).
+        self._assert_same(self._chunks(60, seed=8, drop_emb=0.3), "임베딩 일부 없음")
+
+    def test_matches_loop_when_all_embeddings_missing(self):
+        # mock 데이터처럼 임베딩이 아예 없으면 키워드만으로 엣지가 결정된다.
+        self._assert_same(self._chunks(60, seed=9, drop_emb=1.0), "임베딩 전부 없음")
+
+    def test_matches_loop_when_some_keywords_missing(self):
+        self._assert_same(self._chunks(60, seed=10, no_kw=0.3), "키워드 일부 없음")
+
+    def test_matches_loop_across_row_block_boundary(self):
+        """행 블록 단위로 도므로 블록 경계에서 엣지가 새거나 빠지면 안 된다."""
+        with patch.dict(os.environ, {"EVAL_KG_BLOCK_ROWS": "16"}):
+            self._assert_same(self._chunks(40, seed=11), "블록 경계")
+
+    def test_falls_back_to_loop_without_numpy(self):
+        """numpy 가 없는 환경에서도 그래프가 만들어져야 한다(느릴 뿐)."""
+        chunks = self._chunks(30, seed=12)
+        with patch.dict(sys.modules, {"numpy": None}):
+            graph = kg.build_graph(chunks)
+        self.assertEqual(set(graph.nodes), {c.chunk_id for c in chunks})
+        self.assertEqual(graph.edges, self._loop_graph(chunks).edges)
+
+    def test_self_is_not_a_neighbor(self):
+        graph = kg.build_graph(self._chunks(30, seed=13))
+        for cid, neigh in graph.edges.items():
+            self.assertNotIn(cid, [nid for nid, _ in neigh], f"{cid} 가 자기 이웃이다")
 
 
 if __name__ == "__main__":
