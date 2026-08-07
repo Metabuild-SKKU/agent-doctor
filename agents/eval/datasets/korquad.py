@@ -112,6 +112,35 @@ def _chunk_span_index(corpus_path: str, keep) -> dict[tuple[str, str], tuple[int
     return idx
 
 
+def _gold_spans_of(qa: dict, doc_id: str, span_of: dict) -> list[dict]:
+    """골드 좌표. 명시 gold_spans 가 있으면 그걸 쓰고, 없으면 청크 id 로 환산한다.
+
+    청크 id 환산은 골드를 **청크 통째**(중앙값 497자)로 넓힌다. 정답은 중앙값 7자라
+    70배 넓은 구간을 span_recall 이 빈틈없이 덮어야 1점을 주게 되고, corpus 청크 경계와
+    Index 재청킹 경계가 달라 정답을 맞힌 실행도 recall=0 이 된다(실측 13%).
+
+    그래서 정답 위치를 아는 QA 는 좌표를 직접 싣는다(tools/build_clean_qa.py). 명시
+    좌표를 우선하되 환산 경로는 그대로 둔다 — 기존 qa_pairs.jsonl 이 계속 돌아야 한다.
+    """
+    explicit = qa.get("gold_spans")
+    if isinstance(explicit, list) and explicit:
+        spans = []
+        for span in explicit:
+            if not isinstance(span, dict):
+                continue
+            start, end = span.get("start"), span.get("end")
+            if isinstance(start, int) and isinstance(end, int) and end > start >= 0:
+                spans.append({"doc_id": span.get("doc_id") or doc_id,
+                              "start": start, "end": end})
+        if spans:
+            return spans
+    return [
+        {"doc_id": doc_id, "start": hit[0], "end": hit[1]}
+        for cid in (qa.get("positive_chunk_ids") or [])
+        if (hit := span_of.get((doc_id, cid))) is not None
+    ]
+
+
 def load_taxonomy_probes(qa_path: str = DEFAULT_QA, corpus_path: str = DEFAULT_CORPUS,
                          *, limit=None, max_docs=None) -> list[Probe]:
     """qa_pairs.jsonl → taxonomy Probe(gold_spans 포함). 재청킹 후 resync 로 gold 확정."""
@@ -123,12 +152,7 @@ def load_taxonomy_probes(qa_path: str = DEFAULT_QA, corpus_path: str = DEFAULT_C
         did = o.get("doc_id")
         if keep is not None and did not in keep:
             continue
-        gold_spans = []
-        for cid in (o.get("positive_chunk_ids") or []):
-            hit = span_of.get((did, cid))   # qa 의 doc_id 로 그 문서의 청크만 조회
-            if hit:
-                s, e = hit
-                gold_spans.append({"doc_id": did, "start": s, "end": e})
+        gold_spans = _gold_spans_of(o, did, span_of)
         probes.append(Probe(
             probe_id=f"probe_qa_{o['qa_id']}",
             question=o["question"],
