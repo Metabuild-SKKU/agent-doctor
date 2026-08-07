@@ -256,11 +256,42 @@ def span_recall_at_k(
     retrieved_chunk_ids: list[str],
     chunks: list,
 ) -> float | None:
-    """검색된 청크 좌표가 gold span을 얼마나 온전히 덮는지 계산한다.
+    """검색된 청크 좌표가 gold span 을 얼마나 덮는지 — span 별 **문자 커버리지 비율**의 평균.
 
-    한 청크가 span 전체를 포함해도 성공이고, 여러 검색 청크의 좌표 합집합이
-    빈틈없이 span을 덮어도 성공이다. 청크 좌표가 없어 계산할 수 없는 legacy
-    환경에서는 None을 반환해 호출부가 기존 chunk-id Recall로 폴백하게 한다.
+    청크 좌표가 없어 계산할 수 없는 legacy 환경에서는 None 을 반환해 호출부가 기존
+    chunk-id Recall 로 폴백하게 한다.
+
+    ## 왜 부분점수인가 (2026-08-07 변경)
+
+    예전에는 span 을 **빈틈없이 다 덮어야** 1, 아니면 0 인 이진 판정이었다. 그 판정이
+    "정답을 맞혔는데 검색 실패로 집계되는" 대량 오탐을 만들었다 — 실측
+    (`output/logs/corpus_20260804_103059.txt`) 30문항 중 **14건(47%)** 이 recall=0 이고,
+    그중 다수가 골드 청크 2~4개를 전부 top-k 에 넣어야만 1점이 되는 구조적 불가능이었다.
+
+        missed_gold_ranks=[chunk_015:8, chunk_014:9, chunk_016:12, chunk_013:17]
+        → 청크 4개를 전부 top-5 안에 넣어야 1점
+
+    RAGChecker(NeurIPS 2024)가 골드를 원자 단위로 쪼개 "덮은 것 / 전체" 로 재는 것과
+    같은 취지다. 다만 여기서 쪼갤 대상은 답변 텍스트가 아니라 **골드 구간의 문자**라
+    LLM 이 필요 없다 — 좌표 산수로 끝난다.
+
+    ## 계산
+
+        span 하나  : 검색 청크들과의 교집합 **합집합** 길이 / span 길이
+        전체       : 위 비율들의 평균
+
+    합집합을 쓰는 이유는 청킹 overlap 때문이다. 인접 청크가 같은 문자를 공유하므로
+    단순 합이면 비율이 1을 넘는다.
+
+    ## 판정과의 관계 — 라벨 배정은 바뀌지 않는다
+
+    전부 덮으면 정확히 1.0 이고(int 나눗셈이라 오차 없음), 하나도 못 덮으면 0.0 이다.
+    그래서 `_recall_ok`(`>= 1`)·A슬롯 진입(`0 <= recall < 1`)의 참거짓이 이 변경으로
+    뒤집히지 않는다. 달라지는 것은 **그 사이 값**뿐이다.
+
+    ⚠️ 대신 점수는 올라간다 — `scoring.reliability_score` 가 이 값을 그대로 곱하므로
+    부분 커버리지 probe 의 신뢰도가 0 에서 부분점수로 오른다. **이 변경 이전 실행과
+    composite 를 직접 비교하면 개선으로 오독된다**(agents/eval/README.md 참고).
     """
 
     valid_spans: list[tuple[str, int, int]] = []
@@ -322,23 +353,25 @@ def span_recall_at_k(
     ):
         return None
 
-    covered = 0
+    ratio_sum = 0.0
     for doc_id, start, end in valid_spans:
         intersections = sorted(
             (max(start, c_start), min(end, c_end))
             for c_start, c_end in retrieved_positions.get(doc_id, [])
             if c_start < end and c_end > start
         )
+        # 겹치는 구간은 합쳐서 문자를 두 번 세지 않는다. 청킹 overlap 이 켜져 있으면
+        # 인접 청크가 같은 문자를 공유하므로, 합집합이 아니면 비율이 1을 넘는다.
+        # intersections 가 시작 좌표로 정렬돼 있어 cursor 하나로 합집합이 계산된다.
+        covered_chars = 0
         cursor = start
         for covered_start, covered_end in intersections:
-            if covered_start > cursor:
-                break
-            cursor = max(cursor, covered_end)
-            if cursor >= end:
-                break
-        if cursor >= end:
-            covered += 1
-    return covered / len(valid_spans)
+            if covered_end <= cursor:
+                continue                      # 이미 센 구간 안에 들어옴
+            covered_chars += covered_end - max(covered_start, cursor)
+            cursor = covered_end
+        ratio_sum += covered_chars / (end - start)
+    return ratio_sum / len(valid_spans)
 
 
 # ── 무응답(기권) 판별 ─────────────────────────────────────────────
