@@ -82,8 +82,61 @@ class OpenRouterRoutingTests(_ApiRouted):
         self.assertIn("OPENROUTER_API_KEY", str(ctx.exception))
 
     def test_is_fallback_is_false_for_api(self):
-        # API 경로에는 해시 fallback 이라는 상태가 없다(성공 아니면 예외).
-        self.assertFalse(store.embedding_is_fallback("BAAI/bge-m3"))
+        """API 경로에는 해시 fallback 이라는 상태가 없다(성공 아니면 예외).
+
+        로컬 경로를 막아야 이 단언이 의미를 갖는다. 안 막으면 API 분기를 통째로
+        지워도 통과한다 — _get_embedding_model 로 흘러 실제 BGE-M3(2.2GB)가 뜨고,
+        모델이 있으니 is None 이 False 라 같은 값이 나오기 때문이다(실측 44초).
+        통과 이유가 "API 경로엔 fallback 이 없어서" 가 아니라 "로컬 모델이 마침
+        있어서" 가 되어, 로컬 모델이 없는 CI 에서만 우연히 잡히는 테스트가 된다.
+
+        이 분기가 중요한 이유는 소비처다 — agents/index/agent.py 가 이 값으로
+        재임베딩 여부를 정한다. 잘못 True 가 되면 API 로 잘 색인된 청크를 매번
+        다시 임베딩한다(과금 반복)."""
+        with patch.object(store, "_get_embedding_model", return_value=None):
+            self.assertFalse(store.embedding_is_fallback("BAAI/bge-m3"))
+
+
+    def test_query_axis_inherits_index_axis_when_unset(self):
+        """색인 에러가 시킨 대로 고쳤는데 질의에서 또 막히면 안 된다.
+
+        색인 실패 메시지는 INDEX_EMBED_PROVIDER=local 을 안내한다. 질의 축이 그걸
+        상속하지 않으면, 그대로 따른 사용자가 곧바로 질의 preflight 에서 두 번째
+        에러를 만난다. 오프라인·무키 환경이 정확히 이 경로를 밟는다."""
+        with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "local",
+                                       "INDEX_QUERY_EMBED_PROVIDER": ""}):
+            self.assertEqual(store.resolve_embedding_provider(), "local")
+            self.assertEqual(store.resolve_query_embedding_provider(), "local")
+            # 키가 없어도 질의가 막히지 않아야 한다.
+            self.assertIsNone(store.query_embedding_config_error())
+
+    def test_explicit_query_axis_still_wins_over_index(self):
+        """상속은 기본값 폴백일 뿐 - 명시하면 두 축이 갈라진다(설계 유지)."""
+        with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "local",
+                                       "INDEX_QUERY_EMBED_PROVIDER": "openrouter"}):
+            self.assertEqual(store.resolve_embedding_provider(), "local")
+            self.assertEqual(store.resolve_query_embedding_provider(), "openrouter")
+
+    def test_env_default_matches_cli_default(self):
+        """CLI 와 env 의 기본 규칙이 같아야 한다.
+
+        core/embedding_cli.py 는 --query-embed 미지정 시 --embed 를 따른다
+        (query_target = args.query_embed or target). env 만 다르게 두면 같은 설정을
+        어디에 쓰느냐로 결과가 갈린다."""
+        import argparse
+
+        from core.embedding_cli import add_embedding_args, apply_embedding_args
+
+        parser = argparse.ArgumentParser()
+        add_embedding_args(parser)
+        with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "",
+                                       "INDEX_QUERY_EMBED_PROVIDER": ""}):
+            apply_embedding_args(parser.parse_args(["--embed", "cpu"]))
+            cli_query = store.resolve_query_embedding_provider()
+        with patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "local",
+                                       "INDEX_QUERY_EMBED_PROVIDER": ""}):
+            env_query = store.resolve_query_embedding_provider()
+        self.assertEqual(cli_query, env_query)
 
     def test_empty_input_makes_no_call(self):
         with patch.object(store, "openai_embed") as embed:
@@ -186,7 +239,10 @@ class QueryAxisTests(unittest.TestCase):
         self.addCleanup(store._embed_routes_notified.clear)
 
     def test_default_is_openrouter(self):
-        with patch.dict("os.environ", {"INDEX_QUERY_EMBED_PROVIDER": ""}):
+        # 두 축을 모두 비워야 코드 기본값이 드러난다 — 질의 축이 미지정이면 색인 축을
+        # 상속하므로, 색인만 설정돼 있으면 그 값이 나온다(conftest 가 local 로 고정).
+        with patch.dict("os.environ", {"INDEX_QUERY_EMBED_PROVIDER": "",
+                                       "INDEX_EMBED_PROVIDER": ""}):
             self.assertEqual(store.resolve_query_embedding_provider(), "openrouter")
 
     def test_can_be_pinned_local_independently_of_index(self):

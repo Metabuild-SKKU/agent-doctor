@@ -956,7 +956,9 @@ def resolve_embedding_provider(provider: str | None = None) -> str:
 
 
 def resolve_query_embedding_provider(provider: str | None = None) -> str:
-    """질의 임베딩을 어디서 계산할지. None → env INDEX_QUERY_EMBED_PROVIDER(기본 openrouter).
+    """질의 임베딩을 어디서 계산할지.
+
+    우선순위: 인자 > INDEX_QUERY_EMBED_PROVIDER > INDEX_EMBED_PROVIDER(색인 축) > openrouter.
 
     기본값은 색인과 같은 openrouter 다(그 이유는 resolve_embedding_provider 참고 —
     예산이 있는 전제에서 CPU 를 쓸 이유가 없다는 판단).
@@ -974,7 +976,17 @@ def resolve_query_embedding_provider(provider: str | None = None) -> str:
     벡터 검색 예외를 잡아 keyword 로 내리므로, 키가 없거나 API 가 계속 실패하면
     멈추는 대신 검색 품질만 조용히 떨어진다. 그래서 retriever 진입 시
     query_embedding_config_error() 로 설정 오류만 골라 한 번 끊는다."""
-    raw = provider if provider is not None else os.getenv("INDEX_QUERY_EMBED_PROVIDER")
+    # 미지정이면 색인 축을 따른다. 이 폴백이 없으면 색인 에러가 시킨 대로
+    # INDEX_EMBED_PROVIDER=local 만 고친 사용자가 곧바로 질의 preflight 에서 두 번째
+    # 에러를 만난다 — 첫 에러가 시킨 대로 했는데 안 되는 상태다. 오프라인·무키 환경이
+    # 정확히 이 경로를 밟는다(.env.example 머리말의 "키가 없어도 폴백으로 돈다" 약속).
+    #
+    # CLI 는 이미 이렇게 동작한다(core/embedding_cli.py 의 query_target = --query-embed
+    # or --embed). env 만 다르게 두면 같은 설정을 어디에 쓰느냐로 결과가 갈린다.
+    # 명시값은 그대로 이기므로 "별개 축" 설계는 유지된다.
+    raw = provider if provider is not None else (
+        os.getenv("INDEX_QUERY_EMBED_PROVIDER") or os.getenv("INDEX_EMBED_PROVIDER")
+    )
     return normalize_provider(raw) or "openrouter"
 
 

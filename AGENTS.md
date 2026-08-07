@@ -59,7 +59,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
     선택(`fixed`/`markdown`/`recursive`/`markdown_recursive`), 새 전략은 `register_chunk_strategy()`로 등록
   - 임베딩 모델: `agents/index/qdrant_store.py`의 `embed()` (기본 `bge-m3`, 1024차원)
   - 임베딩 실행 위치: `INDEX_EMBED_PROVIDER`(색인) / `INDEX_QUERY_EMBED_PROVIDER`(질의).
-    둘 다 기본 `openrouter`이며 `local`로 내릴 수 있습니다. 아래 "임베딩 provider" 참고
+    기본 `openrouter`이며 `local`로 내릴 수 있습니다. 질의 축을 안 정하면 색인 축을
+    따릅니다. 아래 "임베딩 provider" 참고
 - 문서 임베딩과 질의 임베딩은 반드시 같은 모델·차원을 사용해야 합니다. 기존 컬렉션과 차원이
   다르면 오류가 나며, 재생성을 허용하려면 `index_config["recreate_collection_on_dimension_mismatch"] = True`를
   명시적으로 설정합니다.
@@ -79,7 +80,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 | env | 기본값 | 대상 |
 |---|---|---|
 | `INDEX_EMBED_PROVIDER` | `openrouter` | 문서 색인 |
-| `INDEX_QUERY_EMBED_PROVIDER` | `openrouter` | 검색 질의 |
+| `INDEX_QUERY_EMBED_PROVIDER` | `INDEX_EMBED_PROVIDER` 따름 (없으면 `openrouter`) | 검색 질의 |
 | `INDEX_EMBED_DEVICE` | `auto` | `local`일 때 `cuda`/`cpu` |
 
 실측(한국어 1,000청크 — 측정 도구 `tools/bench_embedding.py` 는 측정값을 여기와 커밋에 박제한 뒤 제거했습니다. 재검증이 필요하면 `git log --diff-filter=D -- tools/bench_embedding.py` 로 복원): 로컬 CPU 2 chunks/sec vs
