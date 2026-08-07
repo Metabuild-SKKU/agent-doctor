@@ -90,8 +90,15 @@ def _summarize_stage_event(stage: str, snapshot: AgentDoctorState) -> tuple[str,
         history = snapshot.optimization_history or []
         if history:
             last = history[-1]
-            before = last.metadata.get("before_score")
-            after = last.metadata.get("after_score")
+            # 표시용 종합점수(0~100)를 우선 읽는다. before_score/after_score 는
+            # 마진 판정용 탐색 신호(0~1)라 :.0f 로 찍으면 전부 0 또는 1 이 된다.
+            # 구버전 이력(composite 미기록)은 탐색 신호×100 으로 폴백한다.
+            before = last.metadata.get("before_composite")
+            after = last.metadata.get("after_composite")
+            if before is None and last.metadata.get("before_score") is not None:
+                before = last.metadata["before_score"] * 100
+            if after is None and last.metadata.get("after_score") is not None:
+                after = last.metadata["after_score"] * 100
             if before is not None and after is not None:
                 verdict = "유지" if (last.status == "applied" and not last.metadata.get("pending")) else "롤백"
                 # 무엇을 바꿨는지는 action 이 말한다. 구버전 이력에는 없으므로
