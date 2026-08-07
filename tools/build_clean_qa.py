@@ -83,10 +83,25 @@ DEFAULT_MIN_ANSWER = 2
 def load_documents(corpus_path: str) -> dict[str, tuple[str, list[tuple[str, int, int]]]]:
     """doc_id → (원문 전체, [(chunk_id, start, end)]).
 
-    corpus 의 청크를 char_start 순으로 이어 붙여 원문을 복원한다 — Ingest 가 하는 일과
-    같은 방식이라(agents/ingest/agent.py), 여기서 계산한 좌표가 파이프라인이 보는 좌표와
-    같은 기준이 된다.
+    **복원은 파이프라인과 같은 함수(`korquad._stitch`)를 쓴다.** 이 도구가 계산한 좌표를
+    파이프라인이 gold_spans 로 읽으므로, 두 좌표계가 한 글자라도 어긋나면 골드가 엉뚱한
+    곳을 가리킨다 — 이 도구가 고치려던 결함을 그대로 다시 만드는 셈이다.
+
+    처음에는 `"".join(청크 본문)` 으로 이어붙였는데 틀린 방식이었다(리뷰 지적).
+    `_stitch` 는 각 청크를 **`char_start` 위치에 놓고** 빈 자리를 공백으로 남기는 반면,
+    이어붙이기는 좌표를 무시하고 본문을 차례로 붙인다. 둘은 청크 구간이 딱 맞닿을 때만
+    같고, **겹치거나 틈이 있으면 갈라진다.**
+
+    이 코퍼스는 청크가 겹친다(overlap). 실측:
+
+        문서 1,000개 중 구간이 겹치는 문서      1,000개
+        join 길이 - stitch 길이  중앙값 1,327자 (최대 38,910자)
+        그 결과 정제본 549건 중 좌표가 어긋난 것  539건(98%)
+
+    겹친 만큼 뒤쪽 좌표가 통째로 밀려서, 사실상 전부 틀린 골드를 싣고 있었다.
     """
+    from agents.eval.datasets.korquad import _stitch
+
     by_doc: dict[str, list[dict]] = defaultdict(list)
     with open(corpus_path, encoding="utf-8") as fh:
         for line in fh:
@@ -98,7 +113,10 @@ def load_documents(corpus_path: str) -> dict[str, tuple[str, list[tuple[str, int
     out: dict[str, tuple[str, list[tuple[str, int, int]]]] = {}
     for doc_id, rows in by_doc.items():
         rows.sort(key=lambda r: r["char_start"])
-        text = "".join(r["text"] for r in rows)
+        text = _stitch([
+            (int(r.get("char_start", 0)), int(r.get("char_end", 0)), r.get("text", "") or "")
+            for r in rows
+        ])
         spans = [(r["chunk_id"], r["char_start"], r["char_end"]) for r in rows]
         out[doc_id] = (text, spans)
     return out

@@ -28,7 +28,7 @@ import pathlib
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from agents.eval.datasets.korquad import _gold_spans_of
+from agents.eval.datasets.korquad import _gold_spans_of, _stitch
 from tools.build_clean_qa import build, covering_chunk_ids
 
 
@@ -176,6 +176,92 @@ class CoveringChunkIdsTest(unittest.TestCase):
     def test_touching_edge_does_not_count(self):
         """[100,105) 는 c0 의 끝(100)에 닿기만 한다 — 겹침이 아니다."""
         self.assertEqual(covering_chunk_ids(self.SPANS, 100, 105), ["c1"])
+
+
+class CoordinateSystemMatchesPipelineTest(unittest.TestCase):
+    """빌더가 낸 좌표를 **파이프라인이 읽었을 때** 정답을 가리키는지.
+
+    빌더와 파이프라인이 원문을 서로 다르게 복원하면 골드가 통째로 밀린다 — 이 도구가
+    고치려던 결함(골드가 엉뚱한 곳을 가리킴)을 그대로 다시 만드는 셈이다.
+
+    처음 구현은 `"".join(청크 본문)` 으로 이어붙였고 그게 틀렸다(리뷰 지적). 파이프라인의
+    `_stitch` 는 각 청크를 **char_start 위치에 놓는데**, 이어붙이기는 좌표를 무시한다.
+    둘은 청크가 딱 맞닿을 때만 같고 **겹치거나 틈이 있으면 갈라진다.**
+
+    기존 테스트가 이걸 못 잡은 이유는 헬퍼(`_corpus`)가 맞닿는 청크만 만들었기 때문이다.
+    실제 코퍼스는 1,000개 문서가 **전부** 겹쳐 있었고, 정제본 549건 중 539건(98%)의
+    좌표가 어긋나 있었다. 그래서 여기서는 겹치는 코퍼스로만 검증한다.
+    """
+
+    DOC = "가" * 300 + "정답은 MKS 벵진 이다" + "나" * 300
+
+    def _overlapping_corpus(self, doc_id, text, size=200, overlap=50):
+        """실제 코퍼스처럼 **겹치는** 청크. step < size 라 구간이 서로 물린다."""
+        step = size - overlap
+        rows, i, idx = [], 0, 0
+        while i < len(text):
+            end = min(i + size, len(text))
+            rows.append({"doc_id": doc_id, "chunk_id": f"{doc_id}_{idx}", "title": "t",
+                         "text": text[i:end], "char_start": i, "char_end": end})
+            if end >= len(text):
+                break
+            i += step
+            idx += 1
+        return rows
+
+    def _build(self, corpus_rows, qa_rows):
+        with tempfile.TemporaryDirectory() as tmp:
+            cp = pathlib.Path(tmp) / "corpus.jsonl"
+            qp = pathlib.Path(tmp) / "qa.jsonl"
+            op = pathlib.Path(tmp) / "out.jsonl"
+            cp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in corpus_rows),
+                          encoding="utf-8")
+            qp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in qa_rows),
+                          encoding="utf-8")
+            build(str(cp), str(qp), str(op), 50, 2)
+            return [json.loads(l) for l in open(op, encoding="utf-8") if l.strip()]
+
+    def test_gold_span_points_at_the_answer_in_pipeline_coordinates(self):
+        """빌더 좌표를 파이프라인이 복원한 문서에 그대로 대면 정답이 나와야 한다.
+
+        이 단언이 이 파일의 핵심이다 — 나머지 테스트가 전부 통과해도 이게 깨지면
+        정제본은 쓸 수 없다. 이어붙이기 방식으로 되돌리면 여기서 잡힌다.
+        """
+        rows = self._build(
+            self._overlapping_corpus("d1", self.DOC),
+            [{"qa_id": "1", "question": "정답은?", "answer_text": "MKS 벵진",
+              "doc_id": "d1", "positive_chunk_ids": ["d1_0"]}])
+        self.assertEqual(len(rows), 1)
+
+        span = rows[0]["gold_spans"][0]
+        restored = _stitch([(r["char_start"], r["char_end"], r["text"])
+                            for r in self._overlapping_corpus("d1", self.DOC)])
+        self.assertEqual(restored[span["start"]:span["end"]], "MKS 벵진")
+
+    def test_overlapping_corpus_actually_diverges_between_the_two_restorations(self):
+        """이 fixture 가 두 복원 방식을 실제로 가르는지 — 안 그러면 위 테스트가 무의미하다.
+
+        겹침이 없으면 join 과 _stitch 가 같아져 회귀를 못 잡는다. fixture 가 조건을
+        만족하는지 여기서 못박는다.
+        """
+        rows = self._overlapping_corpus("d1", self.DOC)
+        joined = "".join(r["text"] for r in rows)
+        stitched = _stitch([(r["char_start"], r["char_end"], r["text"]) for r in rows])
+        self.assertNotEqual(joined, stitched)
+        self.assertEqual(stitched, self.DOC)      # _stitch 는 원문을 그대로 복원한다
+
+    def test_covering_chunk_ids_are_in_the_same_coordinates(self):
+        """하위호환용 positive_chunk_ids 도 같은 좌표계여야 한다 — 겹치면 여러 개가 나온다."""
+        rows = self._build(
+            self._overlapping_corpus("d1", self.DOC),
+            [{"qa_id": "1", "question": "정답은?", "answer_text": "MKS 벵진",
+              "doc_id": "d1", "positive_chunk_ids": ["d1_0"]}])
+        span = rows[0]["gold_spans"][0]
+        for cid in rows[0]["positive_chunk_ids"]:
+            chunk = next(r for r in self._overlapping_corpus("d1", self.DOC)
+                         if r["chunk_id"] == cid)
+            self.assertLess(chunk["char_start"], span["end"])
+            self.assertGreater(chunk["char_end"], span["start"])
 
 
 if __name__ == "__main__":
