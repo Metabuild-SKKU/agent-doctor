@@ -17,14 +17,20 @@ QA셋(시험지) ↔ 외부 로그(답안지) 병합 유틸
   (시스템 출력/검색 결과)과 반대다. 병합 결과에서는 ground_truth/gold_contexts
   로만 쓴다.
 - 깨진 로그 줄은 그대로 통과시킨다(적재기 log_intake 가 일관되게 집계하도록).
+- 골든셋 형식은 팀마다 다르므로 JSON 배열 / JSONL / CSV / XLSX 를 모두 받는다
+  (멘토 피드백: "골든셋(JSONL, Excel 등)을 입력"). 확장자로 1차 판별하되 실패하면
+  JSON→JSONL 순으로 재시도한다 - 상대가 .txt 로 준 JSONL 같은 케이스를 살린다.
 
-CLI: python -m agents.eval.qa_merge <log.jsonl> <qa.json|jsonl> [--out=경로]
+CLI: python -m agents.eval.qa_merge <log.jsonl> <qa.json|jsonl|csv|xlsx> [--out=경로]
      기본 출력: <log>.merged.jsonl
 """
 
 from __future__ import annotations
 
+import csv
+import io
 import json
+import os
 import re
 import sys
 from typing import Any, Optional
@@ -67,35 +73,87 @@ def _as_text_list(value: Any) -> list[str]:
     return [t for t in (str(v or "").strip() for v in value) if t]
 
 
+def _entries_from_json(content: str) -> tuple[list[Any], list[str]]:
+    """JSON 배열([{...}]) 또는 최상위 dict({"data": [...]} 류)에서 항목 목록을 뽑는다."""
+    errors: list[str] = []
+    loaded = json.loads(content)          # JSONDecodeError 는 호출자가 처리
+    if isinstance(loaded, list):
+        return loaded, errors
+    if isinstance(loaded, dict):
+        entries = next((v for v in loaded.values() if isinstance(v, list)), [])
+        if not entries:
+            errors.append("JSON 오브젝트 안에 항목 리스트가 없음")
+        return entries, errors
+    errors.append("JSON 최상위가 배열/오브젝트가 아님")
+    return [], errors
+
+
+def _entries_from_jsonl(content: str) -> tuple[list[Any], list[str]]:
+    entries: list[Any] = []
+    errors: list[str] = []
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            errors.append(f"{lineno}행: {exc}")
+    return entries, errors
+
+
+def _entries_from_csv(content: str) -> tuple[list[Any], list[str]]:
+    """CSV → dict 리스트. 헤더가 곧 키라서 키 관용 규칙(QUESTION_KEYS 등)이 그대로 통한다.
+    빈 셀은 키를 아예 빼서 _first_key 의 '값 없으면 다음 후보' 규칙을 타게 한다."""
+    rows = list(csv.DictReader(io.StringIO(content)))
+    entries = [{k.strip(): v for k, v in row.items()
+                if k and str(v or "").strip()} for row in rows]
+    return entries, []
+
+
+def _entries_from_xlsx(path: str) -> tuple[list[Any], list[str]]:
+    """XLSX 첫 시트 → dict 리스트(1행=헤더). openpyxl 미설치면 오류로 알린다."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return [], ["xlsx 를 읽으려면 openpyxl 이 필요합니다 (pip install openpyxl)"]
+    # read_only 는 파일 핸들을 열어둔 채라 Windows 에서 원본을 못 지운다 - 반드시 close.
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        rows = wb.active.iter_rows(values_only=True)
+        header = [str(h).strip() if h is not None else "" for h in next(rows, [])]
+        entries = []
+        for row in rows:
+            entry = {h: v for h, v in zip(header, row)
+                     if h and str(v or "").strip()}
+            if entry:
+                entries.append(entry)
+    finally:
+        wb.close()
+    return entries, []
+
+
 def load_qa_set(path: str) -> tuple[dict[str, dict], list[str]]:
     """QA셋 파일 → {정규화 질문: {"ground_truth", "gold_contexts"}}, 오류 목록.
 
-    JSON 배열([{...}]) 또는 JSONL 둘 다 허용. dict 최상위면 값 중 첫 리스트를
-    항목 목록으로 본다({"data": [...]} 류 수용)."""
-    with open(path, encoding="utf-8") as f:
-        content = f.read()
+    JSON 배열 / JSONL / CSV / XLSX 를 받는다. 확장자로 1차 판별하되, JSON 파싱이
+    실패하면 JSONL 로 재시도한다 - 상대가 .json 확장자로 JSONL 을 주는 실무 케이스."""
+    ext = os.path.splitext(path)[1].lower()
 
-    errors: list[str] = []
-    entries: list[Any] = []
-    try:
-        loaded = json.loads(content)
-        if isinstance(loaded, list):
-            entries = loaded
-        elif isinstance(loaded, dict):
-            entries = next((v for v in loaded.values() if isinstance(v, list)), [])
-            if not entries:
-                errors.append("JSON 오브젝트 안에 항목 리스트가 없음")
+    if ext in (".xlsx", ".xlsm"):
+        entries, errors = _entries_from_xlsx(path)
+    else:
+        with open(path, encoding="utf-8-sig") as f:   # BOM 붙은 엑셀 CSV 수용
+            content = f.read()
+        if ext == ".csv":
+            entries, errors = _entries_from_csv(content)
+        elif ext == ".jsonl":
+            entries, errors = _entries_from_jsonl(content)
         else:
-            errors.append("JSON 최상위가 배열/오브젝트가 아님")
-    except json.JSONDecodeError:
-        for lineno, line in enumerate(content.splitlines(), start=1):
-            line = line.strip()
-            if not line:
-                continue
             try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                errors.append(f"{lineno}행: {exc}")
+                entries, errors = _entries_from_json(content)
+            except json.JSONDecodeError:
+                entries, errors = _entries_from_jsonl(content)
 
     qa_map: dict[str, dict] = {}
     for i, entry in enumerate(entries):
@@ -165,7 +223,8 @@ def _main(argv: list[str]) -> int:
     args = [a for a in argv if not a.startswith("--")]
     out = next((a.split("=", 1)[1] for a in argv if a.startswith("--out=")), None)
     if len(args) != 2:
-        print("사용법: python -m agents.eval.qa_merge <log.jsonl> <qa.json|jsonl> [--out=경로]")
+        print("사용법: python -m agents.eval.qa_merge <log.jsonl> "
+              "<qa.json|jsonl|csv|xlsx> [--out=경로]")
         return 2
     log_path, qa_path = args
     out = out or re.sub(r"\.jsonl?$", "", log_path) + ".merged.jsonl"

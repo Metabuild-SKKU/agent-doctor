@@ -49,6 +49,47 @@ class TestLoadQaSet(unittest.TestCase):
         self.assertEqual(entry["ground_truth"], "700만원")     # 복수 정답은 첫 항목
         self.assertEqual(len(entry["gold_contexts"]), 1)
 
+    def test_csv_format(self):
+        # 골든셋을 엑셀에서 CSV로 내보낸 케이스(BOM 포함). 헤더가 곧 키라 관용 규칙이 통한다
+        with tempfile.TemporaryDirectory() as td:
+            qa = os.path.join(td, "qa.csv")
+            with open(qa, "w", encoding="utf-8-sig", newline="") as f:
+                f.write("question,answer,context\n")
+                f.write("공제 한도는?,700만원,연금저축 한도는 연 700만원이다.\n")
+                f.write("빈 정답 행,,\n")
+            qa_map, errors = load_qa_set(qa)
+        entry = qa_map[normalize_question("공제 한도는")]
+        self.assertEqual(entry["ground_truth"], "700만원")
+        self.assertEqual(entry["gold_contexts"], ["연금저축 한도는 연 700만원이다."])
+        # 정답이 빈 행도 질문은 있으므로 적재되되 값은 None
+        self.assertIsNone(qa_map[normalize_question("빈 정답 행")]["ground_truth"])
+
+    def test_xlsx_format(self):
+        openpyxl = __import__("openpyxl")
+        with tempfile.TemporaryDirectory() as td:
+            qa = os.path.join(td, "qa.xlsx")
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(["question", "ground_truth", "gold_contexts"])
+            ws.append(["실업률은 얼마인가?", "3.1%", "2025년 실업률은 3.1%다."])
+            wb.save(qa)
+            qa_map, errors = load_qa_set(qa)
+        self.assertEqual(errors, [])
+        entry = qa_map[normalize_question("실업률은 얼마인가")]
+        self.assertEqual(entry["ground_truth"], "3.1%")
+        self.assertEqual(entry["gold_contexts"], ["2025년 실업률은 3.1%다."])
+
+    def test_jsonl_content_with_json_extension(self):
+        # 상대가 .json 확장자로 JSONL을 주는 실무 케이스 → 재시도로 살린다
+        with tempfile.TemporaryDirectory() as td:
+            qa = _write(td, "qa.json", "\n".join([
+                json.dumps({"question": "q1", "ground_truth": "a1"}, ensure_ascii=False),
+                json.dumps({"question": "q2", "ground_truth": "a2"}, ensure_ascii=False),
+            ]))
+            qa_map, errors = load_qa_set(qa)
+        self.assertEqual(len(qa_map), 2)
+        self.assertEqual(errors, [])
+
     def test_jsonl_format(self):
         with tempfile.TemporaryDirectory() as td:
             qa = _write(td, "qa.jsonl", "\n".join([
