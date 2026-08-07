@@ -323,6 +323,222 @@ class JsonModeKeepsLargeCapTest(unittest.TestCase):
         self.assertEqual(len(FakeOpenAI.calls), 1)
 
 
+class FakeAnthropic:
+    """messages.create() 호출을 기록하는 목 클라이언트.
+
+    script 를 주면 호출 순서대로 (text, stop_reason) 을 소비한다(재시도 검증용).
+    usage 는 캐시 토큰까지 흉내낸다 — 비용 계산이 캐시 배수를 반영하는지 보려면 필요하다."""
+
+    last_kwargs: dict = {}
+    calls: list = []
+    stop_reason: str | None = "end_turn"
+    text: str = '{"ok": 1}'
+    script: list | None = None
+    usage: dict | None = None
+    stop_details = None
+
+    def __init__(self, **kwargs):
+        FakeAnthropic.init_kwargs = kwargs
+        self.messages = types.SimpleNamespace(create=self._create)
+
+    def _create(self, **kwargs):
+        FakeAnthropic.last_kwargs = kwargs
+        FakeAnthropic.calls.append(kwargs)
+        if FakeAnthropic.script:
+            text, stop = FakeAnthropic.script.pop(0)
+        else:
+            text, stop = FakeAnthropic.text, FakeAnthropic.stop_reason
+        usage = types.SimpleNamespace(**(FakeAnthropic.usage or {
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}))
+        return types.SimpleNamespace(
+            content=[types.SimpleNamespace(type="text", text=text)],
+            usage=usage, stop_reason=stop, stop_details=FakeAnthropic.stop_details)
+
+    @classmethod
+    def reset(cls):
+        cls.last_kwargs, cls.calls = {}, []
+        cls.stop_reason, cls.text, cls.script = "end_turn", '{"ok": 1}', None
+        cls.usage, cls.stop_details = None, None
+
+
+def acall(model: str, **kwargs) -> tuple[str, str]:
+    """anthropic_chat 1회 호출 → (반환 텍스트, stdout)."""
+    buf = io.StringIO()
+    with patch("anthropic.Anthropic", FakeAnthropic), redirect_stdout(buf):
+        text = llm_clients.anthropic_chat("sys", "user", model, **kwargs)
+    return text, buf.getvalue()
+
+
+class AnthropicParamsTest(unittest.TestCase):
+    """모델별로 갈리는 축이 요청에 정확히 반영되는지."""
+
+    def setUp(self):
+        FakeAnthropic.reset()
+        llm_clients._warned_once.clear()
+
+    def test_temperature_is_never_sent(self):
+        # Sonnet 5 이후 세대는 비기본 sampling 값을 400 으로 거부한다. 시그니처에
+        # 인자가 없으므로 실을 방법 자체가 없어야 한다.
+        acall("claude-sonnet-5")
+        for key in ("temperature", "top_p", "top_k"):
+            self.assertNotIn(key, FakeAnthropic.last_kwargs)
+
+    def test_temperature_kwarg_is_rejected(self):
+        with self.assertRaises(TypeError):
+            llm_clients.anthropic_chat("s", "u", "claude-sonnet-5", temperature=0.0)
+
+    def test_thinking_is_disabled_explicitly(self):
+        # 생략하면 adaptive 가 켜지고 max_tokens 를 사고와 나눠 써 본문이 잘린다.
+        acall("claude-sonnet-5")
+        self.assertEqual(FakeAnthropic.last_kwargs["thinking"], {"type": "disabled"})
+
+    def test_thinking_omitted_and_cap_raised_when_not_disableable(self):
+        # fable/mythos 는 {"type":"disabled"} 가 400 이다. 파라미터를 아예 빼고
+        # 사고 토큰 몫까지 상한을 올려 잡아야 한다.
+        _, log = acall("claude-fable-5", max_output_tokens=4096)
+        self.assertNotIn("thinking", FakeAnthropic.last_kwargs)
+        self.assertEqual(FakeAnthropic.last_kwargs["max_tokens"],
+                         llm_clients._REASONING_MIN_OUTPUT_TOKENS)
+        self.assertIn("thinking 을 끌 수 없어", log)
+
+    def test_schema_is_enforced_when_supported(self):
+        schema = {"type": "object", "properties": {}, "required": [],
+                  "additionalProperties": False}
+        acall("claude-sonnet-5", json_schema=schema)
+        self.assertEqual(FakeAnthropic.last_kwargs["output_config"],
+                         {"format": {"type": "json_schema", "schema": schema}})
+
+    def test_schema_unsupported_model_warns_and_omits(self):
+        # 조용히 빠지면 이 transport 를 만든 이유(결손 보수 경로 제거)가 사라진다.
+        _, log = acall("claude-sonnet-4-6", json_schema={"type": "object"})
+        self.assertNotIn("output_config", FakeAnthropic.last_kwargs)
+        self.assertIn("스키마 강제", log)
+
+    def test_no_schema_means_no_output_config(self):
+        acall("claude-sonnet-5")
+        self.assertNotIn("output_config", FakeAnthropic.last_kwargs)
+
+    def test_system_carries_cache_control(self):
+        acall("claude-sonnet-5")
+        self.assertEqual(FakeAnthropic.last_kwargs["system"],
+                         [{"type": "text", "text": "sys",
+                           "cache_control": {"type": "ephemeral"}}])
+
+    def test_cache_can_be_turned_off(self):
+        acall("claude-sonnet-5", cache_system=False)
+        self.assertNotIn("cache_control", FakeAnthropic.last_kwargs["system"][0])
+
+    def test_empty_system_is_not_sent(self):
+        buf = io.StringIO()
+        with patch("anthropic.Anthropic", FakeAnthropic), redirect_stdout(buf):
+            llm_clients.anthropic_chat("", "user", "claude-sonnet-5")
+        self.assertNotIn("system", FakeAnthropic.last_kwargs)
+
+
+class AnthropicCapsTest(unittest.TestCase):
+    """능력표 조회 — 접두 매칭이 긴 키 우선인지(4-8 이 4 로 먹히면 안 된다)."""
+
+    def test_longest_prefix_wins(self):
+        self.assertEqual(llm_clients._anthropic_caps("claude-opus-4-8")[2], 1024)
+        self.assertEqual(llm_clients._anthropic_caps("claude-opus-4-6")[2], 4096)
+
+    def test_haiku_cache_minimum_is_high(self):
+        # 심판을 haiku 로 내리면 캐시가 안 걸린다는 사실을 표가 알고 있어야 한다.
+        self.assertEqual(llm_clients._anthropic_caps("claude-haiku-4-5")[2], 4096)
+
+    def test_unknown_model_has_no_price(self):
+        # 0 으로 뭉개면 비용 표가 거짓말한다. None → "단가 미등록" 으로 드러난다.
+        caps = llm_clients._anthropic_caps("claude-something-new-9")
+        self.assertIsNone(caps[0])
+
+
+class AnthropicCostTest(unittest.TestCase):
+    """캐시 토큰 과금 배수(쓰기 1.25x, 읽기 0.1x)를 반영하는지."""
+
+    def setUp(self):
+        FakeAnthropic.reset()
+        llm_clients._warned_once.clear()
+
+    def _logged(self, model="claude-sonnet-5", **usage):
+        FakeAnthropic.usage = {"input_tokens": 0, "output_tokens": 0,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0, **usage}
+        seen = {}
+        with patch("anthropic.Anthropic", FakeAnthropic), \
+                patch.object(llm_clients, "log_usage",
+                             lambda m, p, o, tag="", cost_usd=None: seen.update(
+                                 prompt=p, output=o, cost=cost_usd)), \
+                redirect_stdout(io.StringIO()):
+            llm_clients.anthropic_chat("sys", "user", model)
+        return seen
+
+    def test_cache_read_is_a_tenth_of_input_price(self):
+        fresh = self._logged(input_tokens=1_000_000)
+        cached = self._logged(cache_read_input_tokens=1_000_000)
+        self.assertAlmostEqual(fresh["cost"], 3.00, places=6)
+        self.assertAlmostEqual(cached["cost"], 0.30, places=6)
+
+    def test_cache_write_is_1_25x(self):
+        written = self._logged(cache_creation_input_tokens=1_000_000)
+        self.assertAlmostEqual(written["cost"], 3.75, places=6)
+
+    def test_prompt_tokens_include_all_three_buckets(self):
+        # fresh 만 세면 캐시가 잘 걸릴수록 토큰 열이 작아져 "입력이 줄었다" 는 거짓 인상을 준다.
+        seen = self._logged(input_tokens=10, cache_creation_input_tokens=20,
+                            cache_read_input_tokens=30)
+        self.assertEqual(seen["prompt"], 60)
+
+    def test_unregistered_model_reports_no_cost(self):
+        seen = self._logged(model="claude-something-new-9", input_tokens=100)
+        self.assertIsNone(seen["cost"])
+
+
+class AnthropicStopReasonTest(unittest.TestCase):
+    def setUp(self):
+        FakeAnthropic.reset()
+        llm_clients._warned_once.clear()
+
+    def test_max_tokens_retries_once_for_json(self):
+        FakeAnthropic.script = [("{trunc", "max_tokens"), ('{"ok":1}', "end_turn")]
+        text, log = acall("claude-sonnet-5", json_schema={"type": "object"},
+                          max_output_tokens=4096)
+        self.assertEqual(text, '{"ok":1}')
+        self.assertEqual(len(FakeAnthropic.calls), 2)
+        self.assertEqual(FakeAnthropic.calls[1]["max_tokens"],
+                         llm_clients._REASONING_MIN_OUTPUT_TOKENS)
+        self.assertIn("1회 재시도", log)
+
+    def test_max_tokens_without_json_and_with_text_is_not_retried(self):
+        # 산문은 잘려도 부분 답변이 쓸모 있다(openai_chat 과 같은 판단).
+        FakeAnthropic.stop_reason, FakeAnthropic.text = "max_tokens", "부분 답변"
+        _, log = acall("claude-sonnet-5")
+        self.assertEqual(len(FakeAnthropic.calls), 1)
+        self.assertIn("stop_reason=max_tokens", log)
+
+    def test_refusal_is_reported(self):
+        # HTTP 200 + 빈 content 로 오므로 여기서 안 찍으면 "빈 응답" 으로 흡수된다.
+        FakeAnthropic.stop_reason = "refusal"
+        FakeAnthropic.stop_details = types.SimpleNamespace(category="cyber")
+        _, log = acall("claude-sonnet-5")
+        self.assertIn("거부", log)
+        self.assertIn("cyber", log)
+
+    def test_cache_miss_is_warned_once(self):
+        # 캐시 최소 길이 미달은 에러 없이 무시되므로 로그가 유일한 신호다.
+        _, first = acall("claude-haiku-4-5")
+        _, second = acall("claude-haiku-4-5")
+        self.assertIn("프롬프트 캐시가 걸리지 않았습니다", first)
+        self.assertEqual(second, "")
+
+    def test_no_cache_warning_when_cache_engaged(self):
+        FakeAnthropic.usage = {"input_tokens": 5, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 2000}
+        _, log = acall("claude-sonnet-5")
+        self.assertNotIn("캐시가 걸리지 않았습니다", log)
+
+
 class TestFileWiringTest(unittest.TestCase):
     """__main__ 블록 아래에 클래스를 덧붙이면 파일 직접 실행에서 그 테스트가 안 돈다.
 
@@ -344,6 +560,33 @@ class TestFileWiringTest(unittest.TestCase):
                 self.assertTrue(classes, "테스트 클래스가 없다")
                 self.assertLess(max(classes), guards[0],
                                 "__main__ 블록 뒤의 클래스는 직접 실행에서 안 돈다")
+
+
+class EmbedOrderTests(unittest.TestCase):
+    """임베딩 응답을 index 로 정렬한다 — 색인 벡터가 이 경로를 탄다."""
+
+    def test_out_of_order_response_is_sorted(self):
+        import types
+
+        from core import llm_clients
+
+        data = [
+            types.SimpleNamespace(index=2, embedding=[2.0]),
+            types.SimpleNamespace(index=0, embedding=[0.0]),
+            types.SimpleNamespace(index=1, embedding=[1.0]),
+        ]
+        resp = types.SimpleNamespace(data=data, usage=None)
+        client = types.SimpleNamespace(
+            embeddings=types.SimpleNamespace(create=lambda **kw: resp)
+        )
+        fake_openai = types.ModuleType("openai")
+        fake_openai.OpenAI = lambda **kw: client
+
+        with patch.dict(sys.modules, {"openai": fake_openai}):
+            vectors = llm_clients.openai_embed(["a", "b", "c"], "m")
+
+        # 순서가 한 칸만 어긋나도 벡터가 엉뚱한 청크에 붙어 검색이 조용히 망가진다.
+        self.assertEqual(vectors, [[0.0], [1.0], [2.0]])
 
 
 if __name__ == "__main__":

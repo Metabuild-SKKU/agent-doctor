@@ -51,6 +51,7 @@ from typing import Any, Callable
 from agents.eval import llm_provider
 from agents.eval.types import Mode, EvalRecord
 from agents.eval.metrics_common import _ctx, active_mode
+from core.llm_clients import SCHEMA_INT01, SCHEMA_STR, array_of, strict_object
 from core.parallel import parallel_map
 
 
@@ -464,6 +465,67 @@ _FUSED_BLOCKS: dict[str, tuple[str, str, Any]] = {
     ),
 }
 
+# ── fused 응답의 JSON Schema (anthropic output_config.format 전용) ─
+#
+# 위 _FUSED_BLOCKS 의 스키마 조각은 **프롬프트에 글자로 박히는 문자열**이라 모델이 지키든
+# 말든 강제력이 없다(그래서 _refetch_fused_if_incomplete·_fused_repair 가 필요했다).
+# 여기 dict 는 Anthropic Messages API 의 output_config.format 에 실려 디코딩 단계에서
+# **강제**된다 — 키 누락·타입 위반이 원천적으로 불가능해진다.
+#
+# 두 표는 같은 키 집합을 가져야 한다(어긋나면 스키마가 요구하지 않는 키를 프롬프트만
+# 요구하거나 그 반대가 된다). tests/test_ragas_fused.py 가 대칭을 핀으로 잡는다.
+#
+# 스키마 제약(Anthropic structured outputs):
+#   - 모든 object 에 additionalProperties: false 와 required 전량 명시가 필수다.
+#   - minimum/maximum/minLength 류 수치·길이 제약은 미지원이다. 그래서 0/1 판정은
+#     {"type":"integer"} 가 아니라 enum 으로 좁힌다 — 프롬프트 문자열 스키마보다 강하다.
+#   - 재귀 스키마는 미지원(여기선 쓰지 않는다).
+# 조립 헬퍼는 core 가 소유한다 — 제약이 Anthropic API 규칙이고 쓰는 곳이 여럿이라
+# (probe_gen.py 도 같은 헬퍼를 쓴다) 규칙이 갈라지지 않게 한 곳에 둔다.
+_obj = strict_object
+_arr = array_of
+_STR = SCHEMA_STR
+_INT01 = SCHEMA_INT01
+_TPFPFN_ITEM_SCHEMA = _arr(_obj({"statement": _STR, "reason": _STR}))
+
+# 블록 이름 → 그 블록이 채우는 최상위 프로퍼티들. relevancy 만 키가 2개다
+# (_fused_required_keys 의 예외 규칙과 같은 이유).
+_FUSED_SCHEMA_PROPS: dict[str, dict] = {
+    "answer_statements": {"answer_statements": _arr(_STR)},
+    "faithfulness_verdicts": {
+        "faithfulness_verdicts": _arr(_obj(
+            {"statement": _STR, "reason": _STR, "verdict": _INT01}))},
+    "relevancy": {
+        "generated_questions": _arr(_STR),
+        "noncommittal": _INT01},
+    "context_verdicts": {
+        "context_verdicts": _arr(_obj(
+            {"index": {"type": "integer"}, "reason": _STR, "verdict": _INT01}))},
+    "reference_statements": {"reference_statements": _arr(_STR)},
+    "correctness": {
+        "correctness": _obj({"TP": _TPFPFN_ITEM_SCHEMA,
+                             "FP": _TPFPFN_ITEM_SCHEMA,
+                             "FN": _TPFPFN_ITEM_SCHEMA})},
+    "recall_classifications": {
+        "recall_classifications": _arr(_obj(
+            {"statement": _STR, "reason": _STR, "attributed": _INT01}))},
+}
+
+
+def _fused_json_schema(blocks: list[str]) -> dict | None:
+    """선택된 블록만으로 응답 JSON Schema 를 만든다. 블록이 없으면 None.
+
+    프로퍼티 순서 = 블록 순서 = 모델이 답을 만들어야 하는 순서(분해 → 판정)다.
+    스키마 강제는 순서를 요구하지 않지만, 순서를 맞춰두면 프롬프트와 스키마가 같은
+    이야기를 해서 모델이 헷갈릴 여지가 줄어든다."""
+    if not blocks:
+        return None
+    props: dict = {}
+    for name in blocks:
+        props.update(_FUSED_SCHEMA_PROPS[name])
+    return _obj(props)
+
+
 _FUSED_EXAMPLE_INPUT = {
     "question": "What can you tell me about Albert Einstein?",
     "answer": ("Albert Einstein was a German-born theoretical physicist. "
@@ -490,8 +552,32 @@ _FUSED_RELEVANCY_EXAMPLE = {
 
 def _fused_prompt(blocks: list[str], question: str, answer: str,
                   contexts: list[str], reference: str) -> str:
-    """선택된 블록만으로 fused 프롬프트를 조립한다(_ragas_prompt 와 같은 골격).
-    블록 순서 = 모델이 답을 만들어야 하는 순서(분해 → 판정)이므로 호출부 순서를 지킨다."""
+    """선택된 블록만으로 fused 프롬프트를 조립한다(하위호환 — 두 부분을 이어붙인다)."""
+    prefix, suffix = _fused_prompt_parts(blocks, question, answer, contexts, reference)
+    return prefix + suffix
+
+
+def _fused_prompt_parts(blocks: list[str], question: str, answer: str,
+                        contexts: list[str], reference: str) -> tuple[str, str]:
+    """fused 프롬프트를 (안정 프리픽스, 가변 입력) 두 부분으로 조립한다.
+
+    나누는 이유는 **프롬프트 캐싱**이다. 프리픽스(헤더·지시문·스키마·few-shot)는 블록
+    구성이 같으면 매 호출 바이트가 동일하고, 뒷부분(질문·답변·컨텍스트)만 probe 마다
+    바뀐다. 앞부분을 system 으로 보내 캐시 지점을 걸면 두 번째 호출부터 그 몫이 입력가의
+    0.1 배가 된다.
+
+    실측(count_tokens, claude-sonnet-5): 캐시 프리픽스는 실제 트랙 4,325 / 오라클 트랙
+    3,211 토큰이다. 주의 — 이 값은 system 블록만이 아니라 **output_config 의 스키마까지
+    포함**한다(스키마도 messages 앞에 렌더돼 캐시 프리픽스에 들어간다). 글자수÷4 로
+    어림하면 1.35 배 과소평가되므로(9,025자 → 어림 2,256 vs 실측 4,325) 모델별 캐시
+    최소치와 비교할 때는 반드시 count_tokens 로 잴 것.
+
+    캐싱은 **접두 일치**라 순서가 곧 설계다 — 가변 내용이 한 바이트라도 앞에 끼면 그
+    뒤가 전부 무효화된다. 그래서 질문·컨텍스트는 반드시 프리픽스 뒤에 둔다.
+
+    블록 순서 = 모델이 답을 만들어야 하는 순서(분해 → 판정)이므로 호출부 순서를 지킨다.
+    (anthropic 이 아닌 provider 는 두 부분이 이어붙어 예전과 같은 한 덩어리가 된다 —
+    _fused_prompt 참고. 캐싱만 못 쓸 뿐 프롬프트 내용은 동일하다.)"""
     instructions, schema_parts, example_out = [], [], {}
     for i, name in enumerate(blocks, start=1):
         instr, schema, example = _FUSED_BLOCKS[name]
@@ -518,7 +604,9 @@ def _fused_prompt(blocks: list[str], question: str, answer: str,
         f"Input: {json.dumps(_FUSED_EXAMPLE_INPUT, indent=4, ensure_ascii=False)}\n"
         f"Output: {json.dumps(example_out, indent=4, ensure_ascii=False)}"
     )
-    return (
+    # 캐시 지점 앞 — 블록 구성이 같으면 매 호출 바이트가 동일해야 한다.
+    # 여기에 질문·컨텍스트가 섞여 들어가면 캐시가 probe 마다 무효화된다.
+    prefix = (
         f"{_FUSED_HEADER}\n\n"
         + "\n\n".join(instructions)
         + "\n\nPlease return the output in a JSON format that complies with the following schema "
@@ -528,15 +616,24 @@ def _fused_prompt(blocks: list[str], question: str, answer: str,
         + f"{example_str}\n"
         + "-----------------------------\n\n"
           "Now perform the same with the following input\n"
-        + f"input: {json.dumps(input_obj, indent=4, ensure_ascii=False)}\n"
+    )
+    # 캐시 지점 뒤 — probe 마다 바뀐다.
+    suffix = (
+        f"input: {json.dumps(input_obj, indent=4, ensure_ascii=False)}\n"
         # json_object 모드는 유효한 JSON 만 보장하고 스키마는 강제하지 않는다. 블록이 7개까지
         # 늘면 모델이 뒤쪽 키를 빠뜨린 채 JSON 을 닫아버리는 일이 실제로 있었다(실측: 마지막
         # 블록인 recall_classifications 가 30회 중 7회 누락). 스키마의 required 는 프롬프트
         # 중간에 묻히므로 끝에서 키 목록을 한 번 더 못박는다.
+        #
+        # anthropic(output_config.format)에서는 디코딩 단계가 키를 강제하므로 이 줄이
+        # 없어도 되지만, 나머지 provider 에는 여전히 필요해서 남긴다. 위치가 프리픽스가
+        # 아니라 여기인 건 "입력 바로 뒤에서 못박는다"는 원래 의도 때문이다 — required 는
+        # 블록 구성에만 의존하므로 프리픽스에 둬도 캐시는 깨지지 않는다(무해한 선택).
         + "IMPORTANT: the JSON object MUST contain ALL of these top-level keys, even if an "
           f"array would be empty: {json.dumps(required)}. Do not omit any of them.\n"
           "Output: "
     )
+    return prefix, suffix
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -642,12 +739,17 @@ def _fused_required_keys(blocks: list[str]) -> list[str]:
             for k in (("generated_questions", "noncommittal") if name == "relevancy" else (name,))]
 
 
-def _refetch_fused_if_incomplete(judge, d: dict, prompt: str, blocks: list[str]) -> dict:
+def _refetch_fused_if_incomplete(judge, d: dict, prompt: str, blocks: list[str],
+                                 cache_prefix: str = "", json_schema: dict | None = None) -> dict:
     """필수 키가 빠졌으면 같은 프롬프트로 딱 1회 다시 받아 채운다.
 
     누락은 모델의 간헐적 비준수다 — json_object 모드가 스키마를 강제하지 않아서, 같은
     입력으로 다시 물으면 대개 온전한 응답이 온다(실측: 30여 회 중 부분 누락 재현 불가,
     실행 로그에서는 30 probe 중 7회).
+
+    anthropic(output_config.format)에서는 디코딩 단계가 키를 강제하므로 이 경로가 애초에
+    발화하지 않는다. 그래도 지우지 않는다 — openrouter/openai/gemini 는 여전히 스키마
+    강제가 없어서 이 보수가 필요하고, provider 는 실행 시점 env 로 갈린다.
 
     개별 지표 보수(_fused_repair)보다 먼저 두는 이유는 비용이다. 보수는 지표마다 따로
     호출하고 그중 response_relevancy 는 strictness 만큼(기본 3회) 더 부른다 —
@@ -662,7 +764,7 @@ def _refetch_fused_if_incomplete(judge, d: dict, prompt: str, blocks: list[str])
         return d
     print(f"[Eval] RAGAS fused 응답에 키 누락 {absent} → 같은 프롬프트로 1회 재요청")
     retry = _chat(judge, prompt, max_output_tokens=_fused_max_tokens(),
-                  label="fused.refetch")
+                  label="fused.refetch", cache_prefix=cache_prefix, json_schema=json_schema)
     if not retry:
         return d
     # 재요청분으로 빈 자리만 메운다 — 처음 받은 값이 더 신뢰할 근거는 없지만, 바꿔 끼우면
@@ -702,10 +804,15 @@ def _fused_track(judge, question: str, answer: str, contexts: list[str], referen
     if want_prec:
         blocks.append("recall_classifications")
 
-    prompt = _fused_prompt(blocks, question, answer, contexts, reference)
-    d = _chat(judge, prompt, max_output_tokens=_fused_max_tokens(),
-              label="fused") if blocks else {}
-    d = _refetch_fused_if_incomplete(judge, d, prompt, blocks)
+    # 프리픽스(지시문·스키마·few-shot)와 입력을 나눠 보낸다 — 앞부분이 anthropic 의
+    # 캐시 지점이 된다. 블록 구성이 같으면 프리픽스 바이트가 동일하므로, 실제/오라클
+    # 두 모양에 대해 각각 1회만 캐시를 쓰고 나머지는 전부 읽기(입력가의 0.1배)다.
+    prefix, user_input = _fused_prompt_parts(blocks, question, answer, contexts, reference)
+    schema = _fused_json_schema(blocks)
+    d = _chat(judge, user_input, max_output_tokens=_fused_max_tokens(),
+              label="fused", cache_prefix=prefix, json_schema=schema) if blocks else {}
+    d = _refetch_fused_if_incomplete(judge, d, user_input, blocks,
+                                     cache_prefix=prefix, json_schema=schema)
 
     out: dict = {}
     if not has_answer:
@@ -1165,15 +1272,29 @@ def _average_precision(verdicts: list[int]) -> float:
     )
     return numerator / denominator
 
-def _chat(judge, prompt: str, max_output_tokens: int | None = None, label: str = "") -> dict:
-    """RAGAS 형식 단일 프롬프트를 JSON 강제로 호출 → dict. 실패 시 {}.
+def _chat(judge, prompt: str, max_output_tokens: int | None = None, label: str = "",
+          cache_prefix: str = "", json_schema: dict | None = None) -> dict:
+    """RAGAS 형식 프롬프트를 JSON 강제로 호출 → dict. 실패 시 {}.
 
     max_output_tokens 는 fused 처럼 응답 구조가 큰 호출만 명시한다(미지정=provider 기본).
     label 은 실패 로그에 찍히는 호출 이름 — 호출부가 여럿인데 로그가 전부 같은 문구라
-    어느 지표의 심판이 죽었는지 못 가렸다(정답 판정 degrade 원인 추적)."""
-    if max_output_tokens is None:
-        return llm_provider.chat_json("", prompt, label=label)
-    return llm_provider.chat_json("", prompt, label=label, max_output_tokens=max_output_tokens)
+    어느 지표의 심판이 죽었는지 못 가렸다(정답 판정 degrade 원인 추적).
+
+    cache_prefix 는 매 호출 동일한 앞부분이다. anthropic 에서만 system 블록으로 올라가
+    캐시 지점이 되고(두 번째 호출부터 그 몫이 입력가의 0.1 배), 다른 provider 에서는
+    prompt 앞에 도로 붙어 예전과 바이트가 같은 한 덩어리가 된다 — 캐싱과 무관한
+    provider 의 프롬프트를 바꾸지 않기 위해서다. 기본값 "" 은 기존 호출부(지표별 legacy
+    경로)가 한 덩어리 프롬프트를 그대로 쓰게 둔다.
+
+    json_schema 도 anthropic 전용이다(output_config.format). 나머지 provider 는 무시한다."""
+    kwargs: dict = {"label": label}
+    if max_output_tokens is not None:
+        kwargs["max_output_tokens"] = max_output_tokens
+    if json_schema is not None:
+        kwargs["json_schema"] = json_schema
+    if cache_prefix:
+        kwargs["cache_prefix"] = cache_prefix
+    return llm_provider.chat_json("", prompt, **kwargs)
 
 
 def _embed(judge, texts: list[str]) -> list[list[float]]:

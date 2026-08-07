@@ -959,7 +959,9 @@ class ModelLoadCooldownTests(unittest.TestCase):
         # 각 테스트가 깨끗한 실패 캐시에서 시작하도록 초기화한다.
         store._failed_models.clear()
         store._failed_rerankers.clear()
-        store._models.pop("m", None)
+        # 임베딩 모델 캐시 키는 (model_name, device) 다 — 장치가 달라도 같은 모델을
+        # 동시에 들고 있어야 하기 때문. 리랭커는 아직 이름만으로 캐시한다.
+        store._models.pop(("m", "cpu"), None)
         store._rerankers.pop("m", None)
         self.addCleanup(store._failed_models.clear)
         self.addCleanup(store._failed_rerankers.clear)
@@ -970,20 +972,23 @@ class ModelLoadCooldownTests(unittest.TestCase):
         with patch.dict(sys.modules, {"sentence_transformers": None}), \
              patch.object(store, "_FAILED_MODEL_RETRY_SEC", 300.0), \
              patch.object(store.time, "monotonic") as clock:
+            # device 를 고정한다 — 생략하면 실행 머신의 CUDA 유무로 캐시 키가
+            # 달라져 테스트가 환경 의존이 된다.
+            key = ("m", "cpu")
             clock.return_value = 1000.0
-            self.assertIsNone(store._get_embedding_model("m"))
-            self.assertIn("m", store._failed_models)
+            self.assertIsNone(store._get_embedding_model("m", device="cpu"))
+            self.assertIn(key, store._failed_models)
 
             # 쿨다운 중(=재시도 안 함): 실패 시각이 그대로여야 한다.
             clock.return_value = 1100.0   # +100s < 300s
-            first_failed_at = store._failed_models["m"]
-            self.assertIsNone(store._get_embedding_model("m"))
-            self.assertEqual(store._failed_models["m"], first_failed_at)
+            first_failed_at = store._failed_models[key]
+            self.assertIsNone(store._get_embedding_model("m", device="cpu"))
+            self.assertEqual(store._failed_models[key], first_failed_at)
 
             # 쿨다운 경과 후: 재시도하여 실패 시각이 갱신된다.
             clock.return_value = 1400.0   # +400s > 300s
-            self.assertIsNone(store._get_embedding_model("m"))
-            self.assertEqual(store._failed_models["m"], 1400.0)
+            self.assertIsNone(store._get_embedding_model("m", device="cpu"))
+            self.assertEqual(store._failed_models[key], 1400.0)
 
     def test_reranker_retries_after_cooldown(self):
         store = self.store
@@ -1005,6 +1010,63 @@ class ModelLoadCooldownTests(unittest.TestCase):
             clock.return_value = 1400.0
             store.rerank("q", results, model_name="m", top_k=5)
             self.assertEqual(store._failed_rerankers["m"], 1400.0)
+
+
+class TransientFailureStatusTests(unittest.TestCase):
+    """일시적 실패로 문서가 빠진 색인은 "완료" 가 아니다.
+
+    영구 실패(빈 문서·doc_id 충돌)와 구분한다 — 그런 파일이 코퍼스에 하나 섞여 있으면
+    매 실행이 영원히 partial 이 되어 신호가 죽는다."""
+
+    def _state(self):
+        from core.state import AgentDoctorState
+
+        return AgentDoctorState(
+            documents=[], index_config={"embedding_model": "test-model",
+                                        "embedding_dimension": 4},
+        )
+
+    @patch("agents.index.agent.embed_batch", None)
+    @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
+    def test_transient_failure_marks_partial(self, _mock_embed):
+        from agents.index import agent as index_agent
+
+        state = self._state()
+        state.documents = [
+            _document("doc-ok", "정상 문서 본문입니다."),
+            _document("doc-flaky", "임베딩 중 5xx 가 나는 문서입니다."),
+        ]
+        real = index_agent._process_document
+
+        def _flaky(document, **kwargs):
+            if document.doc_id == "doc-flaky":
+                raise RuntimeError("503 Service Unavailable")
+            return real(document, **kwargs)
+
+        with patch.object(index_agent, "_process_document", _flaky):
+            result = index_agent.run(state)
+
+        self.assertEqual(result.status, "partial")
+        failed = result.index_artifacts["failed_documents"]
+        self.assertEqual([f["doc_id"] for f in failed], ["doc-flaky"])
+        self.assertTrue(failed[0]["transient"])
+
+    @patch("agents.index.agent.embed_batch", None)
+    @patch("agents.index.agent.embed", return_value=[1.0, 0.0, 0.0, 0.0])
+    def test_permanent_failure_stays_indexed(self, _mock_embed):
+        # 빈 문서는 다시 돌려도 같다. 매번 partial 로 올리면 알람이 무뎌진다.
+        state = self._state()
+        state.documents = [
+            _document("doc-ok", "정상 문서 본문입니다."),
+            _document("doc-bad", "   \n"),
+        ]
+
+        result = run(state)
+
+        self.assertEqual(result.status, "indexed")
+        failed = result.index_artifacts["failed_documents"]
+        self.assertEqual([f["doc_id"] for f in failed], ["doc-bad"])
+        self.assertFalse(failed[0]["transient"])
 
 
 if __name__ == "__main__":

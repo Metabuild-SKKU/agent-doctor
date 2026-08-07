@@ -178,7 +178,28 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
+    import argparse
     import os
+
+    from core.embedding_cli import (
+        add_embedding_args,
+        apply_embedding_args,
+        describe_embedding_route,
+    )
+
+    # 임베딩 실행 위치만 플래그로 받는다:
+    #   python graph.py --embed openrouter | gpu | cpu
+    # env 가 아니라 플래그인 이유는 위쪽 load_dotenv(override=True) 때문이다 —
+    # 셸 값보다 .env 가 이기는 규약이라 INDEX_EMBED_PROVIDER=... 를 앞에 붙여도
+    # 조용히 무시된다. 플래그는 그 뒤에 os.environ 을 덮으므로 항상 이긴다.
+    parser = argparse.ArgumentParser(
+        description="Agent Doctor 파이프라인 실행(Serve 포함, 품질 미달 시 재색인 루프)",
+    )
+    add_embedding_args(parser)
+    args = parser.parse_args()
+    applied = apply_embedding_args(args)
+    if applied:
+        print(f"[Orchestrator] 임베딩 설정 적용: {applied}")
 
     # 소스는 env 로 받는다(run_local_pipeline.py 와 동일 계약: SOURCE_TYPE / SOURCE_URL).
     #   SOURCE_TYPE=file    SOURCE_URL=sample_docs/hr_policy.md python graph.py   # 기본
@@ -210,4 +231,5 @@ if __name__ == "__main__":
             "성과급은 언제 나와?",
         ]
 
+    print(f"[Orchestrator] {describe_embedding_route()}")
     run_pipeline(source_url, source_type=source_type, user_questions=user_questions)

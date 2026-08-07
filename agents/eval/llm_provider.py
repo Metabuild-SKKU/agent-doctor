@@ -12,6 +12,12 @@ OpenAI API 토큰 승인 전까지 무료 대체 provider 로 브릿지한다:
 OpenRouter 는 브릿지가 아니라 상시 사용을 전제한 provider 다. 모델명은 "publisher/model"
 형식(예: anthropic/claude-sonnet-4.5)을 쓴다. 임베딩 엔드포인트는 제공하지 않는다
 (embed_texts 주석 참고).
+
+    EVAL_LLM_PROVIDER=anthropic → Anthropic Messages API(유료, 심판 전용 권장)
+심판 품질이 모든 최적화 판단의 타당성을 결정하므로 별도 축으로 둔다. OpenRouter 를 거치지
+않고 직접 붙는 이유는 output_config.format(JSON 스키마 강제)·prompt caching 때문이다 —
+그 둘이 fused RAGAS 의 결손 보수 경로와 입력 비용을 동시에 없앤다. 모델명은 접두사 없는
+정식 ID(예: claude-sonnet-5)를 쓰고, 임베딩 엔드포인트는 제공하지 않는다.
 """
 from __future__ import annotations
 
@@ -25,6 +31,7 @@ from core.llm_clients import (
     OPENROUTER_BASE_URL,
     PROVIDER_ALIASES,
     normalize_provider,
+    anthropic_chat,
     gemini_chat,
     gemini_embed,
     openai_chat,
@@ -36,7 +43,7 @@ from core.llm_retry import run_with_retry
 # 새 provider 를 추가할 때는 transport(_*_generate)·has_key()·여기 셋을 함께 고쳐야 한다.
 # 여기 빠뜨리면 그 provider 는 "미지원 값"으로 판정돼 openai 로 폴백하고 transport 는
 # 도달 불가 코드가 된다 — 파일 내 위치가 달라 git 이 충돌로 잡아주지 않는 실수다.
-_KNOWN_PROVIDERS = {"openai", "gemini", "github", "openrouter"}
+_KNOWN_PROVIDERS = {"openai", "gemini", "github", "openrouter", "anthropic"}
 # 같은 문자열을 EVAL_LLM_PROVIDER 와 RAG_LLM_PROVIDER 어느 쪽에 넣어도 동작하도록 맞춘
 # 철자표. agents/rag/generator.py 의 _PROVIDER_ALIASES 와 항상 같은 값을 유지할 것
 # (tests/test_provider_notices.py 가 두 표의 일치를 핀으로 잡는다).
@@ -53,7 +60,7 @@ def _warn_unknown_provider_once(raw: str) -> None:
             return
         _warned_providers.add(raw)
     print(f"[Eval] 알 수 없는 EVAL_LLM_PROVIDER '{raw}' — openai 로 폴백 "
-          f"(openai|gemini|github|openrouter)")
+          f"(openai|gemini|github|openrouter|anthropic)")
 
 
 def _provider() -> str:
@@ -78,6 +85,8 @@ def has_key() -> bool:
         return bool(os.getenv("GITHUB_TOKEN"))
     if provider == "openrouter":
         return bool(os.getenv("OPENROUTER_API_KEY"))
+    if provider == "anthropic":
+        return bool(os.getenv("ANTHROPIC_API_KEY"))
     return bool(os.getenv("OPENAI_API_KEY"))
 
 
@@ -99,6 +108,8 @@ def chat_json(
     *,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     label: str = "",
+    json_schema: dict | None = None,
+    cache_prefix: str = "",
 ) -> dict:
     """JSON 응답 강제 chat 호출 → dict. 실패 시 {} (API 예외는 호출부로 전파).
 
@@ -107,26 +118,49 @@ def chat_json(
     상한에 걸려 잘린 응답은 JSON 파싱에 실패해 {} 가 되므로, 구조가 큰 응답을 기대하는
     쪽은 max_output_tokens 를 올려 잡을 것.
 
-    label 은 실패 로그에 찍히는 호출 이름(어느 지표가 죽었는지 구분용)."""
+    label 은 실패 로그에 찍히는 호출 이름(어느 지표가 죽었는지 구분용).
+
+    json_schema 는 **anthropic provider 에서만** 쓰인다(output_config.format). 나머지
+    provider 는 "아무 JSON" 강제(json_object)만 지원하므로 무시한다 — 스키마를 넘겨도
+    동작이 나빠지지 않고, 호출부가 provider 를 알 필요도 없다.
+
+    cache_prefix 는 "매 호출 동일해서 캐시할 수 있는 앞부분" 이다. system 과 구분하는
+    이유는 **다른 provider 의 프롬프트를 바꾸지 않기 위해서**다 — anthropic 에서만
+    system 블록으로 올려 cache_control 을 걸고, 나머지 provider 에서는 user 앞에 도로
+    붙여 예전과 바이트가 같은 한 덩어리를 만든다. 그냥 system 에 실으면 지시문이
+    user → system 으로 역할이 바뀌어, 캐싱과 무관한 provider 의 판정 분포까지 건드리게
+    된다(같은 글자라도 역할이 다르면 모델이 다르게 받아들일 수 있다)."""
     def _do():
         provider = _provider()
+        # anthropic 이 아니면 캐시 지점이라는 개념이 없다 → 원래대로 user 앞에 이어붙인다.
+        sys_text = system
+        user_text = user
+        if cache_prefix:
+            if provider == "anthropic":
+                sys_text = f"{system}\n\n{cache_prefix}" if system else cache_prefix
+            else:
+                user_text = cache_prefix + user
         if provider == "gemini":
             return _gemini_generate(
-                system, user, model or os.getenv("EVAL_JUDGE_MODEL_GEMINI", "gemini-flash-latest"),
+                sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL_GEMINI", "gemini-flash-latest"),
                 json_mode=True, max_output_tokens=max_output_tokens)
         elif provider == "github":
             return _github_generate(
-                system, user, model or os.getenv("EVAL_JUDGE_MODEL_GITHUB", "openai/gpt-4o"),
+                sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL_GITHUB", "openai/gpt-4o"),
                 json_mode=True, max_output_tokens=max_output_tokens)
         elif provider == "openrouter":
             # 주의: response_format=json_object 지원은 OpenRouter 에서 모델마다 다르다.
             # 미지원 모델을 쓰면 파싱 실패 → 아래 {} 폴백으로 조용히 흘러가므로,
             # 심판 모델은 JSON 모드를 지원하는 것으로 고를 것.
             return _openrouter_generate(
-                system, user, model or os.getenv("EVAL_JUDGE_MODEL_OPENROUTER", "openai/gpt-4o"),
+                sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL_OPENROUTER", "openai/gpt-4o"),
                 json_mode=True, max_output_tokens=max_output_tokens)
+        elif provider == "anthropic":
+            return _anthropic_generate(
+                sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL_ANTHROPIC", "claude-sonnet-5"),
+                json_schema=json_schema, max_output_tokens=max_output_tokens)
         return _openai_generate(
-            system, user, model or os.getenv("EVAL_JUDGE_MODEL", "gpt-4o"),
+            sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL", "gpt-4o"),
             json_mode=True, max_output_tokens=max_output_tokens)
 
     raw = _run_with_retry(_do, "심판")
@@ -163,9 +197,13 @@ def chat_json(
 
 
 # ── 임베딩 (metrics_ragas.py 가 사용) ─────────────────────────────
-# GitHub Models 와 OpenRouter 는 embeddings 엔드포인트를 제공하지 않는다(OpenRouter 는
-# 카탈로그 337개 중 임베딩 모델 0개 — 붙일 대상 자체가 없다). 그 조합에서는
-# OPENAI_API_KEY 로 폴백하고, 그것도 없으면 Index 가 이미 쓰는 로컬 BGE-M3 로 계산한다.
+# OpenRouter 는 임베딩 엔드포인트(/api/v1/embeddings)를 제공한다. 예전 주석은 "카탈로그에
+# 임베딩 모델 0개" 라고 적혀 있었는데 사실이 아니었다 — baai/bge-m3 를 포함해 31개가 있고,
+# bge-m3 는 $0.01/1M 이라 사실상 공짜다. Index 가 쓰는 로컬 모델과 같은 모델이고
+# 벡터도 코사인 0.99997 로 사실상 동일하다(실측 — AGENTS.md "임베딩 provider" 절 참고).
+#
+# GitHub Models 는 여전히 임베딩 엔드포인트가 없다. 그 조합에서는 OPENAI_API_KEY 로
+# 폴백하고, 그것도 없으면 Index 가 이미 쓰는 로컬 BGE-M3 로 계산한다.
 # 셋 다 불가할 때만 결측이 된다.
 
 # 임베딩 경로 전환/불가를 실행당 한 번만 알린다. 안 그러면 probe·트랙마다 같은 줄이 찍혀
@@ -185,8 +223,11 @@ def _notify_embed_once(message: str) -> None:
 
 def _api_embeddings_available() -> bool:
     """활성 provider 로 임베딩 API 를 부를 수 있는지. 키 유무만 본다(호출은 안 한다)."""
-    if _provider() == "gemini":
+    provider = _provider()
+    if provider == "gemini":
         return bool(os.getenv("GEMINI_API_KEY"))
+    if provider == "openrouter":
+        return bool(os.getenv("OPENROUTER_API_KEY"))
     return bool(os.getenv("OPENAI_API_KEY"))
 
 
@@ -195,10 +236,14 @@ def _local_embeddings_available() -> bool:
 
     모델 로드에 실패하면 qdrant_store 는 해시 기반 벡터를 돌려준다 — 검색에서는 '품질
     저하'지만 채점에 쓰면 무의미한 코사인 값이 정상 점수처럼 리포트에 박힌다. 결측보다
-    나쁘므로 그 경우는 쓰지 않는다."""
+    나쁘므로 그 경우는 쓰지 않는다.
+
+    provider="local" 을 못 박는다. Index 의 기본 임베딩 provider 는 openrouter 라
+    그냥 물으면 "해시 fallback 아님"(=API 경로엔 그 상태가 없음)이 돌아와, 정작
+    로컬 모델이 못 뜨는 환경에서도 True 가 된다."""
     try:
         from agents.index.qdrant_store import embedding_is_fallback
-        return not embedding_is_fallback()
+        return not embedding_is_fallback(provider="local")
     except Exception:
         return False
 
@@ -212,8 +257,10 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
     """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파; rate limit 은 재시도)
 
     우선순위: 활성 provider 의 임베딩 API > 로컬 BGE-M3 > 결측(빈 리스트).
-    API 키가 있으면 기존 동작 그대로다 — 로컬은 임베딩 API 가 없는 조합
-    (OpenRouter·GitHub Models 등)에서만 쓰인다.
+    로컬은 임베딩 API 가 없는 조합(GitHub Models 등)이나 키가 없을 때만 쓰인다.
+
+    주의: provider 를 바꾸면 임베딩 모델이 바뀌고 코사인 분포도 달라진다.
+    response_relevancy 를 실행 간에 비교하려면 한 번 정한 뒤 고정할 것.
 
     로컬 폴백이 필요한 이유: response_relevancy 가 결측이면 diagnose 의
     bad_gold_answer / bad_gold_answer_oracle 이 rel 을 AND 조건으로 요구해 영구히
@@ -224,8 +271,14 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
 
     if _api_embeddings_available():
         def _do():
-            if _provider() == "gemini":
+            provider = _provider()
+            if provider == "gemini":
                 return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
+            if provider == "openrouter":
+                return _openrouter_embed(
+                    texts,
+                    model or os.getenv("EVAL_EMBED_MODEL_OPENROUTER", "baai/bge-m3"),
+                )
             return _openai_embed(texts, model or os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small"))
 
         return _run_with_retry(_do, "임베딩")
@@ -238,12 +291,14 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
             f"로컬 임베딩(BGE-M3)으로 계산합니다 — 비용 0, 외부 호출 없음. "
             f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
             f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요.")
-        return embed_batch(texts)
+        # provider 를 못 박는다 — Index 의 기본값은 openrouter 라 그냥 부르면
+        # "비용 0, 외부 호출 없음" 이라 찍어놓고 실제로는 과금 호출을 한다.
+        return embed_batch(texts, provider="local")
 
     _notify_embed_once(
-        f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없고 "
-        f"OPENAI_API_KEY 도, 로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표"
-        f"(response_relevancy)를 건너뜁니다 — bad_gold_answer 라벨도 함께 침묵합니다.")
+        f"[Eval] EVAL_LLM_PROVIDER={_provider()} 의 임베딩 키도, OPENAI_API_KEY 도, "
+        f"로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표(response_relevancy)를 "
+        f"건너뜁니다 — bad_gold_answer 라벨도 함께 침묵합니다.")
     return []
 
 
@@ -282,6 +337,27 @@ def _openrouter_generate(
     return openai_chat(
         system, user, model, json_mode=json_mode, max_output_tokens=max_output_tokens,
         api_key=os.getenv("OPENROUTER_API_KEY"), base_url=OPENROUTER_BASE_URL, tag="Eval",
+    )
+
+
+def _openrouter_embed(texts: list[str], model: str) -> list[list[float]]:
+    return openai_embed(
+        texts, model,
+        api_key=os.getenv("OPENROUTER_API_KEY"), base_url=OPENROUTER_BASE_URL, tag="Eval",
+    )
+
+
+def _anthropic_generate(
+    system: str, user: str, model: str, json_schema: dict | None = None,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+) -> str:
+    """Anthropic transport. 다른 transport 와 달리 json_mode 대신 json_schema 를 받는다 —
+    Messages API 에는 스키마 없는 JSON 모드가 없기 때문이다(core/llm_clients.py 참고).
+    temperature 도 넘기지 않는다(Sonnet 5 이후 세대는 비기본 sampling 값을 400 으로 거부)."""
+    return anthropic_chat(
+        system, user, model, json_schema=json_schema,
+        max_output_tokens=max_output_tokens,
+        api_key=os.getenv("ANTHROPIC_API_KEY"), tag="Eval",
     )
 
 

@@ -35,6 +35,7 @@ from agents.rag.retriever import (
     get_retriever,
     reset_retriever_cache,
 )
+from core.llm_retry import is_transient
 from core.llm_usage import print_summary, snapshot_usage
 from core.schema import Chunk, Document, IndexSnapshot
 from core.state import AgentDoctorState
@@ -1454,8 +1455,16 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
                 )
             except Exception as exc:
                 doc_id = str(getattr(document, "doc_id", "<unknown>"))
-                failed_documents.append({"doc_id": doc_id, "error": str(exc)})
-                print(f"[Index] 문서 처리 실패(건너뜀): {doc_id} — {exc}")
+                # 실패 성격을 함께 남긴다. 영구 실패(빈 문서·doc_id 충돌·파싱 불가)는
+                # 다시 돌려도 같으므로 건너뛰는 게 맞지만, 일시적 실패(임베딩 API 의
+                # 5xx·타임아웃)는 재시도를 소진하고도 여기 온 것이라 같은 코퍼스인데
+                # 실행마다 결과가 달라진다 - 그걸 "완료" 로 보고하면 안 된다.
+                failed_documents.append({
+                    "doc_id": doc_id,
+                    "error": str(exc),
+                    "transient": is_transient(exc),
+                })
+                print(f"[Index] 문서 처리 실패(건너뜀): {doc_id} - {exc}")
                 continue
 
             # 성공한 문서만 공유 상태에 반영한다. 실패 문서의 doc_id가 seen_doc_ids에
@@ -1479,7 +1488,7 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
 
         if failed_documents:
             print(
-                f"[Index] 경고: 문서 {len(failed_documents)}개 처리 실패 — "
+                f"[Index] 경고: 문서 {len(failed_documents)}개 처리 실패 - "
                 f"나머지 {len(seen_doc_ids)}개는 정상 인덱싱 "
                 f"(상세: index_artifacts['failed_documents'])"
             )
@@ -1557,8 +1566,25 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
             collection_name,
             config,
         )
-        state.status = "indexed"
-        print(f"[Index] 완료 - 총 {len(all_chunks)}개 청크 (dim={vector_dim})")
+        # 일시적 실패로 문서가 빠진 색인을 "완료" 라고 부르지 않는다. 그대로 두면
+        # 불완전한 컬렉션 위에서 Eval 이 돌고 그 점수가 "이 코퍼스의 성능" 으로
+        # 기록된다 - 나중에 보면 왜 낮은지 알 수 없다. 라우팅은 status == "error" 만
+        # 보므로(graph.py) 파이프라인은 그대로 진행되고 표시만 사실대로 남는다.
+        #
+        # 영구 실패는 partial 로 올리지 않는다. 그런 파일이 코퍼스에 하나 섞여 있으면
+        # 매 실행이 영원히 partial 이 되어 신호가 죽는다(그 경우는 failed_documents
+        # 아티팩트와 위 경고 로그로 드러난다).
+        transient_failures = [f for f in failed_documents if f.get("transient")]
+        if transient_failures:
+            state.status = "partial"
+            print(
+                f"[Index] 부분 완료 - 총 {len(all_chunks)}개 청크 (dim={vector_dim}), "
+                f"일시적 실패로 문서 {len(transient_failures)}개 누락 "
+                f"(다시 실행하면 채워질 수 있습니다)"
+            )
+        else:
+            state.status = "indexed"
+            print(f"[Index] 완료 - 총 {len(all_chunks)}개 청크 (dim={vector_dim})")
     except Exception as exc:
         state.status = "error"
         state.error = f"Index 실패: {exc}"
