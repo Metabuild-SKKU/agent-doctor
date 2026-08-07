@@ -153,6 +153,60 @@ class _DiagnoseTestBase(unittest.TestCase):
         )
 
 
+class FailureLocalizationMetadataTest(_DiagnoseTestBase):
+    def _finding(self, label, ftype="retrieval_failure", reason="테스트 reason"):
+        return diagnose._finding(_record(), label, ftype, confirmed=True, reason=reason)
+
+    def test_retrieval_label_carries_local_repair_scope(self):
+        finding = self._finding("retrieval_missing_gold")
+
+        self.assertEqual(finding.metadata["failure_stage"], "retrieval")
+        self.assertEqual(finding.metadata["repair_scope"], "reretrieve_or_expand_search")
+        self.assertEqual(finding.metadata["group"], "A")
+        self.assertEqual(finding.metadata["reason"], "테스트 reason")
+
+    def test_query_planning_label_is_separate_from_plain_retrieval(self):
+        finding = self._finding("retrieval_missing_bridge_dependency")
+
+        self.assertEqual(finding.metadata["failure_stage"], "query_planning")
+        self.assertEqual(
+            finding.metadata["repair_scope"],
+            "decompose_query_or_expand_bridge_entity",
+        )
+
+    def test_generation_label_points_to_answer_only_repair(self):
+        finding = self._finding("generation_partial_answer", "generation_failure")
+
+        self.assertEqual(finding.metadata["failure_stage"], "generation")
+        self.assertEqual(
+            finding.metadata["repair_scope"],
+            "regenerate_with_completeness_prompt",
+        )
+        self.assertEqual(finding.metadata["group"], "B")
+
+    def test_chunking_label_points_to_indexing_repair(self):
+        finding = self._finding("chunking_context_mismatch")
+
+        self.assertEqual(finding.metadata["failure_stage"], "indexing")
+        self.assertEqual(
+            finding.metadata["repair_scope"],
+            "adjust_chunk_overlap_or_size",
+        )
+
+    def test_gold_label_error_points_to_manual_data_repair(self):
+        finding = self._finding("bad_gold_chunk", "gap")
+
+        self.assertEqual(finding.metadata["failure_stage"], "evaluation_data")
+        self.assertEqual(finding.metadata["repair_scope"], "manual_gold_relabel")
+        self.assertEqual(finding.metadata["group"], "D")
+
+    def test_unknown_label_gets_group_based_localization(self):
+        finding = self._finding("generation_new_label", "generation_failure")
+
+        self.assertEqual(finding.metadata["failure_stage"], "generation")
+        self.assertEqual(finding.metadata["repair_scope"], "rerun_generation_diagnosis")
+
+
 # ══════════════════════════════════════════════════════════════════
 #  공통 전제: 놓친 gold 청크가 없으면 chunk-id 기반 검색 라벨은 발동 금지
 #  (recall 은 gold_spans 기준이라 '구간이 덜 덮임'까지 실패로 세는데,
