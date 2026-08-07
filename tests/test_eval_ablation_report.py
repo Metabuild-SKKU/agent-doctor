@@ -52,6 +52,21 @@ SWEEP_LOG = """
 [Optimize] 변경 후 config: top_k=12
 """
 
+# rebalance_hybrid_weight 는 실측된 우세 채널에 따라 값이 양쪽으로 갈린다.
+# 고정 매핑이 아니라 유도가 그 방향을 살려내는지 본다. 같은 id 가 연속되면
+# 한 action 으로 병합되므로(SWEEP_LOG 참고) 두 실행을 따로 둔다.
+FAVORED_LEXICAL_LOG = """
+[Optimize] 처방 적용: id=rebalance_hybrid_weight, label=retrieval_rank_fusion_loss
+[Optimize] 변경 전 config: hybrid_dense_weight=0.7
+[Optimize] 변경 후 config: hybrid_dense_weight=0.6
+"""
+
+FAVORED_DENSE_LOG = """
+[Optimize] 처방 적용: id=rebalance_hybrid_weight, label=retrieval_rank_fusion_loss
+[Optimize] 변경 전 config: hybrid_dense_weight=0.7
+[Optimize] 변경 후 config: hybrid_dense_weight=0.8
+"""
+
 ZERO_OVERALL_LOG = """
   종합점수 0/100 (품질 0 / 신뢰도 0) · overall 0.0 · pass ✗
 """
@@ -141,11 +156,23 @@ class EvalAblationReportTest(unittest.TestCase):
             sorted(actual - set(PRESCRIPTION_ACTIONS) - DERIVED_PRESCRIPTIONS),
             [],
         )
-        # 방향이 갈리는 처방은 고정 매핑이 아니라 유도 전용에 있어야 한다.
-        self.assertIn("disable_reranker", DERIVED_PRESCRIPTIONS)
-        self.assertIn("relax_reranker_threshold", DERIVED_PRESCRIPTIONS)
         # 한 처방이 양쪽에 동시에 있으면 유도 전용 선언이 무력해진다.
         self.assertEqual(set(PRESCRIPTION_ACTIONS) & DERIVED_PRESCRIPTIONS, set())
+        # 유도 전용 집합에 rules.py 에 없는 id 가 쌓이면 아무것도 못 지킨다.
+        self.assertEqual(sorted(DERIVED_PRESCRIPTIONS - actual), [])
+
+    def test_derived_prescription_keeps_both_measured_directions(self):
+        lexical = parse_log_text(FAVORED_LEXICAL_LOG, source="lexical.log")
+        dense = parse_log_text(FAVORED_DENSE_LOG, source="dense.log")
+
+        # 같은 처방인데 실측 채널에 따라 반대 방향이 나온다. 표에 넣었다면 둘 다
+        # 같은 고정값으로 뭉개져 Action-Centered Summary 가 틀린 집계를 낸다.
+        self.assertEqual(
+            lexical.actions[0].canonical_action, "hybrid_dense_weight:decrease"
+        )
+        self.assertEqual(
+            dense.actions[0].canonical_action, "hybrid_dense_weight:increase"
+        )
 
     def test_sweep_candidates_are_counted_as_one_action(self):
         parsed = parse_log_text(SWEEP_LOG, source="sweep.log")

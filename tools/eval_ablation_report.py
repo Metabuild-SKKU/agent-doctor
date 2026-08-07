@@ -37,6 +37,7 @@ PRESCRIPTION_ACTIONS = {
     "completeness_prompt": "generation.completeness_mode:enable",
     "decrease_chunk_size": "chunk_size:decrease",
     "decrease_top_k": "top_k:decrease",
+    "disable_reranker": "use_reranker:disable",
     "dynamic_top_k": "top_k:increase",
     "enable_adaptive_retrieval": "adaptive_retrieval:enable",
     "enable_bridge_entity_verifier": "bridge_entity_verifier:enable",
@@ -71,18 +72,17 @@ PRESCRIPTION_ACTIONS = {
     "widen_rerank_candidates": "rerank_candidates:increase",
 }
 
-# 방향이 실행 데이터에 따라 갈리는 처방 — PRESCRIPTION_ACTIONS 에 박으면
-# OptimizeAction.canonical_action 이 고정값으로 실제 config 변화를 덮어써
-# 리포트가 틀린 action 을 집계한다. before/after 유도에 맡긴다.
+# patch 값이 고정 상수가 아니라 실측치로 정해지는 처방. 표에 박으면
+# OptimizeAction.canonical_action 이 고정값으로 실제 config 변화를 덮어쓰므로
+# before/after 유도에 맡긴다.
+#
+# 주의: "롤백이면 방향이 반대로 나온다"는 여기 들어올 사유가 아니다. 그건 표에
+# 남아 있는 enable_reranker 등 모든 항목에 똑같이 걸리는 표 전체의 성질이라
+# 특정 처방을 가르는 기준이 못 된다.
 DERIVED_PRESCRIPTIONS = {
-    # 리랭커를 되돌리는 롤백이냐 새로 끄는 적용이냐에 따라 방향이 갈린다 (66415ac)
-    "disable_reranker",
-    # 위와 같은 이유 (0616917). 지금은 rules.py 에서 주석 처리된 상태라
-    # 커버리지 검사에는 안 잡히지만, 되살아날 때 표로 가지 않도록 남겨둔다.
-    "relax_reranker_threshold",
     # patch 가 retriever.hybrid_dense_weight="shift_to_favored_channel" 이라
-    # 실측된 우세 채널에 따라 0.7->0.8(dense) 또는 0.7->0.6(lexical) 로 갈린다.
-    # 값이 숫자라 _direction() 이 increase/decrease 를 바르게 뽑는다.
+    # Eval 이 실측한 우세 채널에 따라 0.7->0.8(dense) / 0.7->0.6(lexical) 로
+    # 값 자체가 갈린다. 값이 숫자라 _direction() 이 방향을 바르게 뽑는다.
     "rebalance_hybrid_weight",
 }
 
