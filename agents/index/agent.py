@@ -13,7 +13,7 @@ import os
 import re
 import unicodedata
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -978,6 +978,7 @@ def _chunk_metadata(
     embedding_dimension: int,
     embedding_fallback: bool = False,
     original_char_span: tuple[int, int] | None = None,
+    duplicate_spans: list[list] | None = None,
 ) -> dict[str, Any]:
     # page_spans 는 문서 단위 정보라 청크마다 복사하면 payload 가 페이지 수만큼 불어난다.
     # 아래에서 이 청크의 "page" 하나로 접어 넣으므로 원본 목록은 뺀다.
@@ -1003,6 +1004,10 @@ def _chunk_metadata(
             if original_char_span
             else [char_span[0], char_span[1]]
         ),
+        # dedup 이 버린 쌍둥이의 좌표(core/schema.py::Chunk.duplicate_spans 참고).
+        # 대개 비어 있어, 그때는 키를 아예 안 넣어 payload 를 종전 그대로 둔다.
+        **({"duplicate_spans": [list(span) for span in duplicate_spans]}
+           if duplicate_spans else {}),
         # 출처 표기용 페이지 번호. document.metadata 의 page_spans 를 그대로 물려받으면
         # 청크마다 문서 전체 span 목록이 payload 에 복사되므로, 여기서 이 청크의
         # 페이지 하나로 접고 원본 목록은 뺀다.
@@ -1058,6 +1063,51 @@ def _original_span_from_chunk(chunk: Chunk, char_span: tuple[int, int]) -> tuple
     return char_span
 
 
+def _survivor_map(chunks: list[Chunk]) -> dict[str, Chunk]:
+    """{청크 해시: 청크}. 같은 본문이 둘일 수 없는 dedup 이후 목록이라 첫 등재가 곧 대표다."""
+    survivors: dict[str, Chunk] = {}
+    for chunk in chunks:
+        chunk_hash = chunk.metadata.get("chunk_hash") or _sha256(chunk.text)
+        survivors.setdefault(chunk_hash, chunk)
+    return survivors
+
+
+def _draft_original_span(draft: _ChunkDraft) -> tuple[int, int]:
+    """draft 의 트림 전 좌표. 외부 chunker 가 raw 를 안 채웠으면 char_span 으로 떨어진다."""
+    return (
+        draft.raw_start if draft.raw_start is not None else draft.start,
+        draft.raw_end if draft.raw_end is not None else draft.end,
+    )
+
+
+def _duplicate_spans_from_chunk(chunk: Chunk) -> list[list]:
+    """이미 붙어 있던 별칭 좌표. 필드가 비면 metadata 에서 읽는다(payload 왕복 대비).
+
+    재사용 경로에서 이걸 안 물려주면, 같은 문서를 다시 색인할 때마다 앞선 회차가
+    기록한 별칭이 사라져 dedup 구멍이 되살아난다.
+    """
+    for candidate in (chunk.duplicate_spans, chunk.metadata.get("duplicate_spans")):
+        if isinstance(candidate, list) and candidate:
+            return [list(span) for span in candidate if isinstance(span, (list, tuple))]
+    return []
+
+
+def _attach_duplicate_spans(chunk: Chunk, spans: list[list]) -> None:
+    """생존 청크에 별칭 좌표를 얹는다. 필드와 metadata 를 같이 갱신한다 —
+    Eval 은 둘 중 살아 있는 쪽을 읽고(직렬화 경로마다 다르다), 중복 등재는 걸러낸다."""
+    if not spans:
+        return
+    merged = _duplicate_spans_from_chunk(chunk)
+    seen = {tuple(span) for span in merged}
+    for span in spans:
+        key = tuple(span)
+        if key not in seen:
+            seen.add(key)
+            merged.append(list(span))
+    chunk.duplicate_spans = merged
+    chunk.metadata["duplicate_spans"] = [list(span) for span in merged]
+
+
 def _parent_id(document: Document, section: str | None) -> str:
     if section:
         return f"{document.doc_id}:section:{_sha256(section)[:12]}"
@@ -1078,6 +1128,7 @@ def _refresh_reused_chunk(
     # 임베딩은 재사용하되, top_k 같은 실험값은 최신 config로 맞춘다.
     char_span = _span_from_chunk(chunk)
     original_char_span = _original_span_from_chunk(chunk, char_span)
+    duplicate_spans = _duplicate_spans_from_chunk(chunk)
     vector_dim = len(chunk.embedding or []) or int(config.get("embedding_dimension", 1024))
     return replace(
         chunk,
@@ -1087,6 +1138,7 @@ def _refresh_reused_chunk(
         page=_page_of_span(document, char_span),
         char_span=char_span,
         original_char_span=original_char_span,
+        duplicate_spans=duplicate_spans,
         parent_id=_parent_id(document, chunk.section),
         hash=chunk_hash[:16],
         metadata=_chunk_metadata(
@@ -1097,6 +1149,7 @@ def _refresh_reused_chunk(
             chunk_hash=chunk_hash,
             char_span=char_span,
             original_char_span=original_char_span,
+            duplicate_spans=duplicate_spans,
             chunk_strategy=chunk_strategy,
             signature=signature,
             embedding_dimension=vector_dim,
@@ -1144,6 +1197,7 @@ def _reembed_stale_chunks(
     for (chunk_index, chunk, chunk_hash), vector in zip(stale, vectors):
         char_span = _span_from_chunk(chunk)
         original_char_span = _original_span_from_chunk(chunk, char_span)
+        duplicate_spans = _duplicate_spans_from_chunk(chunk)
         metadata = _chunk_metadata(
             document,
             config,
@@ -1152,6 +1206,7 @@ def _reembed_stale_chunks(
             chunk_hash=chunk_hash,
             char_span=char_span,
             original_char_span=original_char_span,
+            duplicate_spans=duplicate_spans,
             chunk_strategy=chunk_strategy,
             signature=signature,
             embedding_dimension=len(vector),
@@ -1164,6 +1219,7 @@ def _reembed_stale_chunks(
             page=metadata.get("page"),
             char_span=char_span,
             original_char_span=original_char_span,
+            duplicate_spans=duplicate_spans,
             parent_id=_parent_id(document, chunk.section),
             hash=chunk_hash[:16],
             embedding=vector,
@@ -1190,10 +1246,17 @@ def _previous_chunks_by_document(chunks: list[Chunk]) -> dict[tuple[str, str], l
 @dataclass(frozen=True)
 class _DocResult:
     chunks: list[Chunk]        # 이 문서에서 새로 만든/재사용한 청크
-    new_hashes: set[str]       # 성공 시에만 seen_chunks에 커밋할 청크 해시
+    # 성공 시에만 seen_chunks 에 커밋할 {청크 해시: 그 본문을 대표하는 청크}.
+    # 해시만이 아니라 청크를 담는 이유는 아래 alias_spans 를 붙일 대상이라서다.
+    survivors: dict[str, Chunk]
     document_hash: str
     reused: int                # 재사용 임베딩 개수 (신규는 0)
     reembedded: int = 0        # 모델 복구로 fallback 벡터를 실제 벡터로 다시 임베딩한 개수
+    # dedup 으로 버린 조각들의 좌표: {생존자 청크 해시: [[doc_id, start, end], ...]}.
+    # 생존자가 앞선 문서에 있을 수 있어(문서 간 dedup) 여기서 바로 못 붙인다. survivors 와
+    # 같이 성공한 문서만 커밋한다 — 실패한 문서의 좌표를 남기면 색인되지도 않은 구간을
+    # Eval 이 '덮였다'고 세게 된다.
+    alias_spans: dict[str, list[list]] = field(default_factory=dict)
 
 
 # 문서 하나를 청크 리스트로 변환한다. 공유 상태(seen_*)는 읽기만 하고,
@@ -1208,7 +1271,7 @@ def _process_document(
     chunk_strategy: str,
     signature: str,
     previous: dict[tuple[str, str], list[Chunk]],
-    seen_chunks: set[str],
+    seen_chunks: dict[str, Chunk],
     seen_doc_ids: dict[str, str],
     seen_documents: set[str],
 ) -> _DocResult:
@@ -1222,13 +1285,23 @@ def _process_document(
         )
     if config.get("deduplicate", True) and document_hash in seen_documents:
         print(f"[Index] 중복 문서 제외: {document.doc_id}")
-        return _DocResult([], set(), document_hash, 0)
+        return _DocResult([], {}, document_hash, 0)
 
     new_hashes: set[str] = set()
+    alias_spans: dict[str, list[list]] = {}
 
     def _is_duplicate(chunk_hash: str) -> bool:
         return config.get("deduplicate", True) and (
             chunk_hash in seen_chunks or chunk_hash in new_hashes
+        )
+
+    def _drop_as_duplicate(chunk_hash: str, span: tuple[int, int]) -> None:
+        """버리는 조각이 원문에서 차지하던 구간을 생존자 몫으로 적어 둔다.
+
+        좌표는 트림 전(original) 쪽이다 — 커버리지 판정이 그 좌표계를 쓴다.
+        """
+        alias_spans.setdefault(chunk_hash, []).append(
+            [document.doc_id, int(span[0]), int(span[1])]
         )
 
     reusable = previous.get((document_hash, signature), [])
@@ -1248,6 +1321,10 @@ def _process_document(
         for chunk in reusable:
             chunk_hash = _sha256(chunk.text)
             if _is_duplicate(chunk_hash):
+                reused_span = _span_from_chunk(chunk)
+                _drop_as_duplicate(
+                    chunk_hash, _original_span_from_chunk(chunk, reused_span)
+                )
                 continue
             new_hashes.add(chunk_hash)
             chunk_index = len(document_chunks)
@@ -1289,8 +1366,8 @@ def _process_document(
         else:
             print(f"[Index] 기존 임베딩 재사용: {document.doc_id} ({reused_count}개)")
         return _DocResult(
-            document_chunks, new_hashes, document_hash, reused_count,
-            reembedded=len(stale),
+            document_chunks, _survivor_map(document_chunks), document_hash, reused_count,
+            reembedded=len(stale), alias_spans=alias_spans,
         )
 
     drafts = _chunk_document(
@@ -1310,6 +1387,7 @@ def _process_document(
     for draft in drafts:
         chunk_hash = _sha256(draft.text)
         if _is_duplicate(chunk_hash):
+            _drop_as_duplicate(chunk_hash, _draft_original_span(draft))
             continue
         new_hashes.add(chunk_hash)
         survivors.append((draft, chunk_hash))
@@ -1342,11 +1420,7 @@ def _process_document(
     for (draft, chunk_hash), vector in zip(survivors, vectors):
         chunk_index = len(document_chunks)
         char_span = (draft.start, draft.end)
-        # 외부 chunker 가 raw 를 안 채웠으면 char_span 으로 떨어진다(= 기존 동작).
-        original_char_span = (
-            draft.raw_start if draft.raw_start is not None else draft.start,
-            draft.raw_end if draft.raw_end is not None else draft.end,
-        )
+        original_char_span = _draft_original_span(draft)
         metadata = _chunk_metadata(
             document,
             config,
@@ -1383,7 +1457,10 @@ def _process_document(
             metadata=metadata,
         )
         document_chunks.append(chunk)
-    return _DocResult(document_chunks, new_hashes, document_hash, 0)
+    return _DocResult(
+        document_chunks, _survivor_map(document_chunks), document_hash, 0,
+        alias_spans=alias_spans,
+    )
 
 
 # Eval/Optimize가 config를 바꿔 다시 호출하는 흐름을 전제로 둔 Index 본체.
@@ -1556,7 +1633,9 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
         previous = _previous_chunks_by_document(state.chunks)
         seen_documents: set[str] = set()
         seen_doc_ids: dict[str, str] = {}
-        seen_chunks: set[str] = set()
+        # 해시 → 그 본문을 대표하는 생존 청크. dedup 이 버린 조각의 좌표를 생존자에게
+        # 얹어야 해서 해시 집합이 아니라 청크 자체를 들고 있는다.
+        seen_chunks: dict[str, Chunk] = {}
         all_chunks: list[Chunk] = []
         reused_count = 0
         reembedded_count = 0
@@ -1585,7 +1664,15 @@ def run(state: AgentDoctorState, tools: IndexTools | None = None) -> AgentDoctor
             # 성공한 문서만 공유 상태에 반영한다. 실패 문서의 doc_id가 seen_doc_ids에
             # 남으면 아래 delete_document_chunks가 기존 벡터를 지우는데 새 청크는
             # upsert되지 않아 벡터 스토어에서 그 문서가 통째로 사라진다.
-            seen_chunks |= res.new_hashes
+            for chunk_hash, chunk in res.survivors.items():
+                seen_chunks.setdefault(chunk_hash, chunk)
+            # 이 문서가 버린 조각의 좌표를 생존자에게 얹는다. 생존자는 방금 등록한 이 문서의
+            # 청크이거나(문서 안 중복) 앞선 문서의 청크다(문서 간 중복). 위에서 먼저 등록했으니
+            # 둘 다 여기서 찾힌다. 못 찾으면 생존자가 실패한 문서에 있던 것이라 건너뛴다.
+            for chunk_hash, spans in res.alias_spans.items():
+                survivor = seen_chunks.get(chunk_hash)
+                if survivor is not None:
+                    _attach_duplicate_spans(survivor, spans)
             seen_doc_ids[document.doc_id] = res.document_hash
             seen_documents.add(res.document_hash)
             all_chunks.extend(res.chunks)

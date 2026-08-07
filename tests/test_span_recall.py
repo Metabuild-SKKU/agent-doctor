@@ -93,8 +93,11 @@ class SectionGapCoverageTest(unittest.TestCase):
 
         self.assertEqual(span_recall_at_k(span, ["c0"], self._gapped()), 0.0)
 
-    def test_dedup_hole_is_not_bridged(self):
-        """청크가 통째로 빠진 자리(dedup)는 실제 누락이라 0점이 맞다."""
+    def test_dedup_hole_without_alias_is_not_bridged(self):
+        """별칭이 없으면 dedup 구멍은 안 닫힌다 — 원좌표는 제 자리만 늘릴 뿐이다.
+
+        이 필드 이전에 색인된 청크(캐시 재사용 경로)가 그대로 여기 해당한다.
+        """
         chunks = [
             Chunk("c0", "d1", "a" * 100, char_span=(0, 100), original_char_span=(0, 102)),
             # [102, 300) 을 차지하던 청크가 중복이라 빠졌다 → 원좌표로도 안 닫힌다.
@@ -125,6 +128,101 @@ class SectionGapCoverageTest(unittest.TestCase):
         span = [{"doc_id": "d1", "start": 120, "end": 200}]
 
         self.assertEqual(span_recall_at_k(span, ["c0", "c1"], chunks), 1.0)
+
+
+class DuplicateSpanAliasTest(unittest.TestCase):
+    """dedup 이 버린 쌍둥이의 자리를 생존 청크가 대표한다(별칭 좌표).
+
+    핵심은 '항상 덮인다'가 아니라 판정이 **갈린다**는 것이다 — 대표 청크가 검색되면
+    그 내용이 실제로 컨텍스트에 들어갔으니 덮이고, 안 되면 그대로 구멍이다.
+    """
+
+    def _chunks(self, alias_doc="d1"):
+        # [102, 300) 을 차지하던 쌍둥이가 dedup 으로 빠지고, 같은 본문인 c2 가 대표한다.
+        twin = "b" * 190
+        return [
+            Chunk("c0", "d1", "a" * 100, char_span=(0, 100), original_char_span=(0, 102)),
+            Chunk(
+                "c2", "d2", twin,
+                char_span=(10, 200), original_char_span=(8, 202),
+                duplicate_spans=[[alias_doc, 102, 300]],
+            ),
+            Chunk("c3", "d1", "c" * 100, char_span=(300, 400), original_char_span=(300, 402)),
+        ]
+
+    def test_alias_closes_hole_when_representative_is_retrieved(self):
+        span = [{"doc_id": "d1", "start": 50, "end": 350}]
+
+        recall = span_recall_at_k(span, ["c0", "c2", "c3"], self._chunks())
+
+        self.assertEqual(recall, 1.0)
+
+    def test_alias_does_not_close_hole_when_representative_is_missed(self):
+        """대표 청크가 안 검색되면 그 내용은 컨텍스트에 없다 — 0점이 맞다."""
+        span = [{"doc_id": "d1", "start": 50, "end": 350}]
+
+        recall = span_recall_at_k(span, ["c0", "c3"], self._chunks())
+
+        self.assertEqual(recall, 0.0)
+
+    def test_alias_is_filed_under_its_own_doc_not_the_chunks_doc(self):
+        """문서 간 dedup — 별칭이 청크 제 doc_id 밑으로 들어가면 엉뚱한 문서를 덮는다."""
+        chunks = self._chunks(alias_doc="d9")
+        # 별칭이 가리키는 곳은 d9 지 d1 이 아니므로 d1 의 구멍은 그대로다.
+        self.assertEqual(
+            span_recall_at_k([{"doc_id": "d1", "start": 50, "end": 350}], ["c0", "c2", "c3"], chunks),
+            0.0,
+        )
+        self.assertEqual(
+            span_recall_at_k([{"doc_id": "d9", "start": 110, "end": 290}], ["c2"], chunks),
+            1.0,
+        )
+
+    def test_alias_shorter_than_chunk_text_is_ignored(self):
+        """본문이 같으니 별칭 구간은 최소 텍스트 길이여야 한다(직렬화 사고 방어)."""
+        chunks = [
+            Chunk("c0", "d1", "a" * 100, char_span=(0, 100), original_char_span=(0, 102)),
+            Chunk(
+                "c2", "d2", "b" * 190,
+                char_span=(10, 200), original_char_span=(8, 202),
+                duplicate_spans=[["d1", 102, 120]],      # 190자를 담기엔 너무 짧다
+            ),
+            Chunk("c3", "d1", "c" * 100, char_span=(300, 400), original_char_span=(300, 402)),
+        ]
+
+        recall = span_recall_at_k(
+            [{"doc_id": "d1", "start": 50, "end": 350}], ["c0", "c2", "c3"], chunks
+        )
+
+        self.assertEqual(recall, 0.0)
+
+    def test_malformed_alias_entries_are_skipped(self):
+        chunks = self._chunks()
+        chunks[1].duplicate_spans = [
+            ["d1", 102],                 # 길이 부족
+            [None, 102, 300],            # doc_id 가 문자열이 아님
+            ["d1", 300, 102],            # end <= start
+            "d1",                        # 항목이 리스트가 아님
+            ["d1", 102, 300],            # 유일하게 정상
+        ]
+
+        recall = span_recall_at_k(
+            [{"doc_id": "d1", "start": 50, "end": 350}], ["c0", "c2", "c3"], chunks
+        )
+
+        self.assertEqual(recall, 1.0)
+
+    def test_legacy_metadata_carries_alias(self):
+        """Chunk 필드가 비어도 metadata 로 온 값(payload 왕복)을 읽는다."""
+        chunks = self._chunks()
+        chunks[1].duplicate_spans = []
+        chunks[1].metadata = {"duplicate_spans": [["d1", 102, 300]]}
+
+        recall = span_recall_at_k(
+            [{"doc_id": "d1", "start": 50, "end": 350}], ["c0", "c2", "c3"], chunks
+        )
+
+        self.assertEqual(recall, 1.0)
 
 
 if __name__ == "__main__":

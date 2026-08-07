@@ -169,6 +169,7 @@ def _chunk_to_dict(chunk: Chunk | dict) -> dict:
             "section": chunk.get("section"),
             "char_span": chunk.get("char_span"),
             "original_char_span": chunk.get("original_char_span"),
+            "duplicate_spans": chunk.get("duplicate_spans"),
             "token_count": chunk.get("token_count"),
             "parent_id": chunk.get("parent_id"),
             "hash": chunk.get("hash"),
@@ -184,6 +185,7 @@ def _chunk_to_dict(chunk: Chunk | dict) -> dict:
         "section": chunk.section,
         "char_span": chunk.char_span,
         "original_char_span": chunk.original_char_span,
+        "duplicate_spans": chunk.duplicate_spans,
         "token_count": chunk.token_count,
         "parent_id": chunk.parent_id,
         "hash": chunk.hash,
@@ -228,6 +230,10 @@ def _chunk_from_dict(data: dict) -> Chunk:
         original_span = (data.get("metadata") or {}).get("original_char_span")
     if isinstance(original_span, list):
         original_span = tuple(original_span)
+    duplicate_spans = data.get("duplicate_spans")
+    if not duplicate_spans:
+        # 필드가 없는 경로(qdrant payload·chunks.json)는 metadata 에서 복원한다.
+        duplicate_spans = (data.get("metadata") or {}).get("duplicate_spans")
     return Chunk(
         chunk_id=data.get("chunk_id", ""),
         doc_id=data.get("doc_id", ""),
@@ -236,6 +242,7 @@ def _chunk_from_dict(data: dict) -> Chunk:
         section=data.get("section"),
         char_span=span,
         original_char_span=original_span,
+        duplicate_spans=[list(s) for s in duplicate_spans] if duplicate_spans else [],
         token_count=data.get("token_count"),
         parent_id=data.get("parent_id"),
         hash=data.get("hash"),
@@ -411,6 +418,7 @@ class Retriever:
                     "section": chunk.get("section"),
                     "char_span": chunk.get("char_span"),
                     "original_char_span": chunk.get("original_char_span"),
+                    "duplicate_spans": chunk.get("duplicate_spans"),
                     "token_count": chunk.get("token_count"),
                     "parent_id": chunk.get("parent_id"),
                     "hash": chunk.get("hash"),

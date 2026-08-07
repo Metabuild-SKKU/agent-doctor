@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from core.schema import Probe, Chunk
 from agents.eval import metrics_common, metrics_search, diagnose
+from agents.eval.metrics_basic import _compute_metrics
 from agents.eval.types import (
     EvalRecord, Mode,
     F1_PASS_THRESHOLD, ANSWER_SEMANTIC_FLOOR, RAGAS_FAITHFULNESS_MIN,
@@ -2041,6 +2042,77 @@ class WrongfulAbstentionTest(_DiagnoseTestBase):
                            faith=1.0, rel=1.0)
         self.assertFalse(diagnose._wrongful_abstention_premise(answered))
         self.assertTrue(diagnose._context_failed(answered))
+
+
+class DedupHoleDiagnosisTest(_DiagnoseTestBase):
+    """dedup 이 버린 자리에 걸린 gold span — 별칭이 있을 때와 없을 때 판정이 갈린다.
+
+    dedup 은 본문 완전일치만 버리므로 버려진 글자는 대표 청크에 그대로 살아 있고,
+    임베딩도 같아 그 내용을 겨냥한 질의는 대표 청크를 집는다. 좌표만 보던 판정은
+    두 경우를 구분하지 못해 둘 다 recall 0 + 롤업으로 떨어뜨렸다.
+    """
+
+    CONTENT = "가" * 1000
+
+    def _chunks_for(self, alias: bool):
+        return [
+            Chunk("c0", "d1", self.CONTENT[0:400], char_span=(0, 400),
+                  original_char_span=(0, 400), metadata={"chunk_index": 0}),
+            # [400, 500) 을 차지하던 청크가 중복이라 빠지고 c2 가 그 본문을 대표한다.
+            Chunk("c2", "d1", self.CONTENT[600:700], char_span=(600, 700),
+                  original_char_span=(600, 700), metadata={"chunk_index": 1},
+                  duplicate_spans=[["d1", 400, 500]] if alias else []),
+        ]
+
+    def _diagnose(self, *, alias: bool, retrieved: list[str]):
+        chunks = self._chunks_for(alias)
+        by_id = {c.chunk_id: c for c in chunks}
+        probe = Probe(
+            probe_id="p1", question="질문", source="taxonomy",
+            ground_truth="정답 문장",
+            # 별칭이 있으면 _resync_gold_chunk_ids 가 대표 청크를 잡아 준다
+            # (tests/test_probe_gen.py 에서 따로 고정).
+            gold_chunk_ids=["c2"] if alias else [],
+            gold_spans=[{"doc_id": "d1", "start": 430, "end": 470}],
+        )
+        rec = EvalRecord(
+            probe=probe,
+            retrieved_chunk_ids=list(retrieved),
+            retrieved_context=[by_id[c].text for c in retrieved],
+            generated_answer="전혀 다른 답",
+            oracle_answer="정답 문장",
+            oracle_context=[by_id["c2"].text] if alias else [],
+        )
+        metrics_common.set_context(chunks=chunks)
+        metrics_common.set_mode(Mode.DEEP)
+        _compute_metrics(rec)
+        return rec, [f.label for f in diagnose.diagnose(rec, mode=Mode.DEEP)]
+
+    def test_alias_credits_coverage_when_representative_is_retrieved(self):
+        # 대표 청크를 집었으면 그 글자는 실제로 컨텍스트에 들어갔다 — 검색 실패가 아니다.
+        rec, labels = self._diagnose(alias=True, retrieved=["c2"])
+
+        self.assertEqual(rec.recall_at_k, 1.0)
+        self.assertNotIn("retrieval_failure", labels)
+
+    def test_alias_names_the_cause_when_representative_is_missed(self):
+        # 대표 청크를 놓쳤으면 근거가 정말 없다 — 0점이 맞고, 이제 원인까지 짚는다.
+        rec, labels = self._diagnose(alias=True, retrieved=["c0"])
+
+        self.assertEqual(rec.recall_at_k, 0.0)
+        self.assertIn("retrieval_missing_gold", labels)
+
+    def test_without_alias_both_cases_collapse_into_the_rollup(self):
+        """대조군 — 별칭 이전 동작(issue #100 이 지적한 침묵)을 기록한다.
+
+        대표 청크를 집었는데도 0점이고(오판), 원인 라벨 없이 롤업만 남는다.
+        """
+        for retrieved in (["c2"], ["c0"]):
+            with self.subTest(retrieved=retrieved):
+                rec, labels = self._diagnose(alias=False, retrieved=retrieved)
+
+                self.assertEqual(rec.recall_at_k, 0.0)
+                self.assertEqual(labels, ["retrieval_failure"])
 
 
 class AbstentionFlagWiringTest(unittest.TestCase):
