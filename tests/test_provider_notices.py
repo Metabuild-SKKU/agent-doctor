@@ -284,7 +284,11 @@ class GraphAutoExcludesOpenRouterTest(unittest.TestCase):
 
 
 class EmbeddingFallbackTest(unittest.TestCase):
-    """임베딩 API 가 없는 provider 조합의 폴백 사슬: API > 로컬 BGE-M3 > 결측."""
+    """임베딩 API 를 못 쓰는 조합의 폴백 사슬: API > 로컬 BGE-M3 > 결측.
+
+    OpenRouter 는 임베딩 엔드포인트가 있으므로(baai/bge-m3 등 31개) 키가 있으면
+    API 경로를 탄다. 여기서 폴백을 보려면 그 키까지 비워야 한다 — 예전 주석은
+    "OpenRouter 에 임베딩 모델 0개" 였는데 사실이 아니었다."""
 
     def setUp(self):
         llm_provider._embed_notified = False
@@ -302,7 +306,10 @@ class EmbeddingFallbackTest(unittest.TestCase):
             vecs = llm_provider.embed_texts(["가", "나"])
         return vecs, buf.getvalue()
 
-    _OR = {"EVAL_LLM_PROVIDER": "openrouter", "OPENAI_API_KEY": ""}
+    # provider 는 openrouter 지만 임베딩에 쓸 키가 하나도 없는 상태.
+    _OR = {"EVAL_LLM_PROVIDER": "openrouter",
+           "OPENAI_API_KEY": "",
+           "OPENROUTER_API_KEY": ""}
 
     def test_falls_back_to_local_embeddings(self):
         vecs, log = self._embed(self._OR, local_ok=True)
