@@ -31,6 +31,7 @@ from agents.index.qdrant_store import (
     delete_document_chunks,
     embed,
     ensure_collection,
+    query_embedding_config_error,
     hybrid_search,
     keyword_search,
     rerank_with_status,
@@ -476,6 +477,13 @@ class Retriever:
         fallback_used = self.client is None
 
         if self.client is not None:
+            # 설정 오류는 폴백 대상이 아니다. 아래 except 가 잡는 건 "API 가 잠깐
+            # 흔들린다" 이고 그건 keyword 로 내리는 게 맞지만, 키를 안 넣은 실행까지
+            # 같이 흡수하면 모든 질의가 영구히 keyword 로 돌면서 증상은 "검색 품질이
+            # 좀 나쁘다" 로만 보인다. try 밖에서 먼저 끊는다.
+            config_error = query_embedding_config_error()
+            if config_error:
+                raise RuntimeError(f"[Retriever] {config_error}")
             try:
                 query_vector = embed(
                     query,

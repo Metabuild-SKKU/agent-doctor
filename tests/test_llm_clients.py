@@ -562,5 +562,32 @@ class TestFileWiringTest(unittest.TestCase):
                                 "__main__ 블록 뒤의 클래스는 직접 실행에서 안 돈다")
 
 
+class EmbedOrderTests(unittest.TestCase):
+    """임베딩 응답을 index 로 정렬한다 — 색인 벡터가 이 경로를 탄다."""
+
+    def test_out_of_order_response_is_sorted(self):
+        import types
+
+        from core import llm_clients
+
+        data = [
+            types.SimpleNamespace(index=2, embedding=[2.0]),
+            types.SimpleNamespace(index=0, embedding=[0.0]),
+            types.SimpleNamespace(index=1, embedding=[1.0]),
+        ]
+        resp = types.SimpleNamespace(data=data, usage=None)
+        client = types.SimpleNamespace(
+            embeddings=types.SimpleNamespace(create=lambda **kw: resp)
+        )
+        fake_openai = types.ModuleType("openai")
+        fake_openai.OpenAI = lambda **kw: client
+
+        with patch.dict(sys.modules, {"openai": fake_openai}):
+            vectors = llm_clients.openai_embed(["a", "b", "c"], "m")
+
+        # 순서가 한 칸만 어긋나도 벡터가 엉뚱한 청크에 붙어 검색이 조용히 망가진다.
+        self.assertEqual(vectors, [[0.0], [1.0], [2.0]])
+
+
 if __name__ == "__main__":
     unittest.main()
