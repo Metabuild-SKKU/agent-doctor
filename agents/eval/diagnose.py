@@ -1615,6 +1615,170 @@ _RANK_LABELS = {
 }
 
 
+# 라벨은 사람이 읽는 원인명이고, 아래 metadata 는 후속 단계가 읽을 실패 위치다.
+# Optimize/Serve 가 "어느 값이 바뀌었나"보다 "어느 단계를 고치나"를 먼저 볼 수 있게 둔다.
+_FAILURE_LOCALIZATION = {
+    # 검색 질의·후보 생성 단계
+    "retrieval_missing_bridge_dependency": {
+        "failure_stage": "query_planning",
+        "repair_scope": "decompose_query_or_expand_bridge_entity",
+    },
+    "retrieval_incomplete_enumeration": {
+        "failure_stage": "retrieval",
+        "repair_scope": "increase_top_k_or_enable_mmr",
+    },
+    "retrieval_rank_fusion_loss": {
+        "failure_stage": "retrieval",
+        "repair_scope": "rebalance_hybrid_fusion",
+    },
+    "retrieval_duplicate_crowding": {
+        "failure_stage": "retrieval",
+        "repair_scope": "deduplicate_or_diversify_candidates",
+    },
+    "retrieval_rerank_candidate_miss": {
+        "failure_stage": "retrieval",
+        "repair_scope": "expand_rerank_candidate_pool",
+    },
+    "retrieval_reranker_demotion": {
+        "failure_stage": "retrieval",
+        "repair_scope": "tune_or_rollback_reranker",
+    },
+    "retrieval_reranker_ineffective": {
+        "failure_stage": "retrieval",
+        "repair_scope": "tune_or_disable_reranker",
+    },
+    "retrieval_low_rank": {
+        "failure_stage": "retrieval",
+        "repair_scope": "increase_candidate_pool_or_rerank",
+    },
+    "retrieval_lexical_mismatch": {
+        "failure_stage": "retrieval",
+        "repair_scope": "improve_lexical_retrieval",
+    },
+    "retrieval_semantic_mismatch": {
+        "failure_stage": "retrieval",
+        "repair_scope": "improve_dense_retrieval",
+    },
+    "retrieval_missing_gold": {
+        "failure_stage": "retrieval",
+        "repair_scope": "reretrieve_or_expand_search",
+    },
+    "retrieval_failure": {
+        "failure_stage": "retrieval",
+        "repair_scope": "rerun_with_deeper_retrieval_diagnosis",
+    },
+
+    # 인덱싱·컨텍스트 구성 단계
+    "chunking_overchunking": {
+        "failure_stage": "indexing",
+        "repair_scope": "merge_or_resize_chunks",
+    },
+    "chunking_context_mismatch": {
+        "failure_stage": "indexing",
+        "repair_scope": "adjust_chunk_overlap_or_size",
+    },
+    "chunking_underchunking": {
+        "failure_stage": "indexing",
+        "repair_scope": "split_or_shrink_chunks",
+    },
+    "too_long_context": {
+        "failure_stage": "context_packaging",
+        "repair_scope": "compress_or_shorten_context",
+    },
+    "lost_in_the_middle": {
+        "failure_stage": "context_packaging",
+        "repair_scope": "reorder_or_reduce_context",
+    },
+    "context_noise_interference": {
+        "failure_stage": "context_packaging",
+        "repair_scope": "filter_noise_or_rerank_context",
+    },
+    "reranker_low_precision": {
+        "failure_stage": "retrieval",
+        "repair_scope": "tune_or_disable_reranker",
+    },
+    "context_failure": {
+        "failure_stage": "context_packaging",
+        "repair_scope": "rerun_with_deeper_context_diagnosis",
+    },
+
+    # 답변 생성 단계
+    "generation_wrongful_abstention": {
+        "failure_stage": "generation",
+        "repair_scope": "regenerate_with_relaxed_abstention",
+    },
+    "generation_abstention_failure": {
+        "failure_stage": "generation",
+        "repair_scope": "regenerate_with_stricter_abstention",
+    },
+    "generation_parametric_overreliance": {
+        "failure_stage": "generation",
+        "repair_scope": "regenerate_with_stricter_grounding",
+    },
+    "generation_hallucination": {
+        "failure_stage": "generation",
+        "repair_scope": "regenerate_with_stricter_grounding",
+    },
+    "generation_contradiction": {
+        "failure_stage": "generation",
+        "repair_scope": "verify_or_regenerate_answer",
+    },
+    "generation_numerical_error": {
+        "failure_stage": "generation",
+        "repair_scope": "add_calculation_check",
+    },
+    "generation_misinterpretation": {
+        "failure_stage": "generation",
+        "repair_scope": "restate_question_then_regenerate",
+    },
+    "generation_hop_binding_error": {
+        "failure_stage": "generation",
+        "repair_scope": "decompose_or_require_hop_citation",
+    },
+    "generation_partial_answer": {
+        "failure_stage": "generation",
+        "repair_scope": "regenerate_with_completeness_prompt",
+    },
+    "generation_failure": {
+        "failure_stage": "generation",
+        "repair_scope": "rerun_with_deeper_generation_diagnosis",
+    },
+
+    # RAG 파이프라인이 아니라 검증셋·코퍼스 입력 문제
+    "bad_gold_answer": {
+        "failure_stage": "evaluation_data",
+        "repair_scope": "regenerate_probe_answer",
+    },
+    "bad_gold_chunk": {
+        "failure_stage": "evaluation_data",
+        "repair_scope": "manual_gold_relabel",
+    },
+    "corpus_gap": {
+        "failure_stage": "corpus",
+        "repair_scope": "add_or_fix_source_document",
+    },
+    "corpus_gap_partial_hop": {
+        "failure_stage": "corpus",
+        "repair_scope": "add_or_fix_missing_hop_document",
+    },
+}
+
+
+def _localization_for(label: str, ftype: str) -> dict:
+    """후속 repair 가 읽을 실패 위치 metadata. 미등록 라벨은 그룹 기반으로 보수 폴백한다."""
+    found = _FAILURE_LOCALIZATION.get(label)
+    if found is not None:
+        return dict(found)
+    group = _group_of(label, ftype)
+    if group == "A":
+        return {"failure_stage": "retrieval", "repair_scope": "rerun_retrieval_diagnosis"}
+    if group == "B":
+        return {"failure_stage": "generation", "repair_scope": "rerun_generation_diagnosis"}
+    if group == "D":
+        return {"failure_stage": "evaluation_data", "repair_scope": "manual_review"}
+    return {"failure_stage": "context_packaging", "repair_scope": "rerun_context_diagnosis"}
+
+
 def _v(x) -> str:
     """reason 문자열용 값 포맷(float 은 소수 3자리, None 은 '-').
 
@@ -1666,6 +1830,7 @@ def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool, reason
     group = _group_of(label, ftype)
     prefix = "" if confirmed else "[예비] "
     metadata: dict = {"group": group, "reason": reason}
+    metadata.update(_localization_for(label, ftype))
     if label in _RANK_LABELS:
         ranks = _gold_ranks(record)
         if ranks:
@@ -1709,6 +1874,13 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
 
     # 오라클 트랙 RAGAS — 소비처가 B그룹 라벨·_oracle_ok 뿐이라 실패 probe 에서만 지불한다.
     _compute_ragas_oracle(record)
+
+    # 정답 텍스트 자체가 의심되면 파이프라인 원인 판정을 멈춘다.
+    # bad_gold_answer 는 optimize 로 고칠 수 있는 검색·생성 문제가 아니라 데이터 검수 대상이다.
+    # 그대로 A/B/C 라벨을 함께 붙이면 같은 probe 가 튜닝 실패처럼 집계되어 처방과 점수를 흔든다.
+    gold_answer_error = bad_gold_answer_oracle(record)
+    if gold_answer_error is not None:
+        return [gold_answer_error]
 
     # 아래 두 단락(골드 오라벨·검증된 label-recall miss)은 골드가 코퍼스에 있을 때만 탄다.
     # gold 가 코퍼스에 없으면(_corpus_gap_premise) 없는 청크를 '재지정'할 수도(bad_gold_chunk),

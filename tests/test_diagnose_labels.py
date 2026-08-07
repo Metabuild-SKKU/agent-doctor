@@ -153,6 +153,60 @@ class _DiagnoseTestBase(unittest.TestCase):
         )
 
 
+class FailureLocalizationMetadataTest(_DiagnoseTestBase):
+    def _finding(self, label, ftype="retrieval_failure", reason="테스트 reason"):
+        return diagnose._finding(_record(), label, ftype, confirmed=True, reason=reason)
+
+    def test_retrieval_label_carries_local_repair_scope(self):
+        finding = self._finding("retrieval_missing_gold")
+
+        self.assertEqual(finding.metadata["failure_stage"], "retrieval")
+        self.assertEqual(finding.metadata["repair_scope"], "reretrieve_or_expand_search")
+        self.assertEqual(finding.metadata["group"], "A")
+        self.assertEqual(finding.metadata["reason"], "테스트 reason")
+
+    def test_query_planning_label_is_separate_from_plain_retrieval(self):
+        finding = self._finding("retrieval_missing_bridge_dependency")
+
+        self.assertEqual(finding.metadata["failure_stage"], "query_planning")
+        self.assertEqual(
+            finding.metadata["repair_scope"],
+            "decompose_query_or_expand_bridge_entity",
+        )
+
+    def test_generation_label_points_to_answer_only_repair(self):
+        finding = self._finding("generation_partial_answer", "generation_failure")
+
+        self.assertEqual(finding.metadata["failure_stage"], "generation")
+        self.assertEqual(
+            finding.metadata["repair_scope"],
+            "regenerate_with_completeness_prompt",
+        )
+        self.assertEqual(finding.metadata["group"], "B")
+
+    def test_chunking_label_points_to_indexing_repair(self):
+        finding = self._finding("chunking_context_mismatch")
+
+        self.assertEqual(finding.metadata["failure_stage"], "indexing")
+        self.assertEqual(
+            finding.metadata["repair_scope"],
+            "adjust_chunk_overlap_or_size",
+        )
+
+    def test_gold_label_error_points_to_manual_data_repair(self):
+        finding = self._finding("bad_gold_chunk", "gap")
+
+        self.assertEqual(finding.metadata["failure_stage"], "evaluation_data")
+        self.assertEqual(finding.metadata["repair_scope"], "manual_gold_relabel")
+        self.assertEqual(finding.metadata["group"], "D")
+
+    def test_unknown_label_gets_group_based_localization(self):
+        finding = self._finding("generation_new_label", "generation_failure")
+
+        self.assertEqual(finding.metadata["failure_stage"], "generation")
+        self.assertEqual(finding.metadata["repair_scope"], "rerun_generation_diagnosis")
+
+
 # ══════════════════════════════════════════════════════════════════
 #  공통 전제: 놓친 gold 청크가 없으면 chunk-id 기반 검색 라벨은 발동 금지
 #  (recall 은 gold_spans 기준이라 '구간이 덜 덮임'까지 실패로 세는데,
@@ -1865,6 +1919,50 @@ class AnswerScoreGateTest(_DiagnoseTestBase):
         self.assertTrue(diagnose._oracle_ok(rec))
         rec_wrong = _record(oracle_f1=0.34, faith_oracle=0.9, counts_oracle=(1, 1, 4))
         self.assertFalse(diagnose._oracle_ok(rec_wrong))
+
+
+class MentorDecisionTreeRegressionTest(_DiagnoseTestBase):
+    def _diagnose_without_recomputing(self, rec):
+        with unittest.mock.patch.object(diagnose, "_compute_metrics"), \
+             unittest.mock.patch.object(diagnose, "_compute_ragas_real"), \
+             unittest.mock.patch.object(diagnose, "_compute_ragas_oracle") as oracle:
+            findings = diagnose.diagnose(rec, mode=Mode.DEEP)
+        return findings, oracle
+
+    def test_correct_answer_stops_before_oracle_generation_labels(self):
+        """정답이면 oracle_f1 이 낮아도 generation/context 라벨까지 내려가지 않는다."""
+        rec = _record(recall=1.0, f1=1.0, oracle_f1=0.1, faith=1.0, rel=1.0)
+
+        findings, oracle = self._diagnose_without_recomputing(rec)
+
+        self.assertEqual([], findings)
+        oracle.assert_not_called()
+
+    def test_semantic_answer_gate_suppresses_context_labels_when_f1_is_low(self):
+        """긴 답변에서 F1 이 낮아도 의미축이 통과하면 context failure 로 보지 않는다."""
+        rec = _record(
+            recall=1.0, f1=0.49, oracle_f1=1.0,
+            faith=0.9, rel=0.9, ac=0.73, counts_real=(1, 0, 1),
+        )
+
+        findings, oracle = self._diagnose_without_recomputing(rec)
+        labels = {f.label for f in findings}
+
+        self.assertEqual(set(), labels)
+        oracle.assert_not_called()
+
+    def test_bad_gold_answer_short_circuits_retrieval_causes(self):
+        """정답셋 오류는 데이터 검수 대상이라 retrieval 처방 라벨과 함께 집계하지 않는다."""
+        rec = _record(
+            ("g_a", "g_b"), ("g_a",),
+            recall=0.5, f1=0.1, oracle_f1=0.1,
+            faith_oracle=0.9, rel_oracle=0.9,
+        )
+
+        findings, _oracle = self._diagnose_without_recomputing(rec)
+
+        self.assertEqual(["bad_gold_answer"], [f.label for f in findings])
+        self.assertEqual("evaluation_data", findings[0].metadata["failure_stage"])
 
 
 # ══════════════════════════════════════════════════════════════════
