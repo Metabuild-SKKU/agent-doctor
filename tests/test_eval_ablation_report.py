@@ -114,7 +114,7 @@ class EvalAblationReportTest(unittest.TestCase):
         self.assertEqual(parsed.actions[0].label, "chunking_context_mismatch")
         self.assertEqual(parsed.actions[0].before_config, "chunk_size=512")
         self.assertEqual(parsed.actions[0].after_config, "chunk_size=1024")
-        self.assertEqual(parsed.actions[0].canonical_action, "chunk_size:increase")
+        self.assertEqual(parsed.actions[0].canonical_action, "chunker.chunk_size:increase")
 
     def test_parse_log_extracts_verdicts(self):
         parsed = parse_log_text(SAMPLE_LOG, source="sample.log")
@@ -123,7 +123,7 @@ class EvalAblationReportTest(unittest.TestCase):
         self.assertEqual(parsed.actions[0].verdict_before, 0.65)
         self.assertEqual(parsed.actions[0].verdict_after, 0.79)
         self.assertEqual(parsed.actions[1].verdict, "ROLLBACK")
-        self.assertEqual(parsed.actions[1].canonical_action, "use_reranker:enable")
+        self.assertEqual(parsed.actions[1].canonical_action, "reranker.enabled:enable")
 
     def test_multi_key_config_matches_before_after_by_key(self):
         parsed = parse_log_text(MULTI_KEY_CONFIG_LOG, source="multi.log")
@@ -161,6 +161,19 @@ class EvalAblationReportTest(unittest.TestCase):
         # 유도 전용 집합에 rules.py 에 없는 id 가 쌓이면 아무것도 못 지킨다.
         self.assertEqual(sorted(DERIVED_PRESCRIPTIONS - actual), [])
 
+    def test_prescription_action_axes_are_canonical_paths(self):
+        from agents.optimize.config_mapper import canonicalize_path
+
+        # 표와 유도가 같은 네임스페이스를 써야 한 축이 두 행으로 갈리지 않는다.
+        # 유도는 로그의 flat 키를 canonicalize_path 로 올리므로, 표도 이미 올라간
+        # 형태여야 한다(= 한 번 더 올려도 그대로).
+        drifted = {
+            prescription: action
+            for prescription, action in PRESCRIPTION_ACTIONS.items()
+            if canonicalize_path(action.split(":")[0]) != action.split(":")[0]
+        }
+        self.assertEqual(drifted, {})
+
     def test_derived_prescription_keeps_both_measured_directions(self):
         lexical = parse_log_text(FAVORED_LEXICAL_LOG, source="lexical.log")
         dense = parse_log_text(FAVORED_DENSE_LOG, source="dense.log")
@@ -168,10 +181,10 @@ class EvalAblationReportTest(unittest.TestCase):
         # 같은 처방인데 실측 채널에 따라 반대 방향이 나온다. 표에 넣었다면 둘 다
         # 같은 고정값으로 뭉개져 Action-Centered Summary 가 틀린 집계를 낸다.
         self.assertEqual(
-            lexical.actions[0].canonical_action, "hybrid_dense_weight:decrease"
+            lexical.actions[0].canonical_action, "retriever.hybrid_dense_weight:decrease"
         )
         self.assertEqual(
-            dense.actions[0].canonical_action, "hybrid_dense_weight:increase"
+            dense.actions[0].canonical_action, "retriever.hybrid_dense_weight:increase"
         )
 
     def test_sweep_candidates_are_counted_as_one_action(self):
@@ -189,10 +202,10 @@ class EvalAblationReportTest(unittest.TestCase):
 
         markdown = build_markdown([parsed])
 
-        self.assertIn("| top_k:increase | 1 | 1 | 0 | retrieval_low_rank=1 | - |", markdown)
+        self.assertIn("| retriever.top_k:increase | 1 | 1 | 0 | retrieval_low_rank=1 | - |", markdown)
         self.assertIn(
             "| sweep.log | 0 | retrieval_low_rank | dynamic_top_k | "
-            "top_k:increase | top_k=16 | top_k=12 | KEEP |",
+            "retriever.top_k:increase | top_k=16 | top_k=12 | KEEP |",
             markdown,
         )
 
@@ -227,8 +240,8 @@ class EvalAblationReportTest(unittest.TestCase):
 
         self.assertIn("| korquad.log | 1 | 65 | 92 | 50 | 0.9201 | false |", markdown)
         self.assertIn("| korquad.log | 3 | 80 | 91 | 71 | 0.9148 | true |", markdown)
-        self.assertIn("| chunk_size:decrease | 1 | 0 | 1 | retrieval_semantic_mismatch=1 | -0.06 |", markdown)
-        self.assertIn("| chunk_size:increase | 1 | 1 | 0 | chunking_context_mismatch=1 | 0.15 |", markdown)
+        self.assertIn("| chunker.chunk_size:decrease | 1 | 0 | 1 | retrieval_semantic_mismatch=1 | -0.06 |", markdown)
+        self.assertIn("| chunker.chunk_size:increase | 1 | 1 | 0 | chunking_context_mismatch=1 | 0.15 |", markdown)
 
     def test_build_markdown_mentions_action_centered_summary(self):
         parsed = parse_log_text(SAMPLE_LOG, source="sample.log")
@@ -237,7 +250,7 @@ class EvalAblationReportTest(unittest.TestCase):
 
         self.assertIn("65 -> 79", markdown)
         self.assertIn("Action-Centered Summary", markdown)
-        self.assertIn("chunk_size:increase", markdown)
+        self.assertIn("chunker.chunk_size:increase", markdown)
         self.assertIn("Issue #67", markdown)
 
     def test_write_csv_exports_eval_rows(self):
