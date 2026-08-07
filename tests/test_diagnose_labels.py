@@ -1921,6 +1921,50 @@ class AnswerScoreGateTest(_DiagnoseTestBase):
         self.assertFalse(diagnose._oracle_ok(rec_wrong))
 
 
+class MentorDecisionTreeRegressionTest(_DiagnoseTestBase):
+    def _diagnose_without_recomputing(self, rec):
+        with unittest.mock.patch.object(diagnose, "_compute_metrics"), \
+             unittest.mock.patch.object(diagnose, "_compute_ragas_real"), \
+             unittest.mock.patch.object(diagnose, "_compute_ragas_oracle") as oracle:
+            findings = diagnose.diagnose(rec, mode=Mode.DEEP)
+        return findings, oracle
+
+    def test_correct_answer_stops_before_oracle_generation_labels(self):
+        """정답이면 oracle_f1 이 낮아도 generation/context 라벨까지 내려가지 않는다."""
+        rec = _record(recall=1.0, f1=1.0, oracle_f1=0.1, faith=1.0, rel=1.0)
+
+        findings, oracle = self._diagnose_without_recomputing(rec)
+
+        self.assertEqual([], findings)
+        oracle.assert_not_called()
+
+    def test_semantic_answer_gate_suppresses_context_labels_when_f1_is_low(self):
+        """긴 답변에서 F1 이 낮아도 의미축이 통과하면 context failure 로 보지 않는다."""
+        rec = _record(
+            recall=1.0, f1=0.49, oracle_f1=1.0,
+            faith=0.9, rel=0.9, ac=0.73, counts_real=(1, 0, 1),
+        )
+
+        findings, oracle = self._diagnose_without_recomputing(rec)
+        labels = {f.label for f in findings}
+
+        self.assertEqual(set(), labels)
+        oracle.assert_not_called()
+
+    def test_bad_gold_answer_short_circuits_retrieval_causes(self):
+        """정답셋 오류는 데이터 검수 대상이라 retrieval 처방 라벨과 함께 집계하지 않는다."""
+        rec = _record(
+            ("g_a", "g_b"), ("g_a",),
+            recall=0.5, f1=0.1, oracle_f1=0.1,
+            faith_oracle=0.9, rel_oracle=0.9,
+        )
+
+        findings, _oracle = self._diagnose_without_recomputing(rec)
+
+        self.assertEqual(["bad_gold_answer"], [f.label for f in findings])
+        self.assertEqual("evaluation_data", findings[0].metadata["failure_stage"])
+
+
 # ══════════════════════════════════════════════════════════════════
 #  조립: 성공 게이트 · _pick 우선순위 · 정렬
 # ══════════════════════════════════════════════════════════════════
