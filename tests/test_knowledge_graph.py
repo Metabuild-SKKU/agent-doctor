@@ -95,15 +95,15 @@ class VectorizedEdgeParityTests(unittest.TestCase):
         return out
 
     @staticmethod
-    def _loop_graph(chunks):
+    def _loop_graph(chunks, top_k=kg.KG_TOP_K_NEIGHBORS):
         """벡터화를 꺼서 기존 루프 경로를 강제한다."""
         with patch.object(kg, "_candidate_edges_vectorized",
                           return_value=None):
-            return kg.build_graph(chunks)
+            return kg.build_graph(chunks, top_k=top_k)
 
-    def _assert_same(self, chunks, label):
-        fast = kg.build_graph(chunks)
-        slow = self._loop_graph(chunks)
+    def _assert_same(self, chunks, label, top_k=kg.KG_TOP_K_NEIGHBORS):
+        fast = kg.build_graph(chunks, top_k=top_k)
+        slow = self._loop_graph(chunks, top_k=top_k)
         fast_edges = {(cid, nid): w for cid, lst in fast.edges.items() for nid, w in lst}
         slow_edges = {(cid, nid): w for cid, lst in slow.edges.items() for nid, w in lst}
         self.assertEqual(set(fast_edges), set(slow_edges), f"{label}: 엣지 집합이 다르다")
@@ -142,6 +142,46 @@ class VectorizedEdgeParityTests(unittest.TestCase):
         graph = kg.build_graph(self._chunks(30, seed=13))
         for cid, neigh in graph.edges.items():
             self.assertNotIn(cid, [nid for nid, _ in neigh], f"{cid} 가 자기 이웃이다")
+
+    def test_matches_loop_when_top_k_takes_everything(self):
+        """top_k<=0 은 절단 없음이다 — 벡터화가 limit 를 n 으로 열어야 같아진다."""
+        for top_k in (0, -1, 999):
+            with self.subTest(top_k=top_k):
+                self._assert_same(self._chunks(40, seed=14), f"top_k={top_k}", top_k=top_k)
+
+    def test_empty_embedding_list_is_cosine_zero_not_a_dim(self):
+        """빈 리스트 임베딩은 '차원 0' 이 아니라 '코사인 0' 이다(cosine() 규약).
+
+        차원 판정에 빈 리스트가 끼면 전체 임베딩 행렬이 사라져 코사인 신호가 통째로
+        0 이 된다 — 엣지가 자카드만으로 결정돼 그래프가 조용히 달라진다.
+        """
+        chunks = self._chunks(40, seed=15)
+        for i in range(0, 40, 4):
+            chunks[i].embedding = []
+        self._assert_same(chunks, "빈 리스트 임베딩")
+
+    def test_mixed_embedding_dims_fall_back_to_loop(self):
+        """차원이 섞이면 행렬로 담을 수 없다 — 패딩하지 말고 루프로 넘겨야 한다.
+
+        짧은 쪽을 0 으로 패딩한 코사인은 루프 경로의 cosine()(zip 이라 긴 쪽을 자른다)과
+        값이 다르고, 그 차이가 임계값을 넘나들어 엣지가 통째로 갈린다(실측 60청크에서
+        절반). 어느 셈이 옳은지는 이 최적화가 정할 문제가 아니라 값이 갈리면 안 된다.
+        """
+        chunks = self._chunks(40, seed=16, dim=8)
+        chunks[3].embedding = chunks[3].embedding[:5]
+        ids = [c.chunk_id for c in chunks]
+        nodes, embs = {}, {}
+        for c in chunks:
+            enrich = kg._heuristic_enrich(c.text)
+            nodes[c.chunk_id] = kg.KGNode(
+                chunk_id=c.chunk_id, doc_id=c.doc_id, text=c.text,
+                summary=enrich["summary"], entities=enrich["keywords"],
+                keywords=enrich["keywords"])
+            embs[c.chunk_id] = c.embedding
+        self.assertIsNone(
+            kg._candidate_edges_vectorized(ids, nodes, embs, kg.KG_TOP_K_NEIGHBORS),
+            "차원이 섞였는데 벡터화 경로가 결과를 냈다")
+        self._assert_same(chunks, "차원 불일치")
 
 
 if __name__ == "__main__":

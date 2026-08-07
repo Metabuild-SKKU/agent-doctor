@@ -160,6 +160,15 @@ def _candidate_edges_vectorized(
     임계값(0.2/0.5) 바로 위아래 쌍에서 엣지 포함 여부가 뒤집힐 수 있다. 그러면 이
     최적화가 '같은 결과를 빠르게' 가 아니라 '결과가 조금 다름' 이 되어, 나중에 회귀를
     의심하게 만든다.
+
+    [파리티의 유일한 한계] 가중치가 ULP 수준(~1e-16)으로 같은 후보 여럿이 top_k 경계에
+    정확히 걸치면, 그중 누가 뽑히는지는 루프 경로와 갈릴 수 있다. 행렬곱과 파이썬 루프는
+    덧셈 순서가 달라 같은 쌍의 마지막 자리가 다르게 떨어지기 때문이고(루프 경로끼리도
+    쌍마다 0.64 / 0.6400000000000001 로 갈린다), 어느 쪽으로도 고칠 수 없다. 실제로
+    걸리려면 임베딩이 정확히 같은 청크(반복되는 머리말·상용구 등)가 있어야 하고, 그때
+    탈락하는 후보는 가중치가 같은 동률이라 어느 쪽을 남겨도 등가다. 임베딩이 아예 없어
+    자카드만으로 판정하는 코퍼스에서는 이 문제가 없다 — 이진행렬 곱은 float64 에서
+    정확해서 동률이 동률로 유지된다(테스트로 고정).
     """
     n = len(ids)
     if n < 2:
@@ -171,10 +180,18 @@ def _candidate_edges_vectorized(
 
     dim = next((len(embeddings[cid]) for cid in ids if embeddings.get(cid)), 0)
     if dim:
+        # 차원이 섞인 코퍼스는 행렬로 담을 수 없다. 짧은 쪽을 0 으로 패딩하면 코사인이
+        # 달라지는데(루프 경로의 cosine() 은 zip 이라 긴 쪽을 잘라 계산한다) 그 차이가
+        # 임계값을 넘나들어 엣지가 통째로 바뀐다 — 실측으로 60청크에서 엣지 절반이
+        # 갈렸다. 어느 쪽 셈이 옳은지는 이 커밋이 정할 문제가 아니므로(여기서 정하면
+        # 최적화가 아니라 동작 변경이다) 루프 경로로 넘긴다. 정상 코퍼스는 한 모델로
+        # 임베딩하므로 이 분기를 타지 않는다.
+        if any(len(v) != dim for v in embeddings.values() if v):
+            return None
         emb = np.zeros((n, dim), dtype=np.float64)
         for row, cid in enumerate(ids):
             vec = embeddings.get(cid)
-            if vec is not None and len(vec) == dim:
+            if vec:
                 emb[row] = vec
         norms = np.linalg.norm(emb, axis=1, keepdims=True)
         # 영벡터·임베딩 없음은 0 행으로 남긴다 → 그 행의 코사인이 전부 0.
@@ -194,6 +211,11 @@ def _candidate_edges_vectorized(
         kw_mat = kw_sizes = None
 
     limit = n if top_k <= 0 else min(top_k, n)
+    # 기본 512 는 실측으로 고른 값이다(6,584청크 x 1024차원, 3회 중앙값):
+    #   64=12.0s/579MB  256=8.6s/667MB  512=7.7s/810MB  1024=9.3s/1033MB  4096=9.6s/2051MB
+    # 메모리는 블록에 비례해 단조 증가하지만 시간은 512 에서 최소다 — 더 키우면 블록이
+    # 캐시를 벗어나 시간과 메모리가 같이 나빠지므로 올릴 이유가 없다. 아래로는 트레이드가
+    # 성립해서(256 은 -143MB / +12%) 메모리가 빠듯한 환경을 위해 환경변수로 열어둔다.
     block = max(1, _env_int("EVAL_KG_BLOCK_ROWS", 512))
     candidates: dict[str, list[tuple[str, float]]] = {cid: [] for cid in ids}
 
