@@ -27,6 +27,7 @@ from typing import Optional
 
 from core.schema import Finding
 
+from agents.eval.metrics_basic import is_abstention
 from agents.eval.types import CONTEXT_CHARS_MAX, EvalRecord
 from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
 
@@ -144,12 +145,27 @@ def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
                                     겹침 미측정/낮음이면 예비(검색 탓일 수 있음)
       ext_context_overflow          컨텍스트 총길이 과다 + faithfulness 낮음
       ext_grounded_but_wrong        근거엔 충실한데 정답과 불일치 (GT 필요)
+
+    기권한 답변은 소견을 내지 않는다(아래 주석 참고).
     """
     findings: list[Finding] = []
     faith = record.ragas.get("faithfulness")
     rel = record.ragas.get("response_relevancy")
     corr = record.ragas.get("answer_correctness")
     overlap = gold_context_recall(record)
+
+    # "자료에서 확인되지 않습니다"류는 실패가 아니라 **올바른 동작**이다. 근거가
+    # 없을 때 지어내지 않는 것이 우리가 권고하는 처방(strengthen_abstention /
+    # require_citation)의 목표이기도 하다.
+    # 그런데 기권문은 질문을 되풀이하지 않으므로 relevancy 가 0에 가깝게 나오고,
+    # 그대로 두면 동문서답으로 오진된다 — 실측에서 처방 적용본의 기권 5건이 전부
+    # ext_answer_off_topic 으로 잡혀, 처방 효과가 오히려 나빠진 것처럼 보였다.
+    #
+    # 기권이 잘못인 경우(근거가 있는데도 기권 = wrongful abstention)는 gold_contexts
+    # 로만 가릴 수 있고, 그 라벨은 아직 없다(docs §5 미구현). 지금은 "기권은 소견
+    # 없음"으로 두어 거짓 실패를 만들지 않는 쪽을 택한다 — 놓치는 것이 오진보다 낫다.
+    if is_abstention(record.generated_answer):
+        return findings
 
     if rel is not None and rel < EXT_REL_LOW:
         findings.append(_finding(

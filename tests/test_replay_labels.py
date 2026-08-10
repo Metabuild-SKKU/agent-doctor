@@ -144,5 +144,49 @@ class TestRecommendations(unittest.TestCase):
                       LABEL_TO_PRESCRIPTIONS["generation_hallucination"])
 
 
+class AbstentionIsNotAFailureTests(unittest.TestCase):
+    """기권한 답변은 소견을 내지 않는다.
+
+    "자료에서 확인되지 않습니다"는 실패가 아니라 우리가 권고하는 처방
+    (strengthen_abstention / require_citation)의 목표다. 그런데 기권문은 질문을
+    되풀이하지 않아 relevancy 가 0 에 가깝게 나오고, 그대로 두면 동문서답으로
+    오진된다 — 실측에서 처방 적용본의 기권 5건이 전부 ext_answer_off_topic 으로
+    잡혀 처방 효과가 오히려 나빠진 것처럼 보였다.
+    """
+
+    def _rec(self, answer, rel=0.0, faith=0.0):
+        rec = _record(contexts=["사내 규정 안내 문서 본문"],
+                      ragas={"response_relevancy": rel, "faithfulness": faith})
+        rec.generated_answer = answer
+        return rec
+
+    def test_abstained_answer_yields_no_finding(self):
+        rec = self._rec("자료에서 확인되지 않습니다. 참고 자료에는 해당 내용이 없습니다.")
+        self.assertEqual(diagnose_replay_record(rec), [])
+
+    def test_non_abstained_low_relevancy_still_flagged(self):
+        """기권이 아니면 종전대로 동문서답을 잡아야 한다(가드가 과하게 먹지 않는지)."""
+        rec = self._rec("연차 휴가는 연 15일입니다.", rel=0.1, faith=0.9)
+        labels = [f.label for f in diagnose_replay_record(rec)]
+        self.assertIn("ext_answer_off_topic", labels)
+
+    def test_abstention_marker_covers_common_phrasings(self):
+        """'확인할 수 없'만 있어 '확인되지 않습니다'류를 통째로 놓쳤다 —
+        인용 강제 프롬프트를 쓰는 RAG 가 가장 흔히 내는 형태다."""
+        from agents.eval.metrics_basic import is_abstention
+        for text in ("자료에서 확인되지 않습니다.",
+                     "제공된 자료에는 포함되어 있지 않습니다.",
+                     "관련 내용을 찾을 수 없습니다.",
+                     "명시되어 있지 않습니다."):
+            self.assertTrue(is_abstention(text), text)
+
+    def test_normal_answers_are_not_abstention(self):
+        """과검출 방지 — 정상 답변을 기권으로 보면 진단이 통째로 침묵한다."""
+        from agents.eval.metrics_basic import is_abstention
+        for text in ("연차 휴가는 연 15일이 부여됩니다.",
+                     "통신비는 월 5만원이 지원됩니다."):
+            self.assertFalse(is_abstention(text), text)
+
+
 if __name__ == "__main__":
     unittest.main()

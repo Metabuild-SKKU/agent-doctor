@@ -427,8 +427,13 @@ def span_recall_at_k(
 _ABSTENTION_MARKERS = (
     "모른다", "모르겠", "알 수 없", "답변할 수 없", "답변하기 어렵",
     "정보가 없", "정보를 찾을 수 없", "제공된 정보로는 알 수 없", "확인할 수 없",
+    # "확인할 수 없"만 있어 "확인되지 않습니다"류를 통째로 놓쳤다 — 인용 강제·기권
+    # 강화 프롬프트를 쓰는 RAG 가 가장 흔히 내는 형태다(실측: 기권 5건이 전부 미검출
+    # → 올바른 기권이 동문서답으로 오진됐다).
+    "확인되지 않", "확인할 수 없", "찾을 수 없", "포함되어 있지 않",
+    "언급되어 있지 않", "명시되어 있지 않", "나와 있지 않",
     "don't know", "do not know", "cannot answer", "no information",
-    "not available", "unable to answer",
+    "not available", "unable to answer", "not mentioned", "not specified",
 )
 
 
