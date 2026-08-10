@@ -129,7 +129,9 @@ def _gold_spans_of(qa: dict, doc_id: str, span_of: dict) -> list[dict]:
             if not isinstance(span, dict):
                 continue
             start, end = span.get("start"), span.get("end")
-            if isinstance(start, int) and isinstance(end, int) and end > start >= 0:
+            if (isinstance(start, int) and not isinstance(start, bool)
+                    and isinstance(end, int) and not isinstance(end, bool)
+                    and end > start >= 0):
                 spans.append({"doc_id": span.get("doc_id") or doc_id,
                               "start": start, "end": end})
         if spans:

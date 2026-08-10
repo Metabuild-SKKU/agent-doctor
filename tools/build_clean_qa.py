@@ -76,7 +76,8 @@ DEFAULT_OUT = "data/qa_pairs_clean.jsonl"
 # 549건(89%)을 남기고, 그 위(80·100·150자)로 올려도 3%p 씩만 늘어난다. 즉 50자가
 # "채점이 안정적인 짧은 사실형"과 "요약이 오답으로 깎이는 서술형"이 갈리는 지점이다.
 DEFAULT_MAX_ANSWER = 50
-# 1~2자 정답("2", "가")은 문서 아무 데나 우연히 일치해 1회 판정 자체가 못 믿을 값이 된다.
+# 정답 1자("2", "가" 등)는 문서 아무 데나 우연히 일치해 1회 판정 자체가 못 믿을 값이 된다.
+# 문턱은 min_answer 미만만 거르므로 2자는 통과한다 — 실측상 2자부터는 우연 일치가 급감한다.
 DEFAULT_MIN_ANSWER = 2
 
 
@@ -181,6 +182,7 @@ def build(corpus_path: str, qa_path: str, out_path: str,
             })
             stats["남김"] += 1
 
+    pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as fh:
         for row in kept:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -208,6 +210,9 @@ def main() -> int:
 
     total = stats.pop("total", 0)
     keep = stats.pop("남김", 0)
+    if total == 0:
+        print("[오류] QA 파일에 유효한 줄이 없습니다.", file=sys.stderr)
+        return 1
     print(f"입력 {total:,}건 → 남김 {keep:,}건 ({keep / total * 100:.0f}%)")
     print("제외 사유:")
     for reason, n in sorted(stats.items(), key=lambda kv: -kv[1]):

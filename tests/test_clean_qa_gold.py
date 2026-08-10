@@ -264,5 +264,70 @@ class CoordinateSystemMatchesPipelineTest(unittest.TestCase):
             self.assertGreater(chunk["char_end"], span["start"])
 
 
+class GoldSpanBoolRejectionTest(unittest.TestCase):
+    """리뷰 지적(soongwo0o) — bool 은 int 의 서브클래스라 isinstance(x, int) 만으로는
+    안 걸러진다. True 가 로더를 통과하면 명시 좌표로 채택돼 폴백(청크 id 환산)을 안 타고,
+    그 좌표로는 span_recall_at_k 가 None 을 내 recall_at_k=-1(미측정)이 된다 —
+    'malformed 는 폴백으로 흘려 조용한 미측정을 막는다'는 이 파일의 계약과 정반대다."""
+
+    SPAN_OF = {("d1", "d1_0"): (0, 500)}
+
+    def test_bool_start_is_rejected_like_other_malformed_values(self):
+        qa = {"gold_spans": [{"doc_id": "d1", "start": True, "end": 5}],
+              "positive_chunk_ids": ["d1_0"]}
+        self.assertEqual(_gold_spans_of(qa, "d1", self.SPAN_OF),
+                         [{"doc_id": "d1", "start": 0, "end": 500}])
+
+    def test_bool_end_is_rejected_like_other_malformed_values(self):
+        qa = {"gold_spans": [{"doc_id": "d1", "start": 0, "end": False}],
+              "positive_chunk_ids": ["d1_0"]}
+        self.assertEqual(_gold_spans_of(qa, "d1", self.SPAN_OF),
+                         [{"doc_id": "d1", "start": 0, "end": 500}])
+
+
+class BuilderCliRobustnessTest(unittest.TestCase):
+    """리뷰 지적(soongwo0o) — main() 이 잘못된 입력에서 트레이스백 대신 오류 메시지로 죽는다."""
+
+    def test_empty_qa_file_does_not_raise_zero_division(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cp = pathlib.Path(tmp) / "corpus.jsonl"
+            qp = pathlib.Path(tmp) / "qa.jsonl"
+            op = pathlib.Path(tmp) / "out.jsonl"
+            cp.write_text("", encoding="utf-8")
+            qp.write_text("", encoding="utf-8")   # 유효한 줄이 0건
+            import subprocess
+            import sys as _sys
+            result = subprocess.run(
+                [_sys.executable, str(pathlib.Path(__file__).resolve().parent.parent
+                                      / "tools" / "build_clean_qa.py"),
+                 "--corpus", str(cp), "--qa", str(qp), "--out", str(op)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_missing_out_directory_is_created(self):
+        rows, _ = self._run_with_nested_out()
+        self.assertTrue(rows)
+
+    def _run_with_nested_out(self):
+        doc = "라" * 200 + "정답은 MKS 벵진 이다" + "마" * 200
+        corpus_rows = [{"doc_id": "d1", "chunk_id": "d1_0", "title": "t",
+                        "text": doc, "char_start": 0, "char_end": len(doc)}]
+        qa_rows = [{"qa_id": "1", "question": "?", "answer_text": "MKS 벵진",
+                   "doc_id": "d1", "positive_chunk_ids": ["d1_0"]}]
+        with tempfile.TemporaryDirectory() as tmp:
+            cp = pathlib.Path(tmp) / "corpus.jsonl"
+            qp = pathlib.Path(tmp) / "qa.jsonl"
+            op = pathlib.Path(tmp) / "nested" / "dir" / "out.jsonl"   # 없는 디렉터리
+            cp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in corpus_rows),
+                          encoding="utf-8")
+            qp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in qa_rows),
+                          encoding="utf-8")
+            build(str(cp), str(qp), str(op), 50, 2)
+            rows = [json.loads(l) for l in open(op, encoding="utf-8") if l.strip()]
+        return rows, None
+
+
 if __name__ == "__main__":
     unittest.main()
