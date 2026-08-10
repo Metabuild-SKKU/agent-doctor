@@ -21,6 +21,9 @@ data/*
 !data/README.md
 *.json
 !sample_data/*.json
+# 외부 RAG 시뮬레이터의 골든셋(질문+정답+근거) — 코퍼스는 로컬 전용이지만 이 시험지와
+# 뽑아둔 로그(logs/ext_*.jsonl)는 검증 재현에 필요하다.
+!tools/external_rag_questions.json
 
 # 비밀 정보 — *.json 규칙이 바뀌어도 절대 커밋 금지
 agents/ingest/tokens.json
