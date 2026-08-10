@@ -103,6 +103,7 @@ CASES = [
         expect={"A": "chunking_overchunking"},
         known_gap="현재 진단은 retrieval_low_rank 를 낸다. A 슬롯에서 청킹 라벨은 "
                   "qtype=bridge 일 때만 채택되고, 그 외에는 순위·코퍼스 라벨이 선점한다.",
+        known_gap_labels=["retrieval_low_rank"],
     ),
 
     Case(
@@ -122,6 +123,7 @@ CASES = [
         expect={"A": "chunking_context_mismatch"},
         known_gap="섹션 경계의 좌표 틈 때문에 gold 청크를 다 집었는데도 span_recall 이 0 이 "
                   "되고 구체 라벨이 전부 침묵한다 (#100).",
+        known_gap_labels=["retrieval_failure"],   # 구체 라벨이 전부 침묵한 결과의 롤업
     ),
 
     Case(

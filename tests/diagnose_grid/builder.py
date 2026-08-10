@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 from core.schema import Chunk, Document, Probe
 from agents.eval import metrics_common
+from agents.eval.datasets.korquad import DEFAULT_CORPUS, DEFAULT_QA
 from agents.eval.types import EvalRecord, Mode
 from agents.index.agent import CHUNK_STRATEGIES
 
@@ -52,8 +53,16 @@ class Doc:
 _GOLD_MARK = re.compile(r"\[\[gold(?::([\w]+))?\]\](.*?)\[\[/gold\]\]", re.S)
 _DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
 
-_KORQUAD_CORPUS = "data/corpus.jsonl"
-_KORQUAD_QA = "data/qa_pairs.jsonl"
+# 경로는 프로덕션 정본을 그대로 쓴다(agents/eval/datasets/korquad.py) — 격자가 따로 들고
+# 있으면 데이터 위치가 바뀔 때 파이프라인만 고쳐지고 격자는 조용히 옛 경로를 본다.
+_KORQUAD_CORPUS = DEFAULT_CORPUS
+_KORQUAD_QA = DEFAULT_QA
+
+
+def korquad_available() -> bool:
+    """KorQuAD 데이터가 준비돼 있나. data/ 는 gitignore 대상이라 없을 수 있다
+    (data/README.md — '각자 준비한다'). 케이스 빌드 전에 호출자가 확인한다."""
+    return os.path.exists(_KORQUAD_CORPUS) and os.path.exists(_KORQUAD_QA)
 
 
 @lru_cache(maxsize=None)
@@ -184,6 +193,10 @@ class Case:
     # 현재 진단이 expect 를 못 맞추는 케이스. 사유·이슈를 적는다.
     # 기대를 코드 동작에 맞춰 고치는 대신 불일치로 남겨, 데이터셋이 '이래야 한다'를 말하게 한다.
     known_gap: Optional[str] = None
+    # known_gap 케이스가 '지금' 내는 라벨. 이걸 적어야 회귀를 잡는다 — 적지 않으면
+    # '기대와 다르기만 하면' 통과라, 진단이 다른 방식으로 틀려도(예: 롤업이 다른 롤업으로
+    # 바뀌어도) 조용히 넘어간다. 값이 틀리면 테스트가 실제 라벨을 알려주니 그대로 갱신하면 된다.
+    known_gap_labels: Optional[list[str]] = None
     # 심판 값이 붙어야 성립하는 케이스. known_gap 과 다르다 — 진단이 틀린 게 아니라
     # 판정에 필요한 측정이 아직 없는 것이다.
     needs_judge: Optional[str] = None

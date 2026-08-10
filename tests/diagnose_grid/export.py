@@ -126,6 +126,8 @@ def to_dict(case: Case) -> dict:
         out["metrics"] = judge          # 심판 값만 — recall/f1 은 러너가 계산
     if case.known_gap:
         out["known_gap"] = case.known_gap
+    if case.known_gap_labels is not None:
+        out["known_gap_labels"] = list(case.known_gap_labels)
     if case.needs_judge:
         out["needs_judge"] = case.needs_judge
     return out
