@@ -1437,8 +1437,11 @@ def bad_gold_chunk(record: EvalRecord) -> Optional[Finding]:
     # 반복 평균으로는 못 막는다 — 같은 모델의 배심원단은 에러 상관 ρ=0.944~0.972 라
     # 같은 곳에서 같이 틀린다(arXiv 2607.08535). 그래서 판정 구조 쪽을 고친다.
     #
-    # 예비로 남기면 점수에서는 여전히 실패로 센다(report.is_gold_labeling_error 가
-    # confirmed 를 요구한다) — "확신 없으면 봐주지 않는다"가 맞다.
+    # 예비도 **점수에서는 확정과 똑같이 뺀다**(report.is_gold_labeling_error 는 confirmed 를
+    # 요구하지 않는다). 확정만 빼면 제외 여부 자체가 심판 노이즈를 그대로 타서, 같은 probe 가
+    # 회차마다 빠졌다 들어왔다 하며 종합점수를 흔든다 — 덜 빼는 것보다 그쪽이 더 불안정하다.
+    # 확정/예비가 실제로 가르는 건 점수가 아니라 **억제 범위**다(확정은 검색·생성·컨텍스트
+    # 전부, 예비는 검색만 — 아래 diagnose() 의 preliminary_gold 참고).
     faith = _faith(record)
     if faith is None:
         return None                      # 미측정(DEEP 미만) — 근거성에 대해 아무 말도 못 한다.

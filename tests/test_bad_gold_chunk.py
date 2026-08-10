@@ -249,6 +249,59 @@ class GoldLabelingErrorScoringTest(unittest.TestCase):
         rec = self._labeled("retrieval_low_rank", confirmed=True)
         self.assertFalse(report.is_gold_labeling_error(rec))
 
+    def test_generation_label_survives_but_the_probe_still_leaves_scoring(self):
+        """예비 골드오류 + 생성 라벨이 같이 붙은 probe — **라벨은 남고 점수에서는 빠진다.**
+
+        비대칭이라 우연처럼 보일 수 있어 의도를 못박는다(리뷰 지적).
+
+          진단 단계: 예비 bad_gold_chunk 는 검색 슬롯만 막고 생성 증거는 살려 둔다.
+                     오라클 트랙이 스스로 근거 없이 답한 건 골드가 아니라 생성기에 대한
+                     증거라, 미확인 상태에서 그것까지 지우면 측정된 신호를 추측으로 덮는다.
+          점수 단계: 그래도 이 probe 는 통째로 빠진다. 결정론적 신호 둘(_f1_ok ·
+                     not _oracle_ok)이 이미 "이 골드로는 이 답이 안 나온다"를 세웠으므로
+                     평가셋 결함 가능성이 선 상태고, 그런 probe 를 점수에 넣으면 고칠 수
+                     없는 페널티가 된다.
+
+        즉 "생성 라벨은 남지만 점수에는 반영되지 않는다" 가 의도다 — 진단(무엇이
+        일어났나)과 채점(누구 책임인가)이 다른 질문이기 때문이다.
+        """
+        probe = Probe(probe_id="p", question="q", source="taxonomy", ground_truth="gt")
+        rec = EvalRecord(probe=probe)
+        rec.f1_score, rec.recall_at_k = 0.0, 1.0
+        rec.findings = [
+            Finding(finding_id="p1", type="gap", severity="warning", description="d",
+                    label="bad_gold_chunk", confirmed=False, affected_probes=["p"]),
+            Finding(finding_id="p2", type="generation_failure", severity="warning",
+                    description="d", label="generation_hallucination",
+                    confirmed=True, affected_probes=["p"]),
+        ]
+
+        # 라벨은 남는다 — 진단 결과에서 생성 증거가 지워지지 않는다.
+        self.assertIn("generation_hallucination", [f.label for f in rec.findings])
+        # 그런데도 점수에서는 빠진다.
+        self.assertTrue(report.is_gold_labeling_error(rec))
+        # 답 재생성 대상은 아니다 — 정답 텍스트는 멀쩡하다.
+        self.assertFalse(report.is_bad_gold_probe(rec))
+
+    def test_generation_label_does_not_drag_the_composite_down(self):
+        """위 비대칭을 종합점수로도 확인한다 — 생성 라벨이 붙어도 점수는 안 움직인다."""
+        good = [self._good(f"g{i}") for i in range(3)]
+        probe = Probe(probe_id="mixed", question="q", source="taxonomy", ground_truth="gt")
+        mixed = EvalRecord(probe=probe)
+        mixed.f1_score, mixed.recall_at_k = 0.0, 1.0
+        mixed.findings = [
+            Finding(finding_id="p1", type="gap", severity="warning", description="d",
+                    label="bad_gold_chunk", confirmed=False, affected_probes=["mixed"]),
+            Finding(finding_id="p2", type="generation_failure", severity="warning",
+                    description="d", label="generation_hallucination",
+                    confirmed=True, affected_probes=["mixed"]),
+        ]
+
+        only_good = report.build_report(good, 0, mode=1).composite_score["total"]
+        with_mixed = report.build_report(good + [mixed], 0, mode=1).composite_score["total"]
+
+        self.assertEqual(only_good, with_mixed)
+
     # ── 점수 말고 '실패 집계'에서도 빠지는가 ────────────────────────
     # 제외가 build_report 의 점수 계산에만 있어서, 같은 probe 가 점수에선 빠지고 실패
     # 목록·콘솔 마크에는 실패로 남았다. 실측(corpus_20260804): 답 만점(answer=1.00)인
