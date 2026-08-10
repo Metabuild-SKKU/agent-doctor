@@ -685,6 +685,11 @@ def _build_doc_position_index(doc: Document, chunks: list[Chunk]) -> list[tuple[
 
     chunk_index 순서로 훑으면서 직전 청크의 start로 cursor를 옮기기 때문에
     (겹치는) 청크가 순서를 지켜 반복 등장해도 이전 위치를 앞지르지 않는다.
+
+    dedup 이 버린 쌍둥이의 자리는 그 본문을 대표하는 청크 몫으로 달아 준다. 이게 없으면
+    그 구간에 걸린 gold span 이 어느 청크에도 안 붙어 gold_chunk_ids 가 비고, '어떤 gold
+    청크를 놓쳤나'를 근거로 삼는 검색 라벨이 통째로 침묵한다.
+    쌍둥이는 다른 문서에 있을 수 있으므로 doc_id 로 이 문서 몫만 고른다.
     """
     doc_chunks = sorted(
         (c for c in chunks if c.doc_id == doc.doc_id),
@@ -713,6 +718,13 @@ def _build_doc_position_index(doc: Document, chunks: list[Chunk]) -> list[tuple[
         index.append((c.chunk_id, start, end))
         # overlap 청크도 허용하면서 동일 텍스트의 다음 등장을 찾을 수 있게 한 칸 전진한다.
         cursor = start + 1
+    # 별칭은 본래 좌표를 다 넣은 뒤에 붙인다 — 청크 하나를 id 로 되찾는 쪽
+    # (_chunk_fallback_span)이 앞의 제 좌표를 먼저 집게 하려는 것이다.
+    # 이 문서 청크만이 아니라 전체를 훑는다: 쌍둥이가 다른 문서 청크일 수 있다.
+    for c in chunks:
+        for start, end in _declared_alias_spans(c, doc.doc_id):
+            if end <= len(doc.content):
+                index.append((c.chunk_id, start, end))
     return index
 
 
@@ -735,6 +747,40 @@ def _declared_chunk_span(chunk: Chunk) -> tuple[int, int] | None:
     ):
         return None
     return start, end
+
+
+def _declared_alias_spans(chunk: Chunk, doc_id: str) -> list[tuple[int, int]]:
+    """이 청크가 doc_id 안에서 대신 대표하는 구간들(dedup 이 버린 쌍둥이 자리).
+
+    core/schema.py::Chunk.duplicate_spans 참고. 좌표계가 char_span 과 달리 트림 전이라
+    content[start:end] 가 청크 텍스트와 정확히 같지는 않다(앞뒤 공백 포함). 그래서
+    _valid_document_span 의 텍스트 일치 검증은 걸지 않고 길이로만 거른다 — 본문이
+    같으니 구간이 텍스트 길이보다 짧을 수는 없다.
+    """
+    raw = chunk.duplicate_spans
+    if not raw and chunk.metadata:
+        raw = chunk.metadata.get("duplicate_spans")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    spans: list[tuple[int, int]] = []
+    for entry in raw:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            continue
+        alias_doc, start, end = entry
+        if alias_doc != doc_id:
+            continue
+        if (
+            isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, int)
+            or not isinstance(end, int)
+            or start < 0
+            or end <= start
+            or end - start < len(chunk.text)
+        ):
+            continue
+        spans.append((start, end))
+    return spans
 
 
 def _valid_document_span(

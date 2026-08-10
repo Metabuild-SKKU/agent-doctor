@@ -218,6 +218,80 @@ class ChunkingTests(unittest.TestCase):
 
         self.assertEqual(len(drafts), 1)
         self.assertIsNone(drafts[0].section)
+
+    # ── issue #100: 트림이 만든 좌표 틈 ────────────────────────────
+    #
+    # char_span 은 앞뒤 공백을 뗀 좌표라 섹션 경계마다 틈이 남는다. raw_start/raw_end
+    # 는 트림 전 경계라 그 틈이 닫혀야 하고, 동시에 각 청크가 제 char_span 을 덮어야
+    # 한다(안 그러면 그 청크만 검색됐을 때 제 본문을 못 덮는다).
+
+    def _raw_gaps(self, drafts):
+        return [(a.raw_end, b.raw_start) for a, b in zip(drafts, drafts[1:])
+                if b.raw_start > a.raw_end]
+
+    def _char_gaps(self, drafts):
+        return [(a.end, b.start) for a, b in zip(drafts, drafts[1:]) if b.start > a.end]
+
+    def _assert_raw_span_contract(self, document, drafts):
+        self.assertTrue(drafts)
+        self.assertEqual(self._raw_gaps(drafts), [], "raw 좌표에 틈이 남았다")
+        for draft in drafts:
+            self.assertLessEqual(draft.raw_start, draft.start)
+            self.assertGreaterEqual(draft.raw_end, draft.end)
+            # char_span 쪽 불변식은 그대로여야 한다 — probe_gen 이 이걸 검증한다.
+            self.assertEqual(document.content[draft.start : draft.end], draft.text)
+
+    def test_section_strategies_leave_char_span_gaps_but_no_raw_gaps(self):
+        document = _document(
+            "policy",
+            "# 1장 총칙\n이 규정은 인사 원칙을 정한다.\n\n"
+            "## 2장 연차\n연차는 15일이다.\n\n"
+            "## 3장 평가\n평가는 연 2회 실시한다.",
+        )
+
+        for strategy in ("markdown", "markdown_recursive"):
+            with self.subTest(strategy=strategy):
+                drafts = _chunk_document(document, 512, 50, strategy=strategy)
+                # 이 전략들은 겹침이 없어 트림 틈이 실제로 생긴다(재현 조건 고정).
+                self.assertTrue(self._char_gaps(drafts), "틈이 안 생기면 회귀가 무의미")
+                self._assert_raw_span_contract(document, drafts)
+
+    def test_raw_spans_survive_subsection_recursive_split(self):
+        """섹션이 chunk_size 를 넘어 하위 재귀분할될 때도 섹션 경계가 이어져야 한다."""
+        document = _document(
+            "big",
+            "\n\n".join(f"## {i}장\n" + ("이 절의 설명 문장입니다. " * 40) for i in range(1, 5)),
+        )
+
+        drafts = _chunk_document(document, 200, 20, strategy="markdown_recursive")
+
+        self.assertGreater(len(drafts), 4, "하위분할이 일어나야 의미 있는 케이스")
+        self._assert_raw_span_contract(document, drafts)
+
+    def test_gapless_strategies_keep_raw_spans_gapless(self):
+        document = _document(
+            "guide",
+            "# 설치\n" + ("설치 설명 문장입니다. " * 20) + "\n\n## Windows\n"
+            + ("PowerShell 설명입니다. " * 20),
+        )
+
+        for strategy in ("fixed", "recursive", "recursive_sentence"):
+            with self.subTest(strategy=strategy):
+                drafts = _chunk_document(document, 200, 20, strategy=strategy)
+                self.assertEqual(self._char_gaps(drafts), [])
+                self._assert_raw_span_contract(document, drafts)
+
+    def test_math_sections_keep_raw_spans_contiguous(self):
+        document = _document(
+            "math",
+            "\n".join(["# 미적분", "핵심 정의입니다.", "1. 첫 문제입니다.", "2. 둘째 문제입니다."]),
+        )
+        document.metadata["document_type"] = "math"
+
+        drafts = _chunk_document(document, 120, 20, strategy="markdown_recursive")
+
+        self._assert_raw_span_contract(document, drafts)
+
     def test_default_chunk_strategy_is_fixed(self):
         document = _document(
             "guide",
@@ -642,6 +716,129 @@ class IndexRunTests(unittest.TestCase):
         self.assertEqual(result.chunks[0].text, shared_text)
         failed = result.index_artifacts["failed_documents"]
         self.assertEqual([f["doc_id"] for f in failed], ["doc-fails"])
+
+    # ── dedup 이 버린 자리를 생존 청크가 대표한다(duplicate_spans) ──────
+    #
+    # dedup 은 본문 완전일치만 버리므로 버려진 글자는 생존 청크에 그대로 살아 있다.
+    # 그런데 좌표 지도에서는 그 자리가 빈 채로 남아, 근거를 실제로 다 본 답이
+    # span_recall 0 으로 떨어졌다. Index 가 버릴 때 좌표를 적어 두면 Eval 이 메꾼다.
+
+    _DUP_SECTION = "## 안내\n\n재택근무는 주 2일까지 허용하며 팀장과 협의해 요일을 정한다."
+
+    def _duplicated_document(self, doc_id: str = "doc-dup"):
+        content = (
+            f"{self._DUP_SECTION}\n\n"
+            "## 서론\n\n이 문서는 사내 규정을 설명한다.\n\n"
+            f"{self._DUP_SECTION}\n\n"
+            "## 결론\n\n규정은 매년 갱신한다."
+        )
+        return _document(doc_id, content), content
+
+    def test_dropped_duplicate_chunk_records_its_span_on_the_survivor(self):
+        document, content = self._duplicated_document()
+        state = self._state()
+        state.documents = [document]
+        state.index_config["chunk_strategy"] = "markdown"
+
+        result = run(state, tools=_index_tools())
+
+        self.assertEqual(result.status, "indexed")
+        survivor = next(c for c in result.chunks if c.text.startswith("## 안내"))
+        # 중복이라 빠진 두 번째 '안내' 절의 자리가 생존 청크에 적혀야 한다.
+        self.assertTrue(survivor.duplicate_spans, "dedup 이 버린 자리가 기록되지 않았다")
+        alias_doc, alias_start, alias_end = survivor.duplicate_spans[0]
+        self.assertEqual(alias_doc, "doc-dup")
+        # 좌표는 트림 전 기준이고, 그 구간의 본문이 곧 생존 청크의 본문이다.
+        self.assertEqual(content[alias_start:alias_end].strip(), survivor.text)
+        self.assertGreaterEqual(alias_end - alias_start, len(survivor.text))
+        # metadata 로도 나가야 payload 왕복(qdrant·chunks.json)에서 안 사라진다.
+        self.assertEqual(
+            survivor.metadata["duplicate_spans"],
+            [list(span) for span in survivor.duplicate_spans],
+        )
+
+    def test_unique_chunks_carry_no_duplicate_spans(self):
+        # 대개의 문서는 중복이 없다 — 그때는 필드도 payload 키도 안 생겨야 한다.
+        state = self._state()
+        state.documents = [_document("doc-1", "중복이 없는 평범한 문서 본문입니다.")]
+
+        result = run(state, tools=_index_tools())
+
+        for chunk in result.chunks:
+            self.assertEqual(chunk.duplicate_spans, [])
+            self.assertNotIn("duplicate_spans", chunk.metadata)
+
+    def test_alias_survives_embedding_reuse(self):
+        # 재색인 때 별칭을 안 물려주면 dedup 구멍이 되살아난다.
+        document, _content = self._duplicated_document()
+        state = self._state()
+        state.documents = [document]
+        state.index_config["chunk_strategy"] = "markdown"
+        first = run(state, tools=_index_tools())
+        before = next(c for c in first.chunks if c.text.startswith("## 안내"))
+
+        second = run(first, tools=_index_tools())
+
+        self.assertEqual(second.index_artifacts["reused_embeddings"], len(first.chunks))
+        after = next(c for c in second.chunks if c.text.startswith("## 안내"))
+        self.assertEqual(after.duplicate_spans, before.duplicate_spans)
+
+    def test_cross_document_duplicate_records_the_other_documents_span(self):
+        # 문서 간 dedup — 별칭의 doc_id 는 청크 제 doc_id 가 아니라 버려진 쪽이다.
+        # 두 문서 전체가 같으면 문서 단위 dedup 이 먼저 걸리므로, 절 하나만 겹치게 둔다.
+        shared_section = "## 안내\n\n재택근무는 주 2일까지 허용한다."
+        second_content = f"## 서론\n\n이 문서는 규정을 설명한다.\n\n{shared_section}"
+        state = self._state()
+        state.index_config["chunk_strategy"] = "markdown"
+        state.documents = [
+            _document("doc-first", shared_section),
+            _document("doc-second", second_content),
+        ]
+
+        result = run(state, tools=_index_tools())
+
+        survivor = next(c for c in result.chunks if c.doc_id == "doc-first")
+        self.assertEqual([span[0] for span in survivor.duplicate_spans], ["doc-second"])
+        _alias_doc, alias_start, alias_end = survivor.duplicate_spans[0]
+        self.assertEqual(second_content[alias_start:alias_end].strip(), survivor.text)
+
+    def test_failed_document_does_not_leave_alias_spans(self):
+        # 실패한 문서의 좌표를 남기면, 색인되지도 않은 구간을 Eval 이 '덮였다'고 센다.
+        # 앞 테스트와 같은 구성(절 하나가 겹침)이라 성공했다면 별칭이 남았을 상황이다.
+        shared_section = "## 안내\n\n재택근무는 주 2일까지 허용한다."
+        state = self._state()
+        state.index_config["chunk_strategy"] = "markdown"
+        state.documents = [
+            _document("doc-ok", shared_section),
+            _document("doc-fails", f"## 서론\n\n이 문서는 규정을 설명한다.\n\n{shared_section}"),
+        ]
+
+        calls = {"n": 0}
+
+        def flaky_embed(_text, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] > 1:          # 첫 문서만 통과시킨다
+                raise RuntimeError("임베딩 일시 실패")
+            return [1.0, 0.0, 0.0, 0.0]
+
+        tools = IndexTools(
+            get_retriever=lambda *_args, **_kwargs: Mock(),
+            embed=flaky_embed,
+            count_tokens=lambda _text, **_kwargs: 3,
+            build_sparse_vector=lambda _text: {"indices": [], "values": []},
+            build_graph_artifacts=lambda _chunks, _config: {},
+        )
+
+        result = run(state, tools=tools)
+
+        self.assertEqual(result.status, "indexed")
+        self.assertEqual({c.doc_id for c in result.chunks}, {"doc-ok"})
+        self.assertEqual(
+            [f["doc_id"] for f in result.index_artifacts["failed_documents"]],
+            ["doc-fails"],
+        )
+        for chunk in result.chunks:
+            self.assertEqual(chunk.duplicate_spans, [])
 
 
 class SearchAndGraphTests(unittest.TestCase):

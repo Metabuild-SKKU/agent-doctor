@@ -492,6 +492,75 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
 
         self.assertEqual(probe.gold_chunk_ids, [])
 
+    # ── dedup 이 버린 자리에 걸린 gold span ────────────────────────
+    #
+    # 그 자리에는 청크가 없으므로 gold_chunk_ids 가 비고, '어떤 gold 청크를 놓쳤나'를
+    # 근거로 삼는 검색 라벨이 통째로 침묵한다. 버린 자리를 대표하는 청크에 달아 준다.
+
+    def _dup_case(self, alias_doc="d1"):
+        content = "가" * 1000
+        document = Document("d1", "memory", "txt", content)
+        probe = Probe(
+            probe_id="p1",
+            question="질문",
+            source="taxonomy",
+            gold_spans=[{"doc_id": "d1", "start": 430, "end": 470}],
+        )
+        chunks = [
+            Chunk("c0", "d1", content[0:400], char_span=(0, 400),
+                  original_char_span=(0, 400), metadata={"chunk_index": 0}),
+            # [400, 500) 을 차지하던 청크가 중복이라 빠지고 c2 가 그 본문을 대표한다.
+            Chunk("c2", "d1", content[600:700], char_span=(600, 700),
+                  original_char_span=(600, 700), metadata={"chunk_index": 1},
+                  duplicate_spans=[[alias_doc, 400, 500]]),
+        ]
+        return probe, chunks, document
+
+    def test_resync_maps_span_in_dedup_hole_to_the_representing_chunk(self):
+        probe, chunks, document = self._dup_case()
+
+        _resync_gold_chunk_ids([probe], chunks, [document])
+
+        self.assertEqual(probe.gold_chunk_ids, ["c2"])
+
+    def test_resync_leaves_dedup_hole_unmapped_without_alias(self):
+        """대조군 — 별칭이 없으면(legacy 인덱스) 종전대로 비어 침묵한다."""
+        probe, chunks, document = self._dup_case()
+        chunks[1].duplicate_spans = []
+
+        _resync_gold_chunk_ids([probe], chunks, [document])
+
+        self.assertEqual(probe.gold_chunk_ids, [])
+
+    def test_resync_ignores_alias_belonging_to_another_document(self):
+        probe, chunks, document = self._dup_case(alias_doc="d9")
+
+        _resync_gold_chunk_ids([probe], chunks, [document])
+
+        self.assertEqual(probe.gold_chunk_ids, [])
+
+    def test_resync_prefers_a_real_chunk_over_an_alias(self):
+        """제 좌표로 span 을 담는 청크가 있으면 그쪽이 먼저다 — 별칭은 빈 자리용이다."""
+        content = "가" * 1000
+        document = Document("d1", "memory", "txt", content)
+        probe = Probe(
+            probe_id="p1",
+            question="질문",
+            source="taxonomy",
+            gold_spans=[{"doc_id": "d1", "start": 430, "end": 470}],
+        )
+        chunks = [
+            Chunk("c0", "d1", content[400:500], char_span=(400, 500),
+                  original_char_span=(400, 500), metadata={"chunk_index": 0}),
+            Chunk("c2", "d1", content[600:700], char_span=(600, 700),
+                  original_char_span=(600, 700), metadata={"chunk_index": 1},
+                  duplicate_spans=[["d1", 400, 500]]),
+        ]
+
+        _resync_gold_chunk_ids([probe], chunks, [document])
+
+        self.assertEqual(probe.gold_chunk_ids, ["c0"])
+
 
 class ProbeSchemaEnforcementTest(unittest.TestCase):
     """Probe 합성 호출이 전부 JSON 스키마를 싣고 나가는지.
