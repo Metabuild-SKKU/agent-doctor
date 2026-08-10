@@ -698,3 +698,124 @@ def _build_qas(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
         })
 
     return out
+
+
+# ── 외부 RAG(리플레이 모드) 진단서 ─────────────────────────────────
+# build_report_view 와 분리한다. 외부 모드에는 치료경과(course)·처방이력(rxs)이
+# 원리적으로 없고(남의 인덱스라 Optimize 를 못 돈다), 라벨도 ext_ 라 rules 조회가
+# 비어 온다. 한 함수가 두 모드를 분기하면 optimization_history 유무 검사가 함수
+# 전체에 번지므로, 진입점에서 갈라 조립 함수만 공유한다(PR #113 설계 원칙과 동일).
+
+_EXT_SEVERITY_BADGE = {
+    "critical": ["prelim", "치명"],
+    "warning": ["rec-badge-data", "주의"],
+    "info": ["rec-badge-data", "참고"],
+}
+
+
+def build_ext_report_view(
+    report,
+    capability: Optional[dict] = None,
+    recommendations: Optional[list] = None,
+) -> dict[str, Any]:
+    """리플레이 진단 결과 → 진단서 뷰(web/prototype/report.html 과 같은 계약).
+
+    state 를 받지 않는다 — 외부 모드는 Ingest/Index 를 안 돌아 documents/chunks/
+    probes 가 없다. 대신 report(진단)와 capability(적재 판정)만으로 만든다.
+
+    course/rxs 는 항상 빈 배열이다. 비워두는 게 정직하다 — 남의 인덱스에는
+    처방을 적용할 수 없으므로 '아직 안 한 것'이 아니라 '할 수 없는 것'이다.
+    """
+    capability = capability or {}
+    findings = report.findings if report else []
+    cards = recommendations
+    if cards is None:
+        from agents.optimize.ext_advisor import build_ext_recommendations
+        cards = build_ext_recommendations(findings, capability.get("config"))
+
+    headline = _headline_score(report)
+    gate_summary = _gate_summary(report)
+    tier = capability.get("tier", "")
+
+    return {
+        "meta": {
+            "corpus": "외부 RAG 실행 로그",
+            "depth": _EXT_TIER_LABELS.get(tier, "외부 로그 진단"),
+            "question_count": capability.get("records", 0),
+            "created_at": report.created_at.isoformat() if report else "",
+        },
+        "score": {
+            # before 를 after 와 같게 둔다 — 개선 전후를 비교하려면 처방을 적용한
+            # 두 번째 로그가 필요한데, 1회 진단에는 비교 대상이 없다.
+            "before": headline,
+            "after": headline,
+            "delta": 0.0,
+            "pass_threshold": gate_summary["pass"],
+            "gate": gate_summary,
+            "findings_count": len(findings),
+            "kept": 0, "rolled": 0, "errors": 0, "pending": 0,
+        },
+        "priority": _build_priority([f for f in findings if f.confirmed]),
+        "metrics": _build_metrics(report, []),
+        "course": [],
+        "rxs": [],
+        "dxs": _build_dxs(findings),
+        "qas": [],
+        "recommendations": _ext_recommendation_cards(cards),
+        "transparency": {
+            "duration_label": "",
+            "question_count": capability.get("records", 0),
+            "rx_count": 0, "rx_kept": 0, "rx_rolled": 0, "rx_errors": 0,
+            "chunk_count": 0,
+            # 외부 모드에서만 있는 사실 — 어디까지 잰 진단인지 화면이 밝힐 수 있게 남긴다.
+            "external": {
+                "tier": tier,
+                "with_ground_truth": capability.get("with_ground_truth", 0),
+                "with_gold_contexts": capability.get("with_gold_contexts", 0),
+                "notes": capability.get("notes", []),
+            },
+        },
+    }
+
+
+_EXT_TIER_LABELS = {
+    "triad": "외부 로그 진단 (질문·컨텍스트·답변)",
+    "qa_only": "외부 로그 진단 (질문·답변만 — 제한적)",
+}
+
+
+def _ext_recommendation_cards(cards: list[dict]) -> list[dict[str, Any]]:
+    """ext_advisor 카드 → 템플릿의 recommendations 계약.
+
+    ext_advisor 는 '무엇을 왜 권하나'까지만 만든다(Optimize 소관). 여기서
+    화면 표현(배지·아이콘 종류·CTA 문구)을 입힌다."""
+    out: list[dict[str, Any]] = []
+    for c in cards or []:
+        n_conf, n_tent = c.get("confirmed", 0), c.get("tentative", 0)
+        counts = []
+        if n_conf:
+            counts.append(f"확정 {n_conf}건")
+        if n_tent:
+            counts.append(f"예비 {n_tent}건")
+        manual = any(s.get("manual") for s in c.get("steps", []))
+        out.append({
+            # manual 이면 데이터 아이콘(RECIC_BOX) — 사람이 코퍼스를 손봐야 하는 부류다.
+            "kind": "manual" if manual else "prelim",
+            "code": c.get("label", ""),
+            "badge": _EXT_SEVERITY_BADGE.get(c.get("severity"), ["rec-badge-data", "주의"]),
+            "title": c.get("summary", ""),
+            "desc": " · ".join(c.get("evidence", [])[:2]),
+            "items": [],
+            "steps": [
+                {
+                    "action": s["action"] + (f" ({s['current']})" if s.get("current") else ""),
+                    "detail": " ".join(x for x in (
+                        s.get("detail", ""),
+                        "재색인이 필요합니다." if s.get("needs_reindex") else "",
+                    ) if x).strip(),
+                }
+                for s in c.get("steps", [])
+            ],
+            "cta": " · ".join(counts),
+        })
+    return out

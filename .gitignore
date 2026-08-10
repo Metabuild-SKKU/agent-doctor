@@ -39,6 +39,10 @@ uploads/
 tests/corpus/*
 !tests/corpus/README.md
 
+# 리플레이 진단서 산출물 — 실행할 때마다 덮어쓰는 결과물이다. 같은 폴더의
+# ext_*.jsonl(재현용 고정 자산)과 성격이 반대라 out/ 만 따로 제외한다.
+tests/fixtures/external_rag/out/
+
 # PDF 원본 — 용량이 크고 대개 배포 불가 자료다(테스트 코퍼스 문서 포함)
 *.pdf
 
