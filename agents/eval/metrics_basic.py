@@ -333,7 +333,7 @@ def _span_is_covered(start: int, end: int, positions: list[tuple[int, int]]) -> 
 
     **이진 판정이 필요한 곳 전용이다**(현재 소비처: `_gold_span_boundary_analysis` —
     청크 경계가 gold 를 갈랐는지를 covered/uncovered 로 분류한다). 검색 점수는
-    부분점수를 쓰므로 `_span_coverage_ratio` 를 본다."""
+    부분점수를 쓰므로 `_span_covered_chars` 를 본다."""
     intersections = sorted(
         (max(start, c_start), min(end, c_end))
         for c_start, c_end in positions
@@ -349,10 +349,16 @@ def _span_is_covered(start: int, end: int, positions: list[tuple[int, int]]) -> 
     return cursor >= end
 
 
-def _span_coverage_ratio(start: int, end: int, positions: list[tuple[int, int]]) -> float:
-    """[start, end) 중 positions 합집합이 덮은 **문자 비율**(0~1).
+def _span_covered_chars(start: int, end: int, positions: list[tuple[int, int]]) -> int:
+    """[start, end) 중 positions 합집합이 덮은 **문자 수**(정수).
 
-    `_span_is_covered` 의 부분점수판이다. 전부 덮으면 정확히 1.0, 하나도 못 덮으면 0.0
+    비율이 아니라 문자 수를 돌려주는 이유는 호출부가 여러 span 을 **길이 가중으로**
+    합치기 때문이다(`span_recall_at_k` 참고). 비율로 먼저 나눴다가 다시 길이를 곱하면
+    부동소수 오차가 끼어 완전 커버가 0.9999… 로 떨어질 수 있는데, `_recall_ok` 는 정확히
+    `>= 1` 을 요구하므로 그 오차 하나가 라벨을 뒤집는다. 정수로 모아 **마지막에 한 번만**
+    나누면 그런 경로가 없다.
+
+    `_span_is_covered` 의 부분점수판이다. 전부 덮으면 `end - start`, 하나도 못 덮으면 0
     이므로 두 함수의 참거짓 경계는 같고, 달라지는 건 **그 사이 값**뿐이다.
 
     ## 왜 부분점수인가 (2026-08-07)
@@ -380,13 +386,13 @@ def _span_coverage_ratio(start: int, end: int, positions: list[tuple[int, int]])
     top-k 가 흩어져 오는 건 정상이라 연속성을 요구할 이유가 없다.
 
         골드 100자 중 앞 30 + 뒤 40 을 덮음(가운데 30자 틈)
-          _span_is_covered   → False
-          _span_coverage_ratio → 0.70
+          _span_is_covered    → False
+          _span_covered_chars → 70
 
     합집합으로 세는 이유는 청킹 overlap 이다 — 인접 청크가 같은 문자를 공유하므로 단순
-    합이면 비율이 1 을 넘는다."""
+    합이면 덮은 수가 span 길이를 넘는다."""
     if end <= start:
-        return 0.0
+        return 0
     intersections = sorted(
         (max(start, c_start), min(end, c_end))
         for c_start, c_end in positions
@@ -400,7 +406,7 @@ def _span_coverage_ratio(start: int, end: int, positions: list[tuple[int, int]])
             continue                      # 이미 센 구간 안에 들어옴
         covered_chars += covered_end - max(covered_start, cursor)
         cursor = covered_end
-    return covered_chars / (end - start)
+    return covered_chars
 
 
 def span_recall_at_k(
@@ -472,13 +478,31 @@ def span_recall_at_k(
     ):
         return None
 
-    # span 별 문자 커버리지 비율의 평균. 전부 덮으면 1.0, 하나도 못 덮으면 0.0 이라
-    # _recall_ok(>=1)·A슬롯 진입(0<=recall<1) 의 참거짓은 이 변경으로 뒤집히지 않는다
-    # (달라지는 건 그 사이 값뿐). 근거는 _span_coverage_ratio 참고.
-    return sum(
-        _span_coverage_ratio(start, end, retrieved_positions.get(doc_id, []))
+    # 덮은 문자 총합 / 골드 문자 총합 — span 길이로 가중한 micro average 다.
+    #
+    # span 별 비율을 단순 평균(macro)하면 **점수가 청킹 경계에 의존한다**(리뷰 지적,
+    # 2026-08-10). 같은 골드 500자를 청커가 어떻게 자르느냐에 따라:
+    #
+    #     100/400 으로 자름 → 앞쪽만 검색 시 macro 0.5, micro 0.2
+    #     250/250 으로 자름 → 앞쪽만 검색 시 macro 0.5, micro 0.5
+    #     자르지 않음       → 앞쪽만 검색 시 macro 0.2, micro 0.2
+    #
+    # 검색 성과는 셋 다 같은데 macro 만 흔들린다. gold span 은 원자적 근거 단위가 아니라
+    # positive_chunk_ids 를 좌표로 환산한 값이라 그 경계 자체가 청킹 산물이기 때문이다.
+    # optimize 가 처방으로 바꾸는 축이 바로 청크 전략이므로, macro 는 "검색을 잘하는 설정"
+    # 대신 "채점에 유리하게 잘리는 설정" 쪽으로 탐색을 끌 수 있다.
+    #
+    # 실측 영향은 작다 — 현재 골드는 전부 청크 크기라 span 길이가 서로 2배 이내이고,
+    # macro↔micro 차이는 multi-span 582건(34%)에서 중앙값 0.018·최대 0.152 다.
+    #
+    # 정수로 모아 마지막에 한 번만 나눈다: 전부 덮으면 정확히 1.0, 하나도 못 덮으면 0.0
+    # 이라 _recall_ok(>=1)·A슬롯 진입(0<=recall<1) 의 참거짓은 뒤집히지 않는다.
+    covered_chars = sum(
+        _span_covered_chars(start, end, retrieved_positions.get(doc_id, []))
         for doc_id, start, end in valid_spans
-    ) / len(valid_spans)
+    )
+    gold_chars = sum(end - start for _doc_id, start, end in valid_spans)
+    return covered_chars / gold_chars
 
 
 # ── 무응답(기권) 판별 ─────────────────────────────────────────────

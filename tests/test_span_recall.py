@@ -298,11 +298,15 @@ class PartialSpanCoverageTest(unittest.TestCase):
         self.assertEqual(span_recall_at_k(spans, ["c0", "c1"], chunks), 1.0)
 
     def test_multiple_spans_average_their_ratios(self):
-        """span 이 여러 개면 비율의 평균이다 — 하나만 덮었다고 0 이 되지 않는다."""
+        """span 이 여러 개면 하나만 덮었다고 0 이 되지 않는다.
+
+        길이가 같은 두 span 이라 macro·micro 가 같은 값을 낸다 — 둘을 가르는 케이스는
+        `MicroAverageTest` 에 있다.
+        """
         chunks = self._doc_chunks((0, 100), (100, 200))
         spans = [
-            {"doc_id": "d1", "start": 0, "end": 100},      # c0 로 전부 덮임 → 1.0
-            {"doc_id": "d1", "start": 100, "end": 200},    # 안 가져옴      → 0.0
+            {"doc_id": "d1", "start": 0, "end": 100},      # c0 로 전부 덮임 → 100자
+            {"doc_id": "d1", "start": 100, "end": 200},    # 안 가져옴      →   0자
         ]
 
         self.assertEqual(span_recall_at_k(spans, ["c0"], chunks), 0.5)
@@ -310,10 +314,11 @@ class PartialSpanCoverageTest(unittest.TestCase):
     def test_partial_on_every_span_averages(self):
         chunks = self._doc_chunks((0, 25), (100, 175))
         spans = [
-            {"doc_id": "d1", "start": 0, "end": 100},      # 25/100 = 0.25
-            {"doc_id": "d1", "start": 100, "end": 200},    # 75/100 = 0.75
+            {"doc_id": "d1", "start": 0, "end": 100},      # 25자
+            {"doc_id": "d1", "start": 100, "end": 200},    # 75자
         ]
 
+        # 100자 / 200자. 여기서도 span 길이가 같아 macro 와 값이 겹친다.
         self.assertAlmostEqual(span_recall_at_k(spans, ["c0", "c1"], chunks), 0.5)
 
     def test_ratio_never_exceeds_one_when_chunk_is_wider_than_span(self):
@@ -322,6 +327,76 @@ class PartialSpanCoverageTest(unittest.TestCase):
         spans = [{"doc_id": "d1", "start": 500, "end": 510}]
 
         self.assertEqual(span_recall_at_k(spans, ["c0"], chunks), 1.0)
+
+
+class MicroAverageTest(unittest.TestCase):
+    """span 이 여러 개일 때 **길이로 가중**해 합친다(micro average, 2026-08-10).
+
+    span 별 비율을 단순 평균(macro)하면 점수가 **청킹 경계에 의존한다**. gold span 은
+    원자적 근거 단위가 아니라 positive_chunk_ids 를 좌표로 환산한 값이라, 몇 조각으로
+    나뉘는지가 청커 설정의 산물이기 때문이다. optimize 가 처방으로 바꾸는 축이 바로 청크
+    전략이므로, macro 는 "검색을 잘하는 설정" 대신 "채점에 유리하게 잘리는 설정" 쪽으로
+    탐색을 끌 수 있다.
+    """
+
+    def _doc_chunks(self, *ranges):
+        return [
+            Chunk(f"c{i}", "d1", "x" * (e - s), char_span=(s, e))
+            for i, (s, e) in enumerate(ranges)
+        ]
+
+    def test_long_span_outweighs_short_one(self):
+        """길이가 다르면 macro 와 갈린다 — 짧은 쪽만 덮고 만점 절반을 받을 수 없다."""
+        chunks = self._doc_chunks((0, 100), (100, 500))
+        spans = [
+            {"doc_id": "d1", "start": 0, "end": 100},      # 100자, 전부 덮임
+            {"doc_id": "d1", "start": 100, "end": 500},    # 400자, 전혀 못 덮음
+        ]
+
+        # micro: 100자 / 500자 = 0.2   (macro 였다면 (1.0+0.0)/2 = 0.5)
+        self.assertEqual(span_recall_at_k(spans, ["c0"], chunks), 0.2)
+
+    def test_score_does_not_move_with_how_the_gold_is_split(self):
+        """같은 근거·같은 검색이면 골드를 몇 조각으로 쪼개든 점수가 같다.
+
+        이 클래스의 존재 이유다. 아래 셋은 전부 "0~500 의 근거 중 앞 100자만 검색" 이라
+        검색 성과가 동일한데, macro 로는 0.2·0.5·0.2 로 갈린다.
+        """
+        chunks = self._doc_chunks((0, 100), (100, 500))
+        retrieved = ["c0"]
+
+        whole = [{"doc_id": "d1", "start": 0, "end": 500}]
+        uneven = [{"doc_id": "d1", "start": 0, "end": 100},
+                  {"doc_id": "d1", "start": 100, "end": 500}]
+        even = [{"doc_id": "d1", "start": 0, "end": 250},
+                {"doc_id": "d1", "start": 250, "end": 500}]
+
+        self.assertEqual(span_recall_at_k(whole, retrieved, chunks), 0.2)
+        self.assertEqual(span_recall_at_k(uneven, retrieved, chunks), 0.2)
+        self.assertEqual(span_recall_at_k(even, retrieved, chunks), 0.2)
+
+    def test_full_coverage_of_uneven_spans_is_exactly_one(self):
+        """길이가 달라도 전부 덮으면 정확히 1.0 — 정수로 모아 한 번만 나누기 때문이다.
+
+        비율을 먼저 내고 길이를 다시 곱하는 구현이면 여기서 0.999… 가 나올 수 있고,
+        `_recall_ok` 는 정확히 `>= 1` 을 요구하므로 그 오차 하나가 라벨을 뒤집는다.
+        """
+        chunks = self._doc_chunks((0, 3), (3, 1000))
+        spans = [
+            {"doc_id": "d1", "start": 0, "end": 3},        # 3자
+            {"doc_id": "d1", "start": 3, "end": 1000},     # 997자
+        ]
+
+        self.assertEqual(span_recall_at_k(spans, ["c0", "c1"], chunks), 1.0)
+
+    def test_no_coverage_of_uneven_spans_is_exactly_zero(self):
+        chunks = self._doc_chunks((0, 10), (2000, 3000))
+        spans = [
+            {"doc_id": "d1", "start": 100, "end": 103},
+            {"doc_id": "d1", "start": 103, "end": 1100},
+        ]
+
+        self.assertEqual(span_recall_at_k(spans, ["c0", "c1"], chunks), 0.0)
 
 
 if __name__ == "__main__":
