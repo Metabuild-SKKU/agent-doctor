@@ -450,13 +450,46 @@ def _oracle_accuracy(records: list[EvalRecord]) -> float | None:
 
 # ── 로그 요약 ─────────────────────────────────────────────────────
 
+def _fmt_gate_value(value: object) -> str:
+    """gate 상세값을 로그 한 줄에 넣기 좋게 포맷한다."""
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _print_summary(records: list[EvalRecord], report: DiagnosticReport) -> None:
     # 들여쓰기 2칸: agents/eval/agent.py 의 STEP5 스텝 블록 본문으로 출력된다
     # (스텝 헤더가 이미 'Eval STEP5' 를 말하므로 줄마다 접두사를 다시 붙이지 않는다).
+    from agents.optimize import gate
+
     fs = report.findings_summary
-    pass_mark = "✓" if report.pass_threshold else "✗"
+    gate_summary = gate.explain_report(report)
+    gate_pass = bool(gate_summary["pass"])
+    gate_mark = "✓" if gate_pass else "✗"
     print(f"  종합점수 {format_composite(report.composite_score)}"
-          f" · overall {report.overall_score} · pass {pass_mark}")
+          f" · overall {report.overall_score} · gate_pass {gate_mark}")
+    if gate_summary["reason"] != "passed":
+        detail = []
+        if gate_summary["composite_total"] is not None:
+            detail.append(
+                "composite="
+                f"{_fmt_gate_value(gate_summary['composite_total'])}/"
+                f"{_fmt_gate_value(gate_summary['composite_threshold'])}"
+            )
+        if gate_summary["mean_recall_at_k"] is not None:
+            detail.append(
+                "recall="
+                f"{_fmt_gate_value(gate_summary['mean_recall_at_k'])}/"
+                f"{_fmt_gate_value(gate_summary['recall_floor'])}"
+            )
+        suffix = f" ({', '.join(detail)})" if detail else ""
+        print(f"  · gate reason: {gate_summary['reason']}{suffix}")
+    if report.pass_threshold != gate_pass:
+        eval_mark = "✓" if report.pass_threshold else "✗"
+        print(f"  · eval_pass {eval_mark} — overall 기준 점수 판정이며 최종 gate 와 별도")
     rs = report.ragas_scores
     if "mean_f1" in rs:   # KorQuAD식 관측 지표: F1 과 EM 을 나란히
         line = f"  정답매칭(관측) F1={rs['mean_f1']:.3f}  EM={rs.get('mean_exact_match', 0.0):.3f}"
