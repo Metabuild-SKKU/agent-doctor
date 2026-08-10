@@ -133,6 +133,9 @@ def _chunk_from_entry(entry, index: int) -> Chunk:
     span = entry.get("char_span")
     if span is None:
         span = (index * 100, index * 100 + max(1, len(text)))
+    # 커버리지 판정 전용 좌표. 없으면 char_span 으로 떨어져 트림 틈이 되살아난다(#100/#108).
+    original = entry.get("original_char_span")
+    duplicates = entry.get("duplicate_spans")
     return Chunk(
         chunk_id=chunk_id,
         doc_id=entry.get("doc_id", "fixture_doc"),
@@ -140,6 +143,8 @@ def _chunk_from_entry(entry, index: int) -> Chunk:
         page=entry.get("page"),
         section=entry.get("section"),
         char_span=tuple(span),
+        original_char_span=tuple(original) if original else None,
+        duplicate_spans=[list(s) for s in duplicates] if duplicates else [],
     )
 
 

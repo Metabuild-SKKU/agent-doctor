@@ -25,12 +25,24 @@ from tests.diagnose_grid.builder import Case, build
 
 
 def _chunk_entry(chunk) -> dict:
-    return {
+    """청크 1개 → JSONL 항목. 판정에 쓰이는 좌표는 전부 싣는다.
+
+    original_char_span 을 빠뜨리면 러너가 복원한 청크는 그 필드가 None 이라
+    _chunk_coverage_span 이 char_span 으로 떨어진다 — 트림 틈이 되살아나 #108 이전
+    판정이 나온다. 실제로 그랬다(섹션 경계 케이스가 retrieval_failure 로 떨어짐).
+    """
+    entry = {
         "chunk_id": chunk.chunk_id,
         "doc_id": chunk.doc_id,
         "text": chunk.text,
+        "section": chunk.section,
         "char_span": list(chunk.char_span),
     }
+    if chunk.original_char_span is not None:
+        entry["original_char_span"] = list(chunk.original_char_span)
+    if chunk.duplicate_spans:
+        entry["duplicate_spans"] = [list(s) for s in chunk.duplicate_spans]
+    return entry
 
 
 def _gold_excluded(gold_ids, excluded: set) -> bool:

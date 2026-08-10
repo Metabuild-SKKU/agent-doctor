@@ -111,17 +111,23 @@ CASES = [
         situation="P45 문서를 마크다운 섹션 단위로 청킹했다. 근거가 섹션 경계에 걸쳐 있고 "
                   "양쪽 청크가 다 검색됐는데 답은 틀렸다.",
         # 판단: 근거가 섹션 경계에서 잘렸다 → 겹침이나 청크 크기를 늘려야 한다
+        #
+        # overlap=0 이어야 한다. 겹침이 있으면 청크가 서로를 덮어 섹션 사이에 틈이 안 생기고,
+        # 근거(324자)가 청크 하나에 통째로 담겨 상황 자체가 성립하지 않는다. 실제로 이 케이스는
+        # 600/80 일 때 gold 가 청크 1개(contained)라 boundary_split=0 이었고, 서술과 달리
+        # context_failure 를 냈다. 450/0 에서 gold 가 두 청크에 걸친다.
         docs=[P45], korquad_qa="19495", gold_span_mode="exact",
-        chunk_strategy="markdown_recursive", chunk_size=600, chunk_overlap=80,
+        chunk_strategy="markdown_recursive", chunk_size=450, chunk_overlap=0,
         search_mode="dense", reranked=False, mmr_applied=False,
         question="", gold_spans=[], span_grounding=None, ground_truth="",
         qtype=None, answer_exists=None,
         retrieved=[0, 1, 2, 3, 4],
         answer="사전 편집자가 실수로 수록한 것이다",             # 근거와 어긋난다
         oracle_answer=Answer.GOLD_FULL,          # 정답이 324자라 요약하면 char-F1 이 문턱 아래
-        # #100 은 #108 에서 닫혔다. 트림 전 경계(original_char_span)로 커버리지를 재면
-        # 섹션 사이 틈이 메워져, uncovered 로 새던 게 boundary_split 으로 잡힌다.
-        assert_derived={"missed_count": 0, "boundary_split": ">0"},
+        # #100/#108 의 회귀 가드이기도 하다. 트림 전 경계(original_char_span)를 떼면
+        # recall 1.0 -> 0.0, boundary_split 1 -> uncovered 1 로 옛 증상이 그대로 되살아나
+        # retrieval_failure 롤업이 나온다. 즉 이 케이스가 초록이면 #108 이 살아 있다는 뜻이다.
+        assert_derived={"missed_count": 0, "boundary_split": ">0", "recall_at_k": 1.0},
         expect={"A": "chunking_context_mismatch"},
     ),
 
