@@ -13,6 +13,8 @@ retrieve_fn/keyword_fn 을 주입해 흉내낸다.
 주의: 여기 고정된 동작 중 일부는 '설계 논의 중'으로 표시돼 있다. 그 테스트는 옳음을
       주장하는 게 아니라 현행 동작을 기록해, 바꿀 때 조용히 지나가지 않게 한다.
 """
+import ast
+import inspect
 import os
 import sys
 import unittest
@@ -156,6 +158,26 @@ class _DiagnoseTestBase(unittest.TestCase):
 class FailureLocalizationMetadataTest(_DiagnoseTestBase):
     def _finding(self, label, ftype="retrieval_failure", reason="테스트 reason"):
         return diagnose._finding(_record(), label, ftype, confirmed=True, reason=reason)
+
+    def test_failure_localization_covers_all_emitted_labels(self):
+        """새 라벨을 추가하면 failure_stage/repair_scope 매핑도 함께 추가해야 한다."""
+        emitted = set()
+        tree = ast.parse(inspect.getsource(diagnose))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func_name = getattr(node.func, "id", None)
+            if func_name == "_finding" and len(node.args) >= 2:
+                label_arg = node.args[1]
+            elif func_name == "_gap_finding" and len(node.args) >= 2:
+                label_arg = node.args[1]
+            else:
+                continue
+            if isinstance(label_arg, ast.Constant) and isinstance(label_arg.value, str):
+                emitted.add(label_arg.value)
+        emitted.update(diagnose._REASONING_LABELS.values())
+
+        self.assertEqual(emitted, set(diagnose._FAILURE_LOCALIZATION))
 
     def test_retrieval_label_carries_local_repair_scope(self):
         finding = self._finding("retrieval_missing_gold")
@@ -1950,6 +1972,21 @@ class MentorDecisionTreeRegressionTest(_DiagnoseTestBase):
 
         self.assertEqual(set(), labels)
         oracle.assert_not_called()
+
+    def test_oracle_ok_context_failure_is_not_bad_gold_answer(self):
+        """oracle RAGAS 가 높아도 oracle 이 통과한 probe 는 bad_gold_answer 로 조기 반환하지 않는다."""
+        rec = _record(
+            recall=1.0, f1=0.1, oracle_f1=1.0,
+            faith=0.95, rel=0.95,
+            faith_oracle=0.95, rel_oracle=0.95,
+        )
+        self.assertTrue(diagnose._oracle_ok(rec))
+
+        findings, _oracle = self._diagnose_without_recomputing(rec)
+        labels = [f.label for f in findings]
+
+        self.assertIn("context_noise_interference", labels)
+        self.assertNotIn("bad_gold_answer", labels)
 
     def test_bad_gold_answer_short_circuits_retrieval_causes(self):
         """정답셋 오류는 데이터 검수 대상이라 retrieval 처방 라벨과 함께 집계하지 않는다."""

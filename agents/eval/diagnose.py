@@ -1884,7 +1884,8 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
         # 정답 텍스트 자체가 의심되면 파이프라인 원인 판정을 멈춘다.
         # bad_gold_answer 는 optimize 로 고칠 수 있는 검색·생성 문제가 아니라 데이터 검수 대상이다.
         # 단, 자료 자체가 없으면 corpus_gap 을 먼저 보고해야 하므로 이 가드는 코퍼스 gap 밖에서만 탄다.
-        gold_answer_error = bad_gold_answer_oracle(record)
+        # oracle 이 이미 통과한 probe 는 정답셋 오류가 아니라 검색/컨텍스트/생성 원인으로 내려간다.
+        gold_answer_error = None if _oracle_ok(record) else bad_gold_answer_oracle(record)
         if gold_answer_error is not None:
             return [gold_answer_error]
 
