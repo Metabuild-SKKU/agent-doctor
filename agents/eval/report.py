@@ -431,6 +431,12 @@ def _rule_means(records: list[EvalRecord]) -> dict:
     out = {}
     if recalls:
         out["mean_recall_at_k"] = sum(recalls) / len(recalls)
+    # 근거 밀도 — recall 의 짝(관측용, 게이트 미적용). recall 은 많이 퍼올수록 오르는데
+    # 그 비용을 재는 축이 없어 top_k 부풀리기·거대 청크가 개선처럼 보였다.
+    # span 좌표로만 계산되므로 chunk 폴백 record 는 None 이라 평균에서 빠진다.
+    precisions = [r.span_precision for r in records if r.span_precision is not None]
+    if precisions:
+        out["mean_span_precision"] = sum(precisions) / len(precisions)
     if f1s:
         out["mean_f1"] = sum(f1s) / len(f1s)
     if ems:

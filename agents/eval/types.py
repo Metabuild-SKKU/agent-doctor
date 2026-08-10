@@ -289,6 +289,11 @@ class EvalRecord:
     # 로그가 둘을 같은 이름으로 찍어서, gold 청크가 검색 목록에 있는데 recall=0 인 줄이
     # 모순처럼 보였다(span 은 좌표를 빈틈없이 덮어야 1점이라 청크 하나만으론 0 이 될 수 있다).
     recall_basis: str = "chunk"
+    # 컨텍스트에 넣은 글자 중 골드 근거의 비율(근거 밀도). recall 의 짝 — recall 은 많이
+    # 퍼올수록 무조건 오르는데 그 비용을 재는 축이 없었다. 좌표로 못 재면 None(미측정).
+    # RAGAS context_precision 과 다른 축이다: 그쪽은 청크 '순서' 품질이라 top_k 를 늘리거나
+    # 청크가 문서 전체가 돼도 안 떨어진다. 자세한 대비는 span_precision_at_k 참고.
+    span_precision: Optional[float] = None
     f1_score: float = 0.0
     oracle_f1: float = 0.0
     raw_f1_score: float = 0.0
