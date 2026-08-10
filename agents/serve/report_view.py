@@ -750,6 +750,7 @@ def build_ext_report_view(
             "depth": _EXT_TIER_LABELS.get(tier, "외부 로그 진단"),
             "question_count": capability.get("records", 0),
             "created_at": report.created_at.isoformat() if report else "",
+            "tier": tier,
         },
         "score": {
             # before 를 after 와 같게 둔다 — 개선 전후를 비교하려면 처방을 적용한
@@ -760,6 +761,10 @@ def build_ext_report_view(
             "pass_threshold": gate_summary["pass"],
             "gate": gate_summary,
             "findings_count": len(findings),
+            # 외부 모드 hero 는 처방 수 대신 증거 수준을 보여준다 — 소견이 확정인지
+            # 예비인지가 상대에게 "얼마나 믿고 고칠지"를 알려주는 값이다.
+            "confirmed": sum(1 for f in findings if f.confirmed),
+            "tentative": sum(1 for f in findings if not f.confirmed),
             "kept": 0, "rolled": 0, "errors": 0, "pending": 0,
         },
         "priority": _build_priority([f for f in findings if f.confirmed]),
@@ -775,9 +780,24 @@ def build_ext_report_view(
         # 그리면 "최적화를 안 했나"로 읽히는데, 실제로는 남의 인덱스라 못 하는 것이다.
         "mode": {
             "kind": "external",
-            "hidden_sections": ["course", "rxs"],
+            # 치료경과(Rx 목록 포함)는 남의 인덱스라 원리적으로 없다.
+            "hidden_sections": ["course"],
+            # 내부 모드 전제가 담긴 제목을 외부 뜻으로 바꾼다. "처방 전후"는 비교
+            # 대상이 없고, "남은 권고"는 자동 처방 뒤 잔여물이란 뜻이라 성립하지 않는다.
+            "section_titles": [
+                {"section": "metrics", "title": "품질 지표",
+                 "sub": "RAGAS 4개 지표 (실측)"},
+                {"section": "recommendations", "title": "처방 추천",
+                 "sub": "우리가 적용할 수 없어 상대 팀이 직접 적용할 항목"},
+                {"section": "transparency", "title": "진단 범위",
+                 "sub": "무엇을 근거로 어디까지 쟀나"},
+            ],
+            # 권고는 이 진단서의 결론이다 — 꼬리(06)가 아니라 지표 다음 자리로 올린다.
+            "move_before": [{"section": "recommendations", "before": "dxs"}],
             "notice": "외부 RAG 실행 로그 진단입니다. 남의 인덱스에는 처방을 적용할 수 "
-                      "없어 치료 경과·처방 이력은 제공되지 않습니다.",
+                      "없어 치료 경과·처방 이력은 제공되지 않습니다. "
+                      "종합점수의 검색축은 gold 청크 recall 이 아니라 faithfulness 대역이라, "
+                      "내부 진단 점수와 직접 비교할 수 없습니다.",
         },
         "transparency": {
             "duration_label": "",

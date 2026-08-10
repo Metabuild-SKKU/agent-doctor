@@ -174,9 +174,10 @@ class ExtModeSectionTests(unittest.TestCase):
         view = build_ext_report_view(_report(), {})
         mode = view["mode"]
         self.assertEqual(mode["kind"], "external")
+        # Rx 목록은 치료경과 섹션 안에 있으므로 course 를 숨기면 함께 사라진다.
         self.assertIn("course", mode["hidden_sections"])
-        self.assertIn("rxs", mode["hidden_sections"])
         self.assertTrue(mode["notice"].strip())
+        self.assertEqual(view["rxs"], [])
 
     def test_qas_filled_from_failed_questions(self):
         """로그에도 질문·답변·정답이 있으므로 실패 질문은 채운다 —
@@ -203,6 +204,77 @@ class ExtModeSectionTests(unittest.TestCase):
         self.assertIn('data-section="course"', html)
         self.assertIn("function renderMode", html)
         self.assertIn('id="modeNotice"', html)
+
+
+class ExtSectionLayoutTests(unittest.TestCase):
+    """섹션 구성 — 내부 모드 전제가 담긴 제목·순서를 외부 뜻으로 바꾼다."""
+
+    def test_titles_replace_internal_assumptions(self):
+        """'처방 전후'는 비교 대상이 없고, '남은 권고'는 자동 처방 뒤 잔여물이란
+        뜻이라 외부 모드에서 성립하지 않는다."""
+        view = build_ext_report_view(_report(), {})
+        titles = {t["section"]: t["title"] for t in view["mode"]["section_titles"]}
+        self.assertEqual(titles["metrics"], "품질 지표")
+        self.assertEqual(titles["recommendations"], "처방 추천")
+        self.assertEqual(titles["transparency"], "진단 범위")
+
+    def test_recommendations_move_above_dxs(self):
+        """권고는 이 진단서의 결론이다 — 꼬리가 아니라 지표 다음 자리로 올린다."""
+        moves = build_ext_report_view(_report(), {})["mode"]["move_before"]
+        self.assertIn({"section": "recommendations", "before": "dxs"}, moves)
+
+    def test_notice_warns_score_is_not_comparable(self):
+        """검색축이 recall 이 아니라 faithfulness 대역이라 내부 점수와 비교 불가."""
+        notice = build_ext_report_view(_report(), {})["mode"]["notice"]
+        self.assertIn("faithfulness", notice)
+        self.assertIn("비교", notice)
+
+    def test_hero_gets_evidence_counts(self):
+        """외부 hero 는 처방 수 대신 확정/예비를 보여준다."""
+        view = build_ext_report_view(_report([
+            _finding("ext_answer_off_topic"),
+            _finding("ext_generation_hallucination", confirmed=False)]), {"tier": "triad"})
+        self.assertEqual(view["score"]["confirmed"], 1)
+        self.assertEqual(view["score"]["tentative"], 1)
+        self.assertEqual(view["meta"]["tier"], "triad")
+
+    def test_template_has_section_hooks(self):
+        """뷰가 가리키는 섹션 이름표가 마크업에 실제로 있어야 한다 —
+        없으면 제목 교체·이동이 조용히 no-op 이 된다."""
+        from tests.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        html = REPORT_TEMPLATE.read_text(encoding="utf-8")
+        view = build_ext_report_view(_report(), {})
+        names = set(view["mode"]["hidden_sections"])
+        names |= {t["section"] for t in view["mode"]["section_titles"]}
+        for m in view["mode"]["move_before"]:
+            names |= {m["section"], m["before"]}
+        for name in names:
+            self.assertIn(f'data-section="{name}"', html, f"{name} 이름표 없음")
+
+
+class TransparencyRenderTests(unittest.TestCase):
+    """진단 내역 — 하드코딩 목업이 실제 진단서에 나가던 것을 데이터 렌더로 바꿨다."""
+
+    def test_mockup_numbers_are_gone_from_markup(self):
+        from tests.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        html = REPORT_TEMPLATE.read_text(encoding="utf-8")
+        # 마크업에 박힌 값은 어느 코퍼스든 똑같이 표시됐다.
+        self.assertNotIn('<div class="tn">2분 14초</div>', html)
+        self.assertNotIn('<div class="tn">218</div>', html)
+        self.assertIn('id="transList"', html)
+        self.assertIn("function renderTransparency", html)
+
+    def test_external_transparency_payload(self):
+        view = build_ext_report_view(_report(), {
+            "records": 6, "tier": "triad",
+            "with_ground_truth": 6, "with_gold_contexts": 5, "notes": []})
+        ext = view["transparency"]["external"]
+        self.assertEqual((ext["tier"], ext["with_ground_truth"], ext["with_gold_contexts"]),
+                         ("triad", 6, 5))
 
 
 if __name__ == "__main__":
