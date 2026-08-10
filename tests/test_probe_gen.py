@@ -492,6 +492,124 @@ class ProbeGoldSpanGroundingTest(unittest.TestCase):
 
         self.assertEqual(probe.gold_chunk_ids, [])
 
+    # ── dedup 이 버린 자리에 걸린 gold span ────────────────────────
+    #
+    # 그 자리에는 청크가 없으므로 gold_chunk_ids 가 비고, '어떤 gold 청크를 놓쳤나'를
+    # 근거로 삼는 검색 라벨이 통째로 침묵한다. 버린 자리를 대표하는 청크에 달아 준다.
+
+    def _dup_case(self, alias_doc="d1"):
+        content = "가" * 1000
+        document = Document("d1", "memory", "txt", content)
+        probe = Probe(
+            probe_id="p1",
+            question="질문",
+            source="taxonomy",
+            gold_spans=[{"doc_id": "d1", "start": 430, "end": 470}],
+        )
+        chunks = [
+            Chunk("c0", "d1", content[0:400], char_span=(0, 400),
+                  original_char_span=(0, 400), metadata={"chunk_index": 0}),
+            # [400, 500) 을 차지하던 청크가 중복이라 빠지고 c2 가 그 본문을 대표한다.
+            Chunk("c2", "d1", content[600:700], char_span=(600, 700),
+                  original_char_span=(600, 700), metadata={"chunk_index": 1},
+                  duplicate_spans=[[alias_doc, 400, 500]]),
+        ]
+        return probe, chunks, document
+
+    def test_resync_maps_span_in_dedup_hole_to_the_representing_chunk(self):
+        probe, chunks, document = self._dup_case()
+
+        _resync_gold_chunk_ids([probe], chunks, [document])
+
+        self.assertEqual(probe.gold_chunk_ids, ["c2"])
+
+    def test_resync_leaves_dedup_hole_unmapped_without_alias(self):
+        """대조군 — 별칭이 없으면(legacy 인덱스) 종전대로 비어 침묵한다."""
+        probe, chunks, document = self._dup_case()
+        chunks[1].duplicate_spans = []
+
+        _resync_gold_chunk_ids([probe], chunks, [document])
+
+        self.assertEqual(probe.gold_chunk_ids, [])
+
+    def test_resync_ignores_alias_belonging_to_another_document(self):
+        probe, chunks, document = self._dup_case(alias_doc="d9")
+
+        _resync_gold_chunk_ids([probe], chunks, [document])
+
+        self.assertEqual(probe.gold_chunk_ids, [])
+
+    def test_resync_prefers_a_real_chunk_over_an_alias(self):
+        """제 좌표로 span 을 담는 청크가 있으면 그쪽이 먼저다 — 별칭은 빈 자리용이다."""
+        content = "가" * 1000
+        document = Document("d1", "memory", "txt", content)
+        probe = Probe(
+            probe_id="p1",
+            question="질문",
+            source="taxonomy",
+            gold_spans=[{"doc_id": "d1", "start": 430, "end": 470}],
+        )
+        chunks = [
+            Chunk("c0", "d1", content[400:500], char_span=(400, 500),
+                  original_char_span=(400, 500), metadata={"chunk_index": 0}),
+            Chunk("c2", "d1", content[600:700], char_span=(600, 700),
+                  original_char_span=(600, 700), metadata={"chunk_index": 1},
+                  duplicate_spans=[["d1", 400, 500]]),
+        ]
+
+        _resync_gold_chunk_ids([probe], chunks, [document])
+
+        self.assertEqual(probe.gold_chunk_ids, ["c0"])
+
+
+class ProbeSchemaEnforcementTest(unittest.TestCase):
+    """Probe 합성 호출이 전부 JSON 스키마를 싣고 나가는지.
+
+    여기서 파싱이 실패하면 휴리스틱 폴백으로 떨어져 쓰레기 gold 가 eval_probes.json 에
+    박제되고, 이후 모든 채점이 그 gold 를 기준으로 오염된다(RAGAS 심판 실패는 그 지표만
+    결측이라 대가가 훨씬 작다). 새 합성 호출을 추가하면서 스키마를 빠뜨리면 아무 에러 없이
+    예전 동작으로 돌아가므로 소스에서 직접 센다."""
+
+    def _source(self) -> str:
+        import pathlib
+
+        root = pathlib.Path(__file__).parent.parent
+        return (root / "agents" / "eval" / "probe_gen.py").read_text(encoding="utf-8")
+
+    def test_every_chat_json_call_carries_a_schema(self):
+        src = self._source()
+        self.assertEqual(src.count("llm_provider.chat_json("),
+                         src.count("json_schema=_SCHEMA"),
+                         "chat_json 호출 수와 json_schema 인자 수가 다르다 "
+                         "— 스키마 없는 합성 호출이 생겼다")
+
+    def test_schemas_satisfy_structured_output_rules(self):
+        # Anthropic structured outputs 는 모든 object 에 additionalProperties: false 와
+        # required 전량을 요구한다. 하나만 빠져도 요청이 400 이다.
+        from agents.eval import probe_gen
+
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get("type") == "object":
+                    self.assertIs(node.get("additionalProperties"), False, node)
+                    self.assertEqual(set(node["required"]), set(node["properties"]), node)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        for name in ("_SCHEMA_QA", "_SCHEMA_TOPIC", "_SCHEMA_QUESTION",
+                     "_SCHEMA_QA_EVIDENCE"):
+            with self.subTest(name=name):
+                walk(getattr(probe_gen, name))
+
+    def test_gold_schema_requires_both_question_and_answer(self):
+        # ground_truth 가 optional 이면 질문만 오고 gold 가 빈 probe 가 통과한다.
+        from agents.eval.probe_gen import _SCHEMA_QA
+
+        self.assertEqual(set(_SCHEMA_QA["required"]), {"question", "ground_truth"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,10 +11,17 @@ import threading
 import time
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from weakref import WeakKeyDictionary
 
 from agents.ingest.document_type import has_math_signal
+from core.llm_clients import (
+    OPENROUTER_BASE_URL,
+    normalize_provider,
+    openai_embed,
+)
+from core.llm_retry import run_with_retry
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -72,11 +79,24 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-_models: dict[str, Any] = {}
-# model_name → 마지막 로드 실패 시각(monotonic). 실패를 영구 캐시하면 일시적
-# 원인(네트워크 등) 후에도 프로세스 내내 fallback 임베딩만 조용히 쓰게 되므로,
-# 쿨다운이 지나면 재시도한다.
-_failed_models: dict[str, float] = {}
+# (model_name, device) → 로드된 모델. 장치가 키에 들어가는 이유는 같은 모델을
+# CUDA 와 CPU 로 동시에 들고 있어야 하기 때문이다 — GPU OOM 이 계속되면 CPU 로
+# 폴백하는데, 그때 CPU 모델을 새로 로드해도 GPU 모델은 캐시에 남는다.
+# 키를 문자열과 튜플로 섞어 쓰면 같은 모델이 두 벌 상주하고(각 수 GB),
+# count_tokens 처럼 한쪽 키로만 조회하는 곳이 조용히 캐시 미스가 된다.
+_models: dict[tuple[str, str], Any] = {}
+# (model_name, device) → 마지막 로드 실패 시각(monotonic). 실패를 영구 캐시하면
+# 일시적 원인(네트워크 등) 후에도 프로세스 내내 fallback 임베딩만 조용히 쓰게
+# 되므로, 쿨다운이 지나면 재시도한다.
+_failed_models: dict[tuple[str, str], float] = {}
+# model_name → tokenizer(또는 로드 실패를 뜻하는 None). 전체 모델과 별개로 캐시한다 —
+# API provider 로 색인하면 모델은 안 올라오지만 token_count 는 여전히 필요하다.
+_tokenizers: dict[str, Any | None] = {}
+# 이미 안내한 임베딩 경로(색인은 스레드로 병렬 호출한다). 경로별로 한 번씩 찍는다 —
+# 하나로 묶으면 먼저 찍힌 경로가 나머지를 삼켜, API 로 시작한 실행이 도중에
+# 해시 fallback 으로 열화돼도 그 안내가 나오지 않는다.
+_embed_routes_notified: set[str] = set()
+_embed_route_lock = threading.Lock()
 _FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
 # reranker_model → 마지막 로드 실패 시각(monotonic). embedding 모델과 같은 쿨다운
 # 정책을 따른다 — 영구 캐시하면 일시적 실패 후에도 프로세스 내내 리랭킹이 죽는다.
@@ -353,6 +373,8 @@ def _hit_to_result(hit) -> dict:
         "doc_id": payload.get("doc_id", ""),
         "section": payload.get("section"),
         "char_span": payload.get("char_span"),
+        "original_char_span": payload.get("original_char_span"),
+        "duplicate_spans": payload.get("duplicate_spans"),
         "token_count": payload.get("token_count"),
         "parent_id": payload.get("parent_id"),
         "hash": payload.get("hash"),
@@ -442,6 +464,8 @@ def upsert_chunks(
                 "text": chunk.text,
                 "section": chunk.section,
                 "char_span": chunk.char_span,
+                "original_char_span": chunk.original_char_span,
+                "duplicate_spans": chunk.duplicate_spans,
                 "token_count": chunk.token_count,
                 "parent_id": chunk.parent_id,
                 "hash": chunk.hash,
@@ -713,6 +737,8 @@ def keyword_search(
                 "doc_id": _field(chunk, "doc_id", "") or "",
                 "section": _field(chunk, "section"),
                 "char_span": _field(chunk, "char_span"),
+                "original_char_span": _field(chunk, "original_char_span"),
+                "duplicate_spans": _field(chunk, "duplicate_spans"),
                 "token_count": _field(chunk, "token_count"),
                 "parent_id": _field(chunk, "parent_id"),
                 "hash": _field(chunk, "hash"),
@@ -914,52 +940,335 @@ def _fallback_embedding(text: str, vector_dim: int) -> list[float]:
     return [value / norm for value in vector]
 
 
-def _get_embedding_model(model_name: str) -> Any | None:
-    # 프로세스 내 1회 로드(전역 캐시). 실패 시 None → 호출부가 fallback 사용.
-    # 실패는 쿨다운(_FAILED_MODEL_RETRY_SEC) 후 재시도한다 — fallback 임베딩은
-    # 의미 검색이 안 되는 해시 벡터라, 이 상태로 Eval/Optimize가 돌면 점수 전체가
-    # 무효가 되므로 일시적 실패에서 반드시 복구 기회를 줘야 한다.
-    if model_name not in _models:
-        failed_at = _failed_models.get(model_name)
-        in_cooldown = (
-            failed_at is not None
-            and time.monotonic() - failed_at < _FAILED_MODEL_RETRY_SEC
+def resolve_embedding_provider(provider: str | None = None) -> str:
+    """임베딩을 어디서 계산할지. None → env INDEX_EMBED_PROVIDER(기본 openrouter).
+
+    [기본값이 openrouter 인 이유]
+    이 프로젝트는 OpenRouter 예산이 확보된 상태로 운영한다는 전제다. 그 전제에서는
+    CPU 로 돌릴 이유가 사실상 없다 — 실측(AGENTS.md "임베딩 provider" 절)에서 로컬 CPU 는
+    2 chunks/sec, OpenRouter 는 동시 8에서 371 chunks/sec 였다. 26MB 코퍼스 환산으로
+    2.3시간 vs 0.7분이고 비용은 $0.06 다. 100배 넘는 시간 차이를 몇 센트로 사는
+    셈이라, "예산이 있는데 CPU 를 쓰는" 선택지는 실질적으로 없다고 보고 기본값을
+    빠른 쪽에 뒀다. 예산이 없거나 오프라인이면 local 로 내린다.
+
+    바꿔도 안전하다: 로컬 BAAI/bge-m3 와 OpenRouter baai/bge-m3 의 벡터는 코사인
+    0.99997 로 사실상 같고 차원도 1024 로 동일해, provider 를 바꿔도 컬렉션을 다시
+    만들 필요가 없다.
+
+    미지원 값은 openrouter 로 떨어뜨리지 않고 그대로 돌려준다 — 호출부가 로컬로
+    처리하므로, 오타가 "조용히 API 과금" 이 아니라 "조용히 로컬" 로 끝난다."""
+    raw = provider if provider is not None else os.getenv("INDEX_EMBED_PROVIDER")
+    return normalize_provider(raw) or "openrouter"
+
+
+def resolve_query_embedding_provider(provider: str | None = None) -> str:
+    """질의 임베딩을 어디서 계산할지.
+
+    우선순위: 인자 > INDEX_QUERY_EMBED_PROVIDER > INDEX_EMBED_PROVIDER(색인 축) > openrouter.
+
+    기본값은 색인과 같은 openrouter 다(그 이유는 resolve_embedding_provider 참고 —
+    예산이 있는 전제에서 CPU 를 쓸 이유가 없다는 판단).
+
+    그런데도 별개 축으로 둔다. 값이 같아도 성질이 다르기 때문이다 — 색인은
+    대량·일회성이라 재시도가 남는 장사지만, 질의는 단건·대화형이라 재시도가 그대로
+    사용자 지연이 된다. 실측 429 가 19% 라 단건 질의가 재시도에 걸리면 /search 한 건이
+    수십 초 블로킹될 수 있다. 그때 색인은 그대로 두고 이 축만 local 로 내리면 된다.
+
+    섞어도 안전하다 — 로컬과 OpenRouter 의 bge-m3 벡터는 코사인 0.99997 이고 차원도
+    같아, 색인을 API 로 질의를 로컬로 계산해도 순위가 흔들리지 않는다
+    (실측 — AGENTS.md "임베딩 provider" 절 참고).
+
+    주의: 질의 경로에는 색인 같은 "시끄럽게 실패" 가 없다. agents/rag/retriever.py 가
+    벡터 검색 예외를 잡아 keyword 로 내리므로, 키가 없거나 API 가 계속 실패하면
+    멈추는 대신 검색 품질만 조용히 떨어진다. 그래서 retriever 진입 시
+    query_embedding_config_error() 로 설정 오류만 골라 한 번 끊는다."""
+    # 미지정이면 색인 축을 따른다. 이 폴백이 없으면 색인 에러가 시킨 대로
+    # INDEX_EMBED_PROVIDER=local 만 고친 사용자가 곧바로 질의 preflight 에서 두 번째
+    # 에러를 만난다 — 첫 에러가 시킨 대로 했는데 안 되는 상태다. 오프라인·무키 환경이
+    # 정확히 이 경로를 밟는다(.env.example 머리말의 "키가 없어도 폴백으로 돈다" 약속).
+    #
+    # CLI 는 이미 이렇게 동작한다(core/embedding_cli.py 의 query_target = --query-embed
+    # or --embed). env 만 다르게 두면 같은 설정을 어디에 쓰느냐로 결과가 갈린다.
+    # 명시값은 그대로 이기므로 "별개 축" 설계는 유지된다.
+    raw = provider if provider is not None else (
+        os.getenv("INDEX_QUERY_EMBED_PROVIDER") or os.getenv("INDEX_EMBED_PROVIDER")
+    )
+    return normalize_provider(raw) or "openrouter"
+
+
+def query_embedding_config_error(provider: str | None = None) -> str | None:
+    """질의 임베딩 설정이 애초에 불가능한 상태면 사유 문자열, 정상이면 None.
+
+    "설정이 틀렸다" 와 "API 가 잠깐 흔들린다" 를 가르기 위한 함수다. 후자는
+    retriever 의 keyword 폴백으로 흡수하는 게 맞지만, 전자는 폴백하면 안 된다 —
+    키를 안 넣은 실행이 영구히 keyword 검색으로 도는데 증상은 "검색 품질이 좀
+    나쁘다" 로만 나타나 원인을 찾을 수 없다. 호출은 하지 않고 키 유무만 본다.
+
+    색인 경로는 _embed_via_openrouter 가 곧바로 예외를 던져 이미 시끄럽지만,
+    질의 경로는 retriever 가 예외를 삼키므로 진입 시점에 한 번 끊어야 한다."""
+    if resolve_query_embedding_provider(provider) != "openrouter":
+        return None
+    if os.getenv("OPENROUTER_API_KEY"):
+        return None
+    return (
+        "INDEX_QUERY_EMBED_PROVIDER=openrouter 인데 OPENROUTER_API_KEY 가 없습니다. "
+        "키를 채우거나 INDEX_QUERY_EMBED_PROVIDER=local 로 두세요 "
+        "(그대로 두면 모든 질의가 keyword 검색으로 조용히 떨어집니다)."
+    )
+
+
+def _openrouter_embed_model(model_name: str) -> str:
+    """로컬 모델명을 OpenRouter 철자로. env 로 직접 지정할 수도 있다.
+
+    로컬은 "BAAI/bge-m3", OpenRouter 는 "baai/bge-m3" 로 대소문자만 다르다.
+    다른 모델을 로컬 이름 그대로 넘기면 OpenRouter 가 404 를 내는데, 그게
+    조용한 오배선보다 낫다."""
+    override = os.getenv("INDEX_EMBED_MODEL_OPENROUTER")
+    if override:
+        return override
+    return model_name.lower()
+
+
+def _notify_embed_route_once(route: str, message: str) -> None:
+    """임베딩 경로를 경로마다 실행당 한 번씩 알린다.
+
+    청크마다 찍으면 정작 봐야 할 로그를 덮는다(graph_index 의
+    _notify_llm_extraction_once 와 같은 패턴). 한 번은 반드시 남겨야 하는 이유는,
+    provider 가 env 로 정해져 실행 기록만 봐서는 이 색인이 어디서 계산됐는지
+    알 수 없기 때문이다 — 비용과 속도가 100배 넘게 갈리는 축이다.
+
+    플래그를 경로별로 나누는 이유: 하나로 묶으면 먼저 찍힌 경로가 나머지를 삼킨다.
+    특히 API 로 시작한 실행이 도중에 해시 fallback 으로 열화됐을 때 그 안내가
+    억제되는데, 그건 "어디서 계산됐는지 기록한다" 는 목적과 정확히 반대다."""
+    with _embed_route_lock:
+        if route in _embed_routes_notified:
+            return
+        _embed_routes_notified.add(route)
+    print(message)
+
+
+def _embed_via_openrouter(texts: list[str], model_name: str) -> list[list[float]]:
+    """OpenRouter 임베딩. 실패는 예외로 올린다(해시 fallback 없음).
+
+    로컬 경로는 모델 로드 실패 시 해시 벡터로 떨어지되 embedding_fallback 을 기록해
+    나중에 복구할 수 있다(agents/index/agent.py 의 재임베딩 교체 경로). API 가 조용히
+    실패하면 기록할 provenance 자체가 없어 어느 벡터가 쓰레기인지 구분할 수 없고,
+    결국 전체 재색인을 해야 한다 — 실패보다 비싸다.
+
+    429 는 동시성과 무관하게 상시 섞여 나온다(실측: 동시 1 에서도 요청의 19%).
+    요청당 한도가 아니라 상위 제공자의 transient 로 보이므로 동시성을 낮추는 게
+    아니라 재시도로 흡수한다."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "INDEX_EMBED_PROVIDER=openrouter 인데 OPENROUTER_API_KEY 가 없습니다. "
+            "키를 채우거나 INDEX_EMBED_PROVIDER=local 로 두세요."
         )
-        if not in_cooldown:
-            try:
-                from sentence_transformers import SentenceTransformer
 
-                _models[model_name] = SentenceTransformer(model_name)
-                _failed_models.pop(model_name, None)
-            except Exception as exc:
-                _failed_models[model_name] = time.monotonic()
-                print(
-                    f"[Index] 임베딩 모델 '{model_name}' 로드 실패, deterministic "
-                    f"fallback 사용, {_FAILED_MODEL_RETRY_SEC:.0f}초 후 재시도: {exc}"
-                )
-    return _models.get(model_name)
+    model = _openrouter_embed_model(model_name)
+    # 0 이나 음수면 range(step=0) 이 ValueError 로 죽는다. 바로 아래 concurrency 와
+    # 같은 방어를 건다 — 설정 오타가 크래시가 되면 안 된다.
+    batch_size = max(1, _env_int("INDEX_EMBED_API_BATCH", 64))
+    concurrency = max(1, _env_int("INDEX_EMBED_CONCURRENCY", 8))
+    groups = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
+    _notify_embed_route_once(
+        "openrouter",
+        f"[Index] 임베딩을 OpenRouter({model})로 계산합니다 — 요청당 {batch_size}건, "
+        f"동시 {concurrency}. 로컬로 돌리려면 INDEX_EMBED_PROVIDER=local."
+    )
+
+    def _one(group: list[str]) -> list[list[float]]:
+        result = run_with_retry(
+            lambda: openai_embed(
+                group, model,
+                api_key=api_key, base_url=OPENROUTER_BASE_URL, tag="Index",
+            ),
+            label="임베딩",
+            tag="Index",
+        )
+        # 개수가 어긋나면 예외로 끊는다. 호출부가 zip(청크, 벡터) 로 짝짓기 때문에
+        # 짧게 온 응답은 뒤쪽 청크를 조용히 색인에서 지운다 — 벤치에서 재시도 없이
+        # 429 를 삼켰을 때 1,000청크 중 170개가 사라진 것과 같은 실패 모양이고,
+        # 그때처럼 "성공한 색인" 으로 보이는 게 가장 나쁘다.
+        if len(result) != len(group):
+            raise RuntimeError(
+                f"OpenRouter 임베딩 응답 개수가 어긋납니다: 요청 {len(group)} / "
+                f"응답 {len(result)} (model={model}). 부분 응답을 그대로 쓰면 "
+                f"벡터가 엉뚱한 청크에 붙습니다."
+            )
+        return result
+
+    if len(groups) == 1:
+        return _one(groups[0])
+
+    # 입력 순서를 유지해야 한다 — 호출부가 청크와 zip 으로 짝짓는다.
+    vectors: list[list[list[float]]] = [[] for _ in groups]
+    with ThreadPoolExecutor(max_workers=min(concurrency, len(groups))) as pool:
+        futures = {pool.submit(_one, group): idx for idx, group in enumerate(groups)}
+        for future in as_completed(futures):
+            vectors[futures[future]] = future.result()
+    return [vector for group in vectors for vector in group]
 
 
-def embedding_is_fallback(model_name: str = DEFAULT_EMBEDDING_MODEL) -> bool:
+def resolve_embedding_device(device: str | None = None) -> str:
+    """요청한 임베딩 장치를 실제 사용 가능한 장치로 정규화한다.
+
+    None → env INDEX_EMBED_DEVICE(기본 auto). auto 는 CUDA 가 있으면 cuda, 없으면
+    cpu. cuda 를 명시했는데 쓸 수 없으면 경고하고 cpu 로 내린다 — 조용히 내리면
+    "GPU 로 돌리는 중" 이라 믿은 실행이 CPU 속도(실측 2 chunks/sec)로 기어간다."""
+    requested = str(
+        device if device is not None else os.getenv("INDEX_EMBED_DEVICE", "auto")
+    ).strip().lower() or "auto"
+    if requested == "auto":
+        try:
+            import torch
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+    if requested.startswith("cuda"):
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                return requested
+        except Exception:
+            pass
+        print("[Index] CUDA 를 사용할 수 없어 CPU 임베딩으로 전환합니다.")
+        return "cpu"
+    return requested
+
+
+def _load_embedding_model(
+    model_name: str,
+    device: str | None = None,
+) -> tuple[Any | None, str]:
+    """(모델, 실제 장치). 장치별로 캐시하고 실패 쿨다운·GPU→CPU 폴백을 함께 적용한다.
+
+    실패 시 None → 호출부가 fallback 사용. 실패는 쿨다운(_FAILED_MODEL_RETRY_SEC)
+    후 재시도한다 — fallback 임베딩은 의미 검색이 안 되는 해시 벡터라, 이 상태로
+    Eval/Optimize 가 돌면 점수 전체가 무효가 되므로 반드시 복구 기회를 줘야 한다."""
+    actual_device = resolve_embedding_device(device)
+    key = (model_name, actual_device)
+    cached = _models.get(key)
+    if cached is not None:
+        return cached, actual_device
+
+    failed_at = _failed_models.get(key)
+    in_cooldown = (
+        failed_at is not None
+        and time.monotonic() - failed_at < _FAILED_MODEL_RETRY_SEC
+    )
+    if in_cooldown:
+        # GPU 가 쿨다운 중이면 해시 fallback 보다 CPU 실모델이 낫다. CPU 마저
+        # 쿨다운이면 아래 재귀가 곧바로 None 을 돌려준다(무한 재귀 없음).
+        if actual_device != "cpu":
+            return _load_embedding_model(model_name, "cpu")
+        return None, actual_device
+
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        _models[key] = SentenceTransformer(model_name, device=actual_device)
+        _failed_models.pop(key, None)
+    except Exception as exc:
+        _failed_models[key] = time.monotonic()
+        if actual_device != "cpu":
+            print(
+                f"[Index] 임베딩 모델 '{model_name}' 을 {actual_device} 로 로드하지 "
+                f"못해 CPU 로 재시도합니다 ({_FAILED_MODEL_RETRY_SEC:.0f}초 후 "
+                f"{actual_device} 재시도): {exc}"
+            )
+            return _load_embedding_model(model_name, "cpu")
+        print(
+            f"[Index] 임베딩 모델 '{model_name}' 로드 실패, deterministic "
+            f"fallback 사용, {_FAILED_MODEL_RETRY_SEC:.0f}초 후 재시도: {exc}"
+        )
+    return _models.get(key), actual_device
+
+
+def _get_embedding_model(
+    model_name: str,
+    device: str | None = None,
+) -> Any | None:
+    """_load_embedding_model 의 모델만 돌려주는 얇은 래퍼(기존 호출부 호환)."""
+    model, _actual_device = _load_embedding_model(model_name, device)
+    return model
+
+
+def embedding_is_fallback(
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+    device: str | None = None,
+    provider: str | None = None,
+) -> bool:
     """지금 이 모델로 임베딩하면 (해시) fallback 이 되는지 여부.
 
     호출부(index)가 청크에 임베딩 provenance 를 기록하고, 모델 복구 후 fallback 으로
-    색인된 청크를 강제 재임베딩할지 판단하는 데 쓴다. 쿨다운 중이면 로드를 시도하지
-    않으므로 계속 True 를 돌려준다(복구 시도는 쿨다운 경과 후). None → fallback."""
-    return _get_embedding_model(model_name) is None
+    색인된 청크를 강제 재임베딩할지 판단하는 데 쓴다. GPU 가 쿨다운이어도 CPU 실모델을
+    쓸 수 있으면 False 다 — 해시 벡터를 쓰는지가 기준이지 어느 장치인지가 아니다.
+    Eval 의 로컬 임베딩 가용성 판정(agents/eval/llm_provider.py)도 이 함수를 본다.
+
+    API provider 는 해시 fallback 이라는 상태 자체가 없다(성공 아니면 예외)."""
+    if resolve_embedding_provider(provider) == "openrouter":
+        return False
+    return _get_embedding_model(model_name, device) is None
 
 
-def embed(
-    text: str,
-    model_name: str = DEFAULT_EMBEDDING_MODEL,
-    vector_dim: int | None = None,
-) -> list[float]:
-    # sentence-transformers가 있으면 실제 모델, 없으면 fallback을 쓴다.
-    dimension = int(vector_dim or VECTOR_DIM)
-    model = _get_embedding_model(model_name)
-    if model is None:
-        return _fallback_embedding(text, dimension)
-    return model.encode(text, normalize_embeddings=True).tolist()
+def _is_cuda_oom(exc: Exception) -> bool:
+    """PyTorch 버전별 CUDA OOM 예외 표현 차이를 흡수한다."""
+    try:
+        import torch
+
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+    except Exception:
+        pass
+    message = str(exc).lower()
+    return "cuda" in message and "out of memory" in message
+
+
+def _encode_batch(
+    model: Any,
+    texts: list[str],
+    batch_size: int,
+    device: str,
+) -> list[list[float]]:
+    """CUDA OOM 이면 배치 크기를 절반씩 줄여 같은 모델로 재시도한다.
+
+    batch_size 는 한 번에 GPU 로 올리는 양이라 OOM 의 직접 원인이고, 줄여서 다시
+    하면 대개 통과한다. 1 까지 줄여도 안 되면 포기하고 올려보낸다 — 호출부가
+    CPU 로 내린다."""
+    current_batch_size = batch_size
+    while True:
+        try:
+            vectors = model.encode(
+                texts,
+                batch_size=current_batch_size,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            return [vector.tolist() for vector in vectors]
+        except Exception as exc:
+            if not device.startswith("cuda") or not _is_cuda_oom(exc):
+                raise
+            if current_batch_size <= 1:
+                raise
+            current_batch_size = max(1, current_batch_size // 2)
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            # 이 print 는 except 안이라 문구에 cp949 불가 문자를 쓰면 안 된다.
+            # 터지면 UnicodeEncodeError 가 올라가는데, 아래 embed_batch 의
+            # _is_cuda_oom(exc) 가 False 라 그대로 재전파돼 배치 축소와 CPU 폴백이
+            # 통째로 죽는다 — OOM 을 처리하려던 코드가 OOM 처리를 없앤다.
+            # (AGENTS.md 코드 컨벤션, tests/test_console_encoding.py 가 고정한다)
+            print(
+                f"[Index] GPU 메모리 부족, 배치 크기를 {current_batch_size} 로 "
+                f"줄여 재시도합니다."
+            )
 
 
 def embed_batch(
@@ -967,33 +1276,101 @@ def embed_batch(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
     vector_dim: int | None = None,
     batch_size: int | None = None,
+    device: str | None = None,
+    provider: str | None = None,
 ) -> list[list[float]]:
     """텍스트 리스트를 배치 인코딩한다(색인용). 결과는 입력 순서 그대로.
 
-    batch_size: None → env INDEX_EMBED_BATCH(기본 32). 1이면 텍스트별 단건
-    encode 루프로 폴백해 기존 embed() 결과와 완전히 동일하게 만든다(kill-switch).
-    질의 임베딩은 계속 단건 embed()를 쓴다 — 저장 벡터만 같은 방식으로 일괄
-    전환되므로 배치 인코딩의 float 미세차가 검색 순위 비교를 왜곡하지 않는다.
-    """
+    provider: None → env INDEX_EMBED_PROVIDER(기본 openrouter). local 이 아니면
+    아래 device/batch_size 는 쓰이지 않는다.
+    batch_size: None → env INDEX_EMBED_BATCH(기본 32). 1이면 모델이 텍스트별로
+    인코딩하므로 단건 embed() 와 결과가 같아진다(kill-switch).
+    device: None → env INDEX_EMBED_DEVICE(기본 auto).
+
+    CUDA OOM 은 두 단계로 흡수한다 — 먼저 배치를 절반씩 줄여 재시도하고,
+    1 까지 줄여도 안 되면 CPU 모델로 옮겨 같은 텍스트를 다시 인코딩한다."""
     if not texts:
         return []
+    if resolve_embedding_provider(provider) == "openrouter":
+        return _embed_via_openrouter(texts, model_name)
     dimension = int(vector_dim or VECTOR_DIM)
     if batch_size is None:
         try:
             batch_size = int(os.getenv("INDEX_EMBED_BATCH", "32"))
         except ValueError:
             batch_size = 32
-    model = _get_embedding_model(model_name)
+    batch_size = max(1, batch_size)
+
+    model, actual_device = _load_embedding_model(model_name, device)
     if model is None:
-        return [_fallback_embedding(text, dimension) for text in texts]
-    if batch_size <= 1:
-        return [model.encode(text, normalize_embeddings=True).tolist() for text in texts]
-    return [
-        vector.tolist()
-        for vector in model.encode(
-            texts, normalize_embeddings=True, batch_size=batch_size
+        _notify_embed_route_once(
+            "hash_fallback",
+            f"[Index] 임베딩 모델 '{model_name}' 을 못 써 해시 fallback 벡터로 "
+            f"색인합니다 — 의미 검색이 되지 않습니다."
         )
-    ]
+        return [_fallback_embedding(text, dimension) for text in texts]
+    _notify_embed_route_once(
+        f"local:{actual_device}",
+        f"[Index] 임베딩을 로컬 {actual_device.upper()}({model_name})로 계산합니다 "
+        f"— 비용 0, 외부 호출 없음."
+    )
+
+    try:
+        return _encode_batch(model, texts, batch_size, actual_device)
+    except Exception as exc:
+        if not actual_device.startswith("cuda") or not _is_cuda_oom(exc):
+            raise
+        print(f"[Index] GPU 메모리 부족이 계속되어 CPU 임베딩으로 전환합니다: {exc}")
+        cpu_model, cpu_device = _load_embedding_model(model_name, "cpu")
+        if cpu_model is None:
+            return [_fallback_embedding(text, dimension) for text in texts]
+        return _encode_batch(cpu_model, texts, batch_size, cpu_device)
+
+
+def embed(
+    text: str,
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+    vector_dim: int | None = None,
+    device: str | None = None,
+    provider: str | None = None,
+) -> list[float]:
+    """단건 임베딩(질의용). batch_size=1 로 embed_batch 를 한 번 타 경로를 통일한다.
+
+    provider 를 명시하지 않으면 색인이 아니라 **질의 축**(INDEX_QUERY_EMBED_PROVIDER,
+    기본 openrouter)을 읽는다 — 두 축을 나눈 이유는 resolve_query_embedding_provider 참고."""
+    return embed_batch(
+        [text],
+        model_name=model_name,
+        vector_dim=vector_dim,
+        batch_size=1,
+        device=device,
+        provider=resolve_query_embedding_provider(provider),
+    )[0]
+
+
+def _get_tokenizer(model_name: str) -> Any | None:
+    """임베딩 모델의 tokenizer 만 따로 로드한다(전체 모델 없이). 실패하면 None.
+
+    API provider 로 색인하면 sentence-transformers 모델이 아예 안 올라오는데,
+    청크 token_count 는 여전히 실제 tokenizer 로 세야 한다 — 그 값이 optimize 의
+    chunk_size 처방 근거이고, 어림짐작으로 바뀌면 처방이 조용히 무뎌진다.
+
+    성공이든 실패든 결과를 캐시한다. 실패를 캐시하지 않으면 청크마다 네트워크를
+    두드려 색인이 기어간다."""
+    if model_name in _tokenizers:
+        return _tokenizers[model_name]
+    tokenizer = None
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+    except Exception as exc:
+        print(
+            f"[Index] '{model_name}' tokenizer 를 불러오지 못해 토큰 수를 어림짐작으로 "
+            f"기록합니다 (optimize 의 chunk_size 처방 근거가 느슨해집니다): {exc}"
+        )
+    _tokenizers[model_name] = tokenizer
+    return tokenizer
 
 
 def count_tokens(
@@ -1005,8 +1382,25 @@ def count_tokens(
     # (index/agent.py)는 항상 embed 뒤에 불려 모델이 이미 캐시에 있으므로 실제
     # tokenizer를 쓴다. 여기서 _get_embedding_model 로 지연 로드하면 모델 없는
     # 환경에서 HF 다운로드를 유발해 토큰 세기 한 번이 수 초 블로킹된다(리뷰 #36).
-    model = _models.get(model_name)
+    #
+    # 캐시 키가 (model_name, device) 라 장치를 모르는 여기서는 이름이 같은 항목
+    # 아무거나 쓴다 — tokenizer 는 장치와 무관하게 같다. 이름만으로 조회하면
+    # 항상 캐시 미스가 나서 실제 tokenizer 대신 어림짐작으로 조용히 떨어진다
+    # (그 토큰 수는 optimize 의 chunk_size 처방에 쓰인다).
+    # list() 로 스냅샷을 뜬다 — 색인은 스레드로 병렬 호출하므로, 다른 스레드가
+    # 모델을 로드하는 중이면 순회 도중 "dictionary changed size during iteration"
+    # 이 난다. 토큰 세기 하나 때문에 문서 처리가 통째로 실패하면 안 된다.
+    model = next(
+        (value for (name, _device), value in list(_models.items())
+         if name == model_name),
+        None,
+    )
     tokenizer = getattr(model, "tokenizer", None) if model is not None else None
+    if tokenizer is None:
+        # API provider 로 색인하면 로컬 모델이 아예 안 올라와 위 조회가 항상 빈다.
+        # 그때는 tokenizer 만 따로 받는다 — 전체 모델(2.2GB)과 달리 수 MB 라
+        # 리뷰 #36 이 막으려던 "토큰 세기 한 번이 수 초 블로킹" 에 해당하지 않는다.
+        tokenizer = _get_tokenizer(model_name)
     if tokenizer is None:
         return max(1, len(_tokens(text)))
     try:

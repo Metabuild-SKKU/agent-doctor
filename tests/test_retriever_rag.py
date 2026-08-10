@@ -14,6 +14,7 @@ from agents.rag.retriever import (
     build_retriever,
     get_retriever,
     reset_retriever_cache,
+    _chunk_from_dict,
     _dedup_by_chunk_id,
     _mmr_select,
 )
@@ -25,6 +26,46 @@ from agents.rag.generator import (
     _generation_temperature,
 )
 from core.schema import Chunk
+
+
+class ChunkFromDictTests(unittest.TestCase):
+    """dict -> Chunk 복원. original_char_span 은 없을 수 있는 필드라 폴백이 계약이다."""
+
+    def test_none_metadata_does_not_crash(self):
+        # payload 를 만드는 쪽(qdrant_store)은 항상 dict 를 넣지만, 이 함수는 외부
+        # chunks.json 도 받는다. metadata 가 명시적 None 이면 .get 이 AttributeError 였다.
+        chunk = _chunk_from_dict(
+            {"chunk_id": "c0", "doc_id": "d", "text": "본문", "metadata": None}
+        )
+        self.assertEqual(chunk.chunk_id, "c0")
+        self.assertIsNone(chunk.original_char_span)
+        self.assertEqual(chunk.metadata, {})
+
+    def test_original_char_span_falls_back_to_metadata(self):
+        chunk = _chunk_from_dict(
+            {
+                "chunk_id": "c1",
+                "doc_id": "d",
+                "text": "본문",
+                "char_span": [10, 20],
+                "metadata": {"original_char_span": [8, 24]},
+            }
+        )
+        self.assertEqual(chunk.char_span, (10, 20))
+        self.assertEqual(chunk.original_char_span, (8, 24))
+
+    def test_top_level_original_char_span_wins(self):
+        chunk = _chunk_from_dict(
+            {
+                "chunk_id": "c2",
+                "doc_id": "d",
+                "text": "본문",
+                "char_span": [10, 20],
+                "original_char_span": [8, 24],
+                "metadata": {"original_char_span": [0, 99]},
+            }
+        )
+        self.assertEqual(chunk.original_char_span, (8, 24))
 
 
 class RetrieverTests(unittest.TestCase):

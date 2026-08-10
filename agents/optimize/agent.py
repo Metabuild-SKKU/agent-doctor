@@ -38,7 +38,16 @@ from typing import Any
 
 from core.state import AgentDoctorState
 from core.schema import DiagnosticReport
-from agents.optimize import planner, optimizer, config_mapper, history, reporter, gate, rules
+from agents.optimize import (
+    action_aggregator,
+    planner,
+    optimizer,
+    config_mapper,
+    history,
+    reporter,
+    gate,
+    rules,
+)
 from agents.optimize.schemas import (
     ConfigDiff,
     OptimizationHistoryItem,
@@ -494,6 +503,24 @@ def _log_optimize_input(state: AgentDoctorState) -> None:
     print(f"[Optimize] 반복 횟수: {state.iteration}/{state.max_iterations} (진단 입력)")
     _log_eval_line(state.report)
     print(f"[Optimize] 발견된 문제: {_fmt_findings_summary(state.report)}")
+    _log_measurement_noise(state)
+
+
+def _log_measurement_noise(state: AgentDoctorState) -> None:
+    """재측정 편차가 개선 마진을 삼킬 만큼 크면 경고한다.
+
+    **마진 이상일 때만 찍는다.** 이 값은 평소엔 알 필요 없는 내부 관측이고, 매 방문
+    출력하면 정작 문제일 때 묻힌다. 편차가 마진에 닿았다는 것은 "개선"과 "노이즈"가
+    구분되지 않는다는 뜻이라, 그때만 소리를 낸다.
+    """
+    spread = history.max_repeated_measurement_spread(state.optimization_history)
+    if spread is None or spread < history.MIN_IMPROVEMENT_MARGIN:
+        return
+    print(
+        f"[Optimize] ⚠ 재측정 편차 {spread:.3f} ≥ 개선 마진 "
+        f"{history.MIN_IMPROVEMENT_MARGIN:.3f} — 같은 config 가 다르게 측정됐습니다. "
+        "이 구간의 '개선' 판정은 노이즈와 구분되지 않으므로 마진 재보정이 필요합니다."
+    )
 
 
 def _log_excluded_actions(state: AgentDoctorState) -> None:
@@ -507,6 +534,34 @@ def _log_excluded_actions(state: AgentDoctorState) -> None:
     blocked_keys = sorted(_active_excluded_action_keys(state))
     if blocked_keys:
         print(f"[Optimize] 제외된 action: [{', '.join(blocked_keys)}]")
+
+
+# 처방 선택을 견제한 사유. eligibility 실패("이 파이프라인에서는 불가능")와 달리
+# "지금은 시도할 가치가 없다"는 판정이라, 로그에서 구분해 보여줘야 사용자가
+# "왜 뻔한 처방을 안 했나"를 되짚을 수 있다.
+_GUARD_REASONS = {
+    action_aggregator.REASON_NO_PROGRESS_CONFIG: "이미 측정한 config 로 되돌아감",
+    action_aggregator.REASON_KEEP_PROTECTED_AXIS: "유지 판정된 변경의 되돌리기",
+}
+
+
+def _log_guard_rejections(metadata: dict[str, Any]) -> None:
+    """무진전·되돌리기 견제로 제외된 action 을 출력한다."""
+    for entry in metadata.get("rejected_actions") or []:
+        headline = _GUARD_REASONS.get(entry.get("reason"))
+        if headline is None:
+            continue
+        detail = ""
+        protection = entry.get("keep_protection")
+        if protection:
+            detail = (
+                f", 지지 {protection.get('candidate_support')}"
+                f" ≤ 필요 {protection.get('required_support')}"
+            )
+        print(
+            f"[Optimize]   견제된 action: {entry.get('action_key') or '-'} "
+            f"({headline}{detail})"
+        )
 
 
 def _log_selected_action(request: OptimizationRequest) -> None:
@@ -543,6 +598,7 @@ def _log_selected_action(request: OptimizationRequest) -> None:
             f"[Optimize]   보류된 축: {deferred.get('axis')} "
             f"({deferred.get('reason')})"
         )
+    _log_guard_rejections(request.metadata)
 
 
 def _log_action_review(result: OptimizationResult) -> None:
@@ -705,6 +761,9 @@ def _log_optimize_decision(
     next_step = "Serve 이동" if decision.next_route == "serve" else decision.next_route
     action = "SKIP" if decision.status == "skipped" else decision.status.upper()
     print(f"[Optimize] 행동 결정: {action}, reason={decision.reason or '-'}")
+    # 요청이 만들어지지 않은 방문에서도 견제 사유는 남겨야 한다 — "처방 없음"만
+    # 보이면 견제 때문인지 후보가 없어서인지 구분되지 않는다.
+    _log_guard_rejections(decision.metadata)
     _log_manual_prescriptions(decision)
 
     _log_optimize_transition(
@@ -1516,15 +1575,20 @@ def _study_floor_violations(metrics: dict) -> list[str]:
 def _judge_pending_trial(
     state: AgentDoctorState,
 ) -> tuple[OptimizationHistoryItem | None, Verdict | None, DiagnosticReport | None]:
-    """직전에 적용한 처방(pending)을 판정한다. 나빴으면 config 롤백 + blacklist.
+    """직전에 적용한 처방(pending)을 판정한다. 나빴으면 config·진단서 롤백 + blacklist.
     판정한 이력 항목과 Verdict 를 반환한다(판정할 게 없으면 (None, None, None)).
     호출부가 이 둘로 롤백 여부(not verdict.keep) 판단 + 사용자 리포트를 만든다.
+
+    롤백은 **config 와 state.report 를 함께** 되돌린다. 둘 중 하나만 되돌리면 같은
+    방문의 나머지 로직이 서로 다른 config 를 가정한다 — 복원된 설정으로 처방을
+    고르면서 판단 근거는 되돌리기 전 finding 인 상태가 된다.
 
     3번째 반환값(rollback_baseline_report): 롤백했을 때 '복원된 config 가 실제로
     받았던 점수'를 담은 리포트(=이 처방의 before_report). 롤백 후 같은 방문에서
     이어서 제안되는 다음 처방의 비교 기준(before_report)으로 써야 한다. state.report
-    는 롤백 직전의 열화된 Eval 이라 baseline 으로 쓰면 원래보다 나빠도 '개선'으로
-    오판해 유지해버린다(#2). 유지/판정없음이면 None."""
+    를 되돌린 지금은 같은 값이지만, 비교 기준을 호출부에서 눈에 보이게 두는 편이
+    낫다 — 측정이 없어 진단서를 못 되돌린 경우(before_report 부재)에는 둘이 갈린다.
+    유지/판정없음이면 None."""
     pending = history.find_pending(state.optimization_history)
     if pending is None:
         return None, None, None
@@ -1578,6 +1642,25 @@ def _judge_pending_trial(
             restored["recreate_collection_on_dimension_mismatch"] = True
         state.index_config = restored
         state.reindex_required = bool(pending.metadata.get("reindex_required", True))
+        # 진단서도 함께 되돌린다. config 를 복원해 놓고 리포트를 그대로 두면, 같은
+        # 방문에서 이어지는 처방 선택이 **존재하지 않는 config 의 finding** 을 보고
+        # 결정한다. 실제로 abstention 처방을 롤백한 방문에서, 그 처방이 스스로 만든
+        # generation_wrongful_abstention 3건이 남은 리포트로 다음 처방을 골랐다
+        # (그 증상을 되돌리는 abstention_relaxed 가 후보 2위까지 올라왔다).
+        #
+        # 이 복원은 Eval 이 다음 방문에서 하는 일과 같다 — 롤백 진단 캐시가 복원된
+        # config 의 리포트를 그대로 돌려준다(agents/eval/agent.py 의 '롤백 진단 캐시
+        # 복원'). 즉 한 스텝 뒤에 성립할 상태를 지금 맞춰 주는 것이지 새 값을 지어
+        # 내는 것이 아니다. 측정이 없어(before_report 부재) 롤백한 경우는 되돌릴
+        # 진단서 자체가 없으므로 건드리지 않는다.
+        #
+        # ⚠️ 되돌아가는 것은 **state.report 포인터뿐**이다. 열화된 측정 자체는 이 처방의
+        # 이력 항목에 그대로 남는다 — 바로 위에서 after_report 를 먼저 잡아 두고(복원 전),
+        # finalize_item 이 after_score·after_composite·after_metrics·after_config 로
+        # 기록한다. 즉 "무엇을 쟀는가"는 보존되고 "지금 서 있는 config 의 진단서가
+        # 무엇인가"만 복원된다. 마지막 Eval 원본이 필요한 소비처는 그 이력을 봐야 한다.
+        if before_report is not None:
+            state.report = before_report
         # 측정이 없어(unjudgeable) 롤백한 경우는 '나빴다는 증거'가 아니므로 차단
         # 등록을 건너뛴다. 차단하면 리포트 부재만으로 action 이 소진되고, before_report
         # None 이 다음 방문으로 전파돼 판정 불가→롤백→차단이 연쇄될 수 있다(리뷰 #36).

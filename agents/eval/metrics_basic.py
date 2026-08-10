@@ -251,6 +251,100 @@ def recall_at_k(gold_chunk_ids: list[str], retrieved_chunk_ids: list[str]) -> fl
     return hit / len(gold_chunk_ids)
 
 
+def _valid_span(raw) -> tuple[int, int] | None:
+    """(start, end) 꼴의 좌표를 안전하게 읽는다. 형식 불량이면 None."""
+    if (
+        not isinstance(raw, (list, tuple))
+        or len(raw) != 2
+        or isinstance(raw[0], bool)
+        or isinstance(raw[1], bool)
+        or not isinstance(raw[0], int)
+        or not isinstance(raw[1], int)
+        or raw[0] < 0
+        or raw[1] <= raw[0]
+    ):
+        return None
+    return raw[0], raw[1]
+
+
+def _chunk_coverage_span(chunk) -> tuple[int, int] | None:
+    """커버리지 판정에 쓸 좌표. original_char_span 우선, 없으면 char_span.
+
+    char_span 은 청크마다 앞뒤 공백을 뗀 좌표라 인접 청크 사이에 좌표 틈이 남는다.
+    그 틈을 지나는 gold span 은 청크를 다 검색하고도 '못 덮음'으로 떨어졌다(issue #100).
+    original_char_span 은 트림 전 경계라 그 틈이 닫혀 있다.
+
+    dedup 이 만든 틈은 여기가 아니라 _chunk_alias_spans 가 메꾼다 — 그쪽은 이 청크가
+    대표하는 '다른 자리'라 한 구간으로 못 합친다.
+
+    이 필드가 없던 시절에 색인된 청크는 char_span 으로 떨어져 종전과 같이 동작한다.
+    주의: 원문 대조·인용·페이지 계산에는 쓰면 안 된다(_chunk_char_span 을 쓸 것).
+    """
+    char_span = _chunk_char_span(chunk)
+    if char_span is None:
+        return None
+    raw = getattr(chunk, "original_char_span", None)
+    if raw is None and isinstance(getattr(chunk, "metadata", None), dict):
+        raw = chunk.metadata.get("original_char_span")
+    original = _valid_span(raw)
+    # 제 char_span 을 못 덮는 값은 신뢰하지 않는다(직렬화 사고 방어).
+    if original is not None and original[0] <= char_span[0] and original[1] >= char_span[1]:
+        return original
+    return char_span
+
+
+def _chunk_alias_spans(chunk) -> list[tuple[str, int, int]]:
+    """이 청크가 대표하는 다른 자리들 — dedup 이 버린 쌍둥이의 (doc_id, start, end).
+
+    dedup 은 본문 완전일치만 버리므로 버려진 글자는 이 청크 안에 그대로 살아 있고,
+    임베딩도 같아 그 내용을 겨냥한 질의는 이 청크를 대신 집는다. 그래서 이 청크가
+    검색됐다면 버려진 자리의 근거도 실제로 컨텍스트에 들어간 것이다. 좌표만 보던
+    판정은 그 자리를 빈 채로 두어, 근거를 다 본 답을 span_recall 0 으로 떨어뜨렸다.
+
+    doc_id 를 함께 싣는 이유: 문서 간 dedup 이라 쌍둥이가 다른 문서에 있을 수 있다.
+    호출부는 반드시 여기 적힌 doc_id 밑에 넣어야 한다(청크 제 doc_id 가 아니다).
+
+    original_char_span 처럼 '제 char_span 을 덮는가'로는 검증할 수 없다 — 다른 자리라
+    겹치지 않는 게 정상이다. 대신 길이로 거른다: 본문이 같으니 트림 전 구간은 적어도
+    이 청크의 텍스트 길이만큼은 돼야 한다.
+    """
+    raw = getattr(chunk, "duplicate_spans", None)
+    if not raw and isinstance(getattr(chunk, "metadata", None), dict):
+        raw = chunk.metadata.get("duplicate_spans")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    text_len = len(getattr(chunk, "text", "") or "")
+    out: list[tuple[str, int, int]] = []
+    for entry in raw:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            continue
+        doc_id = entry[0]
+        span = _valid_span(entry[1:])
+        if not isinstance(doc_id, str) or span is None:
+            continue
+        if span[1] - span[0] < text_len:
+            continue
+        out.append((doc_id, span[0], span[1]))
+    return out
+
+
+def _span_is_covered(start: int, end: int, positions: list[tuple[int, int]]) -> bool:
+    """[start, end) 가 positions 의 합집합으로 빈틈없이 덮이는지."""
+    intersections = sorted(
+        (max(start, c_start), min(end, c_end))
+        for c_start, c_end in positions
+        if c_start < end and c_end > start
+    )
+    cursor = start
+    for covered_start, covered_end in intersections:
+        if covered_start > cursor:      # 틈 발견 → 덮지 못함
+            break
+        cursor = max(cursor, covered_end)
+        if cursor >= end:
+            break
+    return cursor >= end
+
+
 def span_recall_at_k(
     gold_spans: list[dict],
     retrieved_chunk_ids: list[str],
@@ -261,6 +355,10 @@ def span_recall_at_k(
     한 청크가 span 전체를 포함해도 성공이고, 여러 검색 청크의 좌표 합집합이
     빈틈없이 span을 덮어도 성공이다. 청크 좌표가 없어 계산할 수 없는 legacy
     환경에서는 None을 반환해 호출부가 기존 chunk-id Recall로 폴백하게 한다.
+
+    좌표는 _chunk_coverage_span(트림 전 경계 우선)을 쓴다 — 청크 사이 공백 틈이
+    gold span 을 갈라 0점이 되던 문제(issue #100) 때문이다. 청크가 dedup 으로 버린
+    쌍둥이를 대표하면 그 자리(_chunk_alias_spans)도 제 좌표와 같이 얹는다.
     """
 
     valid_spans: list[tuple[str, int, int]] = []
@@ -291,29 +389,23 @@ def span_recall_at_k(
     for chunk in chunks:
         doc_id = getattr(chunk, "doc_id", None)
         chunk_id = getattr(chunk, "chunk_id", None)
-        raw = getattr(chunk, "char_span", None)
-        metadata = getattr(chunk, "metadata", None)
-        if raw is None and isinstance(metadata, dict):
-            raw = metadata.get("char_span")
-        if (
-            not isinstance(raw, (list, tuple))
-            or len(raw) != 2
-            or isinstance(raw[0], bool)
-            or isinstance(raw[1], bool)
-            or not isinstance(raw[0], int)
-            or not isinstance(raw[1], int)
-            or raw[0] < 0
-            or raw[1] <= raw[0]
-        ):
+        position = _chunk_coverage_span(chunk)
+        if position is None:
             if doc_id in gold_doc_ids and chunk_id in retrieved:
                 retrieved_gold_chunk_without_position = True
             continue
         if not isinstance(doc_id, str):
             continue
-        position = (raw[0], raw[1])
         all_positions.setdefault(doc_id, []).append(position)
         if chunk_id in retrieved:
             retrieved_positions.setdefault(doc_id, []).append(position)
+        # 별칭은 이 청크가 아니라 쌍둥이가 있던 문서 밑으로 들어간다.
+        for alias_doc, alias_start, alias_end in _chunk_alias_spans(chunk):
+            all_positions.setdefault(alias_doc, []).append((alias_start, alias_end))
+            if chunk_id in retrieved:
+                retrieved_positions.setdefault(alias_doc, []).append(
+                    (alias_start, alias_end)
+                )
 
     # gold 문서 좌표가 없거나 검색된 gold 문서 청크의 좌표가 일부라도 빠지면
     # span 기반 0점으로 단정하지 않고 기존 chunk-id Recall로 폴백한다.
@@ -322,22 +414,11 @@ def span_recall_at_k(
     ):
         return None
 
-    covered = 0
-    for doc_id, start, end in valid_spans:
-        intersections = sorted(
-            (max(start, c_start), min(end, c_end))
-            for c_start, c_end in retrieved_positions.get(doc_id, [])
-            if c_start < end and c_end > start
-        )
-        cursor = start
-        for covered_start, covered_end in intersections:
-            if covered_start > cursor:
-                break
-            cursor = max(cursor, covered_end)
-            if cursor >= end:
-                break
-        if cursor >= end:
-            covered += 1
+    covered = sum(
+        1
+        for doc_id, start, end in valid_spans
+        if _span_is_covered(start, end, retrieved_positions.get(doc_id, []))
+    )
     return covered / len(valid_spans)
 
 
@@ -484,6 +565,13 @@ def _gold_span_boundary_analysis(record: EvalRecord):
       boundary_split 단일 청크엔 안 들어가지만 인접 청크들의 합집합이 빈틈없이 덮음 → 경계에 잘림
       uncovered      합쳐도 못 덮음(틈 있음/겹치는 청크 없음) → 누락
     청크 좌표가 없는 환경은 미확정(None).
+
+    좌표는 span_recall_at_k 과 같은 _chunk_coverage_span·_chunk_alias_spans 를 쓴다 —
+    둘이 다른 좌표를 보면 "recall 은 0인데 경계 분석은 contained" 같은 모순이 생긴다.
+
+    uncovered 는 '코퍼스가 그 구간을 정말 안 담고 있다'만 남는다. 트림 틈은
+    original_char_span 이, dedup 으로 청크가 빠진 자리는 별칭이 메꾸기 때문이다.
+    그래서 여기에 청킹 라벨을 붙이지 않는다 — 청킹으로 고칠 수 있는 원인이 아니다.
     """
     if not _ctx.chunks:
         return None
@@ -494,11 +582,13 @@ def _gold_span_boundary_analysis(record: EvalRecord):
             return None
         chunks_by_doc: dict[str, list[tuple[int, int]]] = {}
         for chunk in _ctx.chunks:
-            position = _chunk_char_span(chunk)
+            position = _chunk_coverage_span(chunk)
             doc_id = getattr(chunk, "doc_id", None)
             if position is None or not isinstance(doc_id, str):
                 continue
             chunks_by_doc.setdefault(doc_id, []).append(position)
+            for alias_doc, alias_start, alias_end in _chunk_alias_spans(chunk):
+                chunks_by_doc.setdefault(alias_doc, []).append((alias_start, alias_end))
         for positions in chunks_by_doc.values():
             positions.sort()
 
@@ -512,20 +602,8 @@ def _gold_span_boundary_analysis(record: EvalRecord):
                 contained_count += 1
                 continue
 
-            # span 과 겹치는 조각만 모아 좌표순으로 훑으며 빈틈 없이 이어지는지 본다.
-            intersections = sorted(
-                (max(start, c_start), min(end, c_end))
-                for c_start, c_end in positions
-                if c_start < end and c_end > start
-            )
-            cursor = start
-            for covered_start, covered_end in intersections:
-                if covered_start > cursor:   # 틈 발견 → 덮지 못함
-                    break
-                cursor = max(cursor, covered_end)
-                if cursor >= end:
-                    break
-            if intersections and cursor >= end:
+            overlapping = any(c_start < end and c_end > start for c_start, c_end in positions)
+            if overlapping and _span_is_covered(start, end, positions):
                 split_count += 1
             else:
                 uncovered_count += 1
@@ -547,6 +625,11 @@ def _gold_chunk_evidence_density(record: EvalRecord):
     chunking_underchunking 과 context_noise_interference 를 가르는 신호다.
     gold 를 안 담은 청크는 분모에서 뺀다(그건 top_k·리랭커 문제지 청크 크기 문제가 아니다).
     반환: 0~1 / 좌표·span 없으면 None.
+
+    좌표는 _chunk_char_span(트림된 쪽)을 쓴다 — _chunk_coverage_span 과 일부러 다르다.
+    여기 분모는 "청크가 실제로 담고 있는 본문의 크기"라, 트림된 공백까지 세면 밀도가
+    실제보다 낮게 나와 underchunking 으로 오진한다. 커버리지 판정(span_recall_at_k,
+    _gold_span_boundary_analysis)만 트림 전 좌표를 쓴다.
     """
     if not _ctx.chunks:
         return None
@@ -610,6 +693,11 @@ def _oversized_gold_spans(record: EvalRecord):
     청크 i 가 [i·(c-o), i·(c-o)+c) 를 덮으므로 담김 가능 조건이 L <= c 이기 때문이다(기하 사실).
     그래서 처방이 overlap 이 아니라 chunk_size 증가다 — chunking_overchunking 판별.
     반환: {"oversized_count", "max_chunk_len", "max_span_len"} / 재료 없으면 None.
+
+    좌표는 _chunk_char_span(트림된 쪽)을 쓴다 — _chunk_coverage_span 과 일부러 다르다.
+    max_chunk_len 은 chunk_size 와 견줄 값이라 청크가 실제로 담은 길이여야 한다.
+    트림 전 좌표는 섹션 사이 공백까지 품어 청크를 실제보다 크게 보이게 만들고,
+    그러면 담을 수 없는 span 을 담을 수 있다고 판정해 처방이 뒤집힌다.
     """
     if not _ctx.chunks:
         return None

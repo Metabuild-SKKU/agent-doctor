@@ -31,6 +31,7 @@ from agents.index.qdrant_store import (
     delete_document_chunks,
     embed,
     ensure_collection,
+    query_embedding_config_error,
     hybrid_search,
     keyword_search,
     rerank_with_status,
@@ -168,6 +169,8 @@ def _chunk_to_dict(chunk: Chunk | dict) -> dict:
             "page": chunk.get("page"),
             "section": chunk.get("section"),
             "char_span": chunk.get("char_span"),
+            "original_char_span": chunk.get("original_char_span"),
+            "duplicate_spans": chunk.get("duplicate_spans"),
             "token_count": chunk.get("token_count"),
             "parent_id": chunk.get("parent_id"),
             "hash": chunk.get("hash"),
@@ -182,6 +185,8 @@ def _chunk_to_dict(chunk: Chunk | dict) -> dict:
         "page": chunk.page,
         "section": chunk.section,
         "char_span": chunk.char_span,
+        "original_char_span": chunk.original_char_span,
+        "duplicate_spans": chunk.duplicate_spans,
         "token_count": chunk.token_count,
         "parent_id": chunk.parent_id,
         "hash": chunk.hash,
@@ -220,6 +225,16 @@ def _chunk_from_dict(data: dict) -> Chunk:
     span = data.get("char_span")
     if isinstance(span, list):
         span = tuple(span)
+    original_span = data.get("original_char_span")
+    if original_span is None:
+        # 이 필드 이전에 색인된 청크 — char_span 으로 떨어져 기존과 같이 동작한다.
+        original_span = (data.get("metadata") or {}).get("original_char_span")
+    if isinstance(original_span, list):
+        original_span = tuple(original_span)
+    duplicate_spans = data.get("duplicate_spans")
+    if not duplicate_spans:
+        # 필드가 없는 경로(qdrant payload·chunks.json)는 metadata 에서 복원한다.
+        duplicate_spans = (data.get("metadata") or {}).get("duplicate_spans")
     return Chunk(
         chunk_id=data.get("chunk_id", ""),
         doc_id=data.get("doc_id", ""),
@@ -227,6 +242,8 @@ def _chunk_from_dict(data: dict) -> Chunk:
         page=data.get("page"),
         section=data.get("section"),
         char_span=span,
+        original_char_span=original_span,
+        duplicate_spans=[list(s) for s in duplicate_spans] if duplicate_spans else [],
         token_count=data.get("token_count"),
         parent_id=data.get("parent_id"),
         hash=data.get("hash"),
@@ -401,6 +418,8 @@ class Retriever:
                     "text": chunk.get("text", ""),
                     "section": chunk.get("section"),
                     "char_span": chunk.get("char_span"),
+                    "original_char_span": chunk.get("original_char_span"),
+                    "duplicate_spans": chunk.get("duplicate_spans"),
                     "token_count": chunk.get("token_count"),
                     "parent_id": chunk.get("parent_id"),
                     "hash": chunk.get("hash"),
@@ -476,6 +495,13 @@ class Retriever:
         fallback_used = self.client is None
 
         if self.client is not None:
+            # 설정 오류는 폴백 대상이 아니다. 아래 except 가 잡는 건 "API 가 잠깐
+            # 흔들린다" 이고 그건 keyword 로 내리는 게 맞지만, 키를 안 넣은 실행까지
+            # 같이 흡수하면 모든 질의가 영구히 keyword 로 돌면서 증상은 "검색 품질이
+            # 좀 나쁘다" 로만 보인다. try 밖에서 먼저 끊는다.
+            config_error = query_embedding_config_error()
+            if config_error:
+                raise RuntimeError(f"[Retriever] {config_error}")
             try:
                 query_vector = embed(
                     query,

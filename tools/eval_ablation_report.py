@@ -9,11 +9,19 @@ from __future__ import annotations
 import argparse
 import ast
 import csv
+import os
 import re
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# action 축 표기를 레포 표준 canonical 경로로 맞추기 위해 optimize 쪽 매핑을 쓴다.
+# 여기 복제해 두면 config_mapper 가 바뀔 때 조용히 갈라진다.
+from agents.optimize.config_mapper import canonicalize_path
 
 
 DEFAULT_OUTPUT_DIR = Path("output/eval_ablation")
@@ -31,43 +39,67 @@ KNOWN_LABELS = {
     "retrieval_reranker_demotion",
     "retrieval_semantic_mismatch",
 }
+# action 은 "<축>:<연산>" 이고, 축은 레포 표준인 canonical 경로(retriever.top_k)로
+# 적는다 — tests/test_action_inventory.py 가 고정한 어휘와 같은 네임스페이스다.
+# 로그에 찍히는 건 state.index_config 의 flat 키(top_k)라 유도 경로에서
+# canonicalize_path 로 흡수한다. 안 그러면 같은 축이 표기만 달라 두 행으로 갈린다.
+#
+# 연산은 catalog 의 derive_operation 보다 잘게 쓴다. catalog 는 값이 상수가 아니면
+# 전부 replace 라 markdown_recursive 와 recursive_sentence 가 한 칸으로 합쳐지는데,
+# 이 리포트는 그 둘을 비교하려고 만든 표다.
 PRESCRIPTION_ACTIONS = {
-    "context_compression": "context_compression:enable",
+    "context_compression": "context.compression.enabled:enable",
     "checklist_review_step": "answer_checklist_review:enable",
     "completeness_prompt": "generation.completeness_mode:enable",
-    "decrease_chunk_size": "chunk_size:decrease",
-    "decrease_top_k": "top_k:decrease",
-    "dynamic_top_k": "top_k:increase",
+    "decrease_chunk_size": "chunker.chunk_size:decrease",
+    "decrease_top_k": "retriever.top_k:decrease",
+    "disable_reranker": "reranker.enabled:disable",
+    "dynamic_top_k": "retriever.top_k:increase",
     "enable_adaptive_retrieval": "adaptive_retrieval:enable",
     "enable_bridge_entity_verifier": "bridge_entity_verifier:enable",
     "enable_calculation_check": "calculation_check:enable",
-    "enable_hybrid": "use_hybrid:enable",
-    "enable_mmr": "mmr:enable",
+    "enable_hybrid": "retriever.search_type:enable",
+    "enable_mmr": "retriever.mmr:enable",
     "enable_noise_filter": "noise_filter:enable",
     "enable_query_decomposition": "query_rewrite:decompose",
-    "enable_reranker": "use_reranker:enable",
+    "enable_reranker": "reranker.enabled:enable",
     "expand_bridge_entity_query": "bridge_entity_expansion:enable",
     "expand_query": "query_rewrite:expand",
     "force_hop_evidence_binding": "answer_format:cot_chained",
-    "increase_chunk_overlap": "chunk_overlap:increase",
-    "increase_chunk_size": "chunk_size:increase",
-    "increase_top_k": "top_k:increase",
+    "increase_chunk_overlap": "chunker.chunk_overlap:increase",
+    "increase_chunk_size": "chunker.chunk_size:increase",
+    "increase_top_k": "retriever.top_k:increase",
     "llm_verification_pass": "verifier_on:enable",
     "lower_temperature": "generation.temperature:decrease",
+    "relax_abstention": "generation.abstention_relaxed:enable",
     "reorder_context_edges": "context_ordering:most_relevant_edges",
     "require_citation": "generation.require_citation:enable",
     "require_numeric_citation": "numeric_citation_required:enable",
     "restate_question": "generation.restate_question:enable",
-    "shrink_chunk_size": "chunk_size:decrease",
+    "shrink_chunk_size": "chunker.chunk_size:decrease",
     "strengthen_abstention": "generation.abstention_strict:enable",
     "strict_conflict_prompt": "conflict_resolution_prompt:prefer_high_confidence_evidence",
-    "swap_embedding_model": "embedding_model:change",
+    "swap_embedding_model": "embedding.model:change",
     "swap_reranker_model": "reranker_model:change",
-    "switch_to_markdown_recursive": "chunk_strategy:markdown_recursive",
-    "switch_to_recursive_sentence": "chunk_strategy:recursive_sentence",
+    "switch_to_markdown_recursive": "chunker.strategy:markdown_recursive",
+    "switch_to_recursive_sentence": "chunker.strategy:recursive_sentence",
     "tighten_reranker_threshold": "reranker_threshold:increase",
     "upgrade_generation_model": "generation.model:upgrade",
-    "widen_rerank_candidates": "rerank_candidates:increase",
+    "widen_rerank_candidates": "reranker.candidate_count:increase",
+}
+
+# patch 값이 고정 상수가 아니라 실측치로 정해지는 처방. 표에 박으면
+# OptimizeAction.canonical_action 이 고정값으로 실제 config 변화를 덮어쓰므로
+# before/after 유도에 맡긴다.
+#
+# 주의: "롤백이면 방향이 반대로 나온다"는 여기 들어올 사유가 아니다. 그건 표에
+# 남아 있는 enable_reranker 등 모든 항목에 똑같이 걸리는 표 전체의 성질이라
+# 특정 처방을 가르는 기준이 못 된다.
+DERIVED_PRESCRIPTIONS = {
+    # patch 가 retriever.hybrid_dense_weight="shift_to_favored_channel" 이라
+    # Eval 이 실측한 우세 채널에 따라 0.7->0.8(dense) / 0.7->0.6(lexical) 로
+    # 값 자체가 갈린다. 값이 숫자라 _direction() 이 방향을 바르게 뽑는다.
+    "rebalance_hybrid_weight",
 }
 
 SCORE_LINE_RE = re.compile(
@@ -132,9 +164,9 @@ class OptimizeAction:
         for key, before_value in before_items:
             if key in after_by_key:
                 direction = _direction(before_value, after_by_key[key])
-                return f"{key}:{direction}"
+                return f"{canonicalize_path(key)}:{direction}"
         if after_items:
-            return f"{after_items[0][0]}:set"
+            return f"{canonicalize_path(after_items[0][0])}:set"
         return self.prescription
 
 
@@ -680,11 +712,11 @@ def _suggestions(logs: list[ParsedLog]) -> list[str]:
     suggestions = []
     if total["retrieval_low_rank"] or total["missed_gold_ranks"]:
         suggestions.append(
-            "- If retrieval_low_rank dominates, compare action rows for top_k, rerank_candidates, and reranker.enabled before changing defaults."
+            "- If retrieval_low_rank dominates, compare action rows for retriever.top_k, reranker.candidate_count, and reranker.enabled before changing defaults."
         )
     if total["context_noise_interference"]:
         suggestions.append(
-            "- If context_noise_interference remains high, compare context_compression/MMR with recall@k changes to avoid hiding gold context."
+            "- If context_noise_interference remains high, compare context.compression.enabled/retriever.mmr with recall@k changes to avoid hiding gold context."
         )
     if total["bad_gold_answer"]:
         suggestions.append(
