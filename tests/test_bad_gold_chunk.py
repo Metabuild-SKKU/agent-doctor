@@ -60,9 +60,35 @@ class BadGoldChunkLabelTest(unittest.TestCase):
         # 실제 답도 틀리면 골드 문제로 단정 못 함(진짜 실패 영역) → 침묵
         self.assertIsNone(diagnose.bad_gold_chunk(_rec(f1=0.0, oracle_f1=0.0, faith=1.0)))
 
-    def test_silent_when_answer_ungrounded(self):
-        # faith 낮음 = 답이 검색 근거에 안 붙음(parametric 등) → 골드 단정 불가 → 침묵
-        self.assertIsNone(diagnose.bad_gold_chunk(_rec(f1=1.0, oracle_f1=0.0, faith=0.0)))
+    def test_ungrounded_answer_demotes_instead_of_erasing(self):
+        """faith 가 **측정됐는데 미달**이면 라벨을 지우지 않고 예비로 남긴다(2026-08-07).
+
+        앞의 두 조건(f1 통과 · 오라클 실패)은 글자 비교라 재실행해도 같고, 그 둘만으로
+        "이 골드로는 이 답이 안 나온다"가 이미 선다. faith 는 **왜** 그런지(골드 오라벨 vs
+        파라미터 기억)만 가르므로 라벨의 존재가 아니라 확정/예비를 정해야 한다.
+
+        예전엔 여기서 None 이라 라벨이 통째로 사라졌고, 실측에서 그 자리를
+        retrieval_rerank_candidate_miss 가 차지해 엉뚱한 처방까지 만들었다
+        (output/logs/corpus_20260804_103059.txt, probe_qa_4195 반복 3).
+        """
+        finding = diagnose.bad_gold_chunk(_rec(f1=1.0, oracle_f1=0.0, faith=0.0))
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding.label, "bad_gold_chunk")
+        self.assertFalse(finding.confirmed)
+
+    def test_grounded_answer_stays_confirmed(self):
+        """faith 가 문턱 이상이면 예전과 같이 확정이다 — 정상 경로는 안 바뀐다."""
+        finding = diagnose.bad_gold_chunk(_rec(f1=1.0, oracle_f1=0.0, faith=1.0))
+        self.assertIsNotNone(finding)
+        self.assertTrue(finding.confirmed)
+
+    def test_silent_when_faithfulness_is_unmeasured(self):
+        """미측정(DEEP 미만)은 예비로도 세우지 않는다 — 측정 없이 주장하면 안 된다.
+
+        여기서 예비를 세우면 RAGAS 를 안 켠 실행 **전체**가 검색 진단을 잃는다
+        (예비가 검색 슬롯을 닫으므로).
+        """
+        self.assertIsNone(diagnose.bad_gold_chunk(_rec(f1=1.0, oracle_f1=0.0, faith=None)))
 
     def test_silent_when_no_gold_context(self):
         # 골드 컨텍스트가 없으면(코퍼스 결손 등) 청크 오라벨로 단정 불가 → 침묵
@@ -89,6 +115,57 @@ class DiagnoseShortCircuitTest(unittest.TestCase):
              patch.object(diagnose, "_compute_ragas_oracle"):
             findings = diagnose.diagnose(rec, mode=int(Mode.DEEP))
         self.assertEqual([f.label for f in findings], ["bad_gold_chunk"])
+
+    def test_preliminary_still_blocks_the_false_retrieval_cause(self):
+        """실측 사고의 회귀 테스트 — faith 가 튀어도 엉뚱한 검색 라벨이 붙으면 안 된다.
+
+        output/logs/corpus_20260804_103059.txt 의 probe_qa_4195 재현이다. 답도 검색 결과도
+        5회 내내 같았는데 반복 3 에서만 faithfulness 가 1.000→0.000 으로 튀었고, 그 한 번에
+        bad_gold_chunk 가 사라지면서 retrieval_rerank_candidate_miss 가 자리를 차지해
+        처방(rerank_candidates 20→22)까지 만들어 최종 config 에 남았다.
+
+        검색 라벨을 막는 근거는 faith 와 무관하다 — 오라클이 실패했다는 건 그 골드에 답이
+        없다는 뜻이고, 답 없는 청크를 "왜 안 가져왔나" 고 탓하는 건 이미 거짓이다.
+        """
+        rec = _rec(f1=1.0, oracle_f1=0.0, faith=0.0, recall=0.0)   # faith 측정됐고 미달
+        with patch.object(diagnose, "_compute_metrics"), \
+             patch.object(diagnose, "_compute_ragas_real"), \
+             patch.object(diagnose, "_compute_ragas_oracle"):
+            labels = [f.label for f in diagnose.diagnose(rec, mode=int(Mode.DEEP))]
+
+        self.assertIn("bad_gold_chunk", labels)                     # 라벨이 사라지지 않는다
+        self.assertFalse([l for l in labels if l.startswith("retrieval_")],
+                         f"검색 라벨이 붙으면 안 된다: {labels}")
+
+    def test_preliminary_label_is_marked_unconfirmed_in_the_result(self):
+        """결과에 실리되 예비로 표시돼야 한다 — 확정으로 실리면 처방 가중치를 다 가져간다."""
+        rec = _rec(f1=1.0, oracle_f1=0.0, faith=0.0, recall=0.0)
+        with patch.object(diagnose, "_compute_metrics"), \
+             patch.object(diagnose, "_compute_ragas_real"), \
+             patch.object(diagnose, "_compute_ragas_oracle"):
+            findings = diagnose.diagnose(rec, mode=int(Mode.DEEP))
+        gold = [f for f in findings if f.label == "bad_gold_chunk"]
+        self.assertEqual(len(gold), 1)
+        self.assertFalse(gold[0].confirmed)
+
+    def test_preliminary_does_not_swallow_generation_evidence(self):
+        """예비는 검색만 막는다 — 생성 슬롯은 살려 둔다.
+
+        오라클 트랙이 스스로 근거 없이 답한 경우는 골드가 아니라 **생성기**에 대한 증거라,
+        미확인 상태에서 그것까지 지우면 측정된 신호를 추측으로 덮는 셈이다.
+        """
+        sentinel = Finding(finding_id="gh", type="generation_failure", severity="warning",
+                           description="d", label="generation_hallucination",
+                           confirmed=True, affected_probes=["p1"])
+        rec = _rec(f1=1.0, oracle_f1=0.0, faith=0.0, recall=0.0)
+        with patch.object(diagnose, "_compute_metrics"), \
+             patch.object(diagnose, "_compute_ragas_real"), \
+             patch.object(diagnose, "_compute_ragas_oracle"), \
+             patch.object(diagnose, "_generation_failed", return_value=True), \
+             patch.object(diagnose, "_pick", return_value=sentinel):
+            labels = [f.label for f in diagnose.diagnose(rec, mode=int(Mode.DEEP))]
+        self.assertIn("bad_gold_chunk", labels)
+        self.assertIn("generation_hallucination", labels)
 
     def test_corpus_gap_preempts_bad_gold_chunk(self):
         # 리뷰 지적(Medium): 골드가 코퍼스에 없으면(corpus_gap) 단락하지 않고 양보한다 —
@@ -149,9 +226,144 @@ class GoldLabelingErrorScoringTest(unittest.TestCase):
         # 거짓 실패(골드 청크 오라벨)는 점수에서 빠지므로 두 종합점수가 같아야 한다.
         self.assertEqual(only_good, with_bad)
 
-    def test_unconfirmed_chunk_error_not_excluded(self):
+    def test_unconfirmed_chunk_error_is_also_excluded(self):
+        """예비도 점수에서 뺀다(2026-08-07). 확정만 빼면 **제외 여부가 심판 노이즈를 탄다.**
+
+        실측에서 probe_qa_4195 는 5회 중 4회 확정 bad_gold_chunk 라 제외됐고,
+        faithfulness 가 1.000→0.000 으로 튄 1회만 다른 라벨이 붙어 실패로 집계됐다.
+        같은 probe 가 회차마다 빠졌다 들어왔다 하면 그것만으로 종합점수가 흔들린다.
+
+        제외의 근거는 결정론적인 쪽에 있다 — _f1_ok(답이 맞았다)와 not _oracle_ok
+        (골드만으론 못 맞힌다)는 재실행해도 같은 값이다. faithfulness 는 왜인지만 가르고,
+        그건 라벨의 확정/예비로 표시된다.
+        """
         rec = self._labeled("bad_gold_chunk", confirmed=False)
-        self.assertFalse(report.is_gold_labeling_error(rec))   # 예비면 제외 대상 아님
+        self.assertTrue(report.is_gold_labeling_error(rec))
+
+    def test_confirmed_chunk_error_still_excluded(self):
+        rec = self._labeled("bad_gold_chunk", confirmed=True)
+        self.assertTrue(report.is_gold_labeling_error(rec))
+
+    def test_unrelated_label_is_not_excluded(self):
+        """제외는 골드 오류 라벨에만 걸린다 — 조건을 넓히면서 다른 실패까지 새면 안 된다."""
+        rec = self._labeled("retrieval_low_rank", confirmed=True)
+        self.assertFalse(report.is_gold_labeling_error(rec))
+
+    def test_generation_label_survives_but_the_probe_still_leaves_scoring(self):
+        """예비 골드오류 + 생성 라벨이 같이 붙은 probe — **라벨은 남고 점수에서는 빠진다.**
+
+        비대칭이라 우연처럼 보일 수 있어 의도를 못박는다(리뷰 지적).
+
+          진단 단계: 예비 bad_gold_chunk 는 검색 슬롯만 막고 생성 증거는 살려 둔다.
+                     오라클 트랙이 스스로 근거 없이 답한 건 골드가 아니라 생성기에 대한
+                     증거라, 미확인 상태에서 그것까지 지우면 측정된 신호를 추측으로 덮는다.
+          점수 단계: 그래도 이 probe 는 통째로 빠진다. 결정론적 신호 둘(_f1_ok ·
+                     not _oracle_ok)이 이미 "이 골드로는 이 답이 안 나온다"를 세웠으므로
+                     평가셋 결함 가능성이 선 상태고, 그런 probe 를 점수에 넣으면 고칠 수
+                     없는 페널티가 된다.
+
+        즉 "생성 라벨은 남지만 점수에는 반영되지 않는다" 가 의도다 — 진단(무엇이
+        일어났나)과 채점(누구 책임인가)이 다른 질문이기 때문이다.
+        """
+        probe = Probe(probe_id="p", question="q", source="taxonomy", ground_truth="gt")
+        rec = EvalRecord(probe=probe)
+        rec.f1_score, rec.recall_at_k = 0.0, 1.0
+        rec.findings = [
+            Finding(finding_id="p1", type="gap", severity="warning", description="d",
+                    label="bad_gold_chunk", confirmed=False, affected_probes=["p"]),
+            Finding(finding_id="p2", type="generation_failure", severity="warning",
+                    description="d", label="generation_hallucination",
+                    confirmed=True, affected_probes=["p"]),
+        ]
+
+        # 라벨은 남는다 — 진단 결과에서 생성 증거가 지워지지 않는다.
+        self.assertIn("generation_hallucination", [f.label for f in rec.findings])
+        # 그런데도 점수에서는 빠진다.
+        self.assertTrue(report.is_gold_labeling_error(rec))
+        # 답 재생성 대상은 아니다 — 정답 텍스트는 멀쩡하다.
+        self.assertFalse(report.is_bad_gold_probe(rec))
+
+    def test_excluded_probe_does_not_feed_the_prescription_path(self):
+        """채점에서 뺀 probe 는 **처방도 만들지 않는다**(2026-08-10, 리뷰 지적).
+
+        예전에는 report.findings 를 records 전체로 만들어, 골드가 의심스러워 채점에서 뺀
+        probe 의 확정 라벨이 planner 로 넘어가 처방을 만들었다. 그런데 그 probe 는
+        composite 에 없어 **KEEP/ROLLBACK 게이트가 효과를 볼 수 없다** — 처방은 하는데
+        측정은 못 하는 상태였다.
+
+        골드 라벨 자체는 남는다: 그게 이 probe 를 사람 검수로 보내는 통로이고
+        (report_view 의 "골드 청크 재지정 필요"), D그룹이라 자동 처방 대상도 아니다.
+        """
+        probe = Probe(probe_id="p", question="q", source="taxonomy", ground_truth="gt")
+        rec = EvalRecord(probe=probe)
+        rec.f1_score, rec.recall_at_k = 0.0, 1.0
+        rec.findings = [
+            Finding(finding_id="p1", type="gap", severity="warning", description="d",
+                    label="bad_gold_chunk", confirmed=False, affected_probes=["p"]),
+            Finding(finding_id="p2", type="generation_failure", severity="warning",
+                    description="d", label="generation_hallucination",
+                    confirmed=True, affected_probes=["p"]),
+        ]
+
+        rep = report.build_report([rec], 0, mode=1)
+        labels = [f.label for f in rep.findings]
+
+        self.assertEqual(labels, ["bad_gold_chunk"])          # 처방 경로에서 빠짐
+        self.assertIn("generation_hallucination",             # 관측은 남는다
+                      rep.findings_summary["confirmed_labels"])
+
+    def test_a_scorable_probe_keeps_all_of_its_findings(self):
+        """제외는 골드 오류 probe 에만 걸린다 — 멀쩡한 probe 의 라벨까지 새면 안 된다."""
+        probe = Probe(probe_id="clean", question="q", source="taxonomy", ground_truth="gt")
+        rec = EvalRecord(probe=probe)
+        rec.f1_score, rec.recall_at_k = 0.0, 0.5
+        rec.findings = [
+            Finding(finding_id="c1", type="generation_failure", severity="warning",
+                    description="d", label="generation_hallucination",
+                    confirmed=True, affected_probes=["clean"]),
+            Finding(finding_id="c2", type="retrieval_failure", severity="warning",
+                    description="d", label="retrieval_low_rank",
+                    confirmed=True, affected_probes=["clean"]),
+        ]
+
+        labels = {f.label for f in report.build_report([rec], 0, mode=1).findings}
+
+        self.assertEqual(labels, {"generation_hallucination", "retrieval_low_rank"})
+
+    def test_preliminary_bad_gold_answer_is_not_swept_along(self):
+        """예비 제외는 **검토한 라벨에만** 적용한다(리뷰 지적).
+
+        2026-08-07 변경이 confirmed 요구를 _GOLD_ERROR_LABELS 전체에서 뺐는데, 실제로
+        검토한 건 bad_gold_chunk 뿐이었다. bad_gold_answer 는 현재 생산자 둘 다
+        confirmed=True 라 무해하지만, 나중에 예비를 만드는 코드가 붙으면 아무 논의 없이
+        채점에서 빠진다. 검토한 범위만 넓혀 둔 것을 고정한다.
+        """
+        self.assertFalse(report.is_gold_labeling_error(
+            self._labeled("bad_gold_answer", confirmed=False)))
+        self.assertTrue(report.is_gold_labeling_error(
+            self._labeled("bad_gold_answer", confirmed=True)))
+        # bad_gold_chunk 는 예비여도 제외된다(이 PR 의 본래 목적).
+        self.assertTrue(report.is_gold_labeling_error(
+            self._labeled("bad_gold_chunk", confirmed=False)))
+
+    def test_generation_label_does_not_drag_the_composite_down(self):
+        """위 비대칭을 종합점수로도 확인한다 — 생성 라벨이 붙어도 점수는 안 움직인다."""
+        good = [self._good(f"g{i}") for i in range(3)]
+        probe = Probe(probe_id="mixed", question="q", source="taxonomy", ground_truth="gt")
+        mixed = EvalRecord(probe=probe)
+        mixed.f1_score, mixed.recall_at_k = 0.0, 1.0
+        mixed.findings = [
+            Finding(finding_id="p1", type="gap", severity="warning", description="d",
+                    label="bad_gold_chunk", confirmed=False, affected_probes=["mixed"]),
+            Finding(finding_id="p2", type="generation_failure", severity="warning",
+                    description="d", label="generation_hallucination",
+                    confirmed=True, affected_probes=["mixed"]),
+        ]
+
+        only_good = report.build_report(good, 0, mode=1).composite_score["total"]
+        with_mixed = report.build_report(good + [mixed], 0, mode=1).composite_score["total"]
+
+        self.assertEqual(only_good, with_mixed)
 
     # ── 점수 말고 '실패 집계'에서도 빠지는가 ────────────────────────
     # 제외가 build_report 의 점수 계산에만 있어서, 같은 probe 가 점수에선 빠지고 실패
