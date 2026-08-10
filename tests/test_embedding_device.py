@@ -2,6 +2,7 @@
 # sentence_transformers·torch 를 가짜로 바꿔 분기만 확인한다.
 from __future__ import annotations
 
+import os
 import sys
 import types
 import unittest
@@ -233,6 +234,75 @@ class BatchOomTests(_CacheIsolated):
         with patch.dict(sys.modules, {"torch": _fake_torch(False)}):
             with self.assertRaises(RuntimeError):
                 store._encode_batch(encoder, ["a"], 32, "cpu")
+
+
+class EncodeWindowTests(_CacheIsolated):
+    """진행률을 찍으려고 encode() 를 창(window) 단위로 나눠 부르게 된 뒤의 계약.
+
+    창 분할은 진행률 on/off 와 무관하게 항상 같아야 한다 — PROGRESS_LOG 를 껐다 켰다
+    한다고 encode() 에 들어가는 묶음이 달라지면 '출력만 바꾼다'는 약속이 깨진다."""
+
+    def test_창을_나눠도_결과는_입력_순서_그대로(self):
+        encoder = _FakeEncoder("m", "cpu")
+        texts = [f"t{i}" for i in range(100)]     # batch 4 × 8 = 32 → 창 4개
+        vectors = store._encode_batch(encoder, texts, 4, "cpu")
+        self.assertEqual(len(vectors), len(texts))
+        # _FakeEncoder 는 길이를 값으로 돌려주므로 순서가 섞이면 바로 드러난다.
+        self.assertEqual([v[0] for v in vectors], [float(len(t)) for t in texts])
+
+    def test_창_크기는_batch_size_의_정해진_배수(self):
+        encoder = _FakeEncoder("m", "cpu")
+        sizes = []
+        encoder.encode = lambda texts, batch_size=32, **kw: (
+            sizes.append(len(texts)) or [_Vec([1.0]) for _ in texts])
+        store._encode_batch(encoder, [f"t{i}" for i in range(100)], 4, "cpu")
+        window = 4 * store._ENCODE_WINDOW_BATCHES
+        full, remainder = divmod(100, window)
+        expected = [window] * full + ([remainder] if remainder else [])
+        self.assertEqual(sizes, expected)
+        self.assertEqual(sum(sizes), 100, "창을 다 합치면 입력 전체여야 한다")
+
+    def test_진행률_on_off_가_encode_호출을_바꾸지_않는다(self):
+        def _run(progress_log):
+            encoder = _FakeEncoder("m", "cpu")
+            sizes = []
+            encoder.encode = lambda texts, batch_size=32, **kw: (
+                sizes.append((len(texts), batch_size)) or [_Vec([1.0]) for _ in texts])
+            with patch.dict(os.environ, {"PROGRESS_LOG": progress_log,
+                                         "PROGRESS_INTERVAL_SEC": "0.001"}), \
+                 patch("builtins.print"):
+                store._encode_batch(encoder, [f"t{i}" for i in range(100)], 4, "cpu",
+                                    label="  [Index] 임베딩 (cpu)")
+            return sizes
+
+        self.assertEqual(_run("1"), _run("0"))
+
+    def test_텍스트가_창보다_적으면_encode_는_한_번(self):
+        """기존 동작(통째로 한 번 넘기기)이 그대로 남는 경로."""
+        encoder = _FakeEncoder("m", "cpu")
+        store._encode_batch(encoder, ["a", "b", "c"], 32, "cpu")
+        self.assertEqual(len(encoder.batch_sizes), 1)
+
+    def test_줄인_배치_크기는_다음_창에도_유지된다(self):
+        """창마다 원래 크기로 되돌리면 OOM 이 창 수만큼 반복된다."""
+        encoder = _FakeEncoder("m", "cuda")
+        seen = []
+
+        def _encode(texts, batch_size=32, **kwargs):
+            seen.append(batch_size)
+            if batch_size > 8:
+                raise RuntimeError("CUDA out of memory")
+            return [_Vec([1.0]) for _ in texts]
+
+        encoder.encode = _encode
+        with patch.dict(sys.modules, {"torch": _fake_torch(True)}), patch("builtins.print"):
+            vectors = store._encode_batch(
+                encoder, [f"t{i}" for i in range(200)], 32, "cuda")
+
+        self.assertEqual(len(vectors), 200)
+        # 32 에서 8 까지 두 번 줄인 뒤로는 다시 32 로 돌아가지 않는다.
+        self.assertEqual(seen[:3], [32, 16, 8])
+        self.assertEqual(set(seen[3:]), {8})
 
 
 class EmbedPathTests(_CacheIsolated):

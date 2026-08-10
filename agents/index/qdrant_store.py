@@ -22,6 +22,7 @@ from core.llm_clients import (
     openai_embed,
 )
 from core.llm_retry import run_with_retry
+from core import progress
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -1221,27 +1222,51 @@ def _is_cuda_oom(exc: Exception) -> bool:
     return "cuda" in message and "out of memory" in message
 
 
+# encode() 한 번에 넘기는 텍스트 수 = batch_size × 이 배수. 진행률을 찍으려면
+# encode() 가 한 번 끝나야 해서 통째로 넘기지 않고 창(window) 단위로 나눠 부른다.
+# GPU 에 실제로 올라가는 양은 batch_size 라 OOM 위험은 그대로다.
+#
+# 창 하나가 진행률 출력 간격의 하한이다 — 창이 끝나야 한 줄이 나가므로, 창이 기본
+# 주기(10초)보다 오래 걸리면 그만큼 침묵한다. 실측(batch_size 32 기준):
+#   cuda  3,880청크 67.8초 → 창 하나 약 1.1초 (주기가 걸러 10초마다 출력)
+#   cpu   1,500청크 461초  → 창 하나 약 35초  (창이 곧 출력 간격)
+# 4인 이유: cuda 는 어차피 주기에 걸려 값이 커도 손해가 없지만, GPU 가 없는 환경은
+# 창 크기가 그대로 침묵 길이가 된다. 8 로 뒀을 때 cpu 실측이 71초 간격이라 절반으로
+# 줄였다. 더 줄이면 encode() 내부의 길이 정렬 범위가 좁아져 패딩 낭비가 는다.
+_ENCODE_WINDOW_BATCHES = 4
+
+
 def _encode_batch(
     model: Any,
     texts: list[str],
     batch_size: int,
     device: str,
+    label: str | None = None,
 ) -> list[list[float]]:
     """CUDA OOM 이면 배치 크기를 절반씩 줄여 같은 모델로 재시도한다.
 
     batch_size 는 한 번에 GPU 로 올리는 양이라 OOM 의 직접 원인이고, 줄여서 다시
     하면 대개 통과한다. 1 까지 줄여도 안 되면 포기하고 올려보낸다 — 호출부가
-    CPU 로 내린다."""
+    CPU 로 내린다.
+
+    label 을 주면 창이 끝날 때마다 진행률을 센다(core/progress.py 가 주기로 거른다).
+    창 분할은 진행률을 켰는지와 무관하게 항상 같다 — PROGRESS_LOG 를 껐다 켰다 해도
+    encode() 에 들어가는 묶음이 달라지지 않아야 '출력만 바꾼다'가 성립한다.
+    축소된 batch_size 는 창을 넘어가도 유지한다. 창마다 원래 크기로 되돌리면
+    OOM 이 창 수만큼 반복된다."""
+    reporter = progress.start(label, len(texts))
     current_batch_size = batch_size
-    while True:
+    encoded: list[list[float]] = []
+    cursor = 0
+    while cursor < len(texts):
+        window = texts[cursor:cursor + current_batch_size * _ENCODE_WINDOW_BATCHES]
         try:
             vectors = model.encode(
-                texts,
+                window,
                 batch_size=current_batch_size,
                 normalize_embeddings=True,
                 show_progress_bar=False,
             )
-            return [vector.tolist() for vector in vectors]
         except Exception as exc:
             if not device.startswith("cuda") or not _is_cuda_oom(exc):
                 raise
@@ -1263,6 +1288,12 @@ def _encode_batch(
                 f"[Index] GPU 메모리 부족, 배치 크기를 {current_batch_size} 로 "
                 f"줄여 재시도합니다."
             )
+            continue    # cursor 를 안 옮겼으므로 같은 구간을 줄인 크기로 다시 탄다
+        encoded.extend(vector.tolist() for vector in vectors)
+        cursor += len(window)
+        progress.tick(reporter, len(window))
+    progress.finish(reporter)
+    return encoded
 
 
 def embed_batch(
@@ -1309,8 +1340,11 @@ def embed_batch(
         f"— 비용 0, 외부 호출 없음."
     )
 
+    # 진행률 라벨. 단건(질의 임베딩)은 셀 것이 없어 안 붙인다 — 색인의 수천 건짜리
+    # 침묵만 문제였고, /search 한 건마다 진행률이 붙으면 그게 소음이다.
+    label = f"  [Index] 임베딩 ({actual_device})" if len(texts) > 1 else None
     try:
-        return _encode_batch(model, texts, batch_size, actual_device)
+        return _encode_batch(model, texts, batch_size, actual_device, label=label)
     except Exception as exc:
         if not actual_device.startswith("cuda") or not _is_cuda_oom(exc):
             raise
@@ -1318,7 +1352,8 @@ def embed_batch(
         cpu_model, cpu_device = _load_embedding_model(model_name, "cpu")
         if cpu_model is None:
             return [_fallback_embedding(text, dimension) for text in texts]
-        return _encode_batch(cpu_model, texts, batch_size, cpu_device)
+        return _encode_batch(cpu_model, texts, batch_size, cpu_device,
+                             label="  [Index] 임베딩 (cpu 재시도)")
 
 
 def embed(

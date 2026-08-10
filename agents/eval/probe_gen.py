@@ -414,6 +414,7 @@ def _from_chunks(
         lambda chunk: _llm_generate_single_hop(chunk.text),
         targets,
         resolve_llm_concurrency(),
+        label="  [Eval] STEP1 single-hop probe 합성",
     )
     for chunk, generated in zip(targets, results):
         if len(probes) >= size:
@@ -1220,7 +1221,8 @@ def _generate_ragas_probes(
         specs.append(_plan_ragas_probe(nodes, quadrant, subtype))
 
     # 합성 단계(병렬): LLM 호출만. 실패는 태스크 안에서 None 으로 흡수(예외 무전파).
-    results = parallel_map(_synthesize_ragas_query, specs, resolve_llm_concurrency())
+    results = parallel_map(_synthesize_ragas_query, specs, resolve_llm_concurrency(),
+                           label="  [Eval] STEP1 RAGAS probe 합성")
 
     # 조립 단계(순차, plan 순서): probe_id 번호(성공분만 카운트) 규칙 보존
     probes: list[Probe] = []
@@ -1274,7 +1276,8 @@ def _generate_datamorgana_probes(
             persona=s["persona"], style="conversational",
             length="long", evol_dir="breadth",
         ),
-        specs, resolve_llm_concurrency())
+        specs, resolve_llm_concurrency(),
+        label="  [Eval] STEP1 DataMorgana probe 합성")
 
     probes: list[Probe] = []
     for spec, result in zip(specs, results):
@@ -1363,7 +1366,8 @@ def _generate_held_out_probes(chunks: list[Chunk], n: int) -> list[Probe]:
             break
         specs.append({"index": i, "node": random.choice(usable)})
     results = parallel_map(lambda s: _held_out_question(s["node"].text, s["index"]),
-                           specs, resolve_llm_concurrency())
+                           specs, resolve_llm_concurrency(),
+                           label="  [Eval] STEP1 held-out probe 합성")
 
     probes: list[Probe] = []
     for spec, question in zip(specs, results):
@@ -1465,7 +1469,8 @@ def _generate_false_premise_probes(graph: knowledge_graph.KGraph, n: int, start_
             break
         specs.append({"index": i, "node": random.choice(usable)})
     results = parallel_map(lambda s: _false_premise_question(s["node"].text),
-                           specs, resolve_llm_concurrency())
+                           specs, resolve_llm_concurrency(),
+                           label="  [Eval] STEP1 false-premise probe 합성")
 
     probes: list[Probe] = []
     for spec, question in zip(specs, results):

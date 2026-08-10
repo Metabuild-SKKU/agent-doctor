@@ -71,7 +71,12 @@ def _inner_concurrency() -> int:
     """트랙 1개 내부(지표/청크/strictness) 동시성. 기본 1(=off) — 바깥 probe×track
     병렬(EVAL_LLM_CONCURRENCY)과 곱해지면 429 폭풍이 나므로, probe 가 적어 바깥
     병렬이 놀 때만 명시적으로 켠다. 1이면 parallel_map 이 기존 순차와 동일.
-    (fused 경로에선 트랙당 호출이 1건이라 이 값이 아무 일도 하지 않는다.)"""
+    (fused 경로에선 트랙당 호출이 1건이라 이 값이 아무 일도 하지 않는다.)
+
+    이 모듈의 parallel_map 호출에는 진행률 label 을 일부러 안 붙인다 — 여기는 바깥
+    트랙 병렬(agents/eval/agent.py 의 STEP3)의 **워커 스레드 안**이라, 라벨을 붙이면
+    probe 수만큼의 리포터가 동시에 제 진행률을 찍어 줄이 뒤섞인다. 진행률은 바깥
+    한 곳(트랙 단위)에서만 세는 것이 맞다."""
     return _env_int("EVAL_RAGAS_INNER_CONCURRENCY", 1)
 
 

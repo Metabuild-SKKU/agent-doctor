@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 
 from agents.ingest.document_type import annotate_document_metadata
+from core import progress
 from core.schema import Document
 from core.state import AgentDoctorState
 
@@ -179,9 +180,23 @@ def _ingest_file(source_url: str) -> list[Document]:
 
         # 표는 페이지별로 뽑아 그 페이지 본문 뒤에 붙인다 — 페이지 span 안에 있어야
         # 청크→페이지 역산(Index 의 _page_of_span)이 표에도 맞는다.
+        # 878페이지 실측 104초 구간이라 페이지 수를 세어 진행률을 찍는다
+        # (core/progress.py 가 주기로 걸러 짧은 문서는 그대로 조용하다).
         with pdfplumber.open(path) as pdf:
-            raw_pages = [p.extract_text() for p in pdf.pages]
-            page_tables = [extract_page_tables(p) for p in pdf.pages]
+            page_count = len(pdf.pages)
+            text_progress = progress.start(f"  [Ingest] {path.name} 본문 추출", page_count)
+            raw_pages = []
+            for page in pdf.pages:
+                raw_pages.append(page.extract_text())
+                progress.tick(text_progress)
+            progress.finish(text_progress)
+
+            table_progress = progress.start(f"  [Ingest] {path.name} 표 추출", page_count)
+            page_tables = []
+            for page in pdf.pages:
+                page_tables.append(extract_page_tables(page))
+                progress.tick(table_progress)
+            progress.finish(table_progress)
 
         result = preprocess_pages(raw_pages, page_tables=page_tables)
         content = result.content
