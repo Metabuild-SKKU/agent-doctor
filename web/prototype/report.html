@@ -223,6 +223,9 @@
   .rec-q .rw { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 3px; }
   /* 매뉴얼 조치 스텝 */
   .rec-steps { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; counter-reset: recstep; }
+  /* 적용 지침 — 처방을 하나씩 적용해야 효과 귀속이 된다는 안내 */
+  .rec-note { margin-top: 10px; padding: 8px 12px; border-left: 2px solid var(--border);
+    color: var(--faint); font-size: 12px; line-height: 1.6; }
   .rec-step { display: grid; grid-template-columns: 18px 1fr; gap: 8px; font-size: 12px; }
   .rec-step::before { counter-increment: recstep; content: counter(recstep); font-family: var(--mono); font-size: 10px; color: var(--accent); width: 18px; height: 18px; border: 1px solid var(--border); border-radius: 5px; display: grid; place-items: center; }
   .rec-step .rs-act { font-weight: 500; }
@@ -360,7 +363,8 @@
   <!-- METRICS before/after -->
   <section class="section" data-section="metrics">
     <div class="section-head"><span class="idx">02</span><h2>품질 지표 · 처방 전후</h2><span class="sub">RAGAS 4개 지표</span></div>
-    <div class="metric-legend">
+    <!-- 전후 비교가 없는 모드(외부 로그 진단)에서는 renderMetrics 가 숨긴다 -->
+    <div class="metric-legend" id="metricLegend">
       <span class="k"><span class="sw" style="background:var(--faint)"></span> 처방 전</span>
       <span class="k"><span class="sw" style="background:var(--accent)"></span> 처방 후</span>
     </div>
@@ -703,8 +707,14 @@
   }
 
   /* ── metrics dumbbell ── */
-  var SCALE_MIN = 0.5, SCALE_MAX = 0.95;
-  function pos(v) { return ((v - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)) * 100; }
+  // 지표는 0~1 이다. 예전엔 0.5~0.95 로 좁혀 차이를 부풀렸는데, 그 범위를 벗어난 값이
+  // 막대 밖으로 튀어나갔다(faithfulness 1.00 → 111%, 0.4 → -22%). 눈금과 점 위치가
+  // 어긋나면 그래프가 거짓말을 하므로 전 구간을 쓰고, 그래도 안전하게 0~100 으로 자른다.
+  var SCALE_MIN = 0, SCALE_MAX = 1;
+  function pos(v) {
+    var p = ((v - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)) * 100;
+    return Math.max(0, Math.min(100, p));
+  }
   function renderMetrics(metrics) {
   var mHtml = metrics.map(function (m) {
     var pa = pos(m.after);
@@ -732,6 +742,9 @@
     '</div>';
   }).join('');
   document.getElementById('metrics').innerHTML = mHtml;
+  // 전후 비교가 없으면 '처방 전/후' 범례도 거짓말이 된다 — 점은 하나뿐이다.
+  var legend = document.getElementById('metricLegend');
+  if (legend) legend.style.display = metrics.some(function (m) { return m.single; }) ? 'none' : '';
   }
 
   /* ── course line chart ── */
@@ -907,6 +920,7 @@
           '<div class="rd">' + esc(r.desc) + '</div>' +
           (items ? '<div class="rec-items">' + items + '</div>' : '') +
           (steps ? '<div class="rec-steps">' + steps + '</div>' : '') +
+          (r.note ? '<div class="rec-note">' + esc(r.note) + '</div>' : '') +
         '</div>' +
         '<div class="rec-cta">' + esc(r.cta) + '</div>' +
       '</div>';

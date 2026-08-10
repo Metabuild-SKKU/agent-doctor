@@ -159,5 +159,38 @@ class RepresentativeConfigTests(unittest.TestCase):
         self.assertEqual(assess_capability([self._rec({})])["config"], {})
 
 
+class OneAtATimeTests(unittest.TestCase):
+    """처방은 하나씩 적용해야 효과 귀속이 된다(CONTEXT.md §2 방식2).
+
+    이 원칙이 내부 루프에만 있고 외부 권고에는 없으면, 상대는 처방 4개를 한꺼번에
+    적용하고 무엇이 들었는지 알 수 없게 된다 — 방식1 후퇴다."""
+
+    def _steps(self, label="ext_generation_hallucination"):
+        cards = build_ext_recommendations([_f(label)])
+        return cards[0]["steps"]
+
+    def test_steps_are_ordered(self):
+        """rules.py 의 처방 리스트는 우선순위 순서다 — 그 순서를 번호로 넘긴다."""
+        steps = self._steps()
+        self.assertEqual([s["order"] for s in steps], list(range(1, len(steps) + 1)))
+
+    def test_only_first_is_primary(self):
+        steps = self._steps()
+        self.assertTrue(steps[0]["primary"])
+        self.assertTrue(all(not s["primary"] for s in steps[1:]))
+
+    def test_manual_steps_are_all_primary(self):
+        """manual 처방은 순차 시도가 아니라 다 해야 하는 절차다(근거 특정 → 재색인)."""
+        steps = self._steps("ext_grounded_but_wrong")
+        self.assertTrue(all(s["manual"] for s in steps))
+        self.assertTrue(all(s["primary"] for s in steps))
+
+    def test_card_carries_apply_guide(self):
+        """처방 목록만 주면 한꺼번에 적용한다 — 적용 방법을 카드가 직접 말해야 한다."""
+        card = build_ext_recommendations([_f("ext_generation_hallucination")])[0]
+        self.assertIn("하나만", card["how_to_apply"])
+        self.assertIn("다시 로그", card["how_to_apply"])
+
+
 if __name__ == "__main__":
     unittest.main()

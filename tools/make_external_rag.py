@@ -59,6 +59,9 @@ DEFECTS = {
     "starve":      {"top_k": 1, "chunk_size": 128, "chunk_overlap": 0},
     "hallucinate": {"top_k": 5, "chunk_size": 512, "chunk_overlap": 50},
     "offtopic":    {"top_k": 5, "chunk_size": 512, "chunk_overlap": 50},
+    # 처방 적용 후(A/B 짝). hallucinate 와 같은 질문·같은 검색 설정으로 돌리고
+    # 생성 프롬프트만 권고대로 바꾼다 — 그래야 점수 차이를 처방 탓으로 귀속할 수 있다.
+    "hallucinate_fixed": {"top_k": 5, "chunk_size": 512, "chunk_overlap": 50},
 }
 
 # 환각 유도 프롬프트 + 코퍼스에 답이 없는 질문셋(--questions 기본값이 갈린다).
@@ -76,6 +79,16 @@ HALLUCINATE_TMPL = (
     "당신은 사내 규정 안내 챗봇입니다. 아래 참고 자료를 바탕으로 질문에 답하세요. "
     "사용자는 즉답을 원하므로 '자료에 없다', '확인이 필요하다'는 답변은 금지입니다. "
     "구체적인 숫자와 조건을 포함해 자신 있게 답하세요.\n\n"
+    "참고 자료:\n{context_str}\n\n질문: {query_str}\n답변: "
+)
+
+# 처방 적용본 — 권고 카드의 1·2번(require_citation / strengthen_abstention)을 그대로
+# 프롬프트에 반영한다. 검색·질문·모델은 hallucinate 와 동일하게 두어, 점수 차이가
+# 처방 때문임을 귀속할 수 있게 한다(내부 루프의 keep/rollback 판정과 같은 구조).
+HALLUCINATE_FIXED_TMPL = (
+    "당신은 사내 규정 안내 챗봇입니다. 아래 참고 자료에 **명시된 내용만으로** 답하세요.\n"
+    "- 답변의 각 문장 뒤에 근거가 된 자료의 문구를 그대로 인용하세요.\n"
+    "- 자료에서 근거를 찾지 못하면 지어내지 말고 '자료에서 확인되지 않습니다'라고 답하세요.\n\n"
     "참고 자료:\n{context_str}\n\n질문: {query_str}\n답변: "
 )
 
@@ -140,9 +153,11 @@ def build_index(docs: list[dict], defect: str):
     index = VectorStoreIndex.from_documents(li_docs)
 
     kwargs = {"similarity_top_k": cfg["top_k"]}
-    if defect == "hallucinate":
+    tmpl = {"hallucinate": HALLUCINATE_TMPL,
+            "hallucinate_fixed": HALLUCINATE_FIXED_TMPL}.get(defect)
+    if tmpl:
         from llama_index.core import PromptTemplate
-        kwargs["text_qa_template"] = PromptTemplate(HALLUCINATE_TMPL)
+        kwargs["text_qa_template"] = PromptTemplate(tmpl)
     return index.as_query_engine(**kwargs), cfg
 
 
@@ -208,7 +223,7 @@ def main() -> int:
     docs = load_corpus(args.corpus)
     # hallucinate 는 코퍼스에 답이 없는 질문을 써야 근거 없는 답변이 나온다.
     q_path = args.questions or (
-        GAP_QUESTIONS if args.defect == "hallucinate" else DEFAULT_QUESTIONS)
+        GAP_QUESTIONS if args.defect.startswith("hallucinate") else DEFAULT_QUESTIONS)
     questions = load_questions(q_path)
     if args.limit:
         questions = questions[:args.limit]

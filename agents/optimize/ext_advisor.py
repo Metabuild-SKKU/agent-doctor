@@ -107,6 +107,15 @@ _PRESCRIPTION_TEXT: dict[str, dict[str, str]] = {
 }
 
 
+# 적용 지침. 내부 루프의 방식2(하나씩 바꾸고 검증)를 상대에게도 그대로 권한다 —
+# 우리가 대신 돌려줄 수 없으니 절차를 글로 넘기는 것이 유일한 수단이다.
+APPLY_GUIDE = (
+    "①번부터 하나만 적용하고 같은 질문셋으로 다시 로그를 뽑아 주세요. "
+    "여러 개를 한꺼번에 바꾸면 무엇이 효과를 냈는지 알 수 없고, 부작용도 섞입니다. "
+    "효과가 없으면 되돌린 뒤 다음 번호로 넘어가세요."
+)
+
+
 def _prescription_entries(rule_label: str) -> list[dict]:
     entry = LABEL_TO_PRESCRIPTIONS.get(rule_label) or {}
     return list(entry.get("prescriptions") or [])
@@ -145,7 +154,14 @@ def _direction_hint(patch: dict, config: dict) -> Optional[str]:
 
 
 def _steps(rule_label: str, config: dict) -> list[dict[str, Any]]:
-    """처방 목록 → 카드에 실을 조치 단계."""
+    """처방 목록 → 카드에 실을 조치 단계.
+
+    rules.py 의 처방 리스트는 이미 우선순위 순서다(planner 가 이 순서로 하나씩
+    시도한다). 그 순서를 살려 order 를 매기고, 첫 항목만 primary 로 표시한다 —
+    내부 루프가 지키는 원칙(CONTEXT.md §2 "한 라벨의 여러 config 를 동시에
+    바꾸지 않는다")이 상대에게 넘기는 권고에서도 지켜져야 하기 때문이다.
+    넷을 한꺼번에 적용하면 효과 귀속이 안 되고 부작용도 섞인다.
+    """
     steps: list[dict[str, Any]] = []
     for p in _prescription_entries(rule_label):
         pid = p.get("id") or ""
@@ -159,6 +175,10 @@ def _steps(rule_label: str, config: dict) -> list[dict[str, Any]]:
             detail = p.get("detail") or ""
         steps.append({
             "prescription_id": pid,
+            "order": len(steps) + 1,
+            # manual 처방은 순차 시도가 아니라 다 해야 하는 절차다(근거를 찾고 →
+            # 수집해 재색인). 그런 라벨은 첫 항목만 권하는 규칙을 적용하지 않는다.
+            "primary": bool(p.get("manual")) or len(steps) == 0,
             "action": action,
             "detail": detail,
             "current": _direction_hint(p.get("patch") or {}, config),
@@ -197,6 +217,9 @@ def build_ext_recommendations(
             "tentative": 0,
             "evidence": [],
             "steps": _steps(EXT_LABEL_TO_RULE[label], config),
+            # 적용 방법을 카드가 직접 말한다. 처방 목록만 주면 상대는 넷을 한꺼번에
+            # 적용하고, 그러면 효과 귀속이 안 된다(CONTEXT.md §2 방식1 후퇴).
+            "how_to_apply": APPLY_GUIDE,
         })
         if getattr(f, "confirmed", False):
             card["confirmed"] += 1

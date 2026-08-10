@@ -111,7 +111,8 @@ class ExtReportViewTests(unittest.TestCase):
             "records": 6, "tier": "triad",
             "with_ground_truth": 6, "with_gold_contexts": 6, "notes": ["n"]})
         ext = view["transparency"]["external"]
-        self.assertEqual(ext["tier"], "triad")
+        # tier 코드가 아니라 사람 말로 나와야 한다("triad" 는 우리 적재기 내부 이름).
+        self.assertEqual(ext["tier"], "컨텍스트까지")
         self.assertEqual(ext["with_ground_truth"], 6)
         self.assertEqual(view["meta"]["question_count"], 6)
 
@@ -236,7 +237,7 @@ class ExtSectionLayoutTests(unittest.TestCase):
             _finding("ext_generation_hallucination", confirmed=False)]), {"tier": "triad"})
         self.assertEqual(view["score"]["confirmed"], 1)
         self.assertEqual(view["score"]["tentative"], 1)
-        self.assertEqual(view["meta"]["tier"], "triad")
+        self.assertEqual(view["meta"]["tier"], "컨텍스트까지")
 
     def test_template_has_section_hooks(self):
         """뷰가 가리키는 섹션 이름표가 마크업에 실제로 있어야 한다 —
@@ -274,7 +275,7 @@ class TransparencyRenderTests(unittest.TestCase):
             "with_ground_truth": 6, "with_gold_contexts": 5, "notes": []})
         ext = view["transparency"]["external"]
         self.assertEqual((ext["tier"], ext["with_ground_truth"], ext["with_gold_contexts"]),
-                         ("triad", 6, 5))
+                         ("컨텍스트까지", 6, 5))
 
 
 class ExtLabelExposureTests(unittest.TestCase):

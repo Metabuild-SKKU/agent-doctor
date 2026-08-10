@@ -750,7 +750,7 @@ def build_ext_report_view(
             "depth": _EXT_TIER_LABELS.get(tier, "외부 로그 진단"),
             "question_count": capability.get("records", 0),
             "created_at": report.created_at.isoformat() if report else "",
-            "tier": tier,
+            "tier": _EXT_TIER_SHORT.get(tier, tier or "-"),
         },
         "score": {
             # before 를 after 와 같게 둔다 — 개선 전후를 비교하려면 처방을 적용한
@@ -808,7 +808,7 @@ def build_ext_report_view(
             "chunk_count": 0,
             # 외부 모드에서만 있는 사실 — 어디까지 잰 진단인지 화면이 밝힐 수 있게 남긴다.
             "external": {
-                "tier": tier,
+                "tier": _EXT_TIER_SHORT.get(tier, tier or "-"),
                 "with_ground_truth": capability.get("with_ground_truth", 0),
                 "with_gold_contexts": capability.get("with_gold_contexts", 0),
                 "notes": capability.get("notes", []),
@@ -820,6 +820,14 @@ def build_ext_report_view(
 _EXT_TIER_LABELS = {
     "triad": "외부 로그 진단 (질문·컨텍스트·답변)",
     "qa_only": "외부 로그 진단 (질문·답변만 — 제한적)",
+}
+
+# tier 코드(triad/qa_only)는 우리 적재기의 내부 이름이다. 화면에는 "무엇이 있어서
+# 이만큼 잴 수 있었나"로 풀어 쓴다 — 상대가 코드를 알 리 없다.
+_EXT_TIER_SHORT = {
+    "triad": "컨텍스트까지",
+    "qa_only": "질문·답변만",
+    "none": "판정 불가",
 }
 
 
@@ -938,14 +946,20 @@ def _ext_recommendation_cards(cards: list[dict]) -> list[dict[str, Any]]:
             "items": [],
             "steps": [
                 {
-                    "action": s["action"] + (f" ({s['current']})" if s.get("current") else ""),
+                    # 번호를 앞에 단다 — "①번부터 하나씩"이라는 지침이 목록과 맞물려야
+                    # 상대가 순서를 지킬 수 있다.
+                    "action": (f"{s['order']}. " if s.get("order") and not s.get("manual") else "")
+                              + s["action"]
+                              + (f" ({s['current']})" if s.get("current") else ""),
                     "detail": " ".join(x for x in (
                         s.get("detail", ""),
                         "재색인이 필요합니다." if s.get("needs_reindex") else "",
+                        "" if s.get("primary") else "앞 항목이 듣지 않을 때만 시도하세요.",
                     ) if x).strip(),
                 }
                 for s in c.get("steps", [])
             ],
+            "note": c.get("how_to_apply", ""),
             "cta": " · ".join(counts),
         })
     return out
