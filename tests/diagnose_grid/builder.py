@@ -255,20 +255,28 @@ def _korquad_gold_spans(case: "Case") -> list[tuple[str, int, int]]:
     """KorQuAD QA 의 gold span. exact 는 정답 텍스트 위치, chunk 는 positive_chunk 범위."""
     qa = korquad_qa(case.korquad_qa)
     doc_id = qa["doc_id"]
+    # 좌표는 qa 의 문서에서 뽑고 라벨은 케이스의 Doc 에 붙이므로, 둘이 같은 문서여야 한다.
+    # 안 맞으면 다른 문서의 좌표가 조용히 이 문서 것으로 기록된다(케이스에 문서가 여럿이거나
+    # qa 를 바꿔 끼울 때). 지금은 전부 1:1 이지만 어긋나는 순간 진단이 통째로 틀어진다.
+    owner = next((d for d in case.docs if d.korquad == doc_id), None)
+    if owner is None:
+        raise ValueError(
+            f"{case.id}: korquad_qa={case.korquad_qa} 의 doc_id={doc_id} 와 맞는 Doc 이 "
+            f"case.docs 에 없다(있는 것: {[d.korquad for d in case.docs]})")
     text, chunks = korquad_doc(doc_id)
     positive = [(s, e) for cid, s, e in chunks if cid in (qa.get("positive_chunk_ids") or [])]
     if not positive:
         return []
     lo, hi = min(s for s, _ in positive), max(e for _, e in positive)
     if case.gold_span_mode == "chunk":
-        return [(case.docs[0].id, lo, hi)]
+        return [(owner.id, lo, hi)]
     answer = qa["answer_text"]
     at = text.find(answer, lo)                 # positive 범위 안에서 먼저 찾는다
     if at < 0 or at >= hi:
         at = text.find(answer)
     if at < 0:
-        return [(case.docs[0].id, lo, hi)]      # 원문에서 못 찾으면 청크 범위로 폴백
-    return [(case.docs[0].id, at, at + len(answer))]
+        return [(owner.id, lo, hi)]      # 원문에서 못 찾으면 청크 범위로 폴백
+    return [(owner.id, at, at + len(answer))]
 
 
 def build_chunks(case: Case) -> list[Chunk]:

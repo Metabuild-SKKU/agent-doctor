@@ -45,6 +45,26 @@ def _chunk_entry(chunk) -> dict:
     return entry
 
 
+_JUDGE_LITERAL_FIELDS = ("judge_real", "judge_oracle", "judge_abstention", "judge_reasoning_mode")
+
+
+def _reject_judge_literals(case: Case) -> None:
+    """케이스에 손으로 적은 심판 값을 막는다.
+
+    러너는 ragas·oracle_ragas·aspect 를 fixture 리터럴로 받는 걸 명시적으로 금지하고
+    (test_eval_diagnosis_pipeline.JUDGE_METRIC_KEYS), 대신 requires_llm +
+    EVAL_DIAGNOSIS_USE_LLM 으로 실제 심판을 태운다. export 가 metrics 아래에 실어 보내면
+    러너의 계약 테스트에서 깨지는데, 원인이 두 파일 떨어져 있어 추적이 오래 걸린다.
+    여기서 즉시 막아 그 왕복을 없앤다.
+    """
+    used = [f for f in _JUDGE_LITERAL_FIELDS if getattr(case, f) not in (None, {}, [])]
+    if used:
+        raise NotImplementedError(
+            f"심판 값을 케이스에 적는 경로는 지원하지 않는다({case.id}: {used}). "
+            "러너가 ragas/oracle_ragas/aspect 리터럴을 금지한다 — 심판이 필요하면 "
+            "needs_judge 를 달아 requires_llm 경로로 실제 심판을 태울 것.")
+
+
 def _gold_excluded(gold_ids, excluded: set) -> bool:
     """gold 청크가 코퍼스에서 빠졌나. 러너의 gold.in_corpus 가 불리언이라 부분 제외는 못 싣는다."""
     hit = [g for g in gold_ids if g in excluded]
@@ -61,6 +81,7 @@ def to_dict(case: Case) -> dict:
         raise NotImplementedError(
             "compute_ragas 는 JSONL 경로에서 지원하지 않는다 — 심판 호출은 러너가 맡는다. "
             f"({case.id})")
+    _reject_judge_literals(case)
 
     record, chunks = build(case)
     chunks_by_id = {c.chunk_id: c for c in chunks}
@@ -75,19 +96,8 @@ def to_dict(case: Case) -> dict:
     retrieved_entries = [_chunk_entry(chunks_by_id[cid]) for cid in record.retrieved_chunk_ids
                          if cid in chunks_by_id and cid not in excluded]
 
-    judge: dict = {}
-    if case.judge_real:
-        judge["ragas"] = dict(case.judge_real)
-    if case.judge_oracle:
-        judge["oracle_ragas"] = dict(case.judge_oracle)
-    aspect = {}
-    if case.judge_abstention is not None:
-        aspect["abstention"] = case.judge_abstention
-    if case.judge_reasoning_mode is not None:
-        aspect["reasoning_mode"] = case.judge_reasoning_mode
-    if aspect:
-        judge["aspect"] = aspect
-
+    # metrics 는 싣지 않는다 — 규칙 지표는 러너가 계산하고, 심판 값은 리터럴 자체를
+    # _reject_judge_literals 가 막는다. 둘 다 러너의 금지 목록과 같은 방향이다.
     out = {
         "case_id": case.id,
         "mode": "deep",
@@ -134,14 +144,15 @@ def to_dict(case: Case) -> dict:
         out["dense_candidates"] = [{"chunk_id": chunks[i].chunk_id} for i in case.dense_ranking]
     if case.lexical_ranking is not None:
         out["keyword_candidates"] = [{"chunk_id": chunks[i].chunk_id} for i in case.lexical_ranking]
-    if judge:
-        out["metrics"] = judge          # 심판 값만 — recall/f1 은 러너가 계산
     if case.known_gap:
         out["known_gap"] = case.known_gap
     if case.known_gap_labels is not None:
         out["known_gap_labels"] = list(case.known_gap_labels)
     if case.needs_judge:
-        out["needs_judge"] = case.needs_judge
+        # 러너의 심판 게이트에 그대로 얹는다 — 격자가 따로 판단하지 않는다.
+        # requires_llm + EVAL_DIAGNOSIS_USE_LLM 이 켜지고 키가 있으면 실제로 돈다.
+        out["needs_judge"] = case.needs_judge      # 사람이 읽는 사유
+        out["requires_llm"] = True                 # 러너가 읽는 게이트
     return out
 
 

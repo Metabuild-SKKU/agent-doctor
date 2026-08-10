@@ -284,7 +284,12 @@ def _record_from_case(case: dict) -> EvalRecord:
     return record
 
 
-def _run_case(case: dict) -> list[str]:
+def run_case_with_record(case: dict) -> tuple[list[str], EvalRecord]:
+    """케이스 1건 실행 → (라벨, 레코드).
+
+    파생값(recall·경계·밀도)을 함께 보려는 호출부를 위해 레코드까지 돌려준다 —
+    같은 실행을 두 번 하면 심판 호출이 두 배가 되고 memoize 도 갈린다.
+    """
     config = case.get("config", {})
     use_llm = _case_requires_llm(case) and _llm_fixture_enabled() and _ragas_judge() is not None
     metrics_common.set_context(
@@ -299,7 +304,11 @@ def _run_case(case: dict) -> list[str]:
     )
     record = _record_from_case(case)
     findings = diagnose.diagnose(record, mode=_mode(case.get("mode")))
-    return [finding.label for finding in findings]
+    return [finding.label for finding in findings], record
+
+
+def _run_case(case: dict) -> list[str]:
+    return run_case_with_record(case)[0]
 
 
 class EvalDiagnosisPipelineFixtureTest(unittest.TestCase):
