@@ -83,7 +83,6 @@ from agents.optimize.schemas import (
     OptimizationHistoryItem,
     OptimizationRequest,
     OptimizationResult,
-    OptimizeDecision,
     SelectedAction,
     Verdict,
 )
@@ -828,51 +827,6 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertEqual(blocked[0].action_key, "context.compression.enabled:enable")
         self.assertEqual(state.optimization_history[0].status, "failed")
         self.assertIsNotNone(state.optimization_history[0].rollback_reason)
-
-    def test_visit_excluded_request_is_not_sent_to_optimizer(self):
-        """planner 가 제외된 request 를 돌려줘도 agent 가 optimizer 직전에 막는다."""
-        state = make_state(overall=60.0)
-        blocked_request = OptimizationRequest(
-            request_id="blocked-request",
-            iteration=state.iteration,
-            baseline_config=dict(state.index_config),
-            search_space={"context.compression.enabled": [True]},
-            action_key="context.compression.enabled:enable",
-            supporting_labels=["too_long_context"],
-            supporting_probes=["p1"],
-            prescription_id="context_compression",
-        )
-        state.optimization_history.append(
-            OptimizationHistoryItem(
-                trial_id="unjudgeable-1",
-                request_id="req-unjudgeable-1",
-                iteration=state.iteration,
-                failure_labels=["too_long_context"],
-                optimizer="rules",
-                status="skipped",
-                selected_prescription_id="context_compression",
-                action_key=blocked_request.action_key,
-                supporting_labels=["too_long_context"],
-                supporting_probes=["p1"],
-                metadata={"unjudgeable": True},
-            )
-        )
-        apply_decision = OptimizeDecision(
-            mode="apply_optimize",
-            status="proposed",
-            requires_user_confirmation=False,
-            next_route="index",
-        )
-        with patch.object(
-            agent.planner,
-            "plan",
-            return_value=(blocked_request, apply_decision),
-        ) as plan, patch.object(agent.optimizer, "run") as run_optimizer:
-            out = agent.run(state)
-
-        self.assertEqual(plan.call_count, 1)
-        run_optimizer.assert_not_called()
-        self.assertEqual(out.status, "skipped")
 
     def test_blocked_attempt_is_released_on_a_new_baseline(self):
         """같은 action 이라도 baseline 이 달라지면 다시 시도할 수 있다(구현계획 §5.1).

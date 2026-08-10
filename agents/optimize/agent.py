@@ -353,21 +353,6 @@ def _visit_exclusions(state: AgentDoctorState) -> set[Any]:
     return exclusions
 
 
-def _request_is_visit_excluded(
-    state: AgentDoctorState,
-    request: OptimizationRequest,
-    exclusions: set[Any],
-) -> bool:
-    """planner 가 제외된 request 를 돌려준 경우 optimizer 로 넘기기 전에 한 번 더 막는다."""
-    if not request.action_key:
-        return False
-
-    # ActionAttemptKey / ActionStudyKey 는 후보값·study 단위 제어라 planner/optimizer 의
-    # 기존 dead-end 처리가 이어져야 한다. 여기서는 같은 방문에서 문자열 action key 로
-    # 닫은 축만 최종 안전장치로 한 번 더 막는다.
-    return any(item == request.action_key for item in exclusions if isinstance(item, str))
-
-
 def _block_action_study(
     state: AgentDoctorState,
     item: OptimizationHistoryItem,
@@ -936,29 +921,6 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         _log_excluded_actions(state)
         while True:
             request, decision = planner.plan(state, blacklist=visit_exclusions)
-            if request is not None and _request_is_visit_excluded(
-                state, request, visit_exclusions
-            ):
-                state.status = "rolled_back" if rolled_back else "skipped"
-                if judged_item is not None:
-                    _log_optimize_verdict(state, judged_item, verdict)
-                    state.optimization_report = reporter.build_trial_report(
-                        judged_item, verdict
-                    )
-                else:
-                    skipped_decision = OptimizeDecision(
-                        mode="use_current",
-                        status="skipped",
-                        requires_user_confirmation=False,
-                        next_route="serve",
-                        reason="제외된 action 이 다시 선택되어 최적화 스킵",
-                    )
-                    _log_optimize_decision(state, skipped_decision)
-                    state.optimization_report = reporter.build_report(
-                        skipped_decision, None
-                    )
-                _attach_runtime_deferred(state.optimization_report, deferred_runtime)
-                return state
             # planner 가 실행 불가로 거른 것 중 runtime·선행조건 사유는 보류로 보고한다.
             # 요청이 만들어졌든 아니든 사유가 나오는 곳이 다를 뿐 보고 책임은 같다.
             _extend_deferred(
