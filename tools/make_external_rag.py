@@ -20,7 +20,7 @@ LlamaIndex 는 자체 청킹(SentenceSplitter)·자체 노드 ID(UUID)·자체 �
     offtopic     엉뚱한 질문의 컨텍스트를 붙인다 → 검색 무관 유도
 
 사용법:
-    python -m tools.make_external_rag --defect=none --out=logs/ext_none.jsonl
+    python -m tools.make_external_rag --defect=none --out=tests/fixtures/external_rag/ext_none.jsonl
     python -m tools.make_external_rag --defect=starve --limit=5
 
 임베딩·LLM 은 .env 의 OpenRouter 키를 쓴다(INDEX_EMBED_PROVIDER 와 무관하게
@@ -40,6 +40,9 @@ load_dotenv()
 
 DEFAULT_CORPUS = "data/pdf_corpus.json"
 DEFAULT_QUESTIONS = "tools/external_rag_questions.json"
+# 뽑은 로그는 커밋되는 테스트 자산이라 tests/fixtures 로 간다. 최상위 logs/ 를 쓰면
+# 런타임 산출물 경로(output/logs — core/run_logger.py)와 이름이 겹쳐 성격이 헷갈린다.
+FIXTURE_DIR = "tests/fixtures/external_rag"
 
 # OpenRouter 는 OpenAI 호환 API 라 llama-index-embeddings-openai / llms-openai 를
 # 그대로 쓴다(추가 패키지 불필요 — PR #88 이 core/llm_clients 에서 쓴 것과 같은 원리).
@@ -76,6 +79,13 @@ def _require(module: str, pip_name: str):
 
 
 def load_corpus(path: str) -> list[dict]:
+    if not os.path.exists(path):
+        # data/ 는 gitignore 대상이라 저장소를 받은 사람에겐 코퍼스가 없다. 로그를 새로
+        # 뽑을 때만 필요하므로, 진단만 해볼 사람에게 fixture 경로를 함께 알려준다.
+        sys.exit(f"[ext-rag] 코퍼스가 없습니다: {path}\n"
+                 f"  data/ 는 gitignore 대상입니다(data/README.md 참고).\n"
+                 f"  · 다른 코퍼스로 뽑기: --corpus <경로>\n"
+                 f"  · 진단만 돌리기:     python -m agents.eval.replay {FIXTURE_DIR}/ext_none.jsonl")
     with open(path, encoding="utf-8") as f:
         docs = json.load(f)
     if not isinstance(docs, list) or not docs:
@@ -176,7 +186,8 @@ def main() -> int:
                     help="주입할 결함 (기본 none = 정상 대조군)")
     ap.add_argument("--corpus", default=DEFAULT_CORPUS)
     ap.add_argument("--questions", default=DEFAULT_QUESTIONS)
-    ap.add_argument("--out", default=None, help="기본: logs/ext_<defect>.jsonl")
+    ap.add_argument("--out", default=None,
+                    help=f"기본: {FIXTURE_DIR}/ext_<defect>.jsonl")
     ap.add_argument("--limit", type=int, default=0, help="질문 수 제한(0=전체)")
     ap.add_argument("--no-gold", action="store_true",
                     help="골든셋 필드를 빼고 뽑는다(triad 전용 tier 재현)")
@@ -192,7 +203,7 @@ def main() -> int:
     if args.no_gold:
         questions = [{"question": q["question"]} for q in questions]
 
-    out = args.out or f"logs/ext_{args.defect}.jsonl"
+    out = args.out or f"{FIXTURE_DIR}/ext_{args.defect}.jsonl"
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
 
     print(f"[ext-rag] defect={args.defect} docs={len(docs)} questions={len(questions)}")
