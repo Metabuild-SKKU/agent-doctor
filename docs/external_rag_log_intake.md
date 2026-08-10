@@ -182,9 +182,16 @@ diagnose/rules/metrics_ragas/scoring 전수 감사 결론:
 
 설계 노트:
 
-- **신규 신호 1개 필요**: reference-free context relevance judge(질문 vs 컨텍스트
-  관련성, LLM 프롬프트 1개, `metrics_ragas.py`에 추가). 없으면 `ext_retrieval_*`
-  두 개가 GT 전용이 되어 GT 없는 로그에서 검색축 라벨이 사라진다.
+- **검색축 신호 — 구현됨(2026-08-10), 단 골든셋 전용.** `_retrieval_axis()`가
+  ① `gold_contexts` 텍스트 겹침 ② `context_precision`(GT 있을 때 RAGAS 실측)을
+  보고 "검색이 근거를 가져왔나"를 판정한다. 이 신호 하나로 `ext_retrieval_irrelevant`
+  / `ext_wrongful_abstention` / `ext_retrieval_starved_abstention` 셋이 함께 열린다
+  — 셋 다 같은 갈림길(근거가 있었나)에 서 있기 때문이다.
+  두 신호가 엇갈리면 **나쁜 쪽**을 믿는다: 겹침은 gold 하나만 걸려도 1.00 이라
+  무관한 청크가 잔뜩 섞인 검색을 정상으로 읽는다(실측 offtopic: 겹침 1.00 /
+  precision 0.20).
+  **골든셋이 없는 로그에서는 여전히 침묵한다.** 그 경우를 열려면 reference-free
+  context relevance judge(질문 vs 컨텍스트, LLM 프롬프트 1개)가 필요하다 — 미구현.
 - confirmed 규칙 유지: 지표가 실측된 경우만 `confirmed=True`(예비 강등 철학 그대로).
 - 처방은 자동 적용 없이 **권고 카드**로만 렌더 — planner의 적용 루프를 타지 않고
   리포트가 rules의 patch를 권고 문구로 변환한다.

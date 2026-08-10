@@ -38,12 +38,20 @@ EXT_FAITH_LOW = 0.5        # 이 밑이면 답이 컨텍스트에 근거하지 �
 EXT_REL_LOW = 0.5          # 이 밑이면 답이 질문에 대한 답이 아님
 EXT_CORRECTNESS_LOW = 0.5  # 이 밑이면 정답과 불일치
 GOLD_OVERLAP_FOUND = 0.6   # gold 문단의 이 비율 이상이 검색 결과에 덮이면 "근거를 찾아왔다"
+# 검색축 문턱. context_precision 은 "가져온 컨텍스트 중 정답에 쓸모 있는 비율"이라
+# 다른 지표보다 낮게 나오는 게 정상이다(top_k 를 넉넉히 잡으면 무관한 청크가 섞인다).
+# 0.5 를 그대로 쓰면 정상 검색까지 잡히므로 더 보수적으로 둔다 — 실측(offtopic):
+# 정상 검색 1.00 / 어긋난 검색 0.20 이라 그 사이가 넉넉하다.
+EXT_CTX_PRECISION_LOW = 0.34
 
 _SEVERITY = {
     "ext_generation_hallucination": "critical",
     "ext_answer_off_topic": "critical",
     "ext_context_overflow": "warning",
     "ext_grounded_but_wrong": "warning",   # 원인이 코퍼스/근거 쪽 - 사람 개입 계열
+    "ext_retrieval_irrelevant": "critical",
+    "ext_wrongful_abstention": "critical",  # 답할 수 있었는데 안 했다 - 사용자 체감 손실
+    "ext_retrieval_starved_abstention": "warning",
 }
 
 # ext_ 라벨 → 기존 rules 처방 재참조 (복사 아님 - 처방 문구의 원본은 하나로 유지)
@@ -52,6 +60,13 @@ EXT_RECOMMENDATIONS: dict[str, dict] = {
     "ext_answer_off_topic": LABEL_TO_PRESCRIPTIONS["generation_misinterpretation"],
     "ext_context_overflow": LABEL_TO_PRESCRIPTIONS["too_long_context"],
     "ext_grounded_but_wrong": LABEL_TO_PRESCRIPTIONS["corpus_gap"],
+    # 검색이 질문과 무관한 걸 가져왔다 → 검색 설정 점검(임베딩·청킹 계열).
+    # 순위/리랭커 수준의 세부 원인은 상대 인덱스 없이 못 가르므로(docs §4)
+    # 여기까지가 상한이다.
+    "ext_retrieval_irrelevant": LABEL_TO_PRESCRIPTIONS["retrieval_semantic_mismatch"],
+    "ext_wrongful_abstention": LABEL_TO_PRESCRIPTIONS["generation_wrongful_abstention"],
+    # 검색이 굶어서 기권했다 → 더 가져오게 하거나(top_k·겹침) 코퍼스를 보강한다.
+    "ext_retrieval_starved_abstention": LABEL_TO_PRESCRIPTIONS["retrieval_missing_gold"],
 }
 
 
@@ -134,6 +149,36 @@ def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool, reason
     )
 
 
+def _retrieval_axis(record: EvalRecord) -> Optional[tuple[bool, str]]:
+    """검색이 질문의 근거를 가져왔나 — (찾았나, 근거 문구). 미측정이면 None.
+
+    두 재료 중 있는 것을 쓴다. 둘 다 정답지(골드셋) 계열이라, 골드셋 없는 로그에서는
+    None 이 되어 검색축 라벨 세 개가 통째로 침묵한다(docs §5 - 이 경우를 열려면
+    reference-free context relevance judge 가 필요하다. 미구현).
+
+      1) gold_contexts 텍스트 겹침 — 결정적. 청크 ID 정합이 필요 없고 LLM 도 안 쓴다.
+      2) context_precision — ground_truth 가 있을 때 RAGAS 가 실측하는 값
+         (metrics_ragas 의 want_prec = ... and has_ref).
+
+    둘 다 있고 판정이 엇갈리면 **나쁜 쪽**을 믿는다. 겹침은 "gold 문단이 컨텍스트
+    안에 있나"만 보므로, top_k 를 넉넉히 잡아 무관한 청크가 잔뜩 섞여도 gold 하나만
+    걸리면 1.00 이 된다(실측 offtopic: 겹침 1.00 인데 precision 0.20 — 검색이
+    엉뚱한 걸 가져왔는데 겹침만 보면 정상으로 읽혔다). 검색 품질을 묻는 자리에서는
+    '근거가 섞여 있다'보다 '쓸모없는 것이 대부분이다'가 더 정확한 신호다.
+    """
+    signals: list[tuple[bool, str]] = []
+    overlap = gold_context_recall(record)
+    if overlap is not None:
+        signals.append((overlap >= GOLD_OVERLAP_FOUND, f"gold 근거 겹침 {overlap:.2f}"))
+    prec = record.ragas.get("context_precision")
+    if prec is not None:
+        signals.append((prec >= EXT_CTX_PRECISION_LOW, f"context precision {prec:.2f}"))
+    if not signals:
+        return None
+    failed = [s for s in signals if not s[0]]
+    return failed[0] if failed else signals[0]
+
+
 def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
     """외부 로그 레코드 1건의 ext_ 소견. 실측된 지표만 근거로 쓴다.
 
@@ -161,11 +206,33 @@ def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
     # 그대로 두면 동문서답으로 오진된다 — 실측에서 처방 적용본의 기권 5건이 전부
     # ext_answer_off_topic 으로 잡혀, 처방 효과가 오히려 나빠진 것처럼 보였다.
     #
-    # 기권이 잘못인 경우(근거가 있는데도 기권 = wrongful abstention)는 gold_contexts
-    # 로만 가릴 수 있고, 그 라벨은 아직 없다(docs §5 미구현). 지금은 "기권은 소견
-    # 없음"으로 두어 거짓 실패를 만들지 않는 쪽을 택한다 — 놓치는 것이 오진보다 낫다.
+    # 기권이 '잘한 것'인지 '잘못한 것'인지는 검색축(질문 vs 컨텍스트)을 봐야 갈린다.
+    #   근거가 있었는데 기권  → ext_wrongful_abstention (겁먹음 - 답할 수 있었다)
+    #   근거가 없어서 기권    → ext_retrieval_starved_abstention (검색/코퍼스 탓)
+    #   검색축 미측정         → 소견 없음 (놓치는 것이 오진보다 낫다)
     if is_abstention(record.generated_answer):
+        axis = _retrieval_axis(record)
+        if axis is None:
+            return findings
+        found, why = axis
+        if found:
+            findings.append(_finding(
+                record, "ext_wrongful_abstention", "generation", True,
+                f"{why} - 근거는 있었는데 답하지 않음(기권)"))
+        else:
+            findings.append(_finding(
+                record, "ext_retrieval_starved_abstention", "retrieval", True,
+                f"{why} - 검색이 근거를 못 가져와 기권"))
         return findings
+
+    # 검색이 질문과 무관한 걸 가져왔다(기권하지 않고 답한 경우). 답변축 지표만 보면
+    # 그 여파가 생성 문제로 보이므로, 검색축이 실측될 때는 원인을 검색으로 돌린다.
+    # 실측(offtopic): 정상 검색 1.00 vs 어긋난 검색 0.20.
+    axis = _retrieval_axis(record)
+    if axis is not None and not axis[0]:
+        findings.append(_finding(
+            record, "ext_retrieval_irrelevant", "retrieval", True,
+            f"{axis[1]} - 검색 결과가 질문과 무관"))
 
     if rel is not None and rel < EXT_REL_LOW:
         findings.append(_finding(

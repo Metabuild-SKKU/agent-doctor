@@ -188,5 +188,58 @@ class AbstentionIsNotAFailureTests(unittest.TestCase):
             self.assertFalse(is_abstention(text), text)
 
 
+class RetrievalAxisLabelTests(unittest.TestCase):
+    """검색축 라벨 3종 — 골든셋이 있으면 '검색이 근거를 가져왔나'가 실측된다.
+
+    이 신호가 없으면 검색 결함이 답변축 지표로만 드러나 생성 문제로 오진된다
+    (실측: offtopic 로그가 동문서답·근거부족으로만 잡혔다)."""
+
+    def _rec(self, answer="700만원입니다", *, gold=None, ctx=None, prec=None,
+             rel=0.9, faith=0.9):
+        ragas = {"response_relevancy": rel, "faithfulness": faith}
+        if prec is not None:
+            ragas["context_precision"] = prec
+        rec = _record(contexts=ctx or ["무관한 사내 규정 본문입니다."],
+                      gold_contexts=gold, ragas=ragas)
+        rec.generated_answer = answer
+        return rec
+
+    def test_irrelevant_retrieval_is_flagged(self):
+        rec = self._rec(prec=0.2)
+        labels = [f.label for f in diagnose_replay_record(rec)]
+        self.assertIn("ext_retrieval_irrelevant", labels)
+
+    def test_good_retrieval_is_not_flagged(self):
+        rec = self._rec(prec=1.0)
+        labels = [f.label for f in diagnose_replay_record(rec)]
+        self.assertNotIn("ext_retrieval_irrelevant", labels)
+
+    def test_wrongful_abstention_when_evidence_existed(self):
+        """근거가 있었는데 기권했다 — 답할 수 있었으므로 사용자 손실이다."""
+        rec = self._rec("자료에서 확인되지 않습니다.", gold=[GOLD],
+                        ctx=[f"머리말 {GOLD} 꼬리말"])
+        labels = [f.label for f in diagnose_replay_record(rec)]
+        self.assertIn("ext_wrongful_abstention", labels)
+
+    def test_starved_abstention_when_evidence_missing(self):
+        """근거가 없어서 기권했다 — 생성 탓이 아니라 검색/코퍼스 탓이다."""
+        rec = self._rec("자료에서 확인되지 않습니다.", prec=0.1)
+        labels = [f.label for f in diagnose_replay_record(rec)]
+        self.assertIn("ext_retrieval_starved_abstention", labels)
+
+    def test_abstention_without_axis_stays_silent(self):
+        """검색축 미측정이면 기권을 판정하지 않는다 — 놓치는 것이 오진보다 낫다."""
+        rec = self._rec("자료에서 확인되지 않습니다.")
+        self.assertEqual(diagnose_replay_record(rec), [])
+
+    def test_conflicting_signals_take_the_worse(self):
+        """겹침은 gold 하나만 걸려도 1.00 이 된다 — top_k 를 넉넉히 잡아 무관한
+        청크가 잔뜩 섞여도 정상으로 읽힌다(실측 offtopic: 겹침 1.00 / precision 0.20).
+        검색 품질을 묻는 자리에서는 나쁜 쪽 신호를 믿어야 한다."""
+        rec = self._rec(gold=[GOLD], ctx=[f"머리말 {GOLD} 꼬리말"], prec=0.2)
+        labels = [f.label for f in diagnose_replay_record(rec)]
+        self.assertIn("ext_retrieval_irrelevant", labels)
+
+
 if __name__ == "__main__":
     unittest.main()

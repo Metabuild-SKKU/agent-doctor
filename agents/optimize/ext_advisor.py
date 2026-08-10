@@ -33,6 +33,9 @@ EXT_LABEL_TO_RULE: dict[str, str] = {
     "ext_answer_off_topic": "generation_misinterpretation",
     "ext_context_overflow": "too_long_context",
     "ext_grounded_but_wrong": "corpus_gap",
+    "ext_retrieval_irrelevant": "retrieval_semantic_mismatch",
+    "ext_wrongful_abstention": "generation_wrongful_abstention",
+    "ext_retrieval_starved_abstention": "retrieval_missing_gold",
 }
 
 # 라벨 자체의 한 줄 설명 — 카드 제목 밑에 붙는다.
@@ -41,6 +44,9 @@ LABEL_SUMMARY: dict[str, str] = {
     "ext_answer_off_topic": "답변이 질문을 비껴갑니다(동문서답)",
     "ext_context_overflow": "컨텍스트가 과다해 근거 사용을 방해합니다",
     "ext_grounded_but_wrong": "답변은 근거에 충실하나 근거 자체가 틀렸거나 부족합니다",
+    "ext_retrieval_irrelevant": "검색이 질문과 무관한 문서를 가져옵니다",
+    "ext_wrongful_abstention": "답할 근거가 있는데도 답하지 않습니다",
+    "ext_retrieval_starved_abstention": "검색이 근거를 못 찾아 답하지 못합니다",
 }
 
 # 배지·칩처럼 좁은 자리에 쓰는 짧은 이름. 라벨 코드(ext_grounded_but_wrong)를 그대로
@@ -50,6 +56,9 @@ LABEL_SHORT: dict[str, str] = {
     "ext_answer_off_topic": "동문서답",
     "ext_context_overflow": "컨텍스트 과다",
     "ext_grounded_but_wrong": "근거 부족",
+    "ext_retrieval_irrelevant": "검색 무관",
+    "ext_wrongful_abstention": "과도한 기권",
+    "ext_retrieval_starved_abstention": "검색 굶주림",
 }
 
 
@@ -103,6 +112,43 @@ _PRESCRIPTION_TEXT: dict[str, dict[str, str]] = {
     "shrink_chunk_size": {
         "action": "청크 크기를 줄이세요",
         "detail": "청크 하나가 커서 컨텍스트가 넘칩니다. 재색인이 필요합니다.",
+    },
+    # ── 검색축 ──
+    "swap_embedding_model": {
+        "action": "임베딩 모델을 교체하세요",
+        "detail": "질문과 문서를 같은 뜻으로 이어주지 못하는 상황입니다. "
+                  "다국어·도메인에 맞는 모델로 바꾸면 검색이 개선됩니다. 재색인이 필요합니다.",
+    },
+    "switch_to_recursive_sentence": {
+        "action": "문장 단위 청킹으로 바꾸세요",
+        "detail": "청크가 문장 중간에서 잘려 의미가 흩어지면 검색이 빗나갑니다.",
+    },
+    "switch_to_markdown_recursive": {
+        "action": "문서 구조를 살린 청킹으로 바꾸세요",
+        "detail": "제목·절 경계를 따라 나누면 한 청크가 한 주제를 담아 검색이 정확해집니다.",
+    },
+    "increase_top_k": {
+        "action": "top_k 를 늘리세요",
+        "detail": "검색 결과가 적어 정답 근거가 빠지고 있습니다. 가장 먼저 시도할 값입니다.",
+    },
+    "increase_chunk_overlap": {
+        "action": "청크 겹침을 늘리세요",
+        "detail": "청크 경계에서 근거가 잘려 나가는 경우입니다. 재색인이 필요합니다.",
+    },
+    "increase_chunk_size": {
+        "action": "청크 크기를 키우세요",
+        "detail": "근거가 여러 청크로 조각나 하나도 온전히 걸리지 않는 상황입니다.",
+    },
+    "expand_query": {
+        "action": "질의 확장을 켜세요",
+        "detail": "사용자 표현과 문서 표현이 달라 못 찾는 경우입니다. "
+                  "동의어·상위어를 붙여 검색합니다.",
+    },
+    # ── 생성축 ──
+    "relax_abstention": {
+        "action": "기권 조건을 완화하세요",
+        "detail": "답할 근거가 있는데도 '모른다'고 답하고 있습니다. 기권 규칙이 너무 빡빡한지 "
+                  "확인하세요 — 사용자는 답을 받지 못하고 있습니다.",
     },
 }
 
