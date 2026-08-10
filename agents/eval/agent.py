@@ -579,7 +579,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             print(f"  probe {len(probes)}개 · 실제 답변 {len(records)}건{parallel_note}")
             answers = parallel_map(
                 lambda r: generate_answer(r.probe.question, r.retrieved_context, config=gen_config),
-                records, concurrency)
+                records, concurrency, label="  [Eval] STEP2 답변 생성")
             for rec, answer in zip(records, answers):
                 rec.generated_answer = answer
 
@@ -597,7 +597,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             if mode < Mode.DEEP:
                 print(f"  모드 {_MODE_NAMES.get(mode, mode)} — RAGAS 생략 (deep 이상에서 실행)")
             else:
-                real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records, concurrency)
+                real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records, concurrency,
+                                           label="  [Eval] STEP3 RAGAS 실제 트랙")
                 for rec, score in zip(records, real_scores):
                     rec.ragas, rec.ragas_done = score, True
 
@@ -620,7 +621,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             if oracle_targets:
                 oracle_answers = parallel_map(
                     lambda r: generate_answer(r.probe.question, r.oracle_context, config=gen_config),
-                    oracle_targets, concurrency)
+                    oracle_targets, concurrency, label="  [Eval] STEP3 오라클 답변 생성")
                 for rec, answer in zip(oracle_targets, oracle_answers):
                     rec.oracle_answer = answer
                     _compute_metrics(rec)       # 방금 생긴 오라클 답으로 oracle_f1 채우기
@@ -629,7 +630,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             # _ragas_track 이 {} 를 돌려주므로 기존과 같다.
             if mode >= Mode.DEEP and failed:
                 print(f"  RAGAS 실제 {len(records)}건 / 오라클 {len(failed)}건")
-                oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency)
+                oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency,
+                                             label="  [Eval] STEP3 RAGAS 오라클 트랙")
                 for rec, score in zip(failed, oracle_scores):
                     rec.oracle_ragas, rec.oracle_ragas_done = score, True
 
