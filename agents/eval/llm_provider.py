@@ -221,9 +221,23 @@ def _notify_embed_once(message: str) -> None:
     print(message)
 
 
+def _embed_provider() -> str:
+    """임베딩을 실제로 부를 provider. 심판 provider 와 다를 수 있다.
+
+    anthropic·github 는 임베딩 엔드포인트가 없다. 그 조합에서 곧장 로컬로
+    떨어지면 OPENROUTER_API_KEY 가 있어도 안 쓰고 2GB 모델을 띄우게 된다
+    (실측: 로컬 16.8s vs OpenRouter 3.1s, 벡터는 코사인 1.00000 으로 동일).
+    심판축은 그대로 두고 임베딩만 쓸 수 있는 곳으로 보낸다."""
+    provider = _provider()
+    if provider in ("gemini", "openrouter") or os.getenv("OPENAI_API_KEY"):
+        return provider
+    # 임베딩 없는 provider(anthropic/github) + OpenAI 키도 없음 → OpenRouter 로.
+    return "openrouter" if os.getenv("OPENROUTER_API_KEY") else provider
+
+
 def _api_embeddings_available() -> bool:
     """활성 provider 로 임베딩 API 를 부를 수 있는지. 키 유무만 본다(호출은 안 한다)."""
-    provider = _provider()
+    provider = _embed_provider()
     if provider == "gemini":
         return bool(os.getenv("GEMINI_API_KEY"))
     if provider == "openrouter":
@@ -271,7 +285,9 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
 
     if _api_embeddings_available():
         def _do():
-            provider = _provider()
+            # _api_embeddings_available 과 같은 해석기를 써야 한다 — 다르면
+            # "쓸 수 있다"고 판정한 provider 와 실제로 부르는 곳이 어긋난다.
+            provider = _embed_provider()
             if provider == "gemini":
                 return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
             if provider == "openrouter":

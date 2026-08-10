@@ -60,6 +60,11 @@ def main(argv: list[str] | None = None) -> int:
     if os.getenv("EVAL_MODE", "").strip().lower() not in ("deep", "full", "3", "4"):
         os.environ["EVAL_MODE"] = "deep"
 
+    # 로깅은 파이프라인 import 보다 먼저 설치한다(run_corpus.py 와 같은 규약) —
+    # 모델 로딩 경고처럼 import 시점에 나오는 출력까지 output/logs 에 담기게.
+    from core.run_logger import setup_run_logging
+    run_log = setup_run_logging(prefix="replay")
+
     log_path = Path(args.log)
     if not log_path.exists():
         print(f"로그 파일이 없습니다: {log_path}")
@@ -96,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
     for rec in view["recommendations"]:
         print(f"  · [{rec['badge'][1]}] {rec['title']} ({rec['cta']})")
     print(f"\n진단서: {html_path}")
+    if run_log:
+        print(f"실행 로그: {run_log}")
 
     if not args.no_open:
         webbrowser.open(html_path.resolve().as_uri())

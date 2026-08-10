@@ -35,6 +35,10 @@
   h2 { font-size: 20px; font-weight: 600; letter-spacing: -.02em; margin: 0; }
   .section { padding: 42px 0; border-top: 1px solid var(--border); }
   .section-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 24px; }
+  /* 모드 안내 — 일부 섹션이 원리적으로 없을 때 그 이유를 밝힌다(외부 RAG 로그 진단 등) */
+  .mode-notice { margin: 0 0 20px; padding: 12px 16px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--card, transparent);
+    color: var(--faint); font-size: 13px; line-height: 1.6; }
   .section-head .idx { font-family: var(--mono); font-size: 12px; color: var(--accent); }
   .section-head .sub { font-size: 13px; color: var(--faint); margin-left: auto; }
 
@@ -294,6 +298,9 @@
     <h1><b>진단 리포트</b></h1>
   </div>
 
+  <!-- MODE NOTICE: 외부 RAG 로그 진단처럼 일부 섹션이 원리적으로 없는 경우에만 표시 -->
+  <div id="modeNotice" style="display:none"></div>
+
   <!-- HERO: score -->
   <section class="hero">
     <div class="gauge-wrap">
@@ -361,7 +368,7 @@
   </section>
 
   <!-- TREATMENT COURSE -->
-  <section class="section">
+  <section class="section" data-section="course">
     <div class="section-head"><span class="idx">03</span><h2>치료 경과</h2><span class="sub">처방을 시도하고 · 검증하고 · 되돌린 과정</span></div>
 
     <div class="course-chart">
@@ -531,6 +538,22 @@
     renderRecommendations(recs);
     renderHero(score, meta);
     renderMeta(meta);
+    renderMode(isLive ? data.mode : null);
+  }
+
+  /* ── 모드 안내 ──
+     외부 RAG 로그 진단처럼 일부 섹션이 "아직 안 한 것"이 아니라 "할 수 없는 것"일 때,
+     빈 섹션을 그대로 두면 고장이나 미완성으로 읽힌다. 숨기고 이유를 한 줄 밝힌다. */
+  function renderMode(mode) {
+    var box = document.getElementById('modeNotice');
+    (mode && mode.hidden_sections ? mode.hidden_sections : []).forEach(function (name) {
+      document.querySelectorAll('[data-section="' + name + '"]').forEach(function (el) {
+        el.style.display = 'none';
+      });
+    });
+    if (!mode || !mode.notice) { box.style.display = 'none'; return; }
+    box.style.display = '';
+    box.innerHTML = '<div class="mode-notice">' + esc(mode.notice) + '</div>';
   }
 
   /* ── priority top3 ── */

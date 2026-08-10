@@ -167,5 +167,43 @@ class ReportHtmlInjectionTests(unittest.TestCase):
         self.assertIn("<\\/script>", html)
 
 
+class ExtModeSectionTests(unittest.TestCase):
+    """외부 모드에서 '없음'과 '할 수 없음'을 화면이 구분할 수 있어야 한다."""
+
+    def test_mode_marks_impossible_sections(self):
+        view = build_ext_report_view(_report(), {})
+        mode = view["mode"]
+        self.assertEqual(mode["kind"], "external")
+        self.assertIn("course", mode["hidden_sections"])
+        self.assertIn("rxs", mode["hidden_sections"])
+        self.assertTrue(mode["notice"].strip())
+
+    def test_qas_filled_from_failed_questions(self):
+        """로그에도 질문·답변·정답이 있으므로 실패 질문은 채운다 —
+        '어떤 질문에서 무너졌나'가 상대에게 넘길 진단서의 핵심이다."""
+        rep = _report([_finding("ext_answer_off_topic")])
+        rep.failed_questions = [{
+            "probe_id": "ext_0000", "question": "연차는 며칠인가요?",
+            "expected_answer": "연 15일", "actual_answer": "병가는 60일입니다",
+        }]
+        view = build_ext_report_view(rep, {})
+        self.assertEqual(len(view["qas"]), 1)
+        qa = view["qas"][0]
+        self.assertEqual(qa["q"], "연차는 며칠인가요?")
+        self.assertEqual(qa["gold"], "연 15일")
+        self.assertIn("병가", qa["actual"])
+
+    def test_template_has_hooks_for_mode(self):
+        """템플릿이 hidden_sections 를 실제로 숨길 수 있어야 한다 —
+        뷰만 고치고 마크업이 없으면 빈 섹션이 그대로 남는다."""
+        from tests.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        html = REPORT_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn('data-section="course"', html)
+        self.assertIn("function renderMode", html)
+        self.assertIn('id="modeNotice"', html)
+
+
 if __name__ == "__main__":
     unittest.main()

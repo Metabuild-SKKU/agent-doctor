@@ -658,7 +658,15 @@ def _build_recommendations(state: AgentDoctorState, findings: list) -> list[dict
 
 
 def _build_qas(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
+    """state 경유 래퍼 — 내부 모드용. 실제 조립은 _qas_from_report 가 한다."""
+    return _qas_from_report(state.report, findings)
+
+
+def _qas_from_report(report, findings: list) -> list[dict[str, Any]]:
     """실패한 검증 질문을 실제 Eval 답변과 함께 UI 데이터로 변환한다.
+
+    state 가 아니라 report 를 받는다 — 리플레이 모드에는 state 가 없지만
+    report.failed_questions 는 로그의 질문·답변·정답으로 똑같이 채워진다.
 
     한 probe에 Finding이 여러 개여도 질문 카드는 하나만 만들고 진단 설명과 처방을
     합친다. 예비 Finding도 평가상 실패한 질문이므로 숨기지 않는다. 이 섹션은 최신
@@ -666,7 +674,6 @@ def _build_qas(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
     "해결됨" 카드를 추정하지 않는다. 실패 질문은 DiagnosticReport에 보존된 만큼
     모두 전달하며 표시 상한을 임의로 두지 않는다.
     """
-    report = state.report
     failed_questions = getattr(report, "failed_questions", []) if report else []
     findings_by_probe: dict[str, list] = {}
     for finding in findings:
@@ -760,8 +767,18 @@ def build_ext_report_view(
         "course": [],
         "rxs": [],
         "dxs": _build_dxs(findings),
-        "qas": [],
+        # 로그에도 질문·답변·정답이 있으므로 실패 질문은 채운다 — "어떤 질문에서
+        # 무너졌나"가 상대에게 넘길 진단서의 핵심이다.
+        "qas": _qas_from_report(report, findings),
         "recommendations": _ext_recommendation_cards(cards),
+        # 화면이 "없음"과 "할 수 없음"을 구분할 수 있게 한다. 빈 치료경과를 그대로
+        # 그리면 "최적화를 안 했나"로 읽히는데, 실제로는 남의 인덱스라 못 하는 것이다.
+        "mode": {
+            "kind": "external",
+            "hidden_sections": ["course", "rxs"],
+            "notice": "외부 RAG 실행 로그 진단입니다. 남의 인덱스에는 처방을 적용할 수 "
+                      "없어 치료 경과·처방 이력은 제공되지 않습니다.",
+        },
         "transparency": {
             "duration_label": "",
             "question_count": capability.get("records", 0),
