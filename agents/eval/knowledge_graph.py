@@ -28,6 +28,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -103,8 +104,14 @@ def build_graph(chunks: list[Chunk], top_k: int = KG_TOP_K_NEIGHBORS) -> KGraph:
     #    쌍 수가 O(n^2) 라 청크가 늘면 순수 파이썬 루프로는 감당이 안 된다 — 실측으로
     #    6,584청크(2,167만 쌍)에 약 16분이고, 그동안 진행률 로그가 없어 "멈춤" 과
     #    구분되지 않는다. numpy 가 있으면 행렬곱 두 번으로 같은 값을 1초에 낸다.
-    candidates = _candidate_edges_vectorized(ids, nodes, embeddings, top_k)
+    started_at = time.monotonic()
+    # 폴백 사유는 반환값이 아니라 out 파라미터로 받는다 — 반환 타입을 튜플로 바꾸면
+    # 이 함수를 None 으로 패치해 루프 경로를 강제하는 파리티 테스트가 전부 깨진다.
+    reasons: list[str] = []
+    candidates = _candidate_edges_vectorized(ids, nodes, embeddings, top_k, reasons)
+    fallback_reason = None
     if candidates is None:
+        fallback_reason = reasons[0] if reasons else "unknown"
         candidates = {cid: [] for cid in nodes}
         for i in range(len(ids)):
             for j in range(i + 1, len(ids)):
@@ -130,6 +137,16 @@ def build_graph(chunks: list[Chunk], top_k: int = KG_TOP_K_NEIGHBORS) -> KGraph:
         edges[b_id].append((a_id, w))
     for cid in edges:
         edges[cid].sort(key=lambda pair: pair[1], reverse=True)
+
+    # 어느 경로로 돌았는지 한 줄 남긴다. 이 모듈이 고쳐진 계기가 "16분 동안 아무 출력이
+    # 없어 멈춘 줄 알았다" 였는데, 벡터화가 빨라져도 폴백으로 빠지면 그 증상이 그대로
+    # 재발한다 — 그때 "왜 느린지" 를 로그만 보고 알 수 있어야 한다.
+    # cp949 콘솔에서 죽지 않게 ASCII 와 안전한 문자만 쓴다(호출부가 try 안이라,
+    # 여기서 UnicodeEncodeError 가 나면 STEP1 전체가 실패로 기록된다).
+    print(f"  kg_build_mode={'loop_fallback' if fallback_reason else 'vectorized'} "
+          f"chunks={len(nodes)} block_rows={_env_int('EVAL_KG_BLOCK_ROWS', 512)} "
+          f"edges={len(kept)} elapsed={time.monotonic() - started_at:.1f}s"
+          + (f" reason={fallback_reason}" if fallback_reason else ""))
     return KGraph(nodes=nodes, edges=edges)
 
 
@@ -138,6 +155,7 @@ def _candidate_edges_vectorized(
     nodes: dict[str, KGNode],
     embeddings: dict[str, list[float] | None],
     top_k: int,
+    reasons: list[str] | None = None,
 ) -> dict[str, list[tuple[str, float]]] | None:
     """_edge_weight 를 모든 쌍에 대해 계산한다. numpy 가 없거나 노드가 2개 미만이면 None.
 
@@ -175,13 +193,19 @@ def _candidate_edges_vectorized(
     자카드만으로 판정하는 코퍼스에서는 이 문제가 없다 — 이진행렬 곱은 float64 에서
     정확해서 동률이 동률로 유지된다(테스트로 고정).
     """
+    def bail(reason: str) -> None:
+        """폴백 사유를 호출부(build_graph 의 로그)로 흘린다."""
+        if reasons is not None:
+            reasons.append(reason)
+        return None
+
     n = len(ids)
     if n < 2:
-        return None
+        return bail("too_few_chunks")
     try:
         import numpy as np
     except ImportError:
-        return None
+        return bail("numpy_missing")
 
     dim = next((len(embeddings[cid]) for cid in ids if embeddings.get(cid)), 0)
     if dim:
@@ -192,7 +216,7 @@ def _candidate_edges_vectorized(
         # 최적화가 아니라 동작 변경이다) 루프 경로로 넘긴다. 정상 코퍼스는 한 모델로
         # 임베딩하므로 이 분기를 타지 않는다.
         if any(len(v) != dim for v in embeddings.values() if v):
-            return None
+            return bail("mixed_embedding_dim")
         emb = np.zeros((n, dim), dtype=np.float64)
         for row, cid in enumerate(ids):
             vec = embeddings.get(cid)

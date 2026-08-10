@@ -3,11 +3,13 @@
 멀티홉 후보 페어링(원인1: 무관한 청크가 억지로 엮이던 문제)의 회귀 방지.
 임베딩을 손으로 준 2차원 벡터로 결정적으로 검증한다 — BGE-M3 다운로드/API 불필요.
 """
+import io
 import math
 import os
 import random
 import sys
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from core.schema import Chunk
@@ -142,6 +144,40 @@ class VectorizedEdgeParityTests(unittest.TestCase):
         graph = kg.build_graph(self._chunks(30, seed=13))
         for cid, neigh in graph.edges.items():
             self.assertNotIn(cid, [nid for nid, _ in neigh], f"{cid} 가 자기 이웃이다")
+
+    def test_reports_which_path_it_took(self):
+        """어느 경로로 돌았는지 로그로 남아야 한다(조용한 폴백 금지).
+
+        이 모듈이 고쳐진 계기가 "16분 동안 출력이 없어 멈춘 줄 알았다" 였다. 벡터화가
+        빨라져도 폴백으로 빠지면 증상이 그대로 재발하므로, 그때 '왜 느린지' 를 로그만
+        보고 알 수 있어야 한다.
+        """
+        chunks = self._chunks(30, seed=17, dim=8)
+        cases = [(lambda: kg.build_graph(chunks), "vectorized", None)]
+
+        mixed = self._chunks(30, seed=17, dim=8)
+        mixed[3].embedding = mixed[3].embedding[:5]
+        cases.append((lambda: kg.build_graph(mixed), "loop_fallback", "mixed_embedding_dim"))
+
+        def without_numpy():
+            with patch.dict(sys.modules, {"numpy": None}):
+                return kg.build_graph(chunks)
+        cases.append((without_numpy, "loop_fallback", "numpy_missing"))
+        cases.append((lambda: kg.build_graph(chunks[:1]), "loop_fallback", "too_few_chunks"))
+
+        for run, mode, reason in cases:
+            with self.subTest(mode=mode, reason=reason):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    run()
+                line = buffer.getvalue()
+                self.assertIn(f"kg_build_mode={mode}", line)
+                if reason:
+                    self.assertIn(f"reason={reason}", line)
+                else:
+                    self.assertNotIn("reason=", line)
+                # cp949 콘솔에서 죽으면 호출부(try 안)가 STEP1 을 실패로 기록한다.
+                line.encode("cp949")
 
     def test_matches_loop_when_top_k_takes_everything(self):
         """top_k<=0 은 절단 없음이다 — 벡터화가 limit 를 n 으로 열어야 같아진다."""
