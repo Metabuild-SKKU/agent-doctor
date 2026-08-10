@@ -40,6 +40,23 @@ class Chunk:
     section: Optional[str] = None
     char_span: Optional[tuple[int, int]] = None  # (start, end) — 부모 Document.content 기준 위치.
     # 재청킹돼도 안 깨지는 기준. Eval이 gold_char_span과 겹치는 청크를 찾아 gold를 재판정하는 데 씀.
+    # content[start:end] == text 가 성립한다(앞뒤 공백을 뗀 좌표). 원문 대조·인용·페이지
+    # 계산은 반드시 이쪽을 쓴다.
+    original_char_span: Optional[tuple[int, int]] = None  # 공백을 떼기 "전"의 (start, end).
+    # 커버리지 판정 전용. char_span 은 청크마다 앞뒤 공백을 떼므로 인접 청크 사이에 좌표
+    # 틈이 남는다(섹션 단위로 자르는 markdown/markdown_recursive 는 겹침이 없어 특히).
+    # 그 틈 때문에 gold span 을 다 검색하고도 span_recall 이 0이 됐다(issue #100).
+    # 이 필드는 트림 전 경계라 인접 청크끼리 맞닿아, 트림이 만든 틈은 닫힌다.
+    # 주의: content[start:end] != text 다. 텍스트 대조에 쓰면 안 된다.
+    duplicate_spans: list[list] = field(default_factory=list)  # [[doc_id, start, end], ...]
+    # 이 청크가 대신 대표하는 구간 — dedup 이 버린 쌍둥이가 원문에서 차지하던 트림 전 좌표다.
+    # dedup 은 본문 sha256 완전일치만 버리므로 버려진 글자는 이 청크 안에 그대로 살아 있고,
+    # 임베딩도 같아 질의가 그 내용을 겨냥하면 이 청크가 대신 검색된다. 좌표만 보면 버려진
+    # 자리가 빈 채로 남아, 근거를 실제로 다 본 답이 span_recall 0 으로 떨어졌다.
+    # 이 목록을 커버리지 판정에 얹으면 판정이 갈린다 — 대표 청크가 검색되면 구간이 덮이고
+    # (근거를 봤으니 맞음), 안 되면 그대로 구멍이다(정말 없으니 맞음).
+    # doc_id 를 함께 싣는 이유: 문서 간 dedup 이라 쌍둥이가 다른 문서에 있을 수 있다.
+    # 좌표계는 original_char_span 과 같다(트림 전). 대개 빈 리스트다.
     token_count: Optional[int] = None            # 실제 임베딩 모델 토크나이저 기준 토큰 수
     parent_id: Optional[str] = None              # Small-to-Big(부모 섹션) 확장 대비. 현재는 미사용
     hash: Optional[str] = None                   # sha256(text) 앞부분. 중복 판별/증분 인덱싱용
