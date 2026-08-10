@@ -141,6 +141,25 @@ def _notion_block_text(block: dict) -> str:
 
 # ── 로컬 파일 ─────────────────────────────────────────────────────
 
+def _extract_pages(pdf, page_count: int, label: str, extract) -> list:
+    """pdf.pages 를 한 번 훑으며 extract 를 적용하고 페이지마다 진행률을 센다.
+
+    본문 패스와 표 패스가 같은 모양이라 한 곳으로 모았다 — 진행률 배선이 두 번
+    복사되면 한쪽만 고치는 실수가 나온다. 예외가 나면 진행 줄을 '중단' 으로 닫고
+    그대로 올린다(중간 상태에서 끊긴 로그는 멈춤과 구분되지 않는다)."""
+    reporter = progress.start(label, page_count)
+    results = []
+    try:
+        for page in pdf.pages:
+            results.append(extract(page))
+            progress.tick(reporter)
+    except BaseException:
+        progress.abort(reporter, "예외")
+        raise
+    progress.finish(reporter)
+    return results
+
+
 def _ingest_file(source_url: str) -> list[Document]:
     """로컬 파일 수집 (.txt / .md / .pdf)"""
     path = Path(source_url)
@@ -180,23 +199,21 @@ def _ingest_file(source_url: str) -> list[Document]:
 
         # 표는 페이지별로 뽑아 그 페이지 본문 뒤에 붙인다 — 페이지 span 안에 있어야
         # 청크→페이지 역산(Index 의 _page_of_span)이 표에도 맞는다.
-        # 878페이지 실측 104초 구간이라 페이지 수를 세어 진행률을 찍는다
-        # (core/progress.py 가 주기로 걸러 짧은 문서는 그대로 조용하다).
+        # 878페이지 본문 추출이 실측 2m36s 라 페이지마다 진행률을 센다. 완료 이벤트
+        # 기반이라 페이지가 빨리빨리 끝나는 이 경로가 잘 맞는다 — 최소 간격에 걸려
+        # 짧은 문서는 그대로 조용하다(core/progress.py).
         with pdfplumber.open(path) as pdf:
             page_count = len(pdf.pages)
-            text_progress = progress.start(f"  [Ingest] {path.name} 본문 추출", page_count)
-            raw_pages = []
-            for page in pdf.pages:
-                raw_pages.append(page.extract_text())
-                progress.tick(text_progress)
-            progress.finish(text_progress)
-
-            table_progress = progress.start(f"  [Ingest] {path.name} 표 추출", page_count)
-            page_tables = []
-            for page in pdf.pages:
-                page_tables.append(extract_page_tables(page))
-                progress.tick(table_progress)
-            progress.finish(table_progress)
+            raw_pages = _extract_pages(
+                pdf, page_count, f"  [Ingest] {path.name} 본문 추출",
+                lambda page: page.extract_text(),
+            )
+            # 두 번째 순회는 pdfplumber 가 파싱한 페이지를 캐시해 둬서 훨씬 빠르다
+            # (878페이지 실측 약 4초). 그래도 표가 많은 문서는 길어질 수 있어 같이 센다.
+            page_tables = _extract_pages(
+                pdf, page_count, f"  [Ingest] {path.name} 표 추출",
+                extract_page_tables,
+            )
 
         result = preprocess_pages(raw_pages, page_tables=page_tables)
         content = result.content

@@ -1230,9 +1230,14 @@ def _is_cuda_oom(exc: Exception) -> bool:
 # 주기(10초)보다 오래 걸리면 그만큼 침묵한다. 실측(batch_size 32 기준):
 #   cuda  3,880청크 67.8초 → 창 하나 약 1.1초 (주기가 걸러 10초마다 출력)
 #   cpu   1,500청크 461초  → 창 하나 약 35초  (창이 곧 출력 간격)
-# 4인 이유: cuda 는 어차피 주기에 걸려 값이 커도 손해가 없지만, GPU 가 없는 환경은
-# 창 크기가 그대로 침묵 길이가 된다. 8 로 뒀을 때 cpu 실측이 71초 간격이라 절반으로
-# 줄였다. 더 줄이면 encode() 내부의 길이 정렬 범위가 좁아져 패딩 낭비가 는다.
+# 4인 이유: cuda 는 어차피 최소 간격에 걸려 값이 커도 손해가 없지만, GPU 가 없는
+# 환경은 창 크기가 그대로 침묵 길이가 된다. 8 로 뒀을 때 cpu 실측이 71초 간격이라
+# 절반으로 줄였다. 더 줄이면 encode() 내부의 길이 정렬 범위가 좁아져 패딩 낭비가 는다.
+#
+# env 로 열지 않은 이유(의도적 결정): 이 값은 결과가 아니라 **처리량과 침묵 길이의
+# 맞교환**이라, 노출하면 "진행률이 성글다"는 이유로 낮췄다가 색인 처리량이 조용히
+# 나빠지는 경로가 생긴다. 조정이 필요하면 실측을 근거로 이 상수를 바꾸는 편이,
+# 실행마다 값이 달라져 성능 비교가 안 되는 것보다 낫다.
 _ENCODE_WINDOW_BATCHES = 4
 
 
@@ -1249,49 +1254,60 @@ def _encode_batch(
     하면 대개 통과한다. 1 까지 줄여도 안 되면 포기하고 올려보낸다 — 호출부가
     CPU 로 내린다.
 
-    label 을 주면 창이 끝날 때마다 진행률을 센다(core/progress.py 가 주기로 거른다).
+    label 을 주면 창이 끝날 때마다 진행률을 센다(core/progress.py 가 최소 간격으로 거른다).
     창 분할은 진행률을 켰는지와 무관하게 항상 같다 — PROGRESS_LOG 를 껐다 켰다 해도
-    encode() 에 들어가는 묶음이 달라지지 않아야 '출력만 바꾼다'가 성립한다.
+    encode() 에 들어가는 묶음이 달라지지 않는다.
     축소된 batch_size 는 창을 넘어가도 유지한다. 창마다 원래 크기로 되돌리면
-    OOM 이 창 수만큼 반복된다."""
+    OOM 이 창 수만큼 반복된다.
+
+    주의 — 창 분할 자체는 '출력 전용' 이 아니다. 결과 벡터는 같지만 encode() 를
+    한 번이 아니라 여러 번 부르므로 sentence-transformers 내부의 길이 정렬 범위,
+    호출 횟수, OOM 재시도 단위가 이 PR 이전(단일 호출)과 달라진다. 바뀌지 않는 것은
+    **PROGRESS_LOG on/off 사이의 동등성**이지 main 과의 동등성이 아니다."""
     reporter = progress.start(label, len(texts))
     current_batch_size = batch_size
     encoded: list[list[float]] = []
     cursor = 0
-    while cursor < len(texts):
-        window = texts[cursor:cursor + current_batch_size * _ENCODE_WINDOW_BATCHES]
-        try:
-            vectors = model.encode(
-                window,
-                batch_size=current_batch_size,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )
-        except Exception as exc:
-            if not device.startswith("cuda") or not _is_cuda_oom(exc):
-                raise
-            if current_batch_size <= 1:
-                raise
-            current_batch_size = max(1, current_batch_size // 2)
+    try:
+        while cursor < len(texts):
+            window = texts[cursor:cursor + current_batch_size * _ENCODE_WINDOW_BATCHES]
             try:
-                import torch
+                vectors = model.encode(
+                    window,
+                    batch_size=current_batch_size,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+            except Exception as exc:
+                if not device.startswith("cuda") or not _is_cuda_oom(exc):
+                    raise
+                if current_batch_size <= 1:
+                    raise
+                current_batch_size = max(1, current_batch_size // 2)
+                try:
+                    import torch
 
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
-            # 이 print 는 except 안이라 문구에 cp949 불가 문자를 쓰면 안 된다.
-            # 터지면 UnicodeEncodeError 가 올라가는데, 아래 embed_batch 의
-            # _is_cuda_oom(exc) 가 False 라 그대로 재전파돼 배치 축소와 CPU 폴백이
-            # 통째로 죽는다 — OOM 을 처리하려던 코드가 OOM 처리를 없앤다.
-            # (AGENTS.md 코드 컨벤션, tests/test_console_encoding.py 가 고정한다)
-            print(
-                f"[Index] GPU 메모리 부족, 배치 크기를 {current_batch_size} 로 "
-                f"줄여 재시도합니다."
-            )
-            continue    # cursor 를 안 옮겼으므로 같은 구간을 줄인 크기로 다시 탄다
-        encoded.extend(vector.tolist() for vector in vectors)
-        cursor += len(window)
-        progress.tick(reporter, len(window))
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                # 이 print 는 except 안이라 문구에 cp949 불가 문자를 쓰면 안 된다.
+                # 터지면 UnicodeEncodeError 가 올라가는데, 아래 embed_batch 의
+                # _is_cuda_oom(exc) 가 False 라 그대로 재전파돼 배치 축소와 CPU 폴백이
+                # 통째로 죽는다 — OOM 을 처리하려던 코드가 OOM 처리를 없앤다.
+                # (AGENTS.md 코드 컨벤션, tests/test_console_encoding.py 가 고정한다)
+                print(
+                    f"[Index] GPU 메모리 부족, 배치 크기를 {current_batch_size} 로 "
+                    f"줄여 재시도합니다."
+                )
+                continue    # cursor 를 안 옮겼으므로 같은 구간을 줄인 크기로 다시 탄다
+            encoded.extend(vector.tolist() for vector in vectors)
+            cursor += len(window)
+            progress.tick(reporter, len(window))
+    except BaseException:
+        # 진행 줄이 중간에서 끊기지 않게 닫고 예외는 그대로 올린다. 호출부(embed_batch)
+        # 가 CPU 로 폴백하면 거기서 새 리포터로 다시 센다.
+        progress.abort(reporter, "예외")
+        raise
     progress.finish(reporter)
     return encoded
 

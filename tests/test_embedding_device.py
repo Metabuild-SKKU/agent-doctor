@@ -269,7 +269,7 @@ class EncodeWindowTests(_CacheIsolated):
             encoder.encode = lambda texts, batch_size=32, **kw: (
                 sizes.append((len(texts), batch_size)) or [_Vec([1.0]) for _ in texts])
             with patch.dict(os.environ, {"PROGRESS_LOG": progress_log,
-                                         "PROGRESS_INTERVAL_SEC": "0.001"}), \
+                                         "PROGRESS_MIN_INTERVAL_SEC": "0.001"}), \
                  patch("builtins.print"):
                 store._encode_batch(encoder, [f"t{i}" for i in range(100)], 4, "cpu",
                                     label="  [Index] 임베딩 (cpu)")
@@ -282,6 +282,31 @@ class EncodeWindowTests(_CacheIsolated):
         encoder = _FakeEncoder("m", "cpu")
         store._encode_batch(encoder, ["a", "b", "c"], 32, "cpu")
         self.assertEqual(len(encoder.batch_sizes), 1)
+
+    def test_예외가_나면_진행줄을_중단으로_닫는다(self):
+        """진행줄이 '512/3880' 에서 그냥 끊기면 멈춘 건지 죽은 건지 알 수 없다."""
+        encoder = _FakeEncoder("m", "cpu")
+        calls = {"n": 0}
+
+        def _encode(texts, batch_size=32, **kwargs):
+            calls["n"] += 1
+            if calls["n"] > 2:
+                raise ValueError("모델 폭발")
+            return [_Vec([1.0]) for _ in texts]
+
+        encoder.encode = _encode
+        lines: list[str] = []
+        with patch.dict(os.environ, {"PROGRESS_LOG": "1",
+                                     "PROGRESS_MIN_INTERVAL_SEC": "0.000001"}), \
+             patch("builtins.print",
+                   side_effect=lambda *a, **k: lines.append(" ".join(map(str, a)))):
+            with self.assertRaises(ValueError):
+                store._encode_batch(encoder, [f"t{i}" for i in range(200)], 4, "cpu",
+                                    label="[테스트] 임베딩")
+
+        self.assertTrue(lines, "진행줄이 나온 뒤 실패하는 시나리오여야 한다")
+        self.assertIn("중단", lines[-1])
+        self.assertNotIn("완료", lines[-1])
 
     def test_줄인_배치_크기는_다음_창에도_유지된다(self):
         """창마다 원래 크기로 되돌리면 OOM 이 창 수만큼 반복된다."""
