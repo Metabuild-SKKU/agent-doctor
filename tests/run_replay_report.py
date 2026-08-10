@@ -95,11 +95,19 @@ def main(argv: list[str] | None = None) -> int:
     print("\n" + "=" * 56)
     print(f"  결과 — {log_path.name}")
     print("=" * 56)
-    print(f"레코드/소견   : {cap['records']} / {score['findings_count']}")
-    print(f"종합 점수     : {score['after']}  (gate_pass={score['gate'].get('pass')})")
-    print(f"권고 카드     : {len(view['recommendations'])}건")
-    for rec in view["recommendations"]:
-        print(f"  · [{rec['badge'][1]}] {rec['title']} ({rec['cta']})")
+    # "레코드/소견 6 / 4" 는 비율처럼 읽히는데 서로 무관한 두 값이다. 줄을 나누고
+    # 단위를 붙인다. 소견 수와 카드 수가 다른 것도(라벨 단위로 묶으므로) 함께 밝힌다.
+    n_find = score["findings_count"]
+    n_card = len(view["recommendations"])
+    print(f"진단한 질문   : {cap['records']}건  (진단 수준: {view['meta']['tier']})")
+    print(f"발견한 문제   : {n_find}건"
+          + (f" → 원인 {n_card}종으로 묶임" if n_card and n_card != n_find else ""))
+    print(f"종합 점수     : {score['after']}점 / 100  "
+          f"(기준선 {'통과' if score['gate'].get('pass') else '미달'})")
+    if n_card:
+        print("처방 추천     :")
+        for rec in view["recommendations"]:
+            print(f"  · [{rec['badge'][1]}] {rec['title']} ({rec['cta']})")
     print(f"\n진단서: {html_path}")
     if run_log:
         print(f"실행 로그: {run_log}")
