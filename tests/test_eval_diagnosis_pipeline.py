@@ -133,6 +133,9 @@ def _chunk_from_entry(entry, index: int) -> Chunk:
     span = entry.get("char_span")
     if span is None:
         span = (index * 100, index * 100 + max(1, len(text)))
+    # 커버리지 판정 전용 좌표. 없으면 char_span 으로 떨어져 트림 틈이 되살아난다(#100/#108).
+    original = entry.get("original_char_span")
+    duplicates = entry.get("duplicate_spans")
     return Chunk(
         chunk_id=chunk_id,
         doc_id=entry.get("doc_id", "fixture_doc"),
@@ -140,6 +143,8 @@ def _chunk_from_entry(entry, index: int) -> Chunk:
         page=entry.get("page"),
         section=entry.get("section"),
         char_span=tuple(span),
+        original_char_span=tuple(original) if original else None,
+        duplicate_spans=[list(s) for s in duplicates] if duplicates else [],
     )
 
 
@@ -279,7 +284,12 @@ def _record_from_case(case: dict) -> EvalRecord:
     return record
 
 
-def _run_case(case: dict) -> list[str]:
+def run_case_with_record(case: dict) -> tuple[list[str], EvalRecord]:
+    """케이스 1건 실행 → (라벨, 레코드).
+
+    파생값(recall·경계·밀도)을 함께 보려는 호출부를 위해 레코드까지 돌려준다 —
+    같은 실행을 두 번 하면 심판 호출이 두 배가 되고 memoize 도 갈린다.
+    """
     config = case.get("config", {})
     use_llm = _case_requires_llm(case) and _llm_fixture_enabled() and _ragas_judge() is not None
     metrics_common.set_context(
@@ -294,7 +304,11 @@ def _run_case(case: dict) -> list[str]:
     )
     record = _record_from_case(case)
     findings = diagnose.diagnose(record, mode=_mode(case.get("mode")))
-    return [finding.label for finding in findings]
+    return [finding.label for finding in findings], record
+
+
+def _run_case(case: dict) -> list[str]:
+    return run_case_with_record(case)[0]
 
 
 class EvalDiagnosisPipelineFixtureTest(unittest.TestCase):
