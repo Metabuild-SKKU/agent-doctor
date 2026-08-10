@@ -277,5 +277,79 @@ class TransparencyRenderTests(unittest.TestCase):
                          ("triad", 6, 5))
 
 
+class ExtLabelExposureTests(unittest.TestCase):
+    """라벨 코드는 화면에 노출되지 않는다 — 진단서는 우리 코드를 모르는 상대가 읽는다."""
+
+    def _view(self):
+        f1 = _finding("ext_answer_off_topic", severity="critical")
+        f1.metadata = {"reason": "answer relevancy 0.43 - 답이 질문을 비껴감"}
+        f1.affected_probes = ["p1"]
+        f2 = _finding("ext_grounded_but_wrong")
+        f2.metadata = {"reason": "correctness 0.12인데 faithfulness 1.00"}
+        f2.affected_probes = ["p2"]
+        rep = _report([f1, f2], scores={"faithfulness": 1.0})
+        rep.failed_questions = [
+            {"probe_id": "p1", "question": "q1", "expected_answer": "a", "actual_answer": "b"},
+            {"probe_id": "p2", "question": "q2", "expected_answer": "a", "actual_answer": "b"},
+        ]
+        return build_ext_report_view(rep, {})
+
+    def test_no_raw_label_codes_anywhere(self):
+        import json
+        blob = json.dumps(self._view(), ensure_ascii=False)
+        # mode/code 매핑 자체가 아니라 사용자에게 보이는 문구에 코드가 없어야 한다.
+        for section in ("priority", "dxs", "qas"):
+            text = json.dumps(json.loads(blob)[section], ensure_ascii=False)
+            self.assertNotIn("ext_", text, f"{section} 에 라벨 코드 노출")
+
+    def test_priority_uses_human_titles(self):
+        titles = [p["title"] for p in self._view()["priority"]]
+        self.assertTrue(any("동문서답" in t for t in titles), titles)
+        self.assertTrue(all("질문" in t for t in titles), titles)   # "— 질문 N건"
+
+    def test_dxs_groups_by_label(self):
+        """probe 마다 카드를 만들면 같은 문장이 반복된다 — 라벨 단위로 묶는다."""
+        f = [_finding("ext_grounded_but_wrong") for _ in range(6)]
+        for i, x in enumerate(f):
+            x.affected_probes = [f"p{i}"]
+        dxs = build_ext_report_view(_report(f), {})["dxs"]
+        self.assertEqual(len(dxs), 1)
+        self.assertIn("6건", dxs[0]["foot"])
+
+    def test_dxs_code_is_short_korean(self):
+        codes = [d["code"] for d in self._view()["dxs"]]
+        self.assertIn("동문서답", codes)
+        self.assertIn("근거 부족", codes)
+
+    def test_rx_points_to_recommendation_section(self):
+        """'미처방'이라고 적으면 고칠 방법이 없는 것처럼 읽힌다."""
+        for d in self._view()["dxs"]:
+            self.assertNotEqual(d["rx"], "미처방")
+
+    def test_qas_badge_uses_short_name(self):
+        labels = " ".join(q["label"] for q in self._view()["qas"])
+        self.assertNotIn("ext_", labels)
+
+
+class ExtMetricsSingleTests(unittest.TestCase):
+    """품질 지표 — 외부 모드에는 '처방 전' 값이 없다."""
+
+    def test_metrics_are_single_valued(self):
+        view = build_ext_report_view(
+            _report(scores={"faithfulness": 1.0, "response_relevancy": 0.5}), {})
+        self.assertTrue(view["metrics"])
+        for m in view["metrics"]:
+            self.assertTrue(m["single"])
+            # before 를 남기면 화면이 전후 막대 2개를 그리고 '변화 없음'으로 읽힌다.
+            self.assertNotIn("before", m)
+
+    def test_template_handles_single_metrics(self):
+        """템플릿이 single 을 모르면 m.before.toFixed 에서 죽는다."""
+        from tests.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        self.assertIn("m.single", REPORT_TEMPLATE.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

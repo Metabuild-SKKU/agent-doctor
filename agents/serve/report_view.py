@@ -767,14 +767,16 @@ def build_ext_report_view(
             "tentative": sum(1 for f in findings if not f.confirmed),
             "kept": 0, "rolled": 0, "errors": 0, "pending": 0,
         },
-        "priority": _build_priority([f for f in findings if f.confirmed]),
-        "metrics": _build_metrics(report, []),
+        # 라벨 코드(ext_grounded_but_wrong)를 그대로 노출하지 않는다 — 진단서는
+        # 우리 코드를 모르는 상대 팀이 읽는 문서다.
+        "priority": _ext_priority(findings),
+        "metrics": _ext_metrics(report),
         "course": [],
         "rxs": [],
-        "dxs": _build_dxs(findings),
+        "dxs": _ext_dxs(findings),
         # 로그에도 질문·답변·정답이 있으므로 실패 질문은 채운다 — "어떤 질문에서
         # 무너졌나"가 상대에게 넘길 진단서의 핵심이다.
-        "qas": _qas_from_report(report, findings),
+        "qas": _ext_qas(report, findings),
         "recommendations": _ext_recommendation_cards(cards),
         # 화면이 "없음"과 "할 수 없음"을 구분할 수 있게 한다. 빈 치료경과를 그대로
         # 그리면 "최적화를 안 했나"로 읽히는데, 실제로는 남의 인덱스라 못 하는 것이다.
@@ -819,6 +821,97 @@ _EXT_TIER_LABELS = {
     "triad": "외부 로그 진단 (질문·컨텍스트·답변)",
     "qa_only": "외부 로그 진단 (질문·답변만 — 제한적)",
 }
+
+
+def _ext_reason(finding) -> str:
+    """소견 1건의 근거 문구에서 내부 접두어("[리플레이 소견] 라벨 - ")를 걷어낸다.
+    metadata['reason'] 이 그 접두어 없는 원문이라 그것을 우선 쓴다."""
+    reason = str(finding.metadata.get("reason") or "").strip()
+    if reason:
+        return reason
+    text = (finding.description or "").split("\n")[0]
+    return text.split(" - ", 1)[-1].strip() if " - " in text else text.strip()
+
+
+def _ext_group_by_label(findings: list) -> list[tuple[str, list]]:
+    """라벨 단위로 묶는다. probe 마다 카드를 만들면 같은 문장이 6번 반복된다
+    (실측: 소견 9건이 사실은 라벨 2종이었다)."""
+    groups: dict[str, list] = {}
+    for f in findings:
+        groups.setdefault(f.label or f.type, []).append(f)
+    order = {"critical": 0, "warning": 1, "info": 2}
+    return sorted(groups.items(),
+                  key=lambda kv: (order.get(kv[1][0].severity, 9), -len(kv[1])))
+
+
+def _ext_priority(findings: list) -> list[dict[str, Any]]:
+    """가장 시급한 문제 — 라벨별로 묶어 사람 말 제목으로."""
+    from agents.optimize.ext_advisor import label_summary
+
+    out = []
+    for label, items in _ext_group_by_label([f for f in findings if f.confirmed])[:3]:
+        out.append({
+            "group": "",
+            "severity": items[0].severity,
+            "title": f"{label_summary(label)} — 질문 {len(items)}건",
+            "desc": _ext_reason(items[0]),
+            "confirmed": True,
+            "affected": len(items),
+        })
+    return out
+
+
+def _ext_dxs(findings: list) -> list[dict[str, Any]]:
+    """진단 상세 — 라벨별 카드. code 자리에도 짧은 한글명을 쓴다."""
+    from agents.optimize.ext_advisor import label_short, label_summary
+
+    out = []
+    for label, items in _ext_group_by_label(findings):
+        confirmed = [f for f in items if f.confirmed]
+        out.append({
+            "grp": "",
+            "title": label_summary(label),
+            "code": label_short(label),
+            "badge": ["confirm", "확정"] if confirmed else ["prelim", "예비"],
+            "desc": _ext_reason(items[0]),
+            "foot": f"질문 {len(items)}건 영향"
+                    + (f" · 예비 {len(items) - len(confirmed)}건"
+                       if len(confirmed) < len(items) else ""),
+            # 처방은 '처방 추천' 섹션이 담당한다. 여기서 "미처방"이라고 적으면
+            # 고칠 방법이 없는 것처럼 읽힌다.
+            "rx": "처방 추천 참고",
+        })
+    return out
+
+
+def _ext_qas(report, findings: list) -> list[dict[str, Any]]:
+    """실패한 검증 질문 — 라벨 코드 대신 짧은 한글명을 배지에 쓴다."""
+    from agents.optimize.ext_advisor import label_short
+
+    rows = _qas_from_report(report, findings)
+    by_probe: dict[str, list] = {}
+    for f in findings:
+        for pid in f.affected_probes:
+            by_probe.setdefault(pid, []).append(f)
+    ordered_probes = [r.get("probe_id") for r in
+                      (getattr(report, "failed_questions", []) or [])]
+    for row, pid in zip(rows, ordered_probes):
+        labels = list(dict.fromkeys(
+            label_short(f.label or f.type) for f in by_probe.get(pid, [])))
+        row["label"] = " / ".join(labels) or "검증 실패"
+        row["fix"] = "처방 추천 참고"
+    return rows
+
+
+def _ext_metrics(report) -> list[dict[str, Any]]:
+    """품질 지표 — 외부 모드에는 '처방 전 값'이 없다. before 를 실어 보내면
+    화면이 전후 막대 2개를 그리는데 둘이 같은 값이라 변화 없음으로 읽힌다.
+    single=True 로 현재값 하나만 그리게 한다."""
+    out = _build_metrics(report, [])
+    for m in out:
+        m["single"] = True
+        m.pop("before", None)
+    return out
 
 
 def _ext_recommendation_cards(cards: list[dict]) -> list[dict[str, Any]]:

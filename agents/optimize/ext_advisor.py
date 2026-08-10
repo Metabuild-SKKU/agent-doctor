@@ -36,12 +36,32 @@ EXT_LABEL_TO_RULE: dict[str, str] = {
 }
 
 # 라벨 자체의 한 줄 설명 — 카드 제목 밑에 붙는다.
-_LABEL_SUMMARY: dict[str, str] = {
+LABEL_SUMMARY: dict[str, str] = {
     "ext_generation_hallucination": "답변이 검색된 근거에 기반하지 않습니다(환각)",
     "ext_answer_off_topic": "답변이 질문을 비껴갑니다(동문서답)",
     "ext_context_overflow": "컨텍스트가 과다해 근거 사용을 방해합니다",
     "ext_grounded_but_wrong": "답변은 근거에 충실하나 근거 자체가 틀렸거나 부족합니다",
 }
+
+# 배지·칩처럼 좁은 자리에 쓰는 짧은 이름. 라벨 코드(ext_grounded_but_wrong)를 그대로
+# 노출하면 우리 코드를 아는 사람만 읽을 수 있다 — 진단서는 상대 팀이 보는 문서다.
+LABEL_SHORT: dict[str, str] = {
+    "ext_generation_hallucination": "환각",
+    "ext_answer_off_topic": "동문서답",
+    "ext_context_overflow": "컨텍스트 과다",
+    "ext_grounded_but_wrong": "근거 부족",
+}
+
+
+def label_summary(label: str) -> str:
+    """라벨 → 사람이 읽는 한 줄. 모르는 라벨이면 코드를 그대로 돌려준다
+    (지어내는 것보다 rules/replay_labels 로 되짚을 수 있는 게 낫다)."""
+    return LABEL_SUMMARY.get(label) or label
+
+
+def label_short(label: str) -> str:
+    """라벨 → 배지용 짧은 이름."""
+    return LABEL_SHORT.get(label) or label
 
 # 처방 id → 사람이 읽는 조치 문구. rules.py 의 manual 처방은 action/detail 을
 # 이미 갖고 있지만 ready 처방은 기계용 patch 뿐이라, 그 빈자리를 여기서 메운다.
@@ -171,7 +191,7 @@ def build_ext_recommendations(
             continue                      # 내부 라벨은 이 경로가 다루지 않는다
         card = grouped.setdefault(label, {
             "label": label,
-            "summary": _LABEL_SUMMARY.get(label, ""),
+            "summary": label_summary(label),
             "severity": getattr(f, "severity", "") or "warning",
             "confirmed": 0,
             "tentative": 0,
@@ -182,8 +202,11 @@ def build_ext_recommendations(
             card["confirmed"] += 1
         else:
             card["tentative"] += 1
-        why = getattr(f, "description", "") or ""
-        if why and len(card["evidence"]) < 3:      # 카드가 근거로 넘치지 않게
+        # metadata['reason'] 은 "[리플레이 소견] 라벨 - " 접두어가 없는 원문이다.
+        # description 을 그대로 실으면 라벨 코드가 화면에 노출된다.
+        why = (str(getattr(f, "metadata", {}).get("reason") or "").strip()
+               or str(getattr(f, "description", "") or "").strip())
+        if why and why not in card["evidence"] and len(card["evidence"]) < 3:
             card["evidence"].append(why)
 
     order = {"critical": 0, "warning": 1, "info": 2}

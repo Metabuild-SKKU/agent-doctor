@@ -707,11 +707,22 @@
   function pos(v) { return ((v - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)) * 100; }
   function renderMetrics(metrics) {
   var mHtml = metrics.map(function (m) {
-    var pb = pos(m.before), pa = pos(m.after);
+    var pa = pos(m.after);
+    var name = '<div class="metric-name"><span class="term" tabindex="0" data-tip="' + esc(m.tip) + '">' + esc(m.name) + '</span><span class="en">' + esc(m.en) + '</span></div>';
+    // single: 처방 전후가 없는 모드(외부 로그 진단) — 전후 막대 2개를 그리면 둘이
+    // 같은 값이라 "변화 없음"으로 읽힌다. 현재값 점 하나만 찍는다.
+    if (m.single) {
+      return '<div class="metric-row">' + name +
+        '<div class="dumbbell"><div class="track"></div>' +
+          '<div class="pt after" style="left:' + pa + '%"></div>' +
+        '</div>' +
+        '<div class="metric-vals"><span class="a">' + m.after.toFixed(2) + '</span></div>' +
+      '</div>';
+    }
+    var pb = pos(m.before);
     var lo = Math.min(pb, pa), hi = Math.max(pb, pa);
     var delta = '+' + Math.round((m.after - m.before) * 100) / 100;
-    return '<div class="metric-row">' +
-      '<div class="metric-name"><span class="term" tabindex="0" data-tip="' + m.tip + '">' + m.name + '</span><span class="en">' + m.en + '</span></div>' +
+    return '<div class="metric-row">' + name +
       '<div class="dumbbell"><div class="track"></div>' +
         '<div class="connect" style="left:' + lo + '%;width:' + (hi - lo) + '%"></div>' +
         '<div class="pt before" style="left:' + pb + '%"></div>' +
