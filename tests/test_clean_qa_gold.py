@@ -301,7 +301,12 @@ class BuilderCliRobustnessTest(unittest.TestCase):
                 [_sys.executable, str(pathlib.Path(__file__).resolve().parent.parent
                                       / "tools" / "build_clean_qa.py"),
                  "--corpus", str(cp), "--qa", str(qp), "--out", str(op)],
-                capture_output=True, text=True,
+                # encoding 을 안 박으면 부모가 로케일 코드페이지(한국어 Windows = cp949)로
+                # 디코딩한다. 자식은 core/__init__.py 때문에 stderr 가 UTF-8 이라
+                # UnicodeDecodeError 로 result.stderr 가 None 이 되고, 아래 assertNotIn 이
+                # 정작 검증하려던 ZeroDivision 판정 전에 TypeError 로 죽는다.
+                # tests/test_core_encoding.py 와 같은 처리 — 판정 대상은 ASCII 라 안전하다.
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             self.assertEqual(result.returncode, 1)
             self.assertNotIn("Traceback", result.stderr)
