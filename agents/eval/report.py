@@ -47,6 +47,14 @@ def is_bad_gold_probe(record: EvalRecord) -> bool:
 # 점수에 넣으면 고칠 수 없는 페널티가 되고 Optimize 가 헛처방을 쫓는다.
 _GOLD_ERROR_LABELS = ("bad_gold_answer", "bad_gold_chunk")
 
+# 그중 **예비(confirmed=False)여도** 제외하는 라벨. 지금은 bad_gold_chunk 하나다.
+#
+# 2026-08-07 변경이 confirmed 요구를 _GOLD_ERROR_LABELS 전체에서 뺐는데, 실제로 검토한 건
+# bad_gold_chunk 뿐이었다(리뷰 지적). bad_gold_answer 는 현재 생산자 둘 다 confirmed=True 라
+# 무해하지만, 나중에 예비 bad_gold_answer 를 만드는 코드가 붙으면 **아무 논의 없이** 그 probe
+# 들도 채점에서 빠진다. 검토한 범위만 넓혀 둔다.
+_PRELIMINARY_EXCLUDED_LABELS = ("bad_gold_chunk",)
+
 
 def is_gold_labeling_error(record: EvalRecord) -> bool:
     """골드 라벨 오류(정답 텍스트 또는 근거 청크)로 판정된 probe 인가 — 점수 제외용.
@@ -64,9 +72,16 @@ def is_gold_labeling_error(record: EvalRecord) -> bool:
     faithfulness 는 **왜** 그런지(골드 오라벨 vs 파라미터 기억)만 가르고, 그건 라벨의
     확정/예비로 표시된다.
 
+    예비 제외는 **검토한 라벨에만** 적용한다(_PRELIMINARY_EXCLUDED_LABELS) — bad_gold_answer
+    는 예비가 생기면 그때 따로 판단할 일이지, 이 변경에 묻어가면 안 된다.
+
     ⚠️ 확정만 보던 시절보다 제외 범위가 넓어지므로 점수가 올라간다 — 이 변경 이전
     실행과 직접 비교하지 말 것(agents/eval/README.md 재베이스라인 절)."""
-    return any(f.label in _GOLD_ERROR_LABELS for f in record.findings)
+    return any(
+        f.label in _GOLD_ERROR_LABELS
+        and (f.confirmed or f.label in _PRELIMINARY_EXCLUDED_LABELS)
+        for f in record.findings
+    )
 
 
 # 하위호환 별칭(내부 호출부).
@@ -82,16 +97,37 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     if mode is None:
         mode = resolve_mode()
 
-    findings = [f for r in records for f in r.findings]
-    # Optimize 소비 편의: 확정 우선. 동률은 원래 순서 유지(stable sort — probe별 D→A→C→B).
-    findings.sort(key=lambda f: not f.confirmed)
-
     # 골드 라벨 오류(bad_gold_answer=정답 텍스트, bad_gold_chunk=근거 청크)로 판정된 probe 는
     # '거짓 실패'다 — RAG 결함이 아니라 평가셋이 틀린 것이라, 점수에 넣으면 파이프라인이 고칠 수
-    # 없는 문제로 페널티를 받고 Optimize 가 존재하지 않는 결함을 쫓게 된다. 따라서 점수 집계
-    # (품질/신뢰도/overall/composite)에서만 제외하고, 진단·리포트(findings/summary/outcome)에는
-    # 그대로 남긴다. (전부 제외되면 scorable 이 비어 overall=None → 기존 '판정 보류' 통과 경로.)
+    # 없는 문제로 페널티를 받고 Optimize 가 존재하지 않는 결함을 쫓게 된다.
+    # (전부 제외되면 scorable 이 비어 overall=None → 기존 '판정 보류' 통과 경로.)
     scorable = [r for r in records if not is_gold_labeling_error(r)]
+
+    # **채점에서 뺀 probe 는 처방도 만들지 않는다**(2026-08-10, 리뷰 지적).
+    #
+    # 예전에는 findings 를 records 전체로 만들었다. 그러면 골드가 의심스러워 채점에서 뺀
+    # probe 의 확정 라벨(generation_hallucination 등)이 planner 로 넘어가 처방을 만드는데,
+    # 정작 그 probe 는 composite 에 없어 **KEEP/ROLLBACK 게이트가 효과를 볼 수 없다.**
+    # 처방은 하는데 측정은 못 하는 상태였다. 실측 재현:
+    #
+    #     recall=1.0, real faith=0.0, oracle faith=0.0
+    #       예비 bad_gold_chunk · 확정 generation_hallucination
+    #                           · 확정 generation_parametric_overreliance
+    #       → is_gold_labeling_error=True 라 채점 제외, 그런데 처방은 나감
+    #
+    # 그래서 점수와 처방을 **같은 집합**에서 낸다. 제외 판정은 결정론적 신호만 쓰므로
+    # (오라클 있음 ∧ 오라클 실패 ∧ f1 통과) 회차마다 흔들리지 않는다.
+    #
+    # 골드 오류 라벨 자체는 남긴다 — 그게 이 probe 를 사람 검수로 보내는 통로이고
+    # (report_view 의 "골드 청크 재지정 필요"), D그룹이라 자동 처방 대상도 아니다.
+    # 같이 섰던 파이프라인 라벨은 findings_summary 에 집계로 남아 관측은 가능하다.
+    gold_probe_ids = {r.probe.probe_id for r in records if is_gold_labeling_error(r)}
+    findings = [
+        f for r in records for f in r.findings
+        if r.probe.probe_id not in gold_probe_ids or f.label in _GOLD_ERROR_LABELS
+    ]
+    # Optimize 소비 편의: 확정 우선. 동률은 원래 순서 유지(stable sort — probe별 D→A→C→B).
+    findings.sort(key=lambda f: not f.confirmed)
 
     ragas_means = _ragas_means(scorable)
     rule_means = _rule_means(scorable)

@@ -283,6 +283,69 @@ class GoldLabelingErrorScoringTest(unittest.TestCase):
         # 답 재생성 대상은 아니다 — 정답 텍스트는 멀쩡하다.
         self.assertFalse(report.is_bad_gold_probe(rec))
 
+    def test_excluded_probe_does_not_feed_the_prescription_path(self):
+        """채점에서 뺀 probe 는 **처방도 만들지 않는다**(2026-08-10, 리뷰 지적).
+
+        예전에는 report.findings 를 records 전체로 만들어, 골드가 의심스러워 채점에서 뺀
+        probe 의 확정 라벨이 planner 로 넘어가 처방을 만들었다. 그런데 그 probe 는
+        composite 에 없어 **KEEP/ROLLBACK 게이트가 효과를 볼 수 없다** — 처방은 하는데
+        측정은 못 하는 상태였다.
+
+        골드 라벨 자체는 남는다: 그게 이 probe 를 사람 검수로 보내는 통로이고
+        (report_view 의 "골드 청크 재지정 필요"), D그룹이라 자동 처방 대상도 아니다.
+        """
+        probe = Probe(probe_id="p", question="q", source="taxonomy", ground_truth="gt")
+        rec = EvalRecord(probe=probe)
+        rec.f1_score, rec.recall_at_k = 0.0, 1.0
+        rec.findings = [
+            Finding(finding_id="p1", type="gap", severity="warning", description="d",
+                    label="bad_gold_chunk", confirmed=False, affected_probes=["p"]),
+            Finding(finding_id="p2", type="generation_failure", severity="warning",
+                    description="d", label="generation_hallucination",
+                    confirmed=True, affected_probes=["p"]),
+        ]
+
+        rep = report.build_report([rec], 0, mode=1)
+        labels = [f.label for f in rep.findings]
+
+        self.assertEqual(labels, ["bad_gold_chunk"])          # 처방 경로에서 빠짐
+        self.assertIn("generation_hallucination",             # 관측은 남는다
+                      rep.findings_summary["confirmed_labels"])
+
+    def test_a_scorable_probe_keeps_all_of_its_findings(self):
+        """제외는 골드 오류 probe 에만 걸린다 — 멀쩡한 probe 의 라벨까지 새면 안 된다."""
+        probe = Probe(probe_id="clean", question="q", source="taxonomy", ground_truth="gt")
+        rec = EvalRecord(probe=probe)
+        rec.f1_score, rec.recall_at_k = 0.0, 0.5
+        rec.findings = [
+            Finding(finding_id="c1", type="generation_failure", severity="warning",
+                    description="d", label="generation_hallucination",
+                    confirmed=True, affected_probes=["clean"]),
+            Finding(finding_id="c2", type="retrieval_failure", severity="warning",
+                    description="d", label="retrieval_low_rank",
+                    confirmed=True, affected_probes=["clean"]),
+        ]
+
+        labels = {f.label for f in report.build_report([rec], 0, mode=1).findings}
+
+        self.assertEqual(labels, {"generation_hallucination", "retrieval_low_rank"})
+
+    def test_preliminary_bad_gold_answer_is_not_swept_along(self):
+        """예비 제외는 **검토한 라벨에만** 적용한다(리뷰 지적).
+
+        2026-08-07 변경이 confirmed 요구를 _GOLD_ERROR_LABELS 전체에서 뺐는데, 실제로
+        검토한 건 bad_gold_chunk 뿐이었다. bad_gold_answer 는 현재 생산자 둘 다
+        confirmed=True 라 무해하지만, 나중에 예비를 만드는 코드가 붙으면 아무 논의 없이
+        채점에서 빠진다. 검토한 범위만 넓혀 둔 것을 고정한다.
+        """
+        self.assertFalse(report.is_gold_labeling_error(
+            self._labeled("bad_gold_answer", confirmed=False)))
+        self.assertTrue(report.is_gold_labeling_error(
+            self._labeled("bad_gold_answer", confirmed=True)))
+        # bad_gold_chunk 는 예비여도 제외된다(이 PR 의 본래 목적).
+        self.assertTrue(report.is_gold_labeling_error(
+            self._labeled("bad_gold_chunk", confirmed=False)))
+
     def test_generation_label_does_not_drag_the_composite_down(self):
         """위 비대칭을 종합점수로도 확인한다 — 생성 라벨이 붙어도 점수는 안 움직인다."""
         good = [self._good(f"g{i}") for i in range(3)]

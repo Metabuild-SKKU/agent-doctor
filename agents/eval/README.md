@@ -264,6 +264,15 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, confirmed
 `confirmed=False`(예비)는 *더 깊은 모드에서 확정 가능한 의심 원인*이며, `overall_score`/`pass_threshold` 를
 바꾸지 않는다(지표 기반). Optimize 는 `findings_summary.confirmed_labels` 로 확정 원인부터 처방한다.
 
+> **예외 하나 — 예비 `bad_gold_chunk`**(2026-08-07). 이건 점수를 바꾼다. 그 probe 를
+> `scorable` 에서 빼기 때문이다. 위 계약이 "예비는 점수를 안 건드린다" 인 이유는 *확신 없는
+> 진단으로 파이프라인에 페널티를 주지 않는다* 인데, 골드 오류는 **파이프라인이 아니라
+> 평가셋의 결함**이라 방향이 반대다 — 남겨 두는 쪽이 고칠 수 없는 페널티가 된다. 게다가
+> 제외의 근거(`_f1_ok` ∧ `not _oracle_ok`)는 글자 비교라 예비/확정과 무관하게 결정론적이다.
+> 자세한 배경은 위 "흔들리는 심판 신호가 라벨을 뒤집지 못하게" 절.
+>
+> 이 예외는 `report._PRELIMINARY_EXCLUDED_LABELS` 에 명시된 라벨에만 적용된다.
+
 ---
 
 ## 환경 변수
