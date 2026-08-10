@@ -409,22 +409,21 @@ def _span_covered_chars(start: int, end: int, positions: list[tuple[int, int]]) 
     return covered_chars
 
 
-def span_recall_at_k(
+def _gold_coverage_context(
     gold_spans: list[dict],
     retrieved_chunk_ids: list[str],
     chunks: list,
-) -> float | None:
-    """검색된 청크 좌표가 gold span을 얼마나 온전히 덮는지 계산한다.
+):
+    """(유효 gold span, 검색 청크가 차지한 좌표) — 좌표로 못 재는 환경이면 None.
 
-    한 청크가 span 전체를 포함해도 성공이고, 여러 검색 청크의 좌표 합집합이
-    빈틈없이 span을 덮어도 성공이다. 청크 좌표가 없어 계산할 수 없는 legacy
-    환경에서는 None을 반환해 호출부가 기존 chunk-id Recall로 폴백하게 한다.
+    `span_recall_at_k`(덮은 비율)와 `span_precision_at_k`(근거 밀도)가 **같은 좌표**를
+    봐야 하므로 한 곳에서 만든다. 둘이 다른 좌표를 보면 "recall 은 1.0 인데 정밀도는
+    골드를 하나도 못 덮은 값" 같은 모순이 생긴다.
 
     좌표는 _chunk_coverage_span(트림 전 경계 우선)을 쓴다 — 청크 사이 공백 틈이
     gold span 을 갈라 0점이 되던 문제(issue #100) 때문이다. 청크가 dedup 으로 버린
     쌍둥이를 대표하면 그 자리(_chunk_alias_spans)도 제 좌표와 같이 얹는다.
     """
-
     valid_spans: list[tuple[str, int, int]] = []
     for span in gold_spans:
         if not isinstance(span, dict):
@@ -477,6 +476,24 @@ def span_recall_at_k(
         not all_positions.get(doc_id) for doc_id, _start, _end in valid_spans
     ):
         return None
+    return valid_spans, retrieved_positions
+
+
+def span_recall_at_k(
+    gold_spans: list[dict],
+    retrieved_chunk_ids: list[str],
+    chunks: list,
+) -> float | None:
+    """검색된 청크 좌표가 gold span을 얼마나 온전히 덮는지 계산한다.
+
+    한 청크가 span 전체를 포함해도 성공이고, 여러 검색 청크의 좌표 합집합이
+    빈틈없이 span을 덮어도 성공이다. 청크 좌표가 없어 계산할 수 없는 legacy
+    환경에서는 None을 반환해 호출부가 기존 chunk-id Recall로 폴백하게 한다.
+    """
+    context = _gold_coverage_context(gold_spans, retrieved_chunk_ids, chunks)
+    if context is None:
+        return None
+    valid_spans, retrieved_positions = context
 
     # 덮은 문자 총합 / 골드 문자 총합 — span 길이로 가중한 micro average 다.
     #
@@ -503,6 +520,74 @@ def span_recall_at_k(
     )
     gold_chars = sum(end - start for _doc_id, start, end in valid_spans)
     return covered_chars / gold_chars
+
+
+def span_precision_at_k(
+    gold_spans: list[dict],
+    retrieved_chunk_ids: list[str],
+    chunks: list,
+) -> float | None:
+    """컨텍스트에 넣은 글자 중 **골드 근거의 비율**(근거 밀도). 좌표 없으면 None.
+
+        덮은 골드 문자 / 검색해서 컨텍스트에 넣은 글자 총합
+
+    `span_recall_at_k` 의 짝이다. recall 은 **가져올수록 무조건 오르는** 숫자라 비용이
+    없다 — 5지선다에 다섯 개를 다 체크하면 정답률이 100% 인 것과 같다. 이 함수가 그
+    비용을 잰다: 많이 퍼올수록 분모가 커져 떨어진다.
+
+    ## `context_precision`(RAGAS)이 있는데 왜 또 재나
+
+    겹치지 않는다. `context_precision` 은 **순위 가중 average precision** 이라
+    "쓸모없는 청크가 쓸모있는 청크보다 **앞에** 왔나"만 본다 — 정답 청크 **뒤에** 뭐가
+    붙든 계산에 들어가지 않는다. 또 판정 단위가 **청크 개수**라 청크 크기를 보지 못한다.
+
+        정직: top-5, 1등이 정답 청크          context_precision 1.000
+        top_k 를 20 으로 늘림(뒤에 쓰레기)     context_precision 1.000   ← 안 떨어진다
+        문서 전체가 청크 1개                   context_precision 1.000   ← 안 떨어진다
+        쓰레기가 정답보다 앞에 옴              context_precision 0.200   ← 이건 잡는다
+
+    즉 `context_precision` 은 **순서 품질**(리랭커)을, 이 함수는 **부피 낭비**(top_k·청크
+    크기)를 잰다. 실측(문서 30개, 원본 골드, 오라클 top-1):
+
+        전략                  recall   검색 글자   span_precision
+        fixed                  0.745        500            0.710
+        recursive              0.799        476            0.791
+        markdown_recursive     0.799        476            0.791
+        markdown               1.000      9,498            0.089   ← recall 은 1등
+
+    `markdown` 은 이 코퍼스에 헤딩이 없어 "섹션 = 문서 전체" 로 퇴화해 문서당 청크가
+    1개다. 문서를 통째로 주면 어떤 근거든 덮이므로 recall 이 만점이 되는데, 19배를
+    퍼와서 산 점수라는 건 이 숫자에서만 보인다.
+
+    ## 분모에 무엇이 들어가나
+
+    **검색된 청크 전부** — gold 문서가 아닌 청크도 센다. 그것들도 컨텍스트를 차지하는
+    비용이고, top_k 를 부풀렸을 때 늘어나는 게 바로 그쪽이기 때문이다. 청킹 overlap 으로
+    중복된 글자도 그대로 센다(컨텍스트에 실제로 두 번 들어간다).
+
+    이 값은 **관측용**이다. 골드 폭에 따라 절대값이 크게 달라지므로(원본 골드 497자 vs
+    정제본 6자) 고정 문턱을 걸지 않는다 — 같은 골드 안에서 설정 간 비교로 읽는다.
+    """
+    context = _gold_coverage_context(gold_spans, retrieved_chunk_ids, chunks)
+    if context is None:
+        return None
+    valid_spans, retrieved_positions = context
+
+    retrieved = set(retrieved_chunk_ids)
+    context_chars = sum(
+        len(getattr(chunk, "text", "") or "")
+        for chunk in chunks
+        if getattr(chunk, "chunk_id", None) in retrieved
+    )
+    if context_chars <= 0:
+        return None
+
+    covered_chars = sum(
+        _span_covered_chars(start, end, retrieved_positions.get(doc_id, []))
+        for doc_id, start, end in valid_spans
+    )
+    # 좌표(트림 전 경계)가 본문보다 길 수 있어 비율이 1 을 넘을 수 있다 — 밀도는 1 이 상한이다.
+    return min(1.0, covered_chars / context_chars)
 
 
 # ── 무응답(기권) 판별 ─────────────────────────────────────────────
@@ -546,6 +631,12 @@ def _compute_metrics(record: EvalRecord) -> None:
         else recall_at_k(record.probe.gold_chunk_ids, record.retrieved_chunk_ids)
     )
     record.recall_basis = "span" if span_recall is not None else "chunk"
+    # 근거 밀도(관측용). span 좌표로 재는 값이라 chunk 폴백 실행에서는 None 으로 남는다.
+    record.span_precision = span_precision_at_k(
+        record.probe.gold_spans,
+        record.retrieved_chunk_ids,
+        _ctx.chunks,
+    )
     # answer_match: KorQuAD char-F1 (+짧은 정답 recall).
     if gt:
         score, best_variant, raw_score, variant_count = best_answer_match(record.generated_answer, gt)

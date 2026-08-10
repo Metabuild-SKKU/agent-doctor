@@ -1,6 +1,6 @@
 import unittest
 
-from agents.eval.metrics_basic import span_recall_at_k
+from agents.eval.metrics_basic import span_precision_at_k, span_recall_at_k
 from core.schema import Chunk
 
 
@@ -397,6 +397,93 @@ class MicroAverageTest(unittest.TestCase):
         ]
 
         self.assertEqual(span_recall_at_k(spans, ["c0", "c1"], chunks), 0.0)
+
+
+class SpanPrecisionTest(unittest.TestCase):
+    """근거 밀도 — recall 의 짝(2026-08-10).
+
+    recall 은 **가져올수록 무조건 오르는** 숫자라 비용이 없다. 이 지표가 그 비용을 잰다.
+    고정하는 성질은 셋이다.
+      ① 같은 근거를 더 많은 글자로 사서 오면 떨어진다(top_k 부풀리기).
+      ② 청크가 커질수록 떨어진다 — `context_precision` 이 청크 **개수**로 세느라
+         구조적으로 못 보는 축이 이것이다(문서 전체가 청크 1개여도 그쪽은 1.000).
+      ③ recall 과 **같은 좌표**를 본다 — 다른 좌표를 보면 "recall 1.0 인데 밀도는 0" 같은
+         모순이 생긴다.
+    """
+
+    def _chunks(self, *ranges):
+        return [
+            Chunk(f"c{i}", "d1", "x" * (e - s), char_span=(s, e))
+            for i, (s, e) in enumerate(ranges)
+        ]
+
+    def test_density_is_gold_chars_over_context_chars(self):
+        chunks = self._chunks((0, 100))
+        spans = [{"doc_id": "d1", "start": 0, "end": 10}]
+
+        # 골드 10자를 얻으려고 100자를 컨텍스트에 넣었다.
+        self.assertEqual(span_precision_at_k(spans, ["c0"], chunks), 0.1)
+
+    def test_retrieving_more_for_the_same_evidence_lowers_it(self):
+        """top_k 부풀리기 — recall 은 그대로인데 밀도만 떨어진다."""
+        chunks = self._chunks((0, 100), (100, 200), (200, 300), (300, 400))
+        spans = [{"doc_id": "d1", "start": 0, "end": 10}]
+
+        lean = span_precision_at_k(spans, ["c0"], chunks)
+        greedy = span_precision_at_k(spans, ["c0", "c1", "c2", "c3"], chunks)
+
+        # 같은 근거(10자)를 100자로 사 왔나, 400자로 사 왔나.
+        self.assertEqual(lean, 0.1)
+        self.assertEqual(greedy, 0.025)
+        # recall 은 둘 다 만점이라 아무것도 못 가른다 — 그래서 이 지표가 필요하다.
+        self.assertEqual(span_recall_at_k(spans, ["c0"], chunks), 1.0)
+        self.assertEqual(span_recall_at_k(spans, ["c0", "c1", "c2", "c3"], chunks), 1.0)
+
+    def test_whole_document_as_one_chunk_scores_worst(self):
+        """`markdown` 이 헤딩 없는 코퍼스에서 퇴화하는 경우(문서당 청크 1개).
+
+        recall 은 1등(문서를 통째로 주니 어떤 근거든 덮인다)인데 밀도는 꼴찌다.
+        """
+        chunked = self._chunks(*[(i * 500, (i + 1) * 500) for i in range(20)])
+        whole = self._chunks((0, 10_000))
+        spans = [{"doc_id": "d1", "start": 0, "end": 500}]
+
+        self.assertEqual(span_recall_at_k(spans, ["c0"], chunked), 1.0)
+        self.assertEqual(span_recall_at_k(spans, ["c0"], whole), 1.0)   # recall 은 동점
+        self.assertEqual(span_precision_at_k(spans, ["c0"], chunked), 1.0)
+        self.assertEqual(span_precision_at_k(spans, ["c0"], whole), 0.05)  # 20배 낭비
+
+    def test_chunks_from_other_documents_count_as_cost(self):
+        """gold 문서가 아닌 청크도 컨텍스트를 차지한다 — 분모에 들어가야 한다."""
+        chunks = [
+            Chunk("c0", "d1", "x" * 100, char_span=(0, 100)),
+            Chunk("c1", "d2", "y" * 300, char_span=(0, 300)),   # 엉뚱한 문서
+        ]
+        spans = [{"doc_id": "d1", "start": 0, "end": 10}]
+
+        self.assertEqual(span_precision_at_k(spans, ["c0"], chunks), 0.1)
+        self.assertEqual(span_precision_at_k(spans, ["c0", "c1"], chunks), 0.025)
+
+    def test_missing_evidence_is_zero(self):
+        chunks = self._chunks((0, 100), (200, 300))
+        spans = [{"doc_id": "d1", "start": 120, "end": 150}]
+
+        self.assertEqual(span_precision_at_k(spans, ["c0", "c1"], chunks), 0.0)
+
+    def test_uses_the_same_coordinates_as_recall(self):
+        """recall 이 좌표로 못 재면(legacy) 밀도도 미측정이어야 한다."""
+        chunks = [Chunk("c0", "d1", "legacy", char_span=None)]
+        spans = [{"doc_id": "d1", "start": 0, "end": 6}]
+
+        self.assertIsNone(span_recall_at_k(spans, ["c0"], chunks))
+        self.assertIsNone(span_precision_at_k(spans, ["c0"], chunks))
+
+    def test_density_never_exceeds_one(self):
+        """트림 전 좌표가 본문보다 길면 비율이 1 을 넘을 수 있다 — 밀도의 상한은 1 이다."""
+        chunks = [Chunk("c0", "d1", "x" * 40, char_span=(0, 100))]
+        spans = [{"doc_id": "d1", "start": 0, "end": 100}]
+
+        self.assertEqual(span_precision_at_k(spans, ["c0"], chunks), 1.0)
 
 
 if __name__ == "__main__":
