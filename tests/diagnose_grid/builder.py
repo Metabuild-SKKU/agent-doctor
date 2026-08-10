@@ -277,18 +277,28 @@ def build_chunks(case: Case) -> list[Chunk]:
     청킹 규칙을 여기서 다시 구현하지 않는다 — 격자가 재려는 게 청킹 라벨이라, 구현을
     흉내내면 정작 재야 할 것(공백 트림으로 생기는 청크 사이 틈, 전략별 청크 모양)이 빠진다.
     chunk_id 만 격자 규약(c0, c1, ...)으로 붙인다 — 케이스가 인덱스로 청크를 참조하므로.
+
+    draft 가 싣는 좌표는 **둘 다** 옮긴다(agents/index/agent.py 의 색인 경로와 같게).
+    전략을 진짜로 부르면서 산출물의 필드를 흘리면, 격자만 옛 판정을 타면서 그걸 진단
+    버그로 오인하게 된다 — original_char_span 이 실제로 그랬다(#100/#108).
     """
     strategy = CHUNK_STRATEGIES[case.chunk_strategy]
     chunks: list[Chunk] = []
     for doc in case.docs:
         document = Document(doc_id=doc.id, source="grid", format="md", content=doc_text(doc))
         for draft in strategy(document, case.chunk_size, case.chunk_overlap):
+            raw_start = getattr(draft, "raw_start", None)
+            raw_end = getattr(draft, "raw_end", None)
             chunks.append(Chunk(
                 chunk_id=f"c{len(chunks)}",
                 doc_id=doc.id,
                 text=draft.text,
                 section=draft.section,
                 char_span=(draft.start, draft.end),
+                # 트림 전 경계. 커버리지 판정(metrics_basic._chunk_coverage_span)만 이걸 보고,
+                # None 이면 char_span 으로 떨어져 트림 틈이 되살아난다.
+                original_char_span=(None if raw_start is None or raw_end is None
+                                    else (raw_start, raw_end)),
             ))
     for copy_idx, origin_idx in case.duplicates:      # 사본은 원본 텍스트를 그대로 갖는다
         chunks[copy_idx].text = chunks[origin_idx].text

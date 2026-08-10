@@ -119,11 +119,10 @@ CASES = [
         retrieved=[0, 1, 2, 3, 4],
         answer="사전 편집자가 실수로 수록한 것이다",             # 근거와 어긋난다
         oracle_answer=Answer.GOLD_FULL,          # 정답이 324자라 요약하면 char-F1 이 문턱 아래
-        assert_derived={"missed_count": 0},
+        # #100 은 #108 에서 닫혔다. 트림 전 경계(original_char_span)로 커버리지를 재면
+        # 섹션 사이 틈이 메워져, uncovered 로 새던 게 boundary_split 으로 잡힌다.
+        assert_derived={"missed_count": 0, "boundary_split": ">0"},
         expect={"A": "chunking_context_mismatch"},
-        known_gap="섹션 경계의 좌표 틈 때문에 gold 청크를 다 집었는데도 span_recall 이 0 이 "
-                  "되고 구체 라벨이 전부 침묵한다 (#100).",
-        known_gap_labels=["retrieval_failure"],   # 구체 라벨이 전부 침묵한 결과의 롤업
     ),
 
     Case(
