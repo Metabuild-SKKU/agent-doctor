@@ -40,6 +40,8 @@ load_dotenv()
 
 DEFAULT_CORPUS = "data/pdf_corpus.json"
 DEFAULT_QUESTIONS = "tools/external_rag_questions.json"
+# hallucinate 전용 — 코퍼스에 답이 없는 질문. 근거가 없어야 지어내기가 나온다.
+GAP_QUESTIONS = "tools/external_rag_questions_gap.json"
 # 뽑은 로그는 커밋되는 테스트 자산이라 tests/fixtures 로 간다. 최상위 logs/ 를 쓰면
 # 런타임 산출물 경로(output/logs — core/run_logger.py)와 이름이 겹쳐 성격이 헷갈린다.
 FIXTURE_DIR = "tests/fixtures/external_rag"
@@ -59,10 +61,17 @@ DEFECTS = {
     "offtopic":    {"top_k": 5, "chunk_size": 512, "chunk_overlap": 50},
 }
 
-# 환각 유도 프롬프트. "자료를 무시하라"는 지시만으로는 환각이 안 난다 — 실측 결과
-# claude-sonnet-4.5 는 지시를 거부하고 컨텍스트대로 정확히 답했다(정답률 6/6).
-# 그래서 검색 쪽을 어긋나게 해서(offtopic 과 같은 방식) 근거를 없앤 뒤, 기권만 막는다.
-# 근거가 없는데 답해야 하니 지어낼 수밖에 없는 구조 — 프롬프트 순종에 의존하지 않는다.
+# 환각 유도 프롬프트 + 코퍼스에 답이 없는 질문셋(--questions 기본값이 갈린다).
+#
+# 실패한 시도 둘을 남긴다(같은 함정을 다시 파지 않도록):
+#  1) "자료를 무시하고 지어내라" 지시 — claude-sonnet-4.5 가 거부하고 컨텍스트대로
+#     정확히 답했다(정답률 6/6). 모델의 프롬프트 순종에 기대면 안 된다.
+#  2) 검색만 어긋내기(offtopic 방식) — 무관하지만 **유효한** 문서가 들어가니 모델이
+#     그걸 충실히 요약했다. faithfulness 1.00 · 증상은 동문서답이었다. 환각이 아니다.
+#
+# 그래서 근거 자체를 없앤다: 코퍼스에 답이 없는 질문(external_rag_questions_gap.json)
+# + 기권 금지. 검색은 그럴듯한 문서를 가져오지만 답이 그 안에 없으므로, 답하려면
+# 지어내는 수밖에 없다 — 이때 비로소 faithfulness 가 떨어진다.
 HALLUCINATE_TMPL = (
     "당신은 사내 규정 안내 챗봇입니다. 아래 참고 자료를 바탕으로 질문에 답하세요. "
     "사용자는 즉답을 원하므로 '자료에 없다', '확인이 필요하다'는 답변은 금지입니다. "
@@ -142,11 +151,10 @@ def run(questions: list[dict], engine, cfg: dict, defect: str) -> list[dict]:
     records = []
     for i, q in enumerate(questions, 1):
         question = q["question"]
-        # 엉뚱한 질문으로 검색해 무관한 컨텍스트를 붙인다(검색 실패 재현).
-        # offtopic 은 그 자체가 목적이고, hallucinate 는 근거를 없애 지어내게 만드는 수단이다
-        # (기권 금지 프롬프트와 조합) — 프롬프트 지시만으로는 환각이 재현되지 않았다.
-        misroute = defect in ("offtopic", "hallucinate")
-        search_q = questions[i % len(questions)]["question"] if misroute else question
+        # offtopic: 엉뚱한 질문으로 검색해 무관한 컨텍스트를 붙인다(검색 실패 재현).
+        # hallucinate 는 여기서 어긋내지 않는다 — 질문 자체가 코퍼스에 답이 없으므로
+        # 정상 검색을 해도 근거가 없다(주석 참고).
+        search_q = questions[i % len(questions)]["question"] if defect == "offtopic" else question
 
         t0 = time.time()
         resp = engine.query(search_q)
@@ -185,7 +193,8 @@ def main() -> int:
     ap.add_argument("--defect", default="none", choices=sorted(DEFECTS),
                     help="주입할 결함 (기본 none = 정상 대조군)")
     ap.add_argument("--corpus", default=DEFAULT_CORPUS)
-    ap.add_argument("--questions", default=DEFAULT_QUESTIONS)
+    ap.add_argument("--questions", default=None,
+                    help=f"기본: {DEFAULT_QUESTIONS} (hallucinate 는 {GAP_QUESTIONS})")
     ap.add_argument("--out", default=None,
                     help=f"기본: {FIXTURE_DIR}/ext_<defect>.jsonl")
     ap.add_argument("--limit", type=int, default=0, help="질문 수 제한(0=전체)")
@@ -197,7 +206,10 @@ def main() -> int:
     _require("llama_index.embeddings.openai", "llama-index-embeddings-openai")
 
     docs = load_corpus(args.corpus)
-    questions = load_questions(args.questions)
+    # hallucinate 는 코퍼스에 답이 없는 질문을 써야 근거 없는 답변이 나온다.
+    q_path = args.questions or (
+        GAP_QUESTIONS if args.defect == "hallucinate" else DEFAULT_QUESTIONS)
+    questions = load_questions(q_path)
     if args.limit:
         questions = questions[:args.limit]
     if args.no_gold:
