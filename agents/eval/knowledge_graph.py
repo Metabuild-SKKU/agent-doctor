@@ -143,14 +143,19 @@ def _candidate_edges_vectorized(
 
     같은 값을 다른 방법으로 낸다:
       코사인  = 행 정규화 후 E @ E.T          (영벡터·임베딩 없음은 0 행 → 코사인 0)
-      자카드  = 키워드 이진행렬 B 로 교집합 = B @ B.T,
+      자카드  = 역색인으로 교집합을 세고,
                 합집합 = |a| + |b| - 교집합    (한쪽이 비면 0 — cosine() 규약과 같음)
       가중치  = 0.6*jaccard + 0.4*cosine, 단 둘 다 임계값 미만이면 엣지 없음
 
     **행 블록 단위로 돈다.** 전체 n x n 행렬을 한 번에 만들면 6,584청크에서 실측 peak
-    2.76GB 였다(sim/jac/weight/argsort 출력이 각각 n^2). 블록으로 끊으면 메모리가
-    O(블록 x n) 으로 떨어져 청크 수와 무관하게 일정하다 — 시간은 여전히 O(n^2) 지만
-    그쪽은 행렬곱이라 감당할 수 있다.
+    2.76GB 였다(sim/jac/weight/argsort 출력이 각각 n^2). 블록으로 끊으면 n^2 짜리
+    중간산물이 O(블록 x n) 으로 떨어진다 — 시간은 여전히 O(n^2) 지만 그쪽은 행렬곱이라
+    감당할 수 있다.
+
+    블록에 안 걸리는 상주 메모리는 두 가지뿐이고 둘 다 O(n)이다: 임베딩 행렬
+    (n x 차원, 6,584청크면 54MB)과 키워드 역색인(실측 0.4MB). 키워드를 이진행렬로
+    세웠다면 여기가 n x |어휘| 밀집이라 969MB 로 블록의 노력을 무의미하게 만들었다 —
+    역색인을 쓰는 이유가 그거다(아래 주석).
 
     호출부가 노드당 상위 top_k 만 쓰므로 그 절단도 블록 안에서 끝낸다. 통과한 쌍을
     전부 파이썬으로 옮기면 다시 O(n^2) 가 되는데, 임베딩이 서로 비슷한 코퍼스에서는
@@ -199,23 +204,31 @@ def _candidate_edges_vectorized(
     else:
         emb = None
 
-    vocab = {kw: col for col, kw in enumerate(
-        sorted({kw for cid in ids for kw in set(nodes[cid].keywords)}))}
-    if vocab:
-        kw_mat = np.zeros((n, len(vocab)), dtype=np.float64)
-        for row, cid in enumerate(ids):
-            for kw in set(nodes[cid].keywords):
-                kw_mat[row, vocab[kw]] = 1.0
-        kw_sizes = kw_mat.sum(axis=1)
-    else:
-        kw_mat = kw_sizes = None
+    # 키워드 교집합은 역색인(키워드 → 그 키워드를 가진 행 번호)으로 센다. 이진행렬 B 를
+    # 세워 B @ B.T 로 내도 값은 같지만, 그 행렬이 n x |어휘| 밀집이라 블록 스킴 밖에서
+    # 통째로 상주한다 — 어휘는 청크 수에 비례해 늘어서(실측 3,880청크 11,284어휘 /
+    # 6,584청크 18,391어휘) 메모리가 사실상 n^2 로 자란다. 실측 6,584청크에서 밀집은
+    # 969MB·17.7s 인데 역색인은 0.4MB·1.5s 이고 교집합 행렬은 비트 단위로 같다.
+    # 밀집이 이렇게 손해인 이유: 청크당 키워드가 _TOP_K_KEYWORDS(8)개로 묶여 있어
+    # 실제 밀도가 0.04% 라, 행렬의 99.96% 가 0 이다.
+    keyword_rows = [sorted(set(nodes[cid].keywords)) for cid in ids]
+    rows_by_keyword: dict[str, list[int]] = {}
+    for row, kws in enumerate(keyword_rows):
+        for kw in kws:
+            rows_by_keyword.setdefault(kw, []).append(row)
+    # 누적할 때 fancy index 로 한 번에 더하려고 배열로 굳힌다.
+    postings = {kw: np.array(rws) for kw, rws in rows_by_keyword.items()}
+    kw_sizes = np.array([len(kws) for kws in keyword_rows], dtype=np.float64)
 
     limit = n if top_k <= 0 else min(top_k, n)
-    # 기본 512 는 실측으로 고른 값이다(6,584청크 x 1024차원, 3회 중앙값):
-    #   64=12.0s/579MB  256=8.6s/667MB  512=7.7s/810MB  1024=9.3s/1033MB  4096=9.6s/2051MB
-    # 메모리는 블록에 비례해 단조 증가하지만 시간은 512 에서 최소다 — 더 키우면 블록이
-    # 캐시를 벗어나 시간과 메모리가 같이 나빠지므로 올릴 이유가 없다. 아래로는 트레이드가
-    # 성립해서(256 은 -143MB / +12%) 메모리가 빠듯한 환경을 위해 환경변수로 열어둔다.
+    # 기본 512(실측: 6,584청크 x 1024차원, 실제 코퍼스 어휘 18,391, 3회 중앙값).
+    # 블록별 시간/이 루프가 더 쓰는 메모리:
+    #   128=10.3s/126MB   256=10.1s/198MB   512=9.7s/329MB   1024=11.0s/546MB   2048=11.5s/1025MB
+    # 시간은 128~512 구간이 6% 안이라 사실상 평평하다 — 키워드 교집합이 밀집 행렬곱이
+    # 아니게 되면서(위 역색인) 블록이 좌우하는 건 코사인 행렬곱과 argsort 뿐이라 그렇다.
+    # 그래서 이 값은 '시간을 사는 손잡이' 가 아니라 거의 순수한 메모리 손잡이다. 중앙값이
+    # 가장 낮은 512 를 기본으로 두되, 메모리가 빠듯하면 128 까지 낮춰도 시간 손해가
+    # 6% 안이다(-203MB). 2048 이상은 시간·메모리가 같이 나빠져 올릴 이유가 없다.
     block = max(1, _env_int("EVAL_KG_BLOCK_ROWS", 512))
     candidates: dict[str, list[tuple[str, float]]] = {cid: [] for cid in ids}
 
@@ -224,8 +237,11 @@ def _candidate_edges_vectorized(
         rows = stop - begin
 
         sim = emb[begin:stop] @ emb.T if emb is not None else np.zeros((rows, n))
-        if kw_mat is not None:
-            inter = kw_mat[begin:stop] @ kw_mat.T
+        if postings:
+            inter = np.zeros((rows, n))
+            for local, kws in enumerate(keyword_rows[begin:stop]):
+                for kw in kws:
+                    inter[local, postings[kw]] += 1.0
             union = kw_sizes[begin:stop, None] + kw_sizes[None, :] - inter
             jac = np.divide(inter, union, out=np.zeros_like(inter), where=union > 0)
         else:
