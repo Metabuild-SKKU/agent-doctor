@@ -914,6 +914,54 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
             },
         )
 
+    def test_visit_exclusions_combines_all_exclusion_sources(self):
+        """방문 단위 제외 목록은 attempt/study/history 기반 가드를 모두 포함한다."""
+        state = self._reranker_state(24)
+        attempt_key = history.build_attempt_key(
+            "retriever.top_k:increase",
+            state.index_config,
+            {"retriever.top_k": 7},
+            state.runtime_capabilities,
+        )
+        study_key = history.build_study_key(
+            "retriever.search_type:replace",
+            state.index_config,
+            {"retriever.search_type": ["hybrid"]},
+            state.runtime_capabilities,
+        )
+        state.blocked_action_attempts.add(attempt_key)
+        state.completed_action_studies.add(study_key)
+        state.optimization_history.append(
+            OptimizationHistoryItem(
+                trial_id="u1",
+                request_id="r-u1",
+                iteration=1,
+                failure_labels=["generation_abstention_failure"],
+                optimizer="rules",
+                status="failed",
+                selected_prescription_id="tighten_abstention_policy",
+                rollback_reason="판정 불가 — 롤백",
+                action_key="generation.abstention_strict:enable",
+                metadata={"unjudgeable": True},
+            )
+        )
+        for index, candidates in enumerate((20, 22), start=1):
+            state.optimization_history.append(
+                self._disable_reranker_rollback(
+                    f"disable-{index}",
+                    index,
+                    self._reranker_baseline(candidates),
+                    state.runtime_capabilities,
+                )
+            )
+
+        exclusions = agent._visit_exclusions(state)
+
+        self.assertIn(attempt_key, exclusions)
+        self.assertIn(study_key, exclusions)
+        self.assertIn("generation.abstention_strict:enable", exclusions)
+        self.assertIn("reranker.enabled:disable", exclusions)
+
     def test_single_rollback_still_retries_on_a_moved_baseline(self):
         """한 번 롤백했다고 축을 닫지 않는다 — 옮겨간 baseline 에서 한 번은 더 본다(§5.1)."""
         state = self._reranker_state(22)
