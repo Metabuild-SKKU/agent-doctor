@@ -36,6 +36,41 @@ DEFAULT_LOG = REPO_ROOT / "tests" / "fixtures" / "external_rag" / "ext_hallucina
 OUT_DIR = REPO_ROOT / "tests" / "fixtures" / "external_rag" / "out"
 
 
+def _clip(text: str, n: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= n else text[:n] + "…"
+
+
+def _log_questions(report) -> None:
+    """질문별 Q/기대답/실제답/진단을 남긴다.
+
+    파이프라인 로그(Eval STEP4)가 probe 마다 Q/A/R 을 찍는 것과 같은 자리다.
+    점수만 남기면 나중에 "왜 저 점수였나"를 되짚을 수 없고, 대조군 로그가
+    이름값을 하는지도 눈으로 확인할 수 없다."""
+    rows = getattr(report, "failed_questions", []) or []
+    if not rows:
+        print("\n─── 질문별 결과 ─── 실패한 질문 없음")
+        return
+    by_probe: dict[str, list] = {}
+    for f in report.findings or []:
+        for pid in f.affected_probes:
+            by_probe.setdefault(pid, []).append(f)
+
+    print(f"\n─── 질문별 결과 (실패 {len(rows)}건) ───────────────────────")
+    for i, row in enumerate(rows, 1):
+        pid = row.get("probe_id", "")
+        found = by_probe.get(pid, [])
+        marks = " · ".join(
+            f"{f.label}{'' if f.confirmed else '(예비)'}" for f in found) or "라벨 없음"
+        print(f"\n  [{i}/{len(rows)}] {pid}  ❌ {marks}")
+        print(f"    Q: {_clip(row.get('question'), 90)}")
+        if row.get("expected_answer"):
+            print(f"    기대: {_clip(row.get('expected_answer'), 70)}")
+        print(f"    실제: {_clip(row.get('actual_answer'), 110)}")
+        for f in found:
+            print(f"    → {_clip(f.metadata.get('reason') or f.description, 100)}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="외부 RAG 로그 → 진단서 HTML")
     parser.add_argument("log", nargs="?", default=str(DEFAULT_LOG),
@@ -72,24 +107,46 @@ def main(argv: list[str] | None = None) -> int:
         print("  새로 뽑기:   python -m tools.make_external_rag --defect=hallucinate")
         return 2
 
+    from core.llm_usage import step
+    from agents.eval.log_intake import load_external_log
     from agents.eval.replay import diagnose_external_log
     from agents.serve.report_view import build_ext_report_view
 
     from tests.report_html import write_report_files
 
-    print(f"[1/3] 로그 적재·진단 — {log_path.name}")
-    report, cap, errors = diagnose_external_log(
-        str(log_path), limit=args.limit, allow_qa_only=args.allow_qa_only)
-    print(f"      정상 {cap['records']}건 / 오류 {len(errors)}건 / 수준 {cap['tier']}")
+    # 파이프라인 로그와 같은 STEP 구획을 쓴다(core.llm_usage.step) — 구간별
+    # LLM 호출수·토큰·비용·소요가 자동으로 붙어, 나중에 "왜 저 점수였나"를
+    # 되짚을 때 재료가 남는다.
+    with step("Replay", 1, f"로그 적재 — {log_path.name}"):
+        raw, load_errors = load_external_log(str(log_path))
+        print(f"  {len(raw)}건 적재 · 오류 {len(load_errors)}건")
+        for err in load_errors[:5]:
+            print(f"    ! {err}")
+        if raw:
+            n_ctx = sum(1 for r in raw if r.contexts)
+            n_gt = sum(1 for r in raw if r.ground_truth)
+            n_gold = sum(1 for r in raw if r.gold_contexts)
+            print(f"  컨텍스트 {n_ctx}건 · 정답 텍스트 {n_gt}건 · 정답 근거 {n_gold}건")
+            if raw[0].config:
+                print(f"  상대 설정: {raw[0].config}")
+
+    with step("Replay", 2, "지표 실측 + 원인 판정"):
+        report, cap, errors = diagnose_external_log(
+            str(log_path), limit=args.limit, allow_qa_only=args.allow_qa_only)
+        print(f"  진단 수준 {cap['tier']}")
+        for note in cap.get("notes", []):
+            print(f"    · {note}")
     if report is None:
         print("진단 불가 — 컨텍스트가 없거나(--allow-qa-only) 유효 레코드가 없습니다.")
         return 1
 
-    print("[2/3] 진단서 뷰 조립")
-    view = build_ext_report_view(report, cap)
+    _log_questions(report)
 
-    print("[3/3] HTML 저장")
-    html_path, _ = write_report_files(view, OUT_DIR)
+    with step("Replay", 3, "진단서 조립"):
+        view = build_ext_report_view(report, cap)
+        html_path, _ = write_report_files(view, OUT_DIR)
+        print(f"  섹션 {len([s for s in view['mode']['hidden_sections']])}개 숨김 "
+              f"· 권고 카드 {len(view['recommendations'])}장")
 
     score = view["score"]
     print("\n" + "=" * 56)
@@ -104,6 +161,11 @@ def main(argv: list[str] | None = None) -> int:
           + (f" → 원인 {n_card}종으로 묶임" if n_card and n_card != n_find else ""))
     print(f"종합 점수     : {score['after']}점 / 100  "
           f"(기준선 {'통과' if score['gate'].get('pass') else '미달'})")
+    # 어떤 지표가 점수를 끌어내렸는지 로그만 보고 알 수 있어야 한다.
+    if view["metrics"]:
+        print("품질 지표     :")
+        for m in view["metrics"]:
+            print(f"  · {m['name']:<8} {m['after']:.3f}  ({m['en']})")
     if n_card:
         print("처방 추천     :")
         for rec in view["recommendations"]:
