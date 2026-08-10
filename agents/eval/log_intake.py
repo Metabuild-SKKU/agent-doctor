@@ -214,7 +214,24 @@ def assess_capability(records: list[ExternalLogRecord]) -> dict:
         "with_gold_contexts": with_gold_contexts,
         "tier": tier,
         "notes": notes,
+        # 권고 문구에 상대의 현재값을 싣기 위한 대표 config. 시스템 설정이라 전
+        # 레코드가 같은 값을 갖는 게 정상이므로 첫 레코드 것을 쓴다(docs §3 -
+        # "1회만 받아 우리가 전 레코드에 병합해도 된다"). 레코드마다 다르면
+        # 실행 중 설정이 바뀐 로그이므로 대표값이 성립하지 않아 비운다.
+        "config": _representative_config(records),
     }
+
+
+def _representative_config(records: list[ExternalLogRecord]) -> dict:
+    """전 레코드가 동일한 config 를 가질 때만 그 값을 돌려준다(아니면 빈 dict).
+
+    권고 카드가 "현재 top_k=5" 라고 단정하려면 그 값이 로그 전체를 대표해야
+    한다. 섞여 있는데 하나를 골라 쓰면 사실이 아닌 현재값을 보여주게 된다."""
+    configs = [r.config for r in records if r.config]
+    if not configs:
+        return {}
+    first = configs[0]
+    return dict(first) if all(c == first for c in configs) else {}
 
 
 # ── CLI ──────────────────────────────────────────────────────────

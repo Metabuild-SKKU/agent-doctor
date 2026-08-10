@@ -32,10 +32,13 @@ from agents.eval.log_intake import (
 )
 from agents.eval.metrics_basic import char_f1
 from agents.eval.metrics_ragas import _judge, evaluate_real_track
-from agents.eval.replay_labels import apply_ext_labels, recommendation_ids
+from agents.eval.replay_labels import apply_ext_labels
 from agents.eval.report import build_report
 from agents.eval.types import EvalRecord, llm_eval_enabled
 from agents.eval.scoring import format_composite
+# 권고 카드는 Optimize 소관 — 라벨→처방 지식은 rules.py 를 아는 쪽이 갖는다
+# (reporter.py 가 내부 모드에서 하는 "결정 → 사람이 읽는 번역"의 외부 모드 짝).
+from agents.optimize.ext_advisor import build_ext_recommendations
 
 
 # ── 로그 → EvalRecord 변환 ───────────────────────────────────────
@@ -168,7 +171,7 @@ def _main(argv: list[str]) -> int:
     print(f"종합점수: {format_composite(report.composite_score)}")
 
     if report.findings:
-        # 같은 라벨의 probe 별 소견을 확정/예비로 갈라 요약. 권고는 rules 처방 재참조.
+        # 같은 라벨의 probe 별 소견을 확정/예비로 갈라 요약.
         by_label: dict = {}
         for f in report.findings:
             groups = by_label.setdefault(f.label, {"확정": [], "예비": []})
@@ -181,9 +184,25 @@ def _main(argv: list[str]) -> int:
                     continue
                 print(f"  [{items[0].severity}] {label} ({grade} {len(items)}건)")
                 print(f"      {items[0].metadata.get('reason', '')}")
-            recs = recommendation_ids(label)
-            if recs:
-                print(f"      권고: {', '.join(recs)}")
+
+        # 권고 카드는 Optimize 소관(ext_advisor) — 라벨→처방 지식은 rules.py 를
+        # 아는 쪽이 갖는다. 여기서는 만들어진 재료를 출력만 한다.
+        cards = build_ext_recommendations(report.findings, cap.get("config"))
+        if cards:
+            print("권고:")
+            for c in cards:
+                grade = f"확정 {c['confirmed']}건" if c["confirmed"] else ""
+                if c["tentative"]:
+                    grade = f"{grade} · 예비 {c['tentative']}건" if grade else f"예비 {c['tentative']}건"
+                print(f"  [{c['severity']}] {c['summary']} ({grade})")
+                for s in c["steps"]:
+                    cur = f" — {s['current']}" if s["current"] else ""
+                    tags = "".join(t for t in (
+                        " [재색인 필요]" if s["needs_reindex"] else "",
+                        " [수동 조치]" if s["manual"] else "") if t)
+                    print(f"    · {s['action']}{cur}{tags}")
+                    if s["detail"]:
+                        print(f"        {s['detail']}")
     else:
         print("소견: 없음 (지표 미측정이거나 문턱 이상)")
     if not llm_eval_enabled():
