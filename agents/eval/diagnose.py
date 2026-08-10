@@ -1875,19 +1875,19 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
     # 오라클 트랙 RAGAS — 소비처가 B그룹 라벨·_oracle_ok 뿐이라 실패 probe 에서만 지불한다.
     _compute_ragas_oracle(record)
 
-    # 정답 텍스트 자체가 의심되면 파이프라인 원인 판정을 멈춘다.
-    # bad_gold_answer 는 optimize 로 고칠 수 있는 검색·생성 문제가 아니라 데이터 검수 대상이다.
-    # 그대로 A/B/C 라벨을 함께 붙이면 같은 probe 가 튜닝 실패처럼 집계되어 처방과 점수를 흔든다.
-    gold_answer_error = bad_gold_answer_oracle(record)
-    if gold_answer_error is not None:
-        return [gold_answer_error]
-
     # 아래 두 단락(골드 오라벨·검증된 label-recall miss)은 골드가 코퍼스에 있을 때만 탄다.
     # gold 가 코퍼스에 없으면(_corpus_gap_premise) 없는 청크를 '재지정'할 수도(bad_gold_chunk),
     # '다른 유효 근거로 검증됐다'고 볼 수도(label-recall miss) 없다 — 단락하면 additive 인
     # corpus_gap/corpus_gap_partial_hop(자료 결손·누락 gold 표기)이 통째로 사라진다(리뷰 지적).
     # 이 경우 정상 경로로 흘려 corpus_gap 이 그 사실을 보고하게 양보한다.
     if not _corpus_gap_premise(record):
+        # 정답 텍스트 자체가 의심되면 파이프라인 원인 판정을 멈춘다.
+        # bad_gold_answer 는 optimize 로 고칠 수 있는 검색·생성 문제가 아니라 데이터 검수 대상이다.
+        # 단, 자료 자체가 없으면 corpus_gap 을 먼저 보고해야 하므로 이 가드는 코퍼스 gap 밖에서만 탄다.
+        gold_answer_error = bad_gold_answer_oracle(record)
+        if gold_answer_error is not None:
+            return [gold_answer_error]
+
         # 골드 청크 오라벨: 실제 답은 맞는데(f1 통과) 골드 청크로는 못 맞춘 경우 — 검색·생성이
         # 아니라 골드 라벨이 틀린 것이다. 경쟁 슬롯의 거짓 원인(retrieval_low_rank·generation_*)을
         # 막고 이 하나만 남겨 검수로 보낸다(점수에서는 report 가 거짓 실패로 제외).

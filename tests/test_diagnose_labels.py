@@ -1964,6 +1964,22 @@ class MentorDecisionTreeRegressionTest(_DiagnoseTestBase):
         self.assertEqual(["bad_gold_answer"], [f.label for f in findings])
         self.assertEqual("evaluation_data", findings[0].metadata["failure_stage"])
 
+    def test_bad_gold_answer_does_not_hide_corpus_gap(self):
+        """자료 자체가 없으면 정답셋 오류보다 corpus_gap 을 먼저 보고해야 한다."""
+        rec = _record(
+            ("missing_gold",), tuple(),
+            recall=0.0, f1=0.1, oracle_f1=0.1,
+            faith_oracle=0.9, rel_oracle=0.9,
+            answer="제공된 정보로는 알 수 없습니다",
+        )
+
+        findings, _oracle = self._diagnose_without_recomputing(rec)
+        labels = [f.label for f in findings]
+
+        self.assertIn("corpus_gap", labels)
+        self.assertIn("bad_gold_answer", labels)
+        self.assertNotEqual(["bad_gold_answer"], labels)
+
 
 # ══════════════════════════════════════════════════════════════════
 #  조립: 성공 게이트 · _pick 우선순위 · 정렬
