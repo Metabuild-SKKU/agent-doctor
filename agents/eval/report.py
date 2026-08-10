@@ -49,9 +49,24 @@ _GOLD_ERROR_LABELS = ("bad_gold_answer", "bad_gold_chunk")
 
 
 def is_gold_labeling_error(record: EvalRecord) -> bool:
-    """골드 라벨 오류(정답 텍스트 또는 근거 청크)로 확정된 probe 인가 — 점수 제외용.
-    재생성 대상(is_bad_gold_probe)보다 넓다: 청크 오라벨은 점수만 빼고 답은 안 건드린다."""
-    return any(f.label in _GOLD_ERROR_LABELS and f.confirmed for f in record.findings)
+    """골드 라벨 오류(정답 텍스트 또는 근거 청크)로 판정된 probe 인가 — 점수 제외용.
+    재생성 대상(is_bad_gold_probe)보다 넓다: 청크 오라벨은 점수만 빼고 답은 안 건드린다.
+
+    **예비(confirmed=False)도 제외한다(2026-08-07).** 확정만 제외하면 제외 여부가
+    심판 LLM 의 흔들림을 그대로 탄다 — 같은 probe 가 회차마다 빠졌다 들어왔다 하면서
+    종합점수를 흔든다. 실측(output/logs/corpus_20260804_103059.txt)에서 probe_qa_4195 가
+    5회 중 4회는 확정 bad_gold_chunk 라 제외됐고, faithfulness 가 1.000→0.000 으로 튄
+    1회만 다른 라벨이 붙어 실패로 집계됐다.
+
+    제외의 근거는 결정론적인 쪽에 있다 — `_f1_ok`(답이 맞았다) 와 `not _oracle_ok`
+    (골드만으로는 못 맞힌다)는 글자 비교라 재실행해도 같다. 그 둘로 "이 골드로는 이 답이
+    안 나온다" 가 이미 성립하므로, 파이프라인이 아니라 평가셋 결함이라는 판단은 서 있다.
+    faithfulness 는 **왜** 그런지(골드 오라벨 vs 파라미터 기억)만 가르고, 그건 라벨의
+    확정/예비로 표시된다.
+
+    ⚠️ 확정만 보던 시절보다 제외 범위가 넓어지므로 점수가 올라간다 — 이 변경 이전
+    실행과 직접 비교하지 말 것(agents/eval/README.md 재베이스라인 절)."""
+    return any(f.label in _GOLD_ERROR_LABELS for f in record.findings)
 
 
 # 하위호환 별칭(내부 호출부).
