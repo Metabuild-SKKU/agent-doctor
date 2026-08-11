@@ -102,8 +102,14 @@ def _fused_repair_enabled() -> bool:
 
 def _fused_max_tokens() -> int:
     """fused 응답 출력 상한. 7개 블록이 한 JSON 에 들어가므로 기본 2048 로는 잘린다
-    (잘리면 파싱 실패 → {} → 보수 경로). top_k·답변이 길면 더 올릴 것."""
-    return _env_int("EVAL_RAGAS_FUSED_MAX_TOKENS", 4096)
+    (잘리면 파싱 실패 → {} → 보수 경로). top_k·답변이 길면 더 올릴 것.
+
+    기본 8192 인 이유(실측 2026-08-11, KorQuAD 100 probe · haiku · compact): 4096 에서는
+    100건 중 3~4건이 잘려 상한 승급 재시도가 도는데, 배치 모드에서 그 재시도가 1~3건짜리
+    미니 배치를 만들어 **배치 대기(건수 무관 ~2분)를 통째로 다시 지불**했다 — STEP3 배치
+    대기 8분 중 4분이 이 재시도 몫이었다. 상한은 실사용분만 과금되므로 올려서 잃는 비용은
+    없고, 정상 응답(~1.1K)의 7배라 폭주 차단선 역할도 유지된다."""
+    return _env_int("EVAL_RAGAS_FUSED_MAX_TOKENS", 8192)
 
 
 def _compact_enabled() -> bool:

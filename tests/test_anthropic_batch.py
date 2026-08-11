@@ -327,3 +327,31 @@ class BatchGateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BatchSummaryModelTest(unittest.TestCase):
+    """요약 줄의 모델 표기(리뷰 제안) — 모델이 갈리면 배치 대기·비용을 실행 간 직접
+    비교하면 안 되므로, 요약만 보고 비교하는 사고를 막는 표식이다."""
+
+    def setUp(self):
+        self._patch = patch.dict(os.environ, _FAST_ENV)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_stats_collects_models_and_summary_prints_them(self):
+        import io
+        from contextlib import redirect_stdout
+
+        results = {"req-0": SimpleNamespace(type="succeeded", message=_message("ok"))}
+        client, _ = _fake_client(results)
+        collector = llm_clients._AnthropicBatchCollector()
+        collector.submit(client, {"model": "claude-haiku-4-5"}).result(timeout=10)
+        self.assertEqual(collector.stats()["models"], ["claude-haiku-4-5"])
+
+        buf = io.StringIO()
+        with patch.object(llm_clients, "_batch_collector", collector), \
+                redirect_stdout(buf):
+            llm_clients.print_batch_summary()
+        self.assertIn("claude-haiku-4-5", buf.getvalue())

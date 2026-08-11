@@ -35,6 +35,7 @@ from pathlib import Path
 
 from core.schema import Probe, EvalSnapshot
 from core.llm_usage import print_summary, snapshot_usage, step
+from core import progress
 from core.parallel import parallel_map
 from core.state import AgentDoctorState
 
@@ -566,12 +567,22 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # 키만 읽고 나머지(chunk_size 등)는 무시한다. 없으면 기본값이 현 동작 유지.
         gen_config = state.index_config or {}
         with step("Eval", 2, "검색 + 답변 생성"):
-            # Phase A(순차): 검색 + record 준비
+            # Phase A(순차): 검색 + record 준비. 진행률을 붙이는 이유 — 리랭커가 켜지면
+            # probe 당 수 초(VRAM 경합 시 수십 초)라 이 구간이 몇 분을 조용히 돌고,
+            # 실측에서 세 번이나 hang 으로 오인됐다(#131). 최소 간격 10초 규약 그대로라
+            # 빠른 라운드(전체 수 초)는 지금처럼 침묵한다.
+            search_reporter = progress.start("  [Eval] STEP2 검색", len(probes))
             records = []
-            for p in probes:
-                rec = _prepare_record(p, retriever, chunk_text, top_k,
-                                      state.diagnosis_cache.setdefault(p.probe_id, {}))
-                records.append(rec)
+            try:
+                for p in probes:
+                    rec = _prepare_record(p, retriever, chunk_text, top_k,
+                                          state.diagnosis_cache.setdefault(p.probe_id, {}))
+                    records.append(rec)
+                    progress.tick(search_reporter)
+            except BaseException:
+                progress.abort(search_reporter, "예외")
+                raise
+            progress.finish(search_reporter)
 
             # Phase B(병렬): 실제 트랙 답변 생성만 동시 실행 (EVAL_LLM_CONCURRENCY, 1이면 순차).
             # 오라클 트랙은 여기서 안 만든다 — 실패로 판정된 probe 에만 필요해서 STEP3 로 미룬다.
@@ -600,9 +611,12 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             else:
                 # anthropic 배치 모드면 fan-out = record 수 — 동시성이 곧 배치 크기다
                 # (좁히면 배치가 쪼개져 배치당 대기가 곱해진다. judge_fanout 주석 참고).
+                # 같은 이유로 배치에서는 ETA 를 끈다 — 전 항목이 배치 완료 시점에
+                # 한꺼번에 끝나, 첫 완료 기준 외삽이 60배까지 부풀었다(실측 #131).
+                batch_eta = not eval_llm_provider.judge_batch_active()
                 real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records,
                                            eval_llm_provider.judge_fanout(len(records), concurrency),
-                                           label="  [Eval] STEP3 RAGAS 실제 트랙")
+                                           label="  [Eval] STEP3 RAGAS 실제 트랙", eta=batch_eta)
                 for rec, score in zip(records, real_scores):
                     rec.ragas, rec.ragas_done = score, True
 
@@ -636,7 +650,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 print(f"  RAGAS 실제 {len(records)}건 / 오라클 {len(failed)}건")
                 oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed,
                                              eval_llm_provider.judge_fanout(len(failed), concurrency),
-                                             label="  [Eval] STEP3 RAGAS 오라클 트랙")
+                                             label="  [Eval] STEP3 RAGAS 오라클 트랙",
+                                             eta=not eval_llm_provider.judge_batch_active())
                 for rec, score in zip(failed, oracle_scores):
                     rec.oracle_ragas, rec.oracle_ragas_done = score, True
 

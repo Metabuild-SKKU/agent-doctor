@@ -22,6 +22,8 @@ def parallel_map(
     items: Iterable[T],
     max_workers: int,
     label: str | None = None,
+    *,
+    eta: bool = True,
 ) -> list[R]:
     """items 각각에 fn 을 적용해 입력 순서 그대로 결과 리스트를 반환한다.
 
@@ -46,7 +48,10 @@ def parallel_map(
     두 방식 모두 항목 전부를 즉시 제출한다.
     """
     items = list(items)
-    reporter = progress.start(label, len(items))
+    # eta=False 는 '남은 약 …' 추정만 끈다(경과·백분율은 유지). anthropic 배치처럼
+    # 전 항목이 한꺼번에 끝나는 fan-out 에서는 평균 속도 외삽이 수십 배로 틀린다
+    # (실측: 1/100 시점 '남은 약 285m' → 실제 4.7분). 호출부가 배치 여부를 안다.
+    reporter = progress.start(label, len(items), eta=eta)
     if max_workers <= 1 or len(items) <= 1:
         results: list[R] = []
         try:

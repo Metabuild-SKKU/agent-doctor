@@ -199,6 +199,11 @@ def _batch_wait_timeout() -> float:
             + _env_float("EVAL_ANTHROPIC_BATCH_WINDOW", 2.0) + 300.0)
 
 
+def _item_models(items: list) -> set[str]:
+    """배치 항목들의 모델명 집합 — (custom_id, params, Future) 튜플에서 뽑는다."""
+    return {str(params.get("model", "")) for _, params, _ in items if params.get("model")}
+
+
 class _AnthropicBatchCollector:
     """동시 다발로 들어오는 anthropic_chat 호출을 배치 하나로 묶는 수집기.
 
@@ -218,17 +223,22 @@ class _AnthropicBatchCollector:
         self._client = None
         # 실행 요약용 누적(print_batch_summary). 배치는 비용을 절반으로 줄이는 대신
         # 벽시계 시간을 늘리므로, 그 대가를 비용 표 옆에서 읽을 수 있어야 한다.
+        # models: 배치에 실린 모델명 집합 — 대기 시간·비용을 실행 간 비교할 때 모델이
+        # 갈렸으면 직접 비교하면 안 되므로 요약 줄에 같이 남긴다(리뷰 제안).
         self._stats = {"batches": 0, "items": 0, "wait_s": 0.0}
+        self._models: set[str] = set()
 
     def stats(self) -> dict:
         with self._cond:
-            return dict(self._stats)
+            return {**self._stats, "models": sorted(self._models)}
 
-    def _record(self, n_items: int, elapsed: float) -> None:
+    def _record(self, n_items: int, elapsed: float, models: set[str] | None = None) -> None:
         with self._cond:
             self._stats["batches"] += 1
             self._stats["items"] += n_items
             self._stats["wait_s"] += elapsed
+            if models:
+                self._models.update(models)
 
     @staticmethod
     def _settle(fut: Future, exc: BaseException) -> None:
@@ -336,14 +346,14 @@ class _AnthropicBatchCollector:
                 print(f"[Anthropic] 배치 진행: {done}/{len(items)}건 · {now - started:.0f}s 경과")
                 last_note = now
             if now - started > timeout:
-                self._record(len(items), now - started)
+                self._record(len(items), now - started, _item_models(items))
                 self._fail_items(items, TimeoutError(
                     f"anthropic 배치 {batch.id} 가 {timeout:.0f}s 안에 끝나지 않았습니다 — "
                     f"EVAL_ANTHROPIC_BATCH_TIMEOUT 을 늘리거나 배치를 끄세요"))
                 return
 
         elapsed = time.monotonic() - started
-        self._record(len(items), elapsed)
+        self._record(len(items), elapsed, _item_models(items))
         try:
             by_id = {r.custom_id: r.result for r in client.messages.batches.results(batch.id)}
         except Exception as exc:
@@ -374,7 +384,10 @@ def print_batch_summary() -> None:
     if not s["batches"]:
         return
     avg = s["wait_s"] / s["batches"]
-    print(f"\n  Anthropic Message Batches: {s['batches']}배치 · {s['items']}건 · "
+    # 모델명을 같이 남긴다 — 모델이 갈리면 대기·비용을 실행 간 직접 비교하면 안 되는데,
+    # 요약 줄만 보고 비교하는 사고를 막는다(리뷰 제안).
+    models = ",".join(s["models"]) if s["models"] else "모델 미상"
+    print(f"\n  Anthropic Message Batches({models}): {s['batches']}배치 · {s['items']}건 · "
           f"배치당 평균 대기 {avg:.0f}s({avg / 60:.1f}분) · "
           f"단가 {_ANTHROPIC_BATCH_DISCOUNT:.0%} 반영됨")
 
