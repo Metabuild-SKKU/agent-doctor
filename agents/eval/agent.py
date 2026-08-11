@@ -66,6 +66,7 @@ from agents.eval.metrics_common import (
     set_context as set_diag_context,
     set_mode,
 )
+from agents.eval import llm_provider as eval_llm_provider
 from agents.eval import topic_cluster
 from agents.eval.metrics_basic import _compute_metrics
 from agents.eval.diagnose import diagnose, _is_success
@@ -597,7 +598,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             if mode < Mode.DEEP:
                 print(f"  모드 {_MODE_NAMES.get(mode, mode)} — RAGAS 생략 (deep 이상에서 실행)")
             else:
-                real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records, concurrency,
+                # anthropic 배치 모드면 fan-out = record 수 — 동시성이 곧 배치 크기다
+                # (좁히면 배치가 쪼개져 배치당 대기가 곱해진다. judge_fanout 주석 참고).
+                real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records,
+                                           eval_llm_provider.judge_fanout(len(records), concurrency),
                                            label="  [Eval] STEP3 RAGAS 실제 트랙")
                 for rec, score in zip(records, real_scores):
                     rec.ragas, rec.ragas_done = score, True
@@ -630,7 +634,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             # _ragas_track 이 {} 를 돌려주므로 기존과 같다.
             if mode >= Mode.DEEP and failed:
                 print(f"  RAGAS 실제 {len(records)}건 / 오라클 {len(failed)}건")
-                oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency,
+                oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed,
+                                             eval_llm_provider.judge_fanout(len(failed), concurrency),
                                              label="  [Eval] STEP3 RAGAS 오라클 트랙")
                 for rec, score in zip(failed, oracle_scores):
                     rec.oracle_ragas, rec.oracle_ragas_done = score, True
