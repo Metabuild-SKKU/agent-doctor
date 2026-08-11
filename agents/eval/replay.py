@@ -214,6 +214,15 @@ def _print_golden_summary(cap: dict) -> None:
         print(f"  · 골든셋 {g['qa_entries'] - g['matched']}건은 로그에서 해당 질문을 찾지 못했습니다.")
 
 
+# 골든셋은 사람이 ground_truth/gold_contexts 를 직접 채워야 하는 자료라(docs §3),
+# 커질수록 상대 팀 부담과 리플레이 LLM 비용(매칭된 레코드마다 context precision/
+# recall/correctness 를 추가로 재는 비용)이 함께 는다. 리플레이는 STEP1 probe 합성·
+# STEP2 답변 생성·오라클 트랙·내부 라벨 LLM 호출이 전부 빠져 일반 모드보다 훨씬
+# 싸지만(레코드당 RAGAS 실제 트랙 chat 1 + embed 1 뿐), 그래도 무제한은 아니다.
+GOLDEN_RECOMMENDED_MAX = 150
+GOLDEN_HARD_CAP = 300
+
+
 def _main(argv: list[str]) -> int:
     # graph.py와 같은 규약: CLI로 직접 부를 때만 .env를 읽는다(라이브러리 사용 시엔
     # 호출자 환경을 존중). 미설치면 조용히 넘어간다 - 키 없이도 규칙 지표는 돈다.
@@ -243,18 +252,40 @@ def _main(argv: list[str]) -> int:
     # 라벨 3종이 침묵하고 환각도 예비에 머무는데, 그 사실을 모른 채 얕은 진단을
     # 받아가는 것을 막는다. 정답지가 아예 없는 상황은 --no-golden 으로 옵트인한다
     # (contexts 파일 게이트와 같은 구조 - 기본은 거부, 명시하면 허용).
+    # 단, 로그 자체에 이미 ground_truth/gold_contexts 가 인라인으로 있으면(문서·
+    # 시뮬레이터가 안내하는 --golden 없는 명령이 이 경우다) 골든셋이 없는 게
+    # 아니므로 거부하지 않는다.
     if not golden and "--no-golden" not in argv:
-        print("골든셋(시험지)이 없습니다 — 진단의 기본 입력입니다.")
-        print("  --golden=<golden.xlsx|csv|jsonl|json> 로 질문·정답 세트를 주세요.")
-        print("  · 필수 열: question, ground_truth   · 권장: gold_contexts(정답 근거 원문)")
-        print("  · 이미 쓰는 테스트셋이 있으면 그대로 주셔도 됩니다(열 이름 관용 인식)")
-        print("  골든셋 없이 돌리려면: --no-golden")
-        print("    → 검색축 라벨 3종이 침묵하고 환각은 '예비'에 머뭅니다(7종 중 3종만).")
-        return 2
+        inline_logs, _ = load_external_log(args[0])
+        inline_cap = assess_capability(inline_logs)
+        if not inline_cap["with_ground_truth"] and not inline_cap["with_gold_contexts"]:
+            print("골든셋(시험지)이 없습니다 — 진단의 기본 입력입니다.")
+            print("  --golden=<golden.xlsx|csv|jsonl|json> 로 질문·정답 세트를 주세요.")
+            print("  · 필수 열: question, ground_truth   · 권장: gold_contexts(정답 근거 원문)")
+            print("  · 이미 쓰는 테스트셋이 있으면 그대로 주셔도 됩니다(열 이름 관용 인식)")
+            print("  골든셋 없이 돌리려면: --no-golden")
+            print("    → 검색축 라벨 3종이 침묵하고 환각은 '예비'에 머뭅니다(7종 중 3종만).")
+            return 2
+
+    if golden:
+        from agents.eval.qa_merge import load_qa_set
+        qa_map, _ = load_qa_set(golden)
+        n = len(qa_map)
+        print(f"골든셋 권장 크기: 50~{GOLDEN_RECOMMENDED_MAX}건 (현재 {n}건)")
+        if n > GOLDEN_HARD_CAP:
+            print(f"골든셋이 {GOLDEN_HARD_CAP}건을 넘습니다 — 매칭된 레코드마다 검색축 지표"
+                  "(context precision/recall/correctness)를 추가로 측정해 비용이 함께 늡니다.")
+            print(f"  {GOLDEN_HARD_CAP}건 이하로 나눠서 실행해 주세요"
+                  " (--limit 은 로그 표본만 줄일 뿐 골든셋 크기는 줄이지 못합니다).")
+            return 2
 
     report, cap, errors = diagnose_external_log(
         args[0], limit=limit, allow_qa_only=allow_qa_only, golden_path=golden)
     print(f"적재: 정상 {cap['records']}건 / 오류 {len(errors)}건 / 진단 수준 {cap['tier']}")
+    for err in errors[:10]:
+        print(f"  ! {err}")
+    if len(errors) > 10:
+        print(f"  ! ... 외 {len(errors) - 10}건")
     _print_golden_summary(cap)
     if report is None:
         if cap["tier"] == TIER_QA_ONLY:

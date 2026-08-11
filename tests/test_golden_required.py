@@ -7,9 +7,11 @@ tests/test_golden_required.py
 거부하고, --no-golden 으로 명시해야만 얕은 진단을 내준다(contexts 파일 게이트와
 같은 구조).
 """
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from agents.eval.log_intake import load_external_log
@@ -105,6 +107,85 @@ class GoldenRequiredCliTests(unittest.TestCase):
             [{"question": "연차 휴가는 며칠인가요?", "ground_truth": "연 15일"}],
             ensure_ascii=False), encoding="utf-8")
         self.assertEqual(_main([self.log, f"--golden={golden}"]), 0)
+
+    def test_inline_ground_truth_satisfies_gate(self):
+        """문서·시뮬레이터가 안내하는 --golden 없는 명령이, 로그 자체에 이미
+        ground_truth 가 있으면 거부돼선 안 된다(실행 재현된 버그)."""
+        rows = _log_rows()
+        rows[0]["ground_truth"] = "연 15일"
+        log = _write(self.tmp, "inline_gt.jsonl", rows)
+        self.assertEqual(_main([log]), 0)
+
+    def test_inline_gold_contexts_satisfies_gate(self):
+        rows = _log_rows()
+        rows[0]["gold_contexts"] = [GOLD]
+        log = _write(self.tmp, "inline_gc.jsonl", rows)
+        self.assertEqual(_main([log]), 0)
+
+    def test_no_inline_golden_still_rejected(self):
+        """인라인 필드가 하나도 없으면 종전대로 거부해야 한다(과한 완화 방지)."""
+        self.assertEqual(_main([self.log]), 2)
+
+
+class GoldenParseErrorReportingTests(unittest.TestCase):
+    """골든셋 파싱 오류는 개수만이 아니라 내용도 나와야 한다(openpyxl 미설치 등이
+    '0건 매칭'으로 은폐되던 문제)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.log = _write(self.tmp, "log.jsonl", _log_rows())
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_broken_golden_file_prints_error_content(self):
+        golden = self.tmp / "golden.jsonl"
+        golden.write_text('{"question": "깨진 줄"', encoding="utf-8")  # 닫는 괄호 없음
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _main([self.log, f"--golden={golden}"])
+        self.assertIn("골든셋 파싱 오류", buf.getvalue())
+
+
+class GoldenSetSizeCapTests(unittest.TestCase):
+    """골든셋은 사람이 채워야 하는 필드(ground_truth/gold_contexts)라 크기가 커질수록
+    상대 팀 부담·리플레이 LLM 비용(매칭된 레코드마다 context precision/recall/
+    correctness 추가 측정)이 함께 는다. 권장 범위를 안내하고, 과도하게 크면
+    비용을 쓰기 전에 막는다."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.log = _write(self.tmp, "log.jsonl", _log_rows())
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _golden_with(self, n: int) -> str:
+        path = self.tmp / "golden.json"
+        entries = [{"question": f"질문 {i}", "ground_truth": f"정답 {i}"} for i in range(n)]
+        path.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+        return str(path)
+
+    def test_recommendation_is_shown(self):
+        golden = self._golden_with(1)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _main([self.log, f"--golden={golden}"])
+        self.assertIn("권장", buf.getvalue())
+
+    def test_within_hard_cap_proceeds(self):
+        golden = self._golden_with(150)
+        self.assertEqual(_main([self.log, f"--golden={golden}"]), 0)
+
+    def test_over_hard_cap_is_rejected(self):
+        golden = self._golden_with(301)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = _main([self.log, f"--golden={golden}"])
+        self.assertEqual(code, 2)
+        self.assertIn("300", buf.getvalue())
 
 
 if __name__ == "__main__":
