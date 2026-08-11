@@ -13,9 +13,9 @@
 |---|---|---|---|
 | 1 | 평가 문항 30 → 150 | RAISE | ✅ 문서화 완료 (`.env.example`·`agents/eval/README.md`) |
 | 2 | 같은 config 3회 반복해 σ 측정 | RAISE | ✅ `tools/measure_eval_noise.py` — **실측 미실행** |
-| 3 | 라벨 1개 추가 검토 (E15) | RAGEC | ⏸ 팀 합의 대기 — **E14 는 접음** |
-| 4 | **채점을 부분점수로** | RAGChecker | 🔵 **PR #122** 리뷰 대기 |
-| 5 | 흔들리는 심판 신호가 라벨을 뒤집지 못하게 | 심판 감사 | 🔵 **PR #125** 리뷰 대기 |
+| 3 | 라벨 1개 추가 검토 (E15) | RAGEC | 🔒 **B그룹 verifier 설계 선행** — E14 는 접음 |
+| 4 | **채점을 부분점수로** | RAGChecker | ✅ **PR #122 머지** |
+| 5 | 흔들리는 심판 신호가 라벨을 뒤집지 못하게 | 심판 감사 | ✅ **PR #125 머지** |
 | 6 | 개선 마진을 통계로 | Noisy but Valid | 🔒 2번 실측 필요 |
 | 7 | 처방 선택을 밴딧으로 | AutoRAG-HP | 🔒 4·6 필요 (**근거 하나 철회** — 7번 절 참고) |
 | 8 | 라벨 정확도 측정 | Doctor-RAG | 🔒 코퍼스 배관 필요 |
@@ -59,7 +59,17 @@ RAISE 가 13개 탐색 알고리즘을 벤치마크하며 프록시 크기를 ab
 안정**된다고 보고한다(그 아래는 시드 간 편차가 큼). 우리는 30이었다.
 
 `KORQUAD_MAX_DOCS` 가 먼저 문서를 자르고 그 안에서 QA 를 세므로 둘을 같이 올려야 한다.
-정제본 기준 QA 150 건 = 문서 267 개(실측).
+정제본 기준 문서 267 개 안에 QA **179 건**이 들어온다(실측). 즉 150 은 문서를 더 늘리지
+않아도 확보된다.
+
+**현재 실행값은 100 이다**(`KORQUAD_QA_LIMIT`). 표본이 아니라 **비용** 때문에 낮춰 잡았다 —
+심판 호출이 QA 개수에 선형이라 150 이면 1.5 배다. RAISE 가 말한 안정 구간(100~200)의
+하한이라 목적(30 → 세 자리)은 달성했고, 필요하면 179 까지 설정만 바꾸면 된다.
+
+> **문서 수와 QA 수는 비용 성격이 다르다.** 문서를 늘리면 인덱싱(임베딩)이 늘지만
+> `index_cache` 가 재사용하므로 **한 번**이고, 채점 비용은 top_k 가 고정이라 안 늘어난다.
+> 반면 QA 를 늘리면 **매 라운드** 심판 호출이 늘어난다. 규모를 키울 때는 문서를 먼저,
+> QA 는 필요한 만큼만 올리는 게 맞다.
 
 ### 2. σ 측정 도구 ✅ (실측 미실행)
 
@@ -101,15 +111,59 @@ RAGEC 택소노미(16개)와 우리 31개를 대조한 결과 **이름까지 같
 | `generation_partial_answer` | `completeness_prompt` | 다름 — 그쪽은 "덜 답함", E14 는 "다른 걸 답함" |
 | `generation_misinterpretation` | `restate_question` | **사실상 동일** — 둘 다 "질문을 못 알아들었으니 다시 진술시킨다" |
 
-**E15 Chronological Inconsistency**(시간 순서를 뒤바꿈) — **논의 대상으로 남긴다.**
+**E15 Chronological Inconsistency**(시간 순서를 뒤바꿈) — **지금은 판정할 수 없다.**
 
-세 라벨에 흩어져 있다: `generation_contradiction`(`llm_verification_pass`),
-`generation_numerical_error`(연도·날짜면 `enable_calculation_check`),
-`generation_hop_binding_error`(순서를 엮는 문제면 `force_hop_evidence_binding`).
-"시간축 검증 단계"가 이 셋과 **다른 처방**이라고 볼 수 있으면 도입, 아니면 아니다.
+> 예: "임진왜란과 정유재란 중 뭐가 먼저인가?" → 근거에 1592년·1597년이 **둘 다 있는데**
+> 답변이 순서를 뒤집는다. 각 사실은 근거에 있고(faithfulness 안 낮음) 숫자도 안 틀렸는데
+> **관계**만 틀린 경우다.
 
-급하지 않다 — 현재 평가셋에 시간 순서 질문이 0건이라 어느 쪽이든 당장 발화하지 않는다
-(아래 "KorQuAD 로는 라벨 검증이 불가능하다" 절 참고).
+우리 라벨 셋에 걸쳐 있다.
+
+| 기존 라벨 | 처방 | E15 의 어느 부분을 덮나 | 상태 |
+|---|---|---|---|
+| `generation_contradiction` | `llm_verification_pass` | 앞뒤가 모순되는 경우 | **draft** |
+| `generation_numerical_error` | `enable_calculation_check` | 연도·날짜가 숫자로 틀린 경우 | **draft** |
+| `generation_hop_binding_error` | `force_hop_evidence_binding` | 여러 사실을 잘못 엮은 경우 | **draft** |
+
+판정 기준은 하나다 — **"시간축 검증 단계"가 이 셋과 다른 처방인가.**
+
+#### 그런데 지금은 그 비교가 성립하지 않는다
+
+비교 대상 셋이 **전부 `status: "draft"`** 이고, 공교롭게도 **B그룹 draft 전부**가 정확히
+이 셋이다(`agents/optimize/rules.py`). 셋 다 같은 벽에 막혀 있다.
+
+```
+generation_contradiction     BLOCKER: generation_config 없음 + verifier 노드 자체가 미구현
+generation_numerical_error   BLOCKER: generation_config 필드 및 calculation checker 단계 없음
+generation_hop_binding_error BLOCKER: generation_config 필드 및 verifier 단계 없음
+```
+
+즉 **존재하지 않는 처방과 존재하지 않는 처방을 비교**하는 상황이다. 어느 쪽으로 답해도
+근거가 없다. 게다가 셋 다 결국 B그룹 공통 노드(`evidence_mapper`/`generation_verifier`/
+`revision`, 설계 초안 단계) 위에 얹힐 예정이라 — **그 노드가 "검증 종류"를 어떻게 나누는지가
+정해져야** 시간축이 별도 단계인지 그 안의 한 종류인지 말할 수 있다. 지금 미리 정하면 그
+설계를 제약하기만 한다.
+
+#### 그리고 지금은 재볼 수도 없다
+
+현재 평가셋에 시간 순서 질문이 **0건**이다(아래 "KorQuAD 로는 라벨 검증이 불가능하다" 절).
+도입해도 발화하지 않으므로 맞는지 틀린지 확인할 방법이 없다 — 이미 31개 중 19개가 같은
+이유로 미발화인데 20번째를 더하는 셈이다.
+
+#### 판정이 가능해지는 조건
+
+둘 다 충족돼야 한다.
+
+| | 조건 | 현재 |
+|---|---|---|
+| ① | `generation_verifier` 노드 설계 확정 → 검증 종류를 어떻게 나누는지 정해짐 | 설계 초안 |
+| ② | 평가셋에 시간 순서 질문 존재 → 발화를 실제로 관측 | 0건 |
+
+**①이 사실상 상위 항목이다.** B그룹 draft 3개가 한꺼번에 풀리는 자리이므로, 그때
+"시간축을 네 번째 검증 종류로 넣을까"를 자연스럽게 같이 결정하게 된다.
+
+> **E14 와 성격이 다르다.** E14 는 "겹친다"가 **확인된** 판정이고, E15 는 **판정 자체가
+> 불가능한** 상태다. 접은 게 아니라 조건부 보류다.
 
 ### 4. 채점을 부분점수로 🔵 PR #122
 
