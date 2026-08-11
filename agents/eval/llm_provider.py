@@ -104,6 +104,16 @@ def _batch_max_fanout() -> int:
     return value if value > 0 else _BATCH_MAX_FANOUT_DEFAULT
 
 
+def judge_batch_active() -> bool:
+    """RAGAS 판정이 Message Batches 로 나가는 조합인지 (anthropic 심판 + 배치 스위치).
+
+    fan-out 폭(judge_fanout)과 진행률 ETA 억제(agents/eval/agent.py)가 같은 조건을
+    본다 — 배치에서는 전 항목이 한꺼번에 끝나 평균 속도 외삽이 수십 배로 틀리므로,
+    이 값이 True 면 parallel_map 에 eta=False 를 넘길 것."""
+    from core.llm_clients import anthropic_batch_enabled
+    return _provider() == "anthropic" and anthropic_batch_enabled()
+
+
 def judge_fanout(n_items: int, default: int) -> int:
     """RAGAS 판정 fan-out 폭. anthropic 배치 모드에서는 동시성이 곧 배치 크기이므로
     항목 수 전체로 넓힌다 — 스레드는 배치 결과를 기다리며 잠들 뿐이라 넓혀도 API 비용이
@@ -116,8 +126,7 @@ def judge_fanout(n_items: int, default: int) -> int:
 
     답변 생성(RAG provider)은 대상이 아니다 — 이 함수는 심판(EVAL_LLM_PROVIDER) 호출을
     묶는 parallel_map 에만 쓸 것."""
-    from core.llm_clients import anthropic_batch_enabled
-    if _provider() == "anthropic" and anthropic_batch_enabled():
+    if judge_batch_active():
         return max(1, min(n_items, _batch_max_fanout()))
     return default
 
@@ -275,14 +284,56 @@ def _notify_embed_once(message: str) -> None:
     print(message)
 
 
-def _api_embeddings_available() -> bool:
-    """활성 provider 로 임베딩 API 를 부를 수 있는지. 키 유무만 본다(호출은 안 한다)."""
-    provider = _provider()
+def _embed_api_key_ready(provider: str) -> bool:
+    """해당 provider 의 임베딩 API 키가 있는지. 키 유무만 본다(호출은 안 한다)."""
     if provider == "gemini":
         return bool(os.getenv("GEMINI_API_KEY"))
     if provider == "openrouter":
         return bool(os.getenv("OPENROUTER_API_KEY"))
     return bool(os.getenv("OPENAI_API_KEY"))
+
+
+def _api_embeddings_available() -> bool:
+    """활성 심판 provider 로 임베딩 API 를 부를 수 있는지."""
+    return _embed_api_key_ready(_provider())
+
+
+def _embed_via_api(provider: str, texts: list[str], model: str | None) -> list[list[float]]:
+    """provider 의 임베딩 API 1회 호출. 미지원 provider(anthropic·github)는 openai 로 흡수
+    — 기존 폴백 사슬의 else 분기와 같은 동작이다."""
+    if provider == "gemini":
+        return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
+    if provider == "openrouter":
+        return _openrouter_embed(
+            texts, model or os.getenv("EVAL_EMBED_MODEL_OPENROUTER", "baai/bge-m3"))
+    return _openai_embed(texts, model or os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small"))
+
+
+_EMBED_PROVIDER_CHOICES = {"openrouter", "openai", "gemini", "local"}
+
+
+def _embed_provider_override() -> str:
+    """EVAL_EMBED_PROVIDER — 임베딩 provider 를 심판(EVAL_LLM_PROVIDER)에서 분리하는 스위치.
+
+    없으면 기존 폴백 사슬(심판 provider 의 임베딩 API → 로컬 BGE-M3 → 결측) 그대로다.
+    분리가 필요한 이유는 실제 사고다(2026-08-11): 심판만 anthropic 으로 바꿨는데 —
+    anthropic 은 임베딩 엔드포인트가 없어 — 임베딩이 로컬 BGE-M3 로 끌려왔고,
+    (1) 배치 fan-out 의 동시 로드 race 로 모델 13벌이 상주해 OS 가 프리즈했으며(수정:
+    qdrant_store._embed_model_lock), (2) 8GB GPU 에서 리랭커와 VRAM 을 다투며 검색이
+    192초 → 31분+ 로 열화됐다. OPENROUTER_API_KEY 가 있는 환경이라면
+    EVAL_EMBED_PROVIDER=openrouter 로 로컬 경로 자체를 피하는 것이 낫다($0.01/1M).
+
+    미지원 값은 경고 1회 후 무시한다 — 오타 때문에 임베딩 의존 지표(response_relevancy)
+    와 bad_gold_answer 라벨이 조용히 죽으면 안 된다."""
+    raw = normalize_provider(os.getenv("EVAL_EMBED_PROVIDER", ""))
+    if not raw:
+        return ""
+    if raw not in _EMBED_PROVIDER_CHOICES:
+        _notify_embed_once(
+            f"[Eval] EVAL_EMBED_PROVIDER='{raw}' 는 지원하지 않는 값입니다"
+            f"(openrouter|openai|gemini|local) — 기본 폴백 사슬을 씁니다.")
+        return ""
+    return raw
 
 
 def _local_embeddings_available() -> bool:
@@ -310,8 +361,9 @@ def embeddings_available() -> bool:
 def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
     """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파; rate limit 은 재시도)
 
-    우선순위: 활성 provider 의 임베딩 API > 로컬 BGE-M3 > 결측(빈 리스트).
-    로컬은 임베딩 API 가 없는 조합(GitHub Models 등)이나 키가 없을 때만 쓰인다.
+    우선순위: EVAL_EMBED_PROVIDER 명시(_embed_provider_override 참고)
+    > 활성 provider 의 임베딩 API > 로컬 BGE-M3 > 결측(빈 리스트).
+    로컬은 임베딩 API 가 없는 조합(GitHub Models·anthropic 등)이나 키가 없을 때만 쓰인다.
 
     주의: provider 를 바꾸면 임베딩 모델이 바뀌고 코사인 분포도 달라진다.
     response_relevancy 를 실행 간에 비교하려면 한 번 정한 뒤 고정할 것.
@@ -323,28 +375,32 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
     if not texts:
         return []
 
-    if _api_embeddings_available():
-        def _do():
-            provider = _provider()
-            if provider == "gemini":
-                return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
-            if provider == "openrouter":
-                return _openrouter_embed(
-                    texts,
-                    model or os.getenv("EVAL_EMBED_MODEL_OPENROUTER", "baai/bge-m3"),
-                )
-            return _openai_embed(texts, model or os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small"))
+    override = _embed_provider_override()
+    if override and override != "local":
+        if _embed_api_key_ready(override):
+            return _run_with_retry(lambda: _embed_via_api(override, texts, model), "임베딩")
+        _notify_embed_once(
+            f"[Eval] EVAL_EMBED_PROVIDER={override} 인데 그 provider 의 키가 없습니다 "
+            f"— 기본 폴백 사슬로 내려갑니다.")
+        override = ""
 
-        return _run_with_retry(_do, "임베딩")
+    if override != "local" and _api_embeddings_available():
+        return _run_with_retry(lambda: _embed_via_api(_provider(), texts, model), "임베딩")
 
     if _local_embeddings_available():
         # AGENTS.md 규약대로 공통 모듈을 통해서만 임베딩한다(직접 모델 로드 금지).
         from agents.index.qdrant_store import embed_batch
-        _notify_embed_once(
-            f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없어 "
-            f"로컬 임베딩(BGE-M3)으로 계산합니다 — 비용 0, 외부 호출 없음. "
-            f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
-            f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요.")
+        if override == "local":
+            _notify_embed_once(
+                "[Eval] EVAL_EMBED_PROVIDER=local — 로컬 임베딩(BGE-M3)으로 계산합니다 "
+                "(비용 0, 외부 호출 없음).")
+        else:
+            _notify_embed_once(
+                f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없어 "
+                f"로컬 임베딩(BGE-M3)으로 계산합니다 — 비용 0, 외부 호출 없음. "
+                f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
+                f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요. "
+                f"로컬 GPU 가 좁으면(리랭커와 VRAM 경합) EVAL_EMBED_PROVIDER=openrouter 권장.")
         # provider 를 못 박는다 — Index 의 기본값은 openrouter 라 그냥 부르면
         # "비용 0, 외부 호출 없음" 이라 찍어놓고 실제로는 과금 호출을 한다.
         return embed_batch(texts, provider="local")

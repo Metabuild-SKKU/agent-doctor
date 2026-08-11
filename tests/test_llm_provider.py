@@ -70,3 +70,70 @@ class ChatJsonFailureReasonTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmbedProviderOverrideTest(unittest.TestCase):
+    """EVAL_EMBED_PROVIDER — 임베딩 provider 를 심판(EVAL_LLM_PROVIDER)에서 분리하는 스위치.
+
+    실제 사고(2026-08-11)의 회귀 방지다: 심판만 anthropic 으로 바꿨는데 임베딩이 로컬
+    BGE-M3 로 끌려가 (1) fan-out 동시 로드 race 로 OS 프리즈, (2) 8GB GPU 에서 리랭커와
+    VRAM 경합(검색 192초→31분)을 만들었다. openrouter 명시가 로컬 경로를 피하는지,
+    오타·키 부재가 조용히 새 경로를 만들지 않는지를 고정한다."""
+
+    def setUp(self):
+        llm_provider._embed_notified = False
+
+    def _run(self, env: dict, local_ok: bool = True):
+        """embed_texts 1회. 어느 embed 가 불렸는지와 stdout 을 돌려준다."""
+        called = {}
+        buf = io.StringIO()
+
+        def fake_openrouter(texts, model):
+            called["openrouter"] = model
+            return [[1.0]] * len(texts)
+
+        def fake_openai(texts, model):
+            called["openai"] = model
+            return [[1.0]] * len(texts)
+
+        def fake_local(texts, provider=None):
+            called["local"] = provider
+            return [[0.0]] * len(texts)
+
+        base_env = {"EVAL_LLM_PROVIDER": "anthropic", "EVAL_EMBED_PROVIDER": "",
+                    "OPENROUTER_API_KEY": "", "OPENAI_API_KEY": "", "GEMINI_API_KEY": ""}
+        with patch.dict(os.environ, {**base_env, **env}, clear=False), \
+                patch.object(llm_provider, "_openrouter_embed", fake_openrouter), \
+                patch.object(llm_provider, "_openai_embed", fake_openai), \
+                patch.object(llm_provider, "_local_embeddings_available",
+                             return_value=local_ok), \
+                patch("agents.index.qdrant_store.embed_batch", fake_local), \
+                redirect_stdout(buf):
+            llm_provider.embed_texts(["텍스트"])
+        return called, buf.getvalue()
+
+    def test_override_routes_to_openrouter_even_with_anthropic_judge(self):
+        called, _ = self._run({"EVAL_EMBED_PROVIDER": "openrouter",
+                               "OPENROUTER_API_KEY": "k"})
+        self.assertIn("openrouter", called)
+        self.assertNotIn("local", called)          # 사고 경로(로컬)를 타지 않는다
+
+    def test_override_without_key_falls_back_to_chain(self):
+        called, log = self._run({"EVAL_EMBED_PROVIDER": "openrouter"})
+        self.assertNotIn("openrouter", called)     # 키 없이 호출하지 않는다
+        self.assertIn("local", called)             # 기본 사슬(로컬)로 내려간다
+        self.assertIn("키가 없습니다", log)          # 조용히 내려가지 않는다
+
+    def test_invalid_override_warns_and_uses_chain(self):
+        called, log = self._run({"EVAL_EMBED_PROVIDER": "openroutre",   # 오타
+                                 "EVAL_LLM_PROVIDER": "openrouter",
+                                 "OPENROUTER_API_KEY": "k"})
+        self.assertIn("지원하지 않는 값", log)
+        self.assertIn("openrouter", called)        # 기본 사슬(심판 provider API)로 동작
+
+    def test_override_local_skips_api_even_with_keys(self):
+        called, _ = self._run({"EVAL_EMBED_PROVIDER": "local",
+                               "OPENROUTER_API_KEY": "k", "OPENAI_API_KEY": "k"})
+        self.assertEqual(called.get("local"), "local")
+        self.assertNotIn("openrouter", called)
+        self.assertNotIn("openai", called)
