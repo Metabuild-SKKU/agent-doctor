@@ -26,8 +26,9 @@ def _key(qa_id, category, stage):
             "query_type": "Factual Question"}
 
 
-def _found(qa_id, *labels):
-    return {"qa_id": qa_id, "labels": list(labels)}
+def _found(qa_id, *labels, failed=True):
+    """우리 진단 한 줄. 기본은 '실패했고 이 라벨을 냈다' — 채점 대상이 되는 상태다."""
+    return {"qa_id": qa_id, "labels": list(labels), "failed": failed}
 
 
 class ContainmentScoringTest(unittest.TestCase):
@@ -54,11 +55,46 @@ class ContainmentScoringTest(unittest.TestCase):
             result = score([_found("1", label)], [_key("1", "E7 Low Recall", "Reranking")])
             self.assertEqual(result["total_hit"], 1, label)
 
-    def test_no_diagnosis_is_counted_as_wrong(self):
-        """빼면 '아무 말도 안 하면 안 틀린다' 가 되어 정확도가 거짓으로 오른다."""
-        result = score([], [_key("1", "E4 Missed Retrieval", "Retrieval")])
+    def test_failed_but_no_label_is_counted_as_wrong(self):
+        """실패했는데 원인을 못 짚은 건 오답이다.
+
+        빼면 '아무 말도 안 하면 안 틀린다' 가 되어 정확도가 거짓으로 오른다.
+        """
+        result = score([{"qa_id": "1", "labels": [], "failed": True}],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
         self.assertEqual((result["total_hit"], result["total"]), (0, 1))
         self.assertEqual(result["no_diagnosis"], 1)
+
+
+class OurPipelineMayNotFailTest(unittest.TestCase):
+    """RAGEC 377건은 *그들* 시스템이 실패한 질문이다.
+
+    검색기·생성 모델이 다른 우리는 같은 질문에서 성공할 수 있다. 그걸 오답으로 세면
+    정확도가 진단 품질이 아니라 **"얼마나 그들과 비슷하게 실패하나"** 를 재게 된다.
+    """
+
+    def test_probe_we_passed_is_excluded_not_failed(self):
+        result = score([{"qa_id": "1", "labels": [], "failed": False}],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["we_passed"], 1)
+        self.assertEqual(result["no_diagnosis"], 0)
+
+    def test_probe_missing_from_dump_is_excluded(self):
+        """덤프에 없으면 안 돌린 것이다 — 성공과 구분한다."""
+        result = score([], [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["not_run"], 1)
+
+    def test_dump_without_status_is_flagged(self):
+        """failed 필드가 없으면 '성공' 과 '못 짚음' 이 구분되지 않는다 — 리포트가 밝힌다."""
+        legacy = score([{"qa_id": "1", "labels": ["retrieval_missing_gold"]}],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertFalse(legacy["has_status"])
+        self.assertEqual(legacy["total_hit"], 1)     # 라벨이 있으면 실패로 추론
+        typed = score([{"qa_id": "1", "labels": ["retrieval_missing_gold"], "failed": True}],
+                      [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertTrue(typed["has_status"])
 
 
 class ExclusionTest(unittest.TestCase):

@@ -95,10 +95,22 @@ def stage_of(label: str) -> str | None:
 GOLD_ERROR_LABELS = {"bad_gold_answer", "bad_gold_chunk"}
 
 
-def findings_from_report(report) -> list[dict]:
+def _qa_id(probe_id: str) -> str:
+    """`probe_qa_<qa_id>` → `<qa_id>` (korquad 로더 규약)."""
+    prefix = "probe_qa_"
+    return probe_id[len(prefix):] if probe_id.startswith(prefix) else probe_id
+
+
+def findings_from_report(report, probe_ids: list[str] | None = None) -> list[dict]:
     """DiagnosticReport → 채점기 입력(JSONL 행 목록).
 
-    probe_id 가 `probe_qa_<qa_id>` 라 접두를 떼어 qa_id 로 맞춘다(korquad 로더 규약).
+    **성공한 probe 도 실어야 한다.** RAGEC 377건은 *그들* RAG 시스템이 실패한 질문이고,
+    우리 파이프라인은 같은 질문에서 성공할 수 있다(검색기·생성 모델이 다르다). 실패한
+    probe 만 실으면 우리가 잘한 것이 채점기에서 '미진단' 으로 보여 오답이 된다.
+
+    probe_ids 를 주면 그 목록 전체를 싣고 findings 가 없는 것은 `failed=False` 로 표시한다.
+    안 주면 findings 가 있는 probe 만 실린다(구버전 호환 — 그 경우 채점기가 '우리는 성공'
+    과 '실패했는데 원인을 못 짚음' 을 구분하지 못한다).
     """
     by_probe: dict[str, set[str]] = collections.defaultdict(set)
     for finding in getattr(report, "findings", []) or []:
@@ -106,10 +118,23 @@ def findings_from_report(report) -> list[dict]:
             continue
         for probe_id in finding.affected_probes:
             by_probe[probe_id].add(finding.label)
+
+    # 실패 판정은 report 가 소유한다 — findings 유무로 추론하지 않는다. 골드 오류 probe 는
+    # findings 는 있지만 failed_questions 에서 빠지므로(평가셋 결함이라 '실패한 검증 질문'
+    # 이 아니다) 둘이 다르다.
+    failed_ids = {
+        row.get("probe_id", "")
+        for row in (getattr(report, "failed_questions", []) or [])
+    }
+
+    ids = list(probe_ids) if probe_ids is not None else sorted(by_probe)
     rows = []
-    for probe_id, labels in by_probe.items():
-        qa_id = probe_id[len("probe_qa_"):] if probe_id.startswith("probe_qa_") else probe_id
-        rows.append({"qa_id": qa_id, "labels": sorted(labels)})
+    for probe_id in ids:
+        rows.append({
+            "qa_id": _qa_id(probe_id),
+            "labels": sorted(by_probe.get(probe_id, ())),
+            "failed": probe_id in failed_ids or bool(by_probe.get(probe_id)),
+        })
     return rows
 
 
@@ -119,10 +144,17 @@ def _read_jsonl(path: str) -> list[dict]:
 
 def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
     ours = {str(r["qa_id"]): set(r.get("labels") or []) for r in findings_rows}
+    # "failed" 가 없는 덤프(구버전)는 라벨 유무로 추론한다 — 그 경우 '우리는 성공' 과
+    # '실패했는데 원인을 못 짚음' 이 구분되지 않으므로 리포트가 그렇다고 밝힌다.
+    has_status = any("failed" in r for r in findings_rows)
+    failed = {
+        str(r["qa_id"]): bool(r.get("failed", bool(r.get("labels"))))
+        for r in findings_rows
+    }
 
     per_category: dict[str, list[bool]] = collections.defaultdict(list)
     stage_hit = stage_total = 0
-    no_diagnosis = gold_error = unmappable = 0
+    no_diagnosis = gold_error = unmappable = we_passed = not_run = 0
 
     for key in key_rows:
         qa_id = str(key["qa_id"])
@@ -140,8 +172,18 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
         if not expected:
             unmappable += 1          # 대응 라벨이 아직 없다(E15)
             continue
+        if qa_id not in failed:
+            not_run += 1             # 덤프에 없다 = 이 probe 를 안 돌렸다
+            continue
+        if not failed[qa_id]:
+            # **우리 파이프라인은 이 질문에 성공했다.** RAGEC 377건은 *그들* 시스템이
+            # 실패한 질문이라, 검색기·생성 모델이 다른 우리가 성공하는 건 정상이다.
+            # 이걸 오답으로 세면 정확도가 진단 품질이 아니라 "얼마나 그들과 비슷하게
+            # 실패하나" 를 재게 된다.
+            we_passed += 1
+            continue
         if not got:
-            no_diagnosis += 1        # 우리가 아무 라벨도 안 냈다 = 실패로 센다
+            no_diagnosis += 1        # 실패했는데 원인을 못 짚었다 = 진짜 미진단
             per_category[category].append(False)
             continue
 
@@ -164,6 +206,9 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
         "no_diagnosis": no_diagnosis,
         "gold_error": gold_error,
         "unmappable": unmappable,
+        "we_passed": we_passed,
+        "not_run": not_run,
+        "has_status": has_status,
     }
 
 
@@ -188,8 +233,16 @@ def format_report(result: dict) -> str:
         lines.append(f"  {category:<32}{ok:>8}{n:>8}{ok / n * 100:>8.0f}%")
 
     lines.append("")
+    if result.get("we_passed"):
+        lines.append(f"  · 우리 파이프라인이 성공한 질문    {result['we_passed']}건 "
+                     f"(진단할 게 없어 제외 — 그들 시스템만 실패한 건이다)")
     if result["no_diagnosis"]:
-        lines.append(f"  · 우리가 아무 라벨도 안 낸 probe   {result['no_diagnosis']}건 (오답으로 셈)")
+        lines.append(f"  · 실패했는데 원인을 못 짚음        {result['no_diagnosis']}건 (오답으로 셈)")
+    if result.get("not_run"):
+        lines.append(f"  · 덤프에 없는 probe               {result['not_run']}건 (제외)")
+    if not result.get("has_status", True):
+        lines.append("  ⚠ 덤프에 failed 필드가 없어 '우리는 성공' 과 '원인을 못 짚음' 이")
+        lines.append("    구분되지 않습니다 — findings_from_report(report, probe_ids) 로 다시 덤프하세요.")
     if result["gold_error"]:
         lines.append(f"  · bad_gold_* 를 낸 probe          {result['gold_error']}건 "
                      f"(정확도에서 제외 — 사람이 표본 확인 필요)")
