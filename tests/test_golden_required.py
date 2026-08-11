@@ -9,13 +9,23 @@ tests/test_golden_required.py
 """
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
+from agents.eval import replay
 from agents.eval.log_intake import load_external_log
 from agents.eval.replay import _main, apply_golden_set
+
+# _main 이 CLI 규약대로 load_dotenv(override=True) 를 부르므로, 실사용 .env 에
+# EVAL_ENABLE_LLM=1 이 있으면(정상적인 설정) @patch.dict(os.environ, ...) 만으로는
+# 못 막는다 - override=True 가 패치를 되돌린다(재현됨). llm_eval_enabled 자체를
+# 패치해야 어떤 .env 에서도 이 테스트 파일이 실제 LLM 을 부르지 않는다.
+def _no_llm():
+    return patch.object(replay, "llm_eval_enabled", return_value=False)
 
 GOLD = "입사 1년 이상 직원은 연 15일의 연차 휴가가 부여되며, 3년 이상 근속 시 추가된다."
 
@@ -90,6 +100,9 @@ class GoldenRequiredCliTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.log = _write(self.tmp, "log.jsonl", _log_rows())
+        self._llm_patch = _no_llm()
+        self._llm_patch.start()
+        self.addCleanup(self._llm_patch.stop)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -135,6 +148,9 @@ class GoldenParseErrorReportingTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.log = _write(self.tmp, "log.jsonl", _log_rows())
+        self._llm_patch = _no_llm()
+        self._llm_patch.start()
+        self.addCleanup(self._llm_patch.stop)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -158,6 +174,9 @@ class GoldenSetSizeCapTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.log = _write(self.tmp, "log.jsonl", _log_rows())
+        self._llm_patch = _no_llm()
+        self._llm_patch.start()
+        self.addCleanup(self._llm_patch.stop)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -186,6 +205,37 @@ class GoldenSetSizeCapTests(unittest.TestCase):
             code = _main([self.log, f"--golden={golden}"])
         self.assertEqual(code, 2)
         self.assertIn("300", buf.getvalue())
+
+
+class LlmCallIsolationTests(unittest.TestCase):
+    """이 테스트 파일이 실사용 .env(EVAL_ENABLE_LLM=1 + 유효 키)에서도 실제 LLM 을
+    부르면 안 된다. _main 은 CLI 규약대로 load_dotenv(override=True) 를 부르므로,
+    @patch.dict(os.environ, {"EVAL_ENABLE_LLM": "0"}) 로 걸어 둬도 .env 에 값이
+    있으면 override 가 되돌려 버린다(재현: load_dotenv 가 패치된 "0" 을 다시 "1"
+    로 덮어씀). llm_eval_enabled 자체를 패치하는 것만이 .env 내용과 무관하게 안전하다."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.log = _write(self.tmp, "log.jsonl", _log_rows())
+        golden = self.tmp / "golden.json"
+        golden.write_text(json.dumps(
+            [{"question": "연차 휴가는 며칠인가요?", "ground_truth": "연 15일"}],
+            ensure_ascii=False), encoding="utf-8")
+        self.golden = str(golden)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_hostile_env_still_skips_judge(self):
+        """os.environ 에 EVAL_ENABLE_LLM=1 이 이미 있어도(정상적인 .env 설정 시나리오)
+        _judge 호출까지 가면 안 된다 - llm_eval_enabled 패치가 진짜 방어선인지 확인."""
+        with patch.dict(os.environ, {"EVAL_ENABLE_LLM": "1"}), \
+             _no_llm(), \
+             patch.object(replay, "_judge") as mock_judge:
+            code = _main([self.log, f"--golden={self.golden}"])
+        mock_judge.assert_not_called()
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":
