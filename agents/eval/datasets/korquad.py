@@ -112,6 +112,21 @@ def _chunk_span_index(corpus_path: str, keep) -> dict[tuple[str, str], tuple[int
     return idx
 
 
+def _as_bool(value, *, default: bool) -> bool:
+    """JSONL 의 진위값을 읽는다. 미지정(None)이면 default.
+
+    문자열도 받는다 — 손으로 만든 데이터셋이 "false" 를 문자열로 싣는 일이 흔하고,
+    파이썬에서 비어 있지 않은 문자열은 전부 참이라 조용히 뒤집힌다.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"false", "0", "no", ""}
+    return bool(value)
+
+
 def _gold_spans_of(qa: dict, doc_id: str, span_of: dict) -> list[dict]:
     """골드 좌표. 명시 gold_spans 가 있으면 그걸 쓰고, 없으면 청크 id 로 환산한다.
 
@@ -160,7 +175,12 @@ def load_taxonomy_probes(qa_path: str = DEFAULT_QA, corpus_path: str = DEFAULT_C
             question=o["question"],
             source="taxonomy",
             expected_difficulty="medium",
-            answer_exists=True,
+            # 기본 True — KorQuAD 는 전부 답이 있는 질문이라 기존 파일이 그대로 돈다.
+            # 무응답(답할 수 없는) 질문을 담은 데이터셋은 이 필드를 false 로 실어야 한다.
+            # 없으면 무응답 probe 가 '답이 있는데 못 맞힌 것'으로 잘못 채점되고,
+            # generation_abstention_failure·generation_wrongful_abstention 이 발화하지 않는다
+            # (diagnose 가 `answer_exists is False` 로 그 경로를 연다).
+            answer_exists=_as_bool(o.get("answer_exists"), default=True),
             ground_truth=o.get("answer_text"),
             gold_chunk_ids=[],           # resync 가 현재 청크 기준으로 채운다
             gold_doc_id=did,
