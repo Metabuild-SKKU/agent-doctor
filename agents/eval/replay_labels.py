@@ -179,6 +179,23 @@ def _retrieval_axis(record: EvalRecord) -> Optional[tuple[bool, str]]:
     return failed[0] if failed else signals[0]
 
 
+def _evidence_reached(record: EvalRecord) -> Optional[tuple[bool, str]]:
+    """기권 분기 전용 — '근거가 컨텍스트에 도달했나'. _retrieval_axis 와 다른 질문이다.
+
+    _retrieval_axis 는 "검색 품질이 전반적으로 좋은가"를 물어 나쁜 쪽 신호를 우선한다
+    (top_k 를 넉넉히 잡아 무관한 청크가 섞여도 겹침만 보면 정상으로 읽히는 함정 방지).
+    여기서 묻는 건 다르다 — "gold 문단이 컨텍스트 안에 있긴 했나"이므로, 있었다면
+    주변에 무관한 청크가 얼마나 섞였든 기권의 정오는 이미 정해진다(있는데 기권 = wrongful).
+    그래서 겹침이 실측되면 겹침을 믿고, 겹침이 없을 때만 precision 으로 폴백한다."""
+    overlap = gold_context_recall(record)
+    if overlap is not None:
+        return overlap >= GOLD_OVERLAP_FOUND, f"gold 근거 겹침 {overlap:.2f}"
+    prec = record.ragas.get("context_precision")
+    if prec is not None:
+        return prec >= EXT_CTX_PRECISION_LOW, f"context precision {prec:.2f}"
+    return None
+
+
 def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
     """외부 로그 레코드 1건의 ext_ 소견. 실측된 지표만 근거로 쓴다.
 
@@ -211,7 +228,7 @@ def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
     #   근거가 없어서 기권    → ext_retrieval_starved_abstention (검색/코퍼스 탓)
     #   검색축 미측정         → 소견 없음 (놓치는 것이 오진보다 낫다)
     if is_abstention(record.generated_answer):
-        axis = _retrieval_axis(record)
+        axis = _evidence_reached(record)
         if axis is None:
             return findings
         found, why = axis
@@ -234,10 +251,16 @@ def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
             record, "ext_retrieval_irrelevant", "retrieval", True,
             f"{axis[1]} - 검색 결과가 질문과 무관"))
 
+    # 검색축이 실측되고 실패했으면(axis[0] is False), 그 여파로 낮아진 답변축
+    # 지표(rel·corr)를 독립된 생성/데이터 문제로 확정하지 않는다 - 환각과 같은 규칙.
+    retrieval_failed = axis is not None and not axis[0]
+
     if rel is not None and rel < EXT_REL_LOW:
+        reason = f"answer relevancy {rel:.2f} - 답이 질문을 비껴감"
+        if retrieval_failed:
+            reason += f" ({axis[1]} - 검색 실패의 여파일 수 있음)"
         findings.append(_finding(
-            record, "ext_answer_off_topic", "generation", True,
-            f"answer relevancy {rel:.2f} - 답이 질문을 비껴감"))
+            record, "ext_answer_off_topic", "generation", not retrieval_failed, reason))
 
     # rel 미측정(None)은 통과로 본다 - faithfulness 가 실측된 이상 "동문서답으로
     # 판명되지 않음"이면 환각 소견을 낼 근거는 충분하다(완전 미측정 침묵과 구분).
@@ -264,12 +287,17 @@ def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
             f"컨텍스트 {_context_char_total(record)}자(상한 {CONTEXT_CHARS_MAX}) + "
             f"faithfulness {faith:.2f} - 과다 컨텍스트가 근거 사용을 방해"))
 
+    # rel 게이트: 동문서답(rel 낮음)이면 correctness 가 낮은 건 그 결과이지, 근거
+    # 자체(코퍼스)가 틀렸다는 뜻이 아니다 - 환각(244행)과 같은 게이트.
     if (corr is not None and corr < EXT_CORRECTNESS_LOW
-            and faith is not None and faith >= EXT_FAITH_LOW):
+            and faith is not None and faith >= EXT_FAITH_LOW
+            and (rel is None or rel >= EXT_REL_LOW)):
+        reason = (f"correctness {corr:.2f}인데 faithfulness {faith:.2f} - "
+                  "답은 근거에 충실하나 근거 자체가 틀렸거나 부족(코퍼스/검색 문제)")
+        if retrieval_failed:
+            reason += f" ({axis[1]} - 검색 실패의 여파일 수 있음)"
         findings.append(_finding(
-            record, "ext_grounded_but_wrong", "data", True,
-            f"correctness {corr:.2f}인데 faithfulness {faith:.2f} - "
-            "답은 근거에 충실하나 근거 자체가 틀렸거나 부족(코퍼스/검색 문제)"))
+            record, "ext_grounded_but_wrong", "data", not retrieval_failed, reason))
 
     return findings
 

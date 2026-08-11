@@ -122,6 +122,14 @@ class TestExtLabels(unittest.TestCase):
                       ragas={"faithfulness": 0.9, "answer_correctness": 0.1})
         self.assertIn("ext_grounded_but_wrong", self._labels(rec))
 
+    def test_grounded_but_wrong_requires_relevancy_gate(self):
+        """동문서답(rel 낮음)이면 answer_correctness 가 낮은 건 그 결과다 - 근거
+        자체(코퍼스)가 틀렸다는 뜻이 아니다. corpus_gap 수동 처방을 잘못 확정하면 안 된다."""
+        rec = _record(contexts=["ctx"], ground_truth="정답",
+                      ragas={"response_relevancy": 0.2, "faithfulness": 0.9,
+                             "answer_correctness": 0.1})
+        self.assertNotIn("ext_grounded_but_wrong", self._labels(rec))
+
     def test_finding_shape(self):
         rec = _record(contexts=["ctx"], ragas={"response_relevancy": 0.2})
         f = diagnose_replay_record(rec)[0]
@@ -177,7 +185,10 @@ class AbstentionIsNotAFailureTests(unittest.TestCase):
         for text in ("자료에서 확인되지 않습니다.",
                      "제공된 자료에는 포함되어 있지 않습니다.",
                      "관련 내용을 찾을 수 없습니다.",
-                     "명시되어 있지 않습니다."):
+                     "명시되어 있지 않습니다.",
+                     "답변드리기 어렵습니다.",
+                     "관련 정보가 부족합니다.",
+                     "해당 내용은 문서에서 다루지 않습니다."):
             self.assertTrue(is_abstention(text), text)
 
     def test_normal_answers_are_not_abstention(self):
@@ -239,6 +250,31 @@ class RetrievalAxisLabelTests(unittest.TestCase):
         rec = self._rec(gold=[GOLD], ctx=[f"머리말 {GOLD} 꼬리말"], prec=0.2)
         labels = [f.label for f in diagnose_replay_record(rec)]
         self.assertIn("ext_retrieval_irrelevant", labels)
+
+    def test_off_topic_is_preliminary_when_retrieval_failed(self):
+        """검색이 무관한 걸 가져와 그 여파로 relevancy 도 낮아진 경우, off_topic 을
+        독립 확정으로 보면 안 된다 - 검색을 고치면 사라질 소견이라 확정이 과하다."""
+        rec = self._rec(rel=0.2, prec=0.2)
+        findings = {f.label: f.confirmed for f in diagnose_replay_record(rec)}
+        self.assertIn("ext_answer_off_topic", findings)
+        self.assertFalse(findings["ext_answer_off_topic"])
+
+    def test_off_topic_stays_confirmed_when_retrieval_is_fine(self):
+        """검색이 멀쩡한데 답이 동문서답이면 여전히 확정이어야 한다(과한 강등 방지)."""
+        rec = self._rec(rel=0.2, prec=1.0)
+        findings = {f.label: f.confirmed for f in diagnose_replay_record(rec)}
+        self.assertTrue(findings["ext_answer_off_topic"])
+
+    def test_wrongful_not_starved_when_overlap_says_evidence_present(self):
+        """겹침 1.0 인데 precision 만 낮으면(top_k 를 넉넉히 잡아 무관한 청크가 섞인
+        경우), 기권 분기는 precision 이 아니라 겹침을 믿어야 한다 - '검색이 근거를
+        못 가져왔다'가 사실과 다르다. irrelevant 라벨(위 테스트)과 같은 입력이지만
+        묻는 질문이 다르다(검색 품질 vs 근거 도달 여부)."""
+        rec = self._rec("자료에서 확인되지 않습니다.", gold=[GOLD],
+                        ctx=[f"머리말 {GOLD} 꼬리말"], prec=0.2)
+        labels = [f.label for f in diagnose_replay_record(rec)]
+        self.assertIn("ext_wrongful_abstention", labels)
+        self.assertNotIn("ext_retrieval_starved_abstention", labels)
 
 
 if __name__ == "__main__":

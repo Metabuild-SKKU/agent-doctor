@@ -1071,7 +1071,7 @@ class GenerationLabelTest(_DiagnoseTestBase):
         judge = _FakeAbstentionJudge(1)
         self._with(ragas=judge)
         rec = _record(answer_exists=False, ground_truth=None,
-                      answer="그 부분은 문서에서 다루지 않습니다")   # 마커 미포함
+                      answer="해당 질문에는 답변을 삼가겠습니다")   # 마커 미포함
         self.assertTrue(diagnose.is_abstention(rec.generated_answer) is False)
         self.assertIsNone(diagnose.generation_abstention_failure(rec))
         self.assertIn("abstention", judge.calls)

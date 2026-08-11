@@ -432,6 +432,8 @@ _ABSTENTION_MARKERS = (
     # → 올바른 기권이 동문서답으로 오진됐다).
     "확인되지 않", "확인할 수 없", "찾을 수 없", "포함되어 있지 않",
     "언급되어 있지 않", "명시되어 있지 않", "나와 있지 않",
+    # 위 목록도 여전히 유한하다(휴리스틱의 근본 한계) - 실측에서 추가로 놓친 표현들.
+    "답변드리기 어렵", "정보가 부족", "다루지 않", "다루고 있지 않",
     "don't know", "do not know", "cannot answer", "no information",
     "not available", "unable to answer", "not mentioned", "not specified",
 )
