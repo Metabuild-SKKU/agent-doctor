@@ -1,20 +1,22 @@
 """
-tests/run_replay_report.py
+tools/run_replay_report.py
 외부 RAG 실행 로그 하나로 리플레이 진단을 돌리고, 결과를 진단서 HTML 로 떨군다.
 
-run_corpus.py 의 외부 모드 짝이다. 그쪽은 코퍼스로 우리 파이프라인
-(Ingest→Index→Eval→Optimize)을 돌리지만, 여기서는 남의 RAG 가 남긴 로그를
-리플레이해 진단만 한다 — 남의 인덱스라 Optimize 를 돌 수 없기 때문이다.
+다른 팀의 RAG를 우리가 손대지 않고 진단하는 정식 진입점이다(README §"다른 팀의
+RAG를 로그로 진단하기"). tests/run_corpus.py 의 외부 모드 짝이다 — 그쪽은
+코퍼스로 우리 파이프라인(Ingest→Index→Eval→Optimize)을 돌리지만, 여기서는
+남의 RAG 가 남긴 로그를 리플레이해 진단만 한다 — 남의 인덱스라 Optimize 를
+돌 수 없기 때문이다(그래서 graph.py 의 LangGraph 루프에는 물리지 않는다).
 
 서버를 띄우지 않는다. report.html 이 fetch 로 받아가던 JSON 을
 report_view.build_ext_report_view() 로 직접 만들어 HTML 안에 심으므로,
 브라우저에서 결과 파일을 그냥 열면 된다.
 
 Run:
-    python tests/run_replay_report.py                       # 기본 fixture(결함 로그)
-    python tests/run_replay_report.py <log.jsonl>
-    python tests/run_replay_report.py <log.jsonl> --no-open
-    python tests/run_replay_report.py <log.jsonl> --allow-qa-only
+    python tools/run_replay_report.py                       # 기본 fixture(결함 로그)
+    python tools/run_replay_report.py <log.jsonl>
+    python tools/run_replay_report.py <log.jsonl> --no-open
+    python tools/run_replay_report.py <log.jsonl> --allow-qa-only
 
 RAGAS 지표(faithfulness/relevancy)를 재려면 EVAL_ENABLE_LLM=1 + EVAL_MODE>=deep
 이 필요하다. 미설정이면 이 스크립트가 켜준다 — 지표가 없으면 소견이 0건이라

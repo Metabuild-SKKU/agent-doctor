@@ -2,7 +2,7 @@
 tests/report_html.py
 진단서 뷰(dict) → 단독 실행 가능한 report.html 로 심는 공용 유틸.
 
-run_corpus.py(내부 파이프라인)와 run_replay_report.py(외부 로그 리플레이)가
+run_corpus.py(내부 파이프라인)와 tools/run_replay_report.py(외부 로그 리플레이)가
 같은 템플릿에 각자의 뷰를 심는다. 심는 방법은 템플릿 구조에 의존하므로 —
 fetch 분기를 통째로 들어내고 데이터 블록을 렌더 스크립트 앞에 끼운다 — 두 벌로
 복사하면 템플릿이 바뀔 때 한쪽만 고쳐져 조용히 빈 리포트를 그리게 된다.

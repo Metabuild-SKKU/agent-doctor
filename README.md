@@ -72,6 +72,27 @@ http://localhost:8766/answer?query=재택근무  # 검색 + LLM 답변 생성
 
 ---
 
+## 다른 팀의 RAG를 로그로 진단하기
+
+우리 파이프라인(Ingest→Index)을 거치지 않고, **이미 운영 중인 남의 RAG가 남긴 실행 로그**(질문·검색 컨텍스트·답변)만으로 품질을 진단할 수 있습니다("로그 리플레이" 모드).
+
+```bash
+# 골든셋(질문·정답·정답 근거) 없이는 검색축 라벨 3종이 침묵합니다 — 골든셋이 진단의 기본 입력입니다.
+python -m agents.eval.replay <log.jsonl> --golden=<golden.xlsx|csv|jsonl|json>
+
+# 정답지가 아예 없으면 명시적으로 옵트인(얕은 진단만 가능)
+python -m agents.eval.replay <log.jsonl> --no-golden
+
+# 브라우저로 바로 여는 진단서 HTML을 원하면
+python tools/run_replay_report.py <log.jsonl>
+```
+
+로그 스키마(JSON Lines, 한 줄 = 요청 1건)와 골든셋 병합 규칙은 [`docs/external_rag_log_intake.md`](docs/external_rag_log_intake.md)에 정리돼 있습니다.
+
+이 모드는 `graph.py`의 LangGraph 루프(Ingest→Index→Eval→Optimize→Serve)에 물리지 않습니다 — 남의 인덱스라 재색인·재검증(Optimize)이 성립하지 않기 때문입니다. 대신 원인 라벨(`ext_` 접두어 7종)에 매핑된 처방을 사람이 읽는 권고 카드로만 돌려줍니다.
+
+---
+
 ## 진단과 최적화
 
 ### 진단 (Eval)
@@ -132,6 +153,8 @@ agent_doctor/
 │   └── serve/            # FastAPI 서버 + MCP 서버 + Claude Desktop 등록
 ├── data/                 # 평가 데이터셋 (KorQuAD 등, 별도 준비)
 ├── sample_docs/          # 샘플 문서
+├── docs/                 # 설계 문서 (로그 리플레이 모드 등)
+├── tools/                # 단독 실행 스크립트 (진단서 HTML 생성 등)
 └── tests/
 ```
 
