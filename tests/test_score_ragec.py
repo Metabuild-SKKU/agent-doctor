@@ -1,0 +1,162 @@
+"""
+tests/test_score_ragec.py
+RAGEC 대조 채점기(tools/score_ragec.py) 검증.
+
+여기서 고정하는 건 **무엇을 맞은 것으로 세고 무엇을 세지 않는가** 다. 채점 규칙이 조금만
+느슨해도 정확도가 거짓으로 올라가고, 그 수치로 8-a(격자) 를 할지 말지를 정하게 된다.
+
+  · 포함 — 그들 라벨이 우리 findings 안에 있으면 맞음. 우리가 더 말한 건 오답이 아니다
+  · 미진단(우리가 아무 라벨도 안 냄)은 **오답**으로 센다. 빼면 "말 안 하면 안 틀린다" 가 된다
+  · 대응 라벨이 없는 카테고리(E15)는 **제외**한다. 맞출 수단이 없는 걸 오답으로 세면 거짓이다
+  · bad_gold_* 는 제외한다 — 우리 오탐인지 정답지 오류인지 갈리지 않는다
+"""
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from tools.score_ragec import (
+    RAGEC_TO_OURS, findings_from_report, score, stage_of,
+)
+
+
+def _key(qa_id, category, stage):
+    return {"qa_id": qa_id, "ragec_category": category, "ragec_stage": stage,
+            "query_type": "Factual Question"}
+
+
+def _found(qa_id, *labels):
+    return {"qa_id": qa_id, "labels": list(labels)}
+
+
+class ContainmentScoringTest(unittest.TestCase):
+    def test_exact_match_counts(self):
+        result = score([_found("1", "retrieval_missing_gold")],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual((result["total_hit"], result["total"]), (1, 1))
+
+    def test_extra_labels_do_not_break_the_match(self):
+        """우리가 더 말한 건 오답이 아니다 — RAGEC 은 최초 단계 하나만 적는다."""
+        result = score(
+            [_found("1", "retrieval_missing_gold", "generation_hallucination")],
+            [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual((result["total_hit"], result["total"]), (1, 1))
+
+    def test_wrong_label_is_counted_wrong(self):
+        result = score([_found("1", "generation_hallucination")],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual((result["total_hit"], result["total"]), (0, 1))
+
+    def test_any_of_the_mapped_labels_counts(self):
+        """1:N 대응은 그중 하나만 맞아도 통과다(우리가 원인별로 쪼갠 것이라 처방이 다르다)."""
+        for label in RAGEC_TO_OURS["E7 Low Recall"]:
+            result = score([_found("1", label)], [_key("1", "E7 Low Recall", "Reranking")])
+            self.assertEqual(result["total_hit"], 1, label)
+
+    def test_no_diagnosis_is_counted_as_wrong(self):
+        """빼면 '아무 말도 안 하면 안 틀린다' 가 되어 정확도가 거짓으로 오른다."""
+        result = score([], [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual((result["total_hit"], result["total"]), (0, 1))
+        self.assertEqual(result["no_diagnosis"], 1)
+
+
+class ExclusionTest(unittest.TestCase):
+    def test_category_without_our_label_is_excluded_not_failed(self):
+        """E15 는 대응 라벨이 없다 — 맞출 수단이 없는 걸 오답으로 세면 수치가 거짓이 된다."""
+        result = score([_found("1", "generation_misinterpretation")],
+                       [_key("1", "E15 Chronological Inconsistency", "Generation")])
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["unmappable"], 1)
+
+    def test_gold_error_claim_is_excluded(self):
+        """우리 오탐인지 DragonBall 정답지 오류인지 갈리지 않아 정확도에 섞지 않는다."""
+        result = score([_found("1", "bad_gold_chunk")],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["gold_error"], 1)
+
+    def test_unknown_category_is_excluded(self):
+        """정답지가 바뀌어 새 카테고리가 오면 조용히 오답으로 세지 않는다."""
+        result = score([_found("1", "retrieval_missing_gold")],
+                       [_key("1", "E99 Something New", "Retrieval")])
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["unmappable"], 1)
+
+
+class StageScoringTest(unittest.TestCase):
+    def test_stage_matches_even_when_label_is_wrong(self):
+        """단계 채점은 라벨보다 거칠어 정책 차이에 강하다 — 그래서 병기한다."""
+        result = score([_found("1", "retrieval_low_rank")],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual(result["total_hit"], 0)          # 라벨은 틀림
+        self.assertEqual((result["stage_hit"], result["stage_total"]), (1, 1))
+
+    def test_reranker_labels_are_reranking_not_retrieval(self):
+        """우리 A그룹 안에 청킹·리랭킹이 섞여 있어, 그룹으로 재면 A 정확도가 거저 오른다.
+
+        라벨 이름에서 RAGEC 단계를 직접 유도해 같은 해상도로 맞춘다.
+        """
+        self.assertEqual(stage_of("retrieval_rerank_candidate_miss"), "Reranking")
+        self.assertEqual(stage_of("reranker_low_precision"), "Reranking")
+        self.assertEqual(stage_of("retrieval_missing_gold"), "Retrieval")
+        self.assertEqual(stage_of("chunking_overchunking"), "Chunking")
+
+    def test_labels_without_a_ragec_counterpart_have_no_stage(self):
+        """C그룹·D그룹은 RAGEC 4단계에 자리가 없다."""
+        self.assertIsNone(stage_of("too_long_context"))
+        self.assertIsNone(stage_of("bad_gold_answer"))
+
+
+class FindingsFromReportTest(unittest.TestCase):
+    class _Finding:
+        def __init__(self, label, probes):
+            self.label = label
+            self.affected_probes = probes
+
+    class _Report:
+        def __init__(self, findings):
+            self.findings = findings
+
+    def test_groups_labels_by_probe_and_strips_prefix(self):
+        report = self._Report([
+            self._Finding("retrieval_missing_gold", ["probe_qa_2135", "probe_qa_2159"]),
+            self._Finding("generation_hallucination", ["probe_qa_2135"]),
+        ])
+        rows = {r["qa_id"]: set(r["labels"]) for r in findings_from_report(report)}
+        self.assertEqual(rows["2135"], {"retrieval_missing_gold", "generation_hallucination"})
+        self.assertEqual(rows["2159"], {"retrieval_missing_gold"})
+
+    def test_findings_without_label_are_skipped(self):
+        report = self._Report([self._Finding(None, ["probe_qa_1"])])
+        self.assertEqual(findings_from_report(report), [])
+
+
+class MappingIntegrityTest(unittest.TestCase):
+    """대조표(docs/ragec_label_mapping.md)가 정본이고 이 표는 그 구현이다."""
+
+    def test_every_mapped_label_is_a_real_label(self):
+        import pathlib
+        import re
+        md = pathlib.Path("tests/diagnose_grid/LABELS.md").read_text(encoding="utf-8")
+        real = set(re.findall(r"^\| `([a-z_]+)` \|", md, re.M))
+        self.assertTrue(real, "LABELS.md 에서 라벨을 못 읽었습니다")
+        used = {label for labels in RAGEC_TO_OURS.values() for label in labels}
+        self.assertEqual(used - real, set())
+
+    def test_answer_key_categories_are_all_mapped(self):
+        """정답지에 있는 카테고리가 표에 없으면 그 건들이 조용히 제외된다."""
+        import json
+        import pathlib
+        path = pathlib.Path("data/ragec_answer_key.jsonl")
+        if not path.exists():
+            self.skipTest("data/ragec_answer_key.jsonl 없음 (tools/build_ragec_dataset.py 로 생성)")
+        categories = {
+            json.loads(line)["ragec_category"].strip()
+            for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+        }
+        self.assertEqual(categories - set(RAGEC_TO_OURS), set())
+
+
+if __name__ == "__main__":
+    unittest.main()
