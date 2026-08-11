@@ -28,7 +28,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from core import run_registry
 from core.state import AgentDoctorState
 from graph import build_graph
-from agents.serve.report_view import build_report_view
+from agents.serve.report_view import build_ext_report_view, build_report_view
+from agents.eval.replay import diagnose_external_log
 
 try:
     from dotenv import load_dotenv
@@ -53,14 +54,26 @@ app.add_middleware(
 
 
 def _save_upload(run_id: str, upload: UploadFile) -> Path:
+    return _save_upload_as(run_id, upload, suffix=".pdf")
+
+
+def _save_upload_as(run_id: str, upload: UploadFile, suffix: str) -> Path:
+    """업로드를 run별 폴더에 저장 — 원본 파일명 대신 uuid+고정 확장자를 써서
+    경로 탈출·이름 충돌을 막는다(리플레이 로그/골든셋도 같은 규칙을 쓴다)."""
     run_dir = UPLOAD_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    dest = (run_dir / f"{uuid.uuid4().hex}.pdf").resolve()
+    dest = (run_dir / f"{uuid.uuid4().hex}{suffix}").resolve()
     if run_dir.resolve() not in dest.parents:
         raise HTTPException(status_code=400, detail="잘못된 업로드 경로입니다.")
     with dest.open("wb") as f:
         f.write(upload.file.read())
     return dest
+
+
+# 골든셋은 qa_merge.load_qa_set 이 확장자로 파서를 고른다 — 여기서 허용 확장자를
+# 한 번 더 거르는 이유는 잘못된 파일이 백그라운드 스레드까지 가서야 죽는 것보다
+# 업로드 시점에 바로 400 으로 알리는 게 사용자 경험이 낫기 때문이다.
+_GOLDEN_SUFFIXES = (".json", ".jsonl", ".csv", ".xlsx", ".xlsm")
 
 
 def _percent_for(stage: str, done: bool) -> int:
@@ -177,16 +190,100 @@ def _run_pipeline_background(run_id: str, file_path: Path, depth: str) -> None:
         run_registry.update(run_id, status="error", error=str(exc))
 
 
+def _run_replay_background(
+    run_id: str, log_path: Path, golden_path: Path | None, depth: str,
+) -> None:
+    """로그 리플레이 모드 — Ingest/Index/Optimize 없이 Eval STEP3~5 만 돈다
+    (agents/eval/replay.py 가 이미 하는 일을 웹 실행 단위로 감쌀 뿐).
+
+    파이프라인 모드와 같은 run_registry/이벤트 계약을 쓰므로 프론트엔드
+    폴링·진행률 UI 는 그대로 재사용된다 — stage="eval" 로 찍어 STAGE_UI_MAP
+    의 probe/diagnose 박스가 활성화되게 한다(리플레이 전용 박스는 없음)."""
+    from core.console import force_utf8_stdio
+    force_utf8_stdio()
+
+    from core.run_logger import setup_run_logging
+    setup_run_logging(prefix="web_replay")
+
+    run_registry.update(run_id, status="running", stage="eval", percent=10)
+
+    try:
+        with _PIPELINE_LOCK:
+            eval_mode = _DEPTH_TO_EVAL_MODE.get(depth, "standard")
+            os.environ["EVAL_MODE"] = eval_mode
+            os.environ["EVAL_ENABLE_LLM"] = "1" if eval_mode in ("deep", "full") else "0"
+
+            run_registry.add_event(
+                run_id, stage="eval", tag="적재", text="로그 파일을 읽는 중", ts=time.time(),
+            )
+            report, cap, errors = diagnose_external_log(
+                str(log_path), golden_path=str(golden_path) if golden_path else None,
+            )
+
+        if report is None:
+            tier = cap.get("tier")
+            if tier == "qa_only":
+                msg = ("검색 컨텍스트(contexts)가 없거나 부족해 진단이 성립하지 않습니다. "
+                       "답변 생성에 쓰인 검색 결과 원문을 로그에 포함해 주세요.")
+            else:
+                msg = "유효한 로그 레코드가 없어 진단할 수 없습니다."
+            run_registry.update(run_id, status="error", error=msg)
+            return
+
+        summary = report.findings_summary or {}
+        confirmed = summary.get("confirmed", len(report.findings))
+        run_registry.add_event(
+            run_id, stage="eval", tag="진단",
+            text=f"로그 {cap.get('records', 0)}건 · 확정 문제 {confirmed}건 발견",
+            kind="find" if confirmed else "ok", ts=time.time(),
+        )
+        run_registry.update(
+            run_id, status="done", percent=100, ext_report=report, ext_cap=cap,
+        )
+    except Exception as exc:  # noqa: BLE001 — 백그라운드 스레드 최상단이라 반드시 잡아야 함
+        run_registry.update(run_id, status="error", error=str(exc))
+
+
 @app.post("/runs")
-async def create_run(file: UploadFile = File(...), depth: str = Form("standard")) -> dict:
-    if not (file.filename or "").lower().endswith(".pdf"):
+async def create_run(
+    file: UploadFile | None = File(None),
+    logfile: UploadFile | None = File(None),
+    goldenfile: UploadFile | None = File(None),
+    depth: str = Form("standard"),
+    mode: str = Form("pipeline"),
+) -> dict:
+    run_id = uuid.uuid4().hex
+
+    if mode == "replay":
+        if logfile is None or not (logfile.filename or "").lower().endswith(".jsonl"):
+            raise HTTPException(status_code=400, detail="로그는 JSONL 파일만 지원합니다.")
+        log_dest = _save_upload_as(run_id, logfile, suffix=".jsonl")
+
+        golden_dest: Path | None = None
+        if goldenfile is not None and goldenfile.filename:
+            golden_suffix = Path(goldenfile.filename).suffix.lower()
+            if golden_suffix not in _GOLDEN_SUFFIXES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"골든셋은 {', '.join(_GOLDEN_SUFFIXES)} 형식만 지원합니다.",
+                )
+            golden_dest = _save_upload_as(run_id, goldenfile, suffix=golden_suffix)
+
+        run_registry.create(
+            run_id, depth=depth, upload_path=str(log_dest), created_at=time.time(), mode="replay",
+        )
+        thread = threading.Thread(
+            target=_run_replay_background, args=(run_id, log_dest, golden_dest, depth), daemon=True,
+        )
+        thread.start()
+        return {"run_id": run_id}
+
+    if file is None or not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="PDF 파일만 지원합니다.")
 
-    run_id = uuid.uuid4().hex
     dest = _save_upload(run_id, file)
     run_registry.create(run_id, depth=depth, upload_path=str(dest), created_at=time.time())
 
-    import threading
     thread = threading.Thread(target=_run_pipeline_background, args=(run_id, dest, depth), daemon=True)
     thread.start()
 
@@ -222,6 +319,11 @@ def run_report(run_id: str) -> dict:
         raise HTTPException(status_code=404, detail="알 수 없는 run_id")
     if run.status == "error":
         raise HTTPException(status_code=500, detail=run.error or "파이프라인 실행 실패")
+    if run.mode == "replay":
+        if run.status != "done" or run.ext_report is None:
+            raise HTTPException(status_code=409, detail="아직 완료되지 않았습니다.")
+        return build_ext_report_view(run.ext_report, run.ext_cap)
+
     if run.status != "done" or run.final_state is None:
         raise HTTPException(status_code=409, detail="아직 완료되지 않았습니다.")
 
