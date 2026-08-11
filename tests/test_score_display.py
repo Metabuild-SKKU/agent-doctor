@@ -29,7 +29,6 @@ class ResolveDisplayScoresTest(unittest.TestCase):
 
         self.assertTrue(scores.available)
         self.assertEqual((scores.before, scores.after), (72.4, 78.1))
-        self.assertTrue(scores.is_composite)
 
     def test_legacy_pair_without_composite_is_restored(self):
         """composite 를 기록하지 않던 구버전 이력만 ×100 복원을 탄다.
@@ -66,12 +65,17 @@ class ResolveDisplayScoresTest(unittest.TestCase):
 
         self.assertFalse(scores.available)
 
-    def test_proxy_only_never_claims_to_be_composite(self):
-        """프록시 지표는 값이 갖춰져 있어도 '종합점수'로 불리면 안 된다."""
+    def test_proxy_only_never_displays_a_number(self):
+        """프록시 지표는 값이 갖춰져 있어도 숫자 자체를 보여주지 않는다.
+
+        다른 이름으로라도 숫자를 보여주면 사용자는 결국 개선폭처럼 읽는다.
+        """
         scores = resolve_display_scores(0.7, 0.9, 70.0, 90.0, proxy_only=True)
 
         self.assertFalse(scores.available)
-        self.assertFalse(scores.is_composite)
+        self.assertIsNone(scores.before)
+        self.assertIsNone(scores.after)
+        self.assertIsNotNone(scores.unavailable_reason)
 
     def test_no_scores_at_all_is_unavailable(self):
         """판정 전(pending) 이력처럼 점수 자체가 없으면 문장을 만들지 않는다."""

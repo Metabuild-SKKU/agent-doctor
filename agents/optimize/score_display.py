@@ -25,8 +25,10 @@ agents/optimize/score_display.py
      (chunk prescreener 의 `best_score` 는 종합점수가 아니라 정답 span 포함률이다).
      서로 다른 축 두 개를 화살표로 이으면 **틀린 숫자를 사용자가 믿게 된다** — 표시를
      생략하는 쪽이 낫다.
-  4. `proxy_only` 이력의 점수는 eval 이 매긴 종합점수가 아니다. 값이 있어도
-     "종합점수"라는 이름을 붙이지 않는다(`DisplayScores.is_composite` 로 구분).
+  4. `proxy_only` 이력은 점수를 표시하지 않는다. 프록시 지표(prescreener 포함률 등)를
+     다른 이름으로라도 숫자를 보여주면 사용자는 결국 그 숫자를 개선폭처럼 읽는다 —
+     "종합점수"라는 이름만 피하는 것으로는 부족해서, 이 경우는 규약 3(한쪽만 있음)과
+     동일하게 값 자체를 만들지 않는다.
 
 [쓰는 곳]  optimize/reporter.py, serve/web_api.py, serve/report_view.py
 [쓰지 않는 곳]  history.judge 의 판정 — 판정은 탐색 신호(0~1)로 한다. 스케일을 바꾸면
@@ -59,19 +61,16 @@ def to_display_scale(score_0_to_1: float) -> float:
 
 @dataclass(frozen=True)
 class DisplayScores:
-    """표시용 점수 한 쌍과, 그 숫자를 뭐라고 불러도 되는지에 대한 판단.
+    """표시용 점수 한 쌍.
 
     Attributes:
         before: 처방 전 표시 점수(0~100). 표시할 수 없으면 None.
         after: 처방 후 표시 점수(0~100). 표시할 수 없으면 None.
-        is_composite: True 면 eval 이 매긴 종합점수라 "종합점수"로 불러도 된다.
-            False 면 프록시 지표(prescreener 포함률 등)라 그 이름을 쓰면 안 된다.
         unavailable_reason: 점수가 없을 때 그 이유(디버깅·캡션용). 있으면 None.
     """
 
     before: Optional[float] = None
     after: Optional[float] = None
-    is_composite: bool = True
     unavailable_reason: Optional[str] = None
 
     @property
@@ -96,7 +95,6 @@ def resolve_display_scores(
     # proxy_only 이력의 점수는 종합점수가 아니다. 값이 있어도 이름을 빌려주지 않는다.
     if proxy_only:
         return DisplayScores(
-            is_composite=False,
             unavailable_reason="프록시 지표로 선택된 후보라 종합점수가 측정되지 않았습니다",
         )
 
@@ -113,7 +111,6 @@ def resolve_display_scores(
     # 보장이 없다(prescreener 경로가 정확히 이 경우다) → 축이 섞이느니 표시를 접는다.
     if has_before or has_after:
         return DisplayScores(
-            is_composite=False,
             unavailable_reason=(
                 "처방 전후 중 한쪽만 종합점수가 측정돼 비교할 수 없습니다"
             ),
