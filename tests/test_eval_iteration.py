@@ -73,6 +73,7 @@ class EvalIterationContractTest(unittest.TestCase):
     @patch("agents.eval.agent.get_retriever")
     @patch("agents.eval.agent.generate_probes")
     @patch("agents.eval.agent.load_probes")
+    @patch.dict("os.environ", {"EVAL_PROBE_SOURCE": ""}, clear=False)
     def test_cached_probe_is_resynced_after_rechunking(
         self,
         load_probes,
