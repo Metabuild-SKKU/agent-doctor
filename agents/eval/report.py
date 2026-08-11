@@ -370,7 +370,7 @@ def _reranker_runtime(records: list[EvalRecord]) -> dict:
             key=lambda v: (v is None, v),
         ),
         # 어디서 계산했나("local:cuda" / "openrouter:<model>"). max_lengths 와 같은 이유로
-        # 남긴다 — 경로가 바뀌면 리랭커 **모델 자체**가 바뀌므로(로컬 bge ↔ Cohere), 두
+        # 남긴다 — 경로가 바뀌면 리랭커 **모델 자체**가 바뀌므로(로컬 bge ↔ Voyage), 두
         # 실행의 점수 차이를 처방 효과로 읽으면 안 된다. 실제로 리랭크가 돈 건만 센다.
         "routes": sorted(
             {

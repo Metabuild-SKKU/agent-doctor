@@ -613,8 +613,9 @@ def openrouter_rerank(
     빠졌다)를 호출부가 알아챌 방법이 없어진다.
 
     top_n 은 보내지 않는다. 보내면 그 개수만 응답에 오는데, 호출부(rerank_with_status)는
-    후보 전원의 점수를 받아 정렬하는 규약이라 빠진 문서를 실패로 읽는다. 과금은 어차피
-    'search' 1건 단위라 top_n 을 줄여도 싸지지 않는다.
+    후보 전원의 점수를 받아 정렬하는 규약이라 빠진 문서를 실패로 읽는다. 비용도 안 준다 —
+    top_n 은 응답만 자를 뿐 채점(과금) 대상 문서는 그대로다(Cohere 계열은 search 1건
+    단위, Voyage 계열은 보낸 토큰 단위 — 어느 쪽이든 top_n 과 무관하다).
 
     재시도는 하지 않는다 — openai_embed 와 같은 규약으로, 호출부가
     core.llm_retry.run_with_retry 로 감싼다. 상태 코드를 예외에 실어 올려야
@@ -654,10 +655,11 @@ def openrouter_rerank(
         cost_usd = float(cost) if cost is not None else None
     except (TypeError, ValueError):
         cost_usd = None
-    # 리랭크는 토큰이 아니라 검색 1건 단위로 과금된다. 토큰 0 으로 기록하되 비용은 실어야
-    # 호출 수와 금액이 표에 남는다 — cost 를 못 읽으면 None 으로 "단가 미등록"이 되고,
-    # $0 으로 뭉개져 조용히 사라지지 않는다.
-    log_usage(model, 0, 0, tag=tag, cost_usd=cost_usd)
+    # 과금 단위가 모델마다 다르다(Cohere 계열 search 1건 / Voyage 계열 토큰). 단가표로
+    # 추정하지 않고 응답 usage 의 실비를 그대로 기록한다 — 응답이 토큰 수를 줄 때만 싣고,
+    # cost 를 못 읽으면 None 으로 "단가 미등록"이 된다. $0 으로 뭉개져 조용히 사라지지 않는다.
+    prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    log_usage(model, prompt_tokens or 0, 0, tag=tag, cost_usd=cost_usd)
 
     scored: list[tuple[int, float]] = []
     for item in results:

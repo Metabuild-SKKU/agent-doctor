@@ -64,9 +64,9 @@ def add_embedding_args(parser) -> None:
         "--rerank",
         choices=EMBED_CHOICES,
         help="리랭크(cross-encoder)를 어디서 계산할지 (기본: env INDEX_RERANKER_PROVIDER, "
-             "미설정 시 local). openrouter 는 질의 1건당 검색 1건으로 과금되고 모델도 "
-             "바뀐다(로컬 bge-reranker-v2-m3 → cohere/rerank-v3.5) — 두 실행의 점수는 "
-             "직접 비교하지 말 것. --embed 를 따라가지 않는다(기본값이 서로 다르다).",
+             "미설정 시 local). openrouter 는 질의마다 과금되고 모델도 "
+             "바뀐다(로컬 bge-reranker-v2-m3 → voyageai/rerank-2.5-lite) — 두 실행의 "
+             "점수는 직접 비교하지 말 것. --embed 를 따라가지 않는다(기본값이 서로 다르다).",
     )
 
 

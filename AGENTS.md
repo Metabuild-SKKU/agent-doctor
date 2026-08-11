@@ -148,7 +148,7 @@ Eval의 RAGAS `response_relevancy` 임베딩은 `EVAL_LLM_PROVIDER`를 따릅니
 | env | 기본값 | 대상 |
 |---|---|---|
 | `INDEX_RERANKER_PROVIDER` | `local` | `local` \| `openrouter` |
-| `INDEX_RERANKER_MODEL_OPENROUTER` | `cohere/rerank-v3.5` | `openrouter`일 때 부를 모델 |
+| `INDEX_RERANKER_MODEL_OPENROUTER` | `voyageai/rerank-2.5-lite` | `openrouter`일 때 부를 모델 |
 | `INDEX_RERANKER_DEVICE` | `INDEX_EMBED_DEVICE` 따름 (없으면 `auto`) | `local`일 때 `cuda`/`cpu` |
 
 ```bash
@@ -158,13 +158,20 @@ python graph.py --rerank openrouter       # API (질의마다 과금)
 python graph.py --embed openrouter --rerank gpu   # 임베딩만 API, 리랭크는 로컬 GPU
 ```
 
-**기본값이 `local`인 이유는 과금 단위입니다.** 임베딩은 색인 1회지만 리랭크는
-**질의마다** 부과됩니다(OpenRouter 리랭크는 토큰이 아니라 `search` 1건 단위 과금).
-Eval 한 번이 질문 수만큼이고 Optimize는 같은 셋을 반복 평가하므로, 기본값을 API로 두면
-실행할수록 조용히 곱해집니다. 임베딩 쪽 근거("예산이 있으면 API가 100배 빠르다")는 여기
-그대로 적용되지 않습니다 — 리랭크 후보는 보통 20건이라 로컬 GPU로도 한 자릿수 ms입니다.
+**기본값이 `local`인 이유는 과금 시점입니다.** 임베딩은 색인 1회지만 리랭크는
+**질의마다** 부과됩니다. Eval 한 번이 질문 수만큼이고 Optimize는 같은 셋을 반복
+평가하므로, 기본값을 API로 두면 실행할수록 조용히 곱해집니다. 임베딩 쪽 근거("예산이
+있으면 API가 100배 빠르다")는 여기 그대로 적용되지 않습니다 — 리랭크 후보는 보통
+20건이라 로컬 GPU로도 한 자릿수 ms입니다.
 
-**바꾸면 안전하지 않습니다.** 로컬 `BAAI/bge-reranker-v2-m3`와 `cohere/rerank-v3.5`는
+API 모델 기본값이 `voyageai/rerank-2.5-lite`인 이유: 토큰 과금($0.02/1M)이라 이
+워크로드(후보 20건 × ~292토큰 ≈ 검색당 $0.00012, KorQuAD 스모크 한 바퀴 ≈ $0.03)에서
+`cohere/rerank-v3.5`($0.001/search)보다 약 8배 싸고, 컨텍스트도 32K로 후보 전체가
+들어갑니다(v3.5는 4K라 정책 내 구성에서도 넘칠 수 있음). 무료 nvidia 계열은 free 티어의
+분당·일당 상한이 Eval의 버스트 호출과 충돌하고(한도에 걸리면 리랭크가 조용히 빠진 채
+점수가 나옴) 프롬프트 로깅 정책도 있어 기본값으로 두지 않습니다.
+
+**바꾸면 안전하지 않습니다.** 로컬 `BAAI/bge-reranker-v2-m3`와 Voyage/Cohere 계열은
 서로 다른 모델이라 점수 스케일도 순위도 다릅니다(임베딩의 코사인 0.99997 같은 호환성이
 없습니다). OpenRouter 카탈로그에 bge 계열이 없어 이름 변환도 불가능합니다. 그래서 실제
 경로가 실행마다 남습니다 — `runtime_summary.reranker.routes`(리포트)와

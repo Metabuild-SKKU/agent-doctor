@@ -109,7 +109,7 @@ _failed_rerankers: dict[str, float] = {}
 # 실행을 리포트가 구분할 수 있어야 한다 — reranker_status 는 그 경우에도 "ready" 라
 # capped/uncapped 가 안 남고, 다음 처방 판정이 둘을 같은 실행으로 취급한다.
 _reranker_max_lengths: dict[str, int | None] = {}
-# model_name → 이 모델이 실제로 올라간 경로("local:cuda" / "openrouter:cohere/rerank-v3.5").
+# model_name → 이 모델이 실제로 올라간 경로("local:cuda" / "openrouter:voyageai/rerank-2.5-lite").
 # 캐시된 모델이 지금 env 가 가리키는 경로와 다르면 갈아끼우는 데도 쓴다 — 안 그러면
 # provider 를 바꾼 실행이 이전 경로의 객체를 그대로 재사용하면서, 리포트에는 새 경로가
 # 찍히는 최악의 조합이 된다(비교 실험의 라벨이 통째로 거짓말이 됨).
@@ -196,9 +196,10 @@ def reranker_max_length(model_name: str = DEFAULT_RERANKER_MODEL) -> int | None:
 def reranker_route(model_name: str = DEFAULT_RERANKER_MODEL) -> str | None:
     """이 모델이 실제로 올라간 경로("local:cuda"·"openrouter:<model>"). 아직 안 실렸으면 None.
 
-    리포트가 실행마다 남겨야 하는 값이다. 로컬 bge-reranker-v2-m3 와 OpenRouter 의 Cohere
-    계열은 임베딩(bge-m3 끼리 코사인 0.99997)과 달리 **다른 모델**이라 점수 스케일도 순위도
-    다르다. 경로를 안 남기면 Optimize 가 provider 교체로 생긴 차이를 처방 효과로 읽는다."""
+    리포트가 실행마다 남겨야 하는 값이다. 로컬 bge-reranker-v2-m3 와 OpenRouter 의
+    Voyage/Cohere 계열은 임베딩(bge-m3 끼리 코사인 0.99997)과 달리 **다른 모델**이라
+    점수 스케일도 순위도 다르다. 경로를 안 남기면 Optimize 가 provider 교체로 생긴
+    차이를 처방 효과로 읽는다."""
     return _reranker_routes.get(model_name)
 
 
@@ -206,8 +207,8 @@ def resolve_reranker_provider(provider: str | None = None) -> str:
     """리랭크를 어디서 계산할지. None → env INDEX_RERANKER_PROVIDER(기본 local).
 
     [왜 임베딩과 반대로 local 이 기본인가]
-    과금 단위가 다르다. 임베딩은 색인 1회지만 리랭크는 **질의마다** 부과된다(OpenRouter 의
-    rerank 계열은 토큰이 아니라 'search' 1건 단위 과금). Eval 한 번이 질문 수만큼이고
+    과금 시점이 다르다. 임베딩은 색인 1회지만 리랭크는 **질의마다** 부과된다(Cohere 계열은
+    search 1건 단위, Voyage 계열은 후보 토큰 단위 — 어느 쪽이든 질의마다다). Eval 한 번이 질문 수만큼이고
     Optimize 는 같은 셋을 반복 평가하므로, 기본값을 API 로 두면 실행할수록 조용히 곱해진다.
     임베딩 쪽 근거("예산이 있으면 API 가 100배 빠르다")가 여기엔 그대로 적용되지 않는다 —
     리랭크 후보는 보통 20건이라 로컬 GPU 로도 한 자릿수 ms 다.
@@ -273,13 +274,22 @@ def _reranker_soft_device(model_name: str) -> str | None:
 
 
 def openrouter_reranker_model(model_name: str = DEFAULT_RERANKER_MODEL) -> str:
-    """OpenRouter 에서 부를 리랭크 모델명. 기본 cohere/rerank-v3.5.
+    """OpenRouter 에서 부를 리랭크 모델명. 기본 voyageai/rerank-2.5-lite.
 
     임베딩(_openrouter_embed_model)처럼 로컬 이름을 소문자로 바꾸는 규칙을 쓸 수 없다.
     OpenRouter 의 리랭크 카탈로그에 bge-reranker 계열이 없어 "baai/bge-reranker-v2-m3" 는
     404 가 되기 때문이다. 그래서 이름을 변환하지 않고 별도 기본값을 둔다 — 즉 provider 를
-    바꾸면 모델도 바뀐다는 사실이 이 함수에 드러나 있어야 한다."""
-    return os.getenv("INDEX_RERANKER_MODEL_OPENROUTER", "cohere/rerank-v3.5").strip()
+    바꾸면 모델도 바뀐다는 사실이 이 함수에 드러나 있어야 한다.
+
+    [기본값이 voyage-2.5-lite 인 이유] 토큰 과금($0.02/1M)이라 이 워크로드(후보 20건
+    x ~292토큰 = 검색 1건 약 5.9K토큰 = $0.00012)에서 cohere/rerank-v3.5 의 검색 단위
+    과금($0.001/search)보다 약 8배 싸고, 컨텍스트도 32K 로 후보 전체가 들어간다
+    (v3.5 는 4K 라 정책 내 구성에서도 넘칠 수 있다). 무료인 nvidia 계열은 기본값으로
+    두지 않는다 — free 티어의 분당·일당 상한이 Eval 의 버스트 호출과 정면 충돌하고,
+    프롬프트(코퍼스 원문) 로깅 정책도 기본값에 걸기엔 부적합하다."""
+    return os.getenv(
+        "INDEX_RERANKER_MODEL_OPENROUTER", "voyageai/rerank-2.5-lite"
+    ).strip()
 
 
 class _OpenRouterReranker:
@@ -357,8 +367,8 @@ def _load_openrouter_reranker(model_name: str) -> tuple[Any | None, str]:
     model = openrouter_reranker_model(model_name)
     _notify_embed_route_once(
         f"reranker:openrouter:{model}",
-        f"[Index] 리랭크를 OpenRouter({model})로 계산합니다 — 질의 1건당 검색 1건으로 "
-        f"과금됩니다(로컬 계산은 INDEX_RERANKER_PROVIDER=local).",
+        f"[Index] 리랭크를 OpenRouter({model})로 계산합니다 — 질의마다 과금됩니다"
+        f"(로컬 계산은 INDEX_RERANKER_PROVIDER=local).",
     )
     # 입력 길이 상한은 로컬 전용 장치다(토크나이저가 여기 없다). 상한 없이 도는 실행으로
     # 남겨야 리포트의 capped/uncapped 구분이 거짓말을 하지 않는다.

@@ -630,7 +630,7 @@ class Retriever:
                 reranker_max_length(self.settings.reranker_model) if reranked else None
             ),
             # 어디서 계산했나("local:cuda" / "openrouter:<model>"). 임베딩과 달리 리랭커는
-            # provider 를 바꾸면 모델 자체가 바뀌어(로컬 bge ↔ Cohere) 점수 스케일도 순위도
+            # provider 를 바꾸면 모델 자체가 바뀌어(로컬 bge ↔ Voyage) 점수 스케일도 순위도
             # 달라진다 — 경로를 안 남기면 Optimize 가 그 차이를 처방 효과로 읽는다.
             "rerank_route": (
                 reranker_route(self.settings.reranker_model) if reranked else None

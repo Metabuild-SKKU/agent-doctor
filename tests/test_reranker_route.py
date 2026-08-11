@@ -1,8 +1,8 @@
-"""리랭크 실행 경로(provider × device) — 로컬 CPU/GPU 와 OpenRouter /rerank.
+﻿"""리랭크 실행 경로(provider × device) — 로컬 CPU/GPU 와 OpenRouter /rerank.
 
 임베딩 축과 **일부러 다르게** 만든 지점들이 여기서 고정된다.
   - 기본값이 반대다(임베딩 openrouter / 리랭크 local). 과금이 색인 1회가 아니라 질의마다다.
-  - 경로를 바꾸면 모델도 바뀐다(로컬 bge-reranker-v2-m3 ↔ cohere/rerank-v3.5). 그래서
+  - 경로를 바꾸면 모델도 바뀐다(로컬 bge-reranker-v2-m3 ↔ voyageai/rerank-2.5-lite). 그래서
     "어디서 계산했나" 가 실행 기록에 남아야 하고, 그 값이 리포트까지 도달해야 한다.
   - 키가 없을 때 임베딩은 예외로 끊지만 리랭크는 원순위를 유지한다(optional 이라서).
 """
@@ -67,7 +67,7 @@ class RerankerRouteResolutionTest(unittest.TestCase):
             model = qdrant_store.openrouter_reranker_model(
                 qdrant_store.DEFAULT_RERANKER_MODEL
             )
-        self.assertEqual(model, "cohere/rerank-v3.5")
+        self.assertEqual(model, "voyageai/rerank-2.5-lite")
         self.assertNotIn("bge", model)
 
 
@@ -132,16 +132,16 @@ class OpenRouterRerankTransportTest(unittest.TestCase):
 
         with patch("requests.post", post):
             scored = llm_clients.openrouter_rerank(
-                "질문", ["a", "b", "c"], "cohere/rerank-v3.5", api_key="key"
+                "질문", ["a", "b", "c"], "voyageai/rerank-2.5-lite", api_key="key"
             )
 
         self.assertEqual(scored, [(2, 0.9), (0, 0.1), (1, 0.5)])
         body = post.call_args.kwargs["json"]
-        self.assertEqual(body["model"], "cohere/rerank-v3.5")
+        self.assertEqual(body["model"], "voyageai/rerank-2.5-lite")
         self.assertEqual(body["query"], "질문")
         self.assertEqual(body["documents"], ["a", "b", "c"])
         # top_n 은 보내지 않는다 — 보내면 나머지 후보의 점수가 응답에서 빠지는데,
-        # 과금은 어차피 검색 1건 단위라 줄여도 싸지지 않는다.
+        # 채점(과금) 대상 문서 수는 그대로라 줄여도 싸지지 않는다.
         self.assertNotIn("top_n", body)
 
     def test_reported_cost_is_logged(self):
@@ -232,7 +232,7 @@ class OpenRouterRerankerModelTest(unittest.TestCase):
 
         self.assertEqual(
             qdrant_store.reranker_route(qdrant_store.DEFAULT_RERANKER_MODEL),
-            "openrouter:cohere/rerank-v3.5",
+            "openrouter:voyageai/rerank-2.5-lite",
         )
         # 입력 길이 상한은 로컬 전용 장치다 — API 경로는 uncapped 로 남아야 한다.
         self.assertIsNone(
@@ -303,7 +303,7 @@ class OpenRouterRerankerModelTest(unittest.TestCase):
             capability = qdrant_store.probe_reranker_capability()
 
         self.assertEqual(capability["status"], "verified")
-        self.assertEqual(capability["route"], "openrouter:cohere/rerank-v3.5")
+        self.assertEqual(capability["route"], "openrouter:voyageai/rerank-2.5-lite")
 
 
 class RerankerRouteSwitchTest(unittest.TestCase):
@@ -332,7 +332,7 @@ class RerankerRouteSwitchTest(unittest.TestCase):
         self.assertIsNot(model, stale)
         self.assertEqual(
             qdrant_store._reranker_routes[model_name],
-            "openrouter:cohere/rerank-v3.5",
+            "openrouter:voyageai/rerank-2.5-lite",
         )
 
     def test_injected_double_without_route_is_kept(self):
@@ -440,7 +440,7 @@ class RerankRouteReachesReportTest(unittest.TestCase):
                 retrieval_details={
                     "reranker_status": "applied", "reranked": True,
                     "rerank_pairs": 3, "rerank_seconds": 0.2,
-                    "rerank_route": "openrouter:cohere/rerank-v3.5",
+                    "rerank_route": "openrouter:voyageai/rerank-2.5-lite",
                 },
             ),
             # 돌지 않은 실행의 경로는 세지 않는다(쌍 0).
@@ -457,7 +457,7 @@ class RerankRouteReachesReportTest(unittest.TestCase):
 
         self.assertEqual(
             report.runtime_summary["reranker"]["routes"],
-            ["local:cuda", "openrouter:cohere/rerank-v3.5"],
+            ["local:cuda", "openrouter:voyageai/rerank-2.5-lite"],
         )
 
 
