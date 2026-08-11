@@ -24,6 +24,9 @@ from core.llm_usage import log_usage
 
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# 리랭크는 OpenAI 호환 규약이 아니라 Cohere 스타일 전용 엔드포인트다(OpenAI SDK 에 대응
+# 메서드가 없어 openai_chat/openai_embed 처럼 base_url 만 갈아끼우는 방식이 안 통한다).
+OPENROUTER_RERANK_URL = f"{OPENROUTER_BASE_URL}/rerank"
 
 # provider 철자표 — 같은 값을 EVAL_LLM_PROVIDER / RAG_LLM_PROVIDER / INDEX_LLM_PROVIDER
 # 어디에 넣어도 같게 해석되도록 한 곳에서 소유한다. 예전엔 Eval·RAG 가 각자 복사본을
@@ -592,6 +595,79 @@ def openai_embed(
     # 아니라 관례이고(그래서 index 필드가 따로 있다), 이제 색인 벡터가 이 경로를 탄다.
     # 순서가 한 칸만 어긋나도 벡터가 엉뚱한 청크에 붙어 검색이 조용히 망가진다.
     return [d.embedding for d in sorted(resp.data, key=lambda d: d.index)]
+
+
+def openrouter_rerank(
+    query: str,
+    documents: list[str],
+    model: str,
+    *,
+    api_key: str,
+    timeout: float = 60.0,
+    tag: str = "LLM",
+) -> list[tuple[int, float]]:
+    """OpenRouter /rerank 1회 호출 → [(입력 인덱스, 관련도 점수)].
+
+    응답은 점수 내림차순이라 입력 순서가 아니다. 인덱스를 그대로 실어 돌려주고
+    호출부가 제자리에 꽂는다 — 여기서 정렬해 버리면 "응답이 짧게 왔다"(문서 일부가
+    빠졌다)를 호출부가 알아챌 방법이 없어진다.
+
+    top_n 은 보내지 않는다. 보내면 그 개수만 응답에 오는데, 호출부(rerank_with_status)는
+    후보 전원의 점수를 받아 정렬하는 규약이라 빠진 문서를 실패로 읽는다. 과금은 어차피
+    'search' 1건 단위라 top_n 을 줄여도 싸지지 않는다.
+
+    재시도는 하지 않는다 — openai_embed 와 같은 규약으로, 호출부가
+    core.llm_retry.run_with_retry 로 감싼다. 상태 코드를 예외에 실어 올려야
+    is_transient 가 429/5xx 만 골라 재시도할 수 있어 status_code 를 붙인다.
+    """
+    import requests
+
+    resp = requests.post(
+        OPENROUTER_RERANK_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={"model": model, "query": query, "documents": documents},
+        timeout=timeout,
+    )
+    if resp.status_code >= 400:
+        error = RuntimeError(
+            f"OpenRouter rerank 실패(status {resp.status_code}, model={model}): "
+            f"{resp.text[:300]}"
+        )
+        # 문자열 매칭이 아니라 상태 코드로 재시도 여부가 갈리게 한다(core/llm_retry.py).
+        error.status_code = resp.status_code
+        raise error
+
+    payload = resp.json()
+    results = payload.get("results")
+    if not isinstance(results, list):
+        raise RuntimeError(
+            f"OpenRouter rerank 응답에 results 가 없습니다(model={model}): "
+            f"{str(payload)[:300]}"
+        )
+
+    usage = payload.get("usage") or {}
+    cost = usage.get("cost") if isinstance(usage, dict) else None
+    try:
+        cost_usd = float(cost) if cost is not None else None
+    except (TypeError, ValueError):
+        cost_usd = None
+    # 리랭크는 토큰이 아니라 검색 1건 단위로 과금된다. 토큰 0 으로 기록하되 비용은 실어야
+    # 호출 수와 금액이 표에 남는다 — cost 를 못 읽으면 None 으로 "단가 미등록"이 되고,
+    # $0 으로 뭉개져 조용히 사라지지 않는다.
+    log_usage(model, 0, 0, tag=tag, cost_usd=cost_usd)
+
+    scored: list[tuple[int, float]] = []
+    for item in results:
+        if not isinstance(item, dict):
+            raise RuntimeError(f"OpenRouter rerank 응답 항목 형식 오류: {str(item)[:120]}")
+        score = item.get("relevance_score")
+        if score is None:
+            score = item.get("score")
+        scored.append((int(item.get("index", -1)), float(score)))
+    return scored
 
 
 def gemini_embed(texts: list[str], model: str, *, tag: str = "LLM") -> list[list[float]]:

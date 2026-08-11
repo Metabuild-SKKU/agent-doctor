@@ -7,6 +7,7 @@ import inspect
 import math
 import os
 import re
+import sys
 import threading
 import time
 import uuid
@@ -20,6 +21,7 @@ from core.llm_clients import (
     OPENROUTER_BASE_URL,
     normalize_provider,
     openai_embed,
+    openrouter_rerank,
 )
 from core.llm_retry import run_with_retry
 from core import progress
@@ -107,6 +109,14 @@ _failed_rerankers: dict[str, float] = {}
 # 실행을 리포트가 구분할 수 있어야 한다 — reranker_status 는 그 경우에도 "ready" 라
 # capped/uncapped 가 안 남고, 다음 처방 판정이 둘을 같은 실행으로 취급한다.
 _reranker_max_lengths: dict[str, int | None] = {}
+# model_name → 이 모델이 실제로 올라간 경로("local:cuda" / "openrouter:cohere/rerank-v3.5").
+# 캐시된 모델이 지금 env 가 가리키는 경로와 다르면 갈아끼우는 데도 쓴다 — 안 그러면
+# provider 를 바꾼 실행이 이전 경로의 객체를 그대로 재사용하면서, 리포트에는 새 경로가
+# 찍히는 최악의 조합이 된다(비교 실험의 라벨이 통째로 거짓말이 됨).
+_reranker_routes: dict[str, str] = {}
+# model_name → 강제 장치. CUDA OOM 을 만난 모델을 CPU 로 내려 고정하는 데만 쓴다.
+# env 를 덮는 게 아니라 "이 프로세스에서 이 모델은 GPU 로 못 올린다"는 실측 기록이다.
+_reranker_device_overrides: dict[str, str] = {}
 _FAILED_RERANKER_RETRY_SEC = _env_float("INDEX_RERANKER_RETRY_SEC", 300.0)
 # 리랭커(cross-encoder) 입력 토큰 상한. 0 이하면 모델 기본값(이 모델은 8192)을 쓴다.
 #
@@ -133,43 +143,49 @@ _collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, dict[str, bool]
 _reranker_lock = threading.Lock()
 
 
-def _accepts_max_length(cross_encoder_cls) -> bool:
-    """생성자가 max_length 를 받나 — 예외로 떠보지 않고 시그니처로 판정한다.
+def _accepts_kwarg(cross_encoder_cls, name: str) -> bool:
+    """생성자가 이 키워드를 받나 — 예외로 떠보지 않고 시그니처로 판정한다.
 
-    TypeError 를 잡아 재시도하면 생성자 **내부**에서 난 무관한 TypeError 까지 '상한 미지원'
+    TypeError 를 잡아 재시도하면 생성자 **내부**에서 난 무관한 TypeError 까지 '미지원'
     으로 오진하고, 그 오진의 대가로 2GB 대 모델을 한 번 더 로드한다. 시그니처 조회는 공짜다.
     **kwargs 를 받는 래퍼는 지원으로 본다 — 넘겨봐야 알 수 있고, 틀렸다면 로드 실패로
-    드러나는 편이 상한만 조용히 빠지는 것보다 낫다. 시그니처를 못 읽으면 보수적으로 False.
+    드러나는 편이 인자만 조용히 빠지는 것보다 낫다. 시그니처를 못 읽으면 보수적으로 False.
     """
     try:
         params = inspect.signature(cross_encoder_cls).parameters
     except (TypeError, ValueError):
         return False
-    if "max_length" in params:
+    if name in params:
         return True
     return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
-def _new_cross_encoder(cross_encoder_cls, model_name: str):
-    """입력 길이 상한(_RERANKER_MAX_LENGTH)을 걸어 CrossEncoder 를 만든다.
+def _new_cross_encoder(cross_encoder_cls, model_name: str, device: str | None = None):
+    """입력 길이 상한(_RERANKER_MAX_LENGTH)과 장치를 걸어 CrossEncoder 를 만든다.
 
-    상한 인자를 못 받는 구현이면 상한 없이 만들되 조용히 넘어가지 않는다 — 상한이 빠지면
+    인자를 못 받는 구현이면 그 인자 없이 만들되 조용히 넘어가지 않는다 — 상한이 빠지면
     리랭크 비용이 다시 chunk_size 에 비례해 열리므로, 로그로 드러내야 원인을 찾을 수 있다.
+
+    device 를 명시하는 이유: sentence-transformers 는 인자가 없으면 자기 규칙으로 장치를
+    고른다. 그러면 "GPU 로 돌리는 중"인지 실행 기록만 봐서는 알 수 없고, VRAM 이 모자란
+    머신에서 리랭커만 따로 CPU 로 내리는 것도 불가능하다. device=None 이면 예전처럼
+    라이브러리 기본값에 맡긴다.
 
     경고 문구는 ASCII 기호로만 쓴다. 이 모듈은 진입점의 인코딩 보정
     (core.console.force_utf8_stdio)을 거치지 않고 import 될 수 있어, cp949 콘솔에서
     UnicodeEncodeError 가 나면 호출부(_load_reranker)의 except 가 로드 실패로 삼킨다.
     """
-    if _RERANKER_MAX_LENGTH <= 0:
-        _reranker_max_lengths[model_name] = None
-        return cross_encoder_cls(model_name)
-    if not _accepts_max_length(cross_encoder_cls):
-        print("[Index] reranker 구현이 max_length 를 받지 않아 입력 길이 상한 없이 로드한다 "
-              "(청크가 크면 리랭크 비용이 그만큼 커진다)")
-        _reranker_max_lengths[model_name] = None
-        return cross_encoder_cls(model_name)
-    _reranker_max_lengths[model_name] = _RERANKER_MAX_LENGTH
-    return cross_encoder_cls(model_name, max_length=_RERANKER_MAX_LENGTH)
+    kwargs: dict[str, Any] = {}
+    if _RERANKER_MAX_LENGTH > 0:
+        if _accepts_kwarg(cross_encoder_cls, "max_length"):
+            kwargs["max_length"] = _RERANKER_MAX_LENGTH
+        else:
+            print("[Index] reranker 구현이 max_length 를 받지 않아 입력 길이 상한 없이 로드한다 "
+                  "(청크가 크면 리랭크 비용이 그만큼 커진다)")
+    if device and _accepts_kwarg(cross_encoder_cls, "device"):
+        kwargs["device"] = device
+    _reranker_max_lengths[model_name] = kwargs.get("max_length")
+    return cross_encoder_cls(model_name, **kwargs)
 
 
 def reranker_max_length(model_name: str = DEFAULT_RERANKER_MODEL) -> int | None:
@@ -177,12 +193,250 @@ def reranker_max_length(model_name: str = DEFAULT_RERANKER_MODEL) -> int | None:
     return _reranker_max_lengths.get(model_name)
 
 
+def reranker_route(model_name: str = DEFAULT_RERANKER_MODEL) -> str | None:
+    """이 모델이 실제로 올라간 경로("local:cuda"·"openrouter:<model>"). 아직 안 실렸으면 None.
+
+    리포트가 실행마다 남겨야 하는 값이다. 로컬 bge-reranker-v2-m3 와 OpenRouter 의 Cohere
+    계열은 임베딩(bge-m3 끼리 코사인 0.99997)과 달리 **다른 모델**이라 점수 스케일도 순위도
+    다르다. 경로를 안 남기면 Optimize 가 provider 교체로 생긴 차이를 처방 효과로 읽는다."""
+    return _reranker_routes.get(model_name)
+
+
+def resolve_reranker_provider(provider: str | None = None) -> str:
+    """리랭크를 어디서 계산할지. None → env INDEX_RERANKER_PROVIDER(기본 local).
+
+    [왜 임베딩과 반대로 local 이 기본인가]
+    과금 단위가 다르다. 임베딩은 색인 1회지만 리랭크는 **질의마다** 부과된다(OpenRouter 의
+    rerank 계열은 토큰이 아니라 'search' 1건 단위 과금). Eval 한 번이 질문 수만큼이고
+    Optimize 는 같은 셋을 반복 평가하므로, 기본값을 API 로 두면 실행할수록 조용히 곱해진다.
+    임베딩 쪽 근거("예산이 있으면 API 가 100배 빠르다")가 여기엔 그대로 적용되지 않는다 —
+    리랭크 후보는 보통 20건이라 로컬 GPU 로도 한 자릿수 ms 다.
+
+    미지원 값은 openrouter 로 떨어뜨리지 않고 그대로 돌려준다(호출부가 로컬로 처리한다) —
+    resolve_embedding_provider 와 같은 규약이라 오타가 조용한 과금이 되지 않는다."""
+    raw = provider if provider is not None else os.getenv("INDEX_RERANKER_PROVIDER")
+    return normalize_provider(raw) or "local"
+
+
+def resolve_reranker_device(device: str | None = None) -> str:
+    """로컬 리랭커를 올릴 장치. INDEX_RERANKER_DEVICE > INDEX_EMBED_DEVICE(기본 auto).
+
+    임베딩 축을 물려받는 이유: `--embed gpu` 로 GPU 를 쓰겠다고 말한 실행에서 리랭커만
+    CPU 에 남으면, 정작 검색 시간의 대부분을 차지하는 쪽이 그대로 느리다. 둘을 떼야 할 때
+    (VRAM 이 리랭커까지는 못 받칠 때)만 INDEX_RERANKER_DEVICE 로 덮는다.
+
+    torch 를 import 할 수 있다(auto 판정). 실행 머리의 경로 요약(describe_embedding_route)
+    용이고, 리랭커 로드 경로는 이 함수가 아니라 _reranker_soft_device 를 쓴다 — 그쪽은
+    torch 를 새로 import 하면 안 되는 제약이 있다(함수 주석 참고)."""
+    raw = device if device is not None else os.getenv("INDEX_RERANKER_DEVICE")
+    return resolve_embedding_device(raw, purpose="리랭커")
+
+
+def _reranker_soft_device(model_name: str) -> str | None:
+    """리랭커 로드에 쓸 장치. **torch 를 새로 import 하지 않는다.** None = 라이브러리 기본.
+
+    auto 판정에는 torch 가 필요한데, 여기서 import 하면 안 되는 이유가 있다 — 이 함수는
+    sentence_transformers 가 가짜 모듈로 패치된 테스트 경로에서도 불리고, patch.dict 가
+    끝나며 torch 를 sys.modules 에서 걷어낸 뒤 재-import 하면 이미 로드된 네이티브 DLL 과
+    충돌해 access violation 으로 죽는다(실측: Windows, torch 2.x). 실제 로드 경로에서는
+    이 함수가 진짜 sentence_transformers import **뒤에** 불리므로 torch 는 이미 올라와
+    있고, auto 판정은 항상 정확하다. torch 가 없으면(=가짜 모듈 경로) None 으로 물러나
+    라이브러리 기본 장치에 맡긴다."""
+    override = _reranker_device_overrides.get(model_name)
+    if override:
+        return override
+    raw = (
+        os.getenv("INDEX_RERANKER_DEVICE")
+        or os.getenv("INDEX_EMBED_DEVICE")
+        or "auto"
+    ).strip().lower() or "auto"
+    torch = sys.modules.get("torch")
+    if raw == "auto":
+        if torch is None:
+            return None
+        try:
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+    if raw.startswith("cuda") and torch is not None:
+        try:
+            if not torch.cuda.is_available():
+                _notify_embed_route_once(
+                    f"device_downgrade:리랭커:{raw}",
+                    f"[Index] CUDA 를 사용할 수 없어 리랭커 계산을 CPU 로 내립니다"
+                    f"(요청: {raw}).",
+                )
+                return "cpu"
+        except Exception:
+            return "cpu"
+    return raw
+
+
+def openrouter_reranker_model(model_name: str = DEFAULT_RERANKER_MODEL) -> str:
+    """OpenRouter 에서 부를 리랭크 모델명. 기본 cohere/rerank-v3.5.
+
+    임베딩(_openrouter_embed_model)처럼 로컬 이름을 소문자로 바꾸는 규칙을 쓸 수 없다.
+    OpenRouter 의 리랭크 카탈로그에 bge-reranker 계열이 없어 "baai/bge-reranker-v2-m3" 는
+    404 가 되기 때문이다. 그래서 이름을 변환하지 않고 별도 기본값을 둔다 — 즉 provider 를
+    바꾸면 모델도 바뀐다는 사실이 이 함수에 드러나 있어야 한다."""
+    return os.getenv("INDEX_RERANKER_MODEL_OPENROUTER", "cohere/rerank-v3.5").strip()
+
+
+class _OpenRouterReranker:
+    """CrossEncoder 와 같은 predict(pairs) 규약으로 OpenRouter /rerank 를 부른다.
+
+    provider 분기를 여기(모델 객체)로 밀어 넣는 이유는, 검색 경로(rerank_with_status)가
+    이미 계측·쿨다운·실패 시 원순위 유지를 다 갖고 있기 때문이다. 그쪽에 if 를 하나 더
+    두면 실패 처리가 두 벌이 되고, 그중 API 쪽만 조용히 다르게 동작하게 된다.
+    """
+
+    def __init__(self, model: str, api_key: str):
+        self.model = model
+        self.api_key = api_key
+
+    def predict(self, pairs):
+        pairs = [(query, text) for query, text in pairs]
+        if not pairs:
+            return []
+        queries = {query for query, _ in pairs}
+        if len(queries) != 1:
+            # 한 번의 rerank 호출은 질의 하나에만 유효하다. 여러 질의가 섞여 들어오면
+            # 첫 질의로 전부 채점하게 되므로 조용히 진행하지 않는다.
+            raise ValueError(
+                f"OpenRouter rerank 는 질의 1건만 받는다(받은 질의 {len(queries)}종)"
+            )
+        # 빈 문서는 API 가 400 으로 거절한다. 자리를 비우면 인덱스가 밀려 점수가 엉뚱한
+        # 청크에 붙으므로, 공백 한 칸으로 채워 자리만 지킨다(점수는 바닥에 깔린다).
+        documents = [text if text.strip() else " " for _query, text in pairs]
+        scored = run_with_retry(
+            lambda: openrouter_rerank(
+                pairs[0][0],
+                documents,
+                self.model,
+                api_key=self.api_key,
+                tag="Index",
+            ),
+            label="리랭크",
+            tag="Index",
+        )
+
+        scores: list[float | None] = [None] * len(documents)
+        for index, score in scored:
+            if not 0 <= index < len(documents):
+                raise ValueError(
+                    f"OpenRouter rerank 응답의 index 가 범위를 벗어났다: {index} "
+                    f"(문서 {len(documents)}건)"
+                )
+            scores[index] = score
+        missing = [i for i, score in enumerate(scores) if score is None]
+        if missing:
+            # 짧게 온 응답을 그대로 쓰면 점수 없는 후보가 0점으로 깔려 조용히 강등된다.
+            # 임베딩의 "응답 개수 불일치" 와 같은 판단이다 — 성공처럼 보이는 게 가장 나쁘다.
+            raise ValueError(
+                f"OpenRouter rerank 응답에 점수가 빠진 문서가 있다: {len(missing)}건 "
+                f"/ 요청 {len(documents)}건 (model={self.model})"
+            )
+        return scores
+
+
+def _load_openrouter_reranker(model_name: str) -> tuple[Any | None, str]:
+    """API 리랭커를 만든다. 키가 없으면 로드 실패로 처리한다(질의는 원순위로 계속된다).
+
+    임베딩 API 경로처럼 예외로 끊지 않는 이유는 리랭커가 optional 이기 때문이다 — 여기서
+    던지면 키 오타 하나로 모든 검색이 죽는다. 대신 capability 에 재시도 불가로 남겨
+    Index preflight 단계에서 사람이 보게 한다."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        print(
+            "[Index] INDEX_RERANKER_PROVIDER=openrouter 인데 OPENROUTER_API_KEY 가 "
+            "없습니다. 리랭크를 건너뛰고 기존 순위를 유지합니다 "
+            "(키를 채우거나 INDEX_RERANKER_PROVIDER=local 로 두세요)."
+        )
+        return None, "api_key_missing"
+
+    model = openrouter_reranker_model(model_name)
+    _notify_embed_route_once(
+        f"reranker:openrouter:{model}",
+        f"[Index] 리랭크를 OpenRouter({model})로 계산합니다 — 질의 1건당 검색 1건으로 "
+        f"과금됩니다(로컬 계산은 INDEX_RERANKER_PROVIDER=local).",
+    )
+    # 입력 길이 상한은 로컬 전용 장치다(토크나이저가 여기 없다). 상한 없이 도는 실행으로
+    # 남겨야 리포트의 capped/uncapped 구분이 거짓말을 하지 않는다.
+    _reranker_max_lengths[model_name] = None
+    _reranker_routes[model_name] = f"openrouter:{model}"
+    return _OpenRouterReranker(model, api_key), "ready"
+
+
+def _load_local_reranker(model_name: str) -> tuple[Any | None, str]:
+    """로컬 CrossEncoder. CUDA 로 못 올리면 CPU 로 한 번 더 시도한다.
+
+    OOM 을 로드 실패로 두면 쿨다운(기본 300초) 뒤 같은 GPU 로 또 시도해 같은 자리에서
+    죽는다 — GPU 가 모자란 머신에서는 리랭커가 영원히 안 도는 것과 같다."""
+    try:
+        from sentence_transformers import CrossEncoder
+    except ImportError as exc:
+        print(f"[Index] reranker 의존성 없음, 기존 순위 유지: {exc}")
+        return None, "dependency_missing"
+
+    # 진짜 sentence_transformers 를 import 한 뒤라 torch 는 이미 올라와 있고 auto 판정이
+    # 정확하다. None(가짜 모듈 경로)이면 장치를 넘기지 않고 라이브러리 기본에 맡긴다.
+    device = _reranker_soft_device(model_name)
+    try:
+        model = _new_cross_encoder(CrossEncoder, model_name, device)
+        _reranker_routes[model_name] = f"local:{device or 'auto'}"
+        return model, "ready"
+    except Exception as exc:
+        if not (device or "").startswith("cuda") or not _is_cuda_oom(exc):
+            print(
+                f"[Index] reranker 로드 실패, 기존 순위 유지 "
+                f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
+            )
+            return None, "model_load_failed"
+
+    print(f"[Index] reranker 를 {device} 로 못 올렸습니다(GPU 메모리 부족) — CPU 로 내립니다.")
+    _reranker_device_overrides[model_name] = "cpu"
+    try:
+        model = _new_cross_encoder(CrossEncoder, model_name, "cpu")
+        _reranker_routes[model_name] = "local:cpu"
+        return model, "ready"
+    except Exception as exc:
+        print(
+            f"[Index] reranker CPU 로드도 실패, 기존 순위 유지 "
+            f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
+        )
+        return None, "model_load_failed"
+
+
 def _load_reranker(model_name: str) -> tuple[Any | None, str]:
-    """reranker를 한 번만 로드하고 준비 상태를 정규화해 반환한다."""
+    """reranker를 한 번만 로드하고 준비 상태를 정규화해 반환한다.
+
+    provider(local/openrouter)와 장치는 여기서 정해진다. 반환 객체는 어느 경로든
+    predict(pairs) -> 점수 리스트 규약을 지키므로 호출부는 경로를 몰라도 된다."""
     with _reranker_lock:
+        provider = resolve_reranker_provider()
         model = _rerankers.get(model_name)
         if model is not None:
-            return model, "ready"
+            recorded = _reranker_routes.get(model_name)
+            # provider(또는 openrouter 모델명)가 바뀌었으면 갈아끼운다 — 이전 경로의 객체를
+            # 재사용하면 리포트에는 새 경로가 찍히는데 실제로는 옛 모델이 채점한다(비교
+            # 라벨이 통째로 거짓말). local 끼리의 장치 차이는 비교하지 않는다. 장치는 이
+            # 모듈이 스스로 바꾸는 축이라(OOM 강등) env 와 어긋난 기록이 정상 상태고,
+            # cuda 로 기록된 모델을 cpu 설정에서 발견했다고 2GB 를 다시 로드하는 건
+            # 낭비일 뿐이다. 경로 기록이 없는 객체는 테스트가 직접 꽂은 더블이므로
+            # 건드리지 않는다.
+            keep = (
+                recorded is None
+                or (provider == "local" and recorded.startswith("local:"))
+                or (
+                    provider == "openrouter"
+                    and recorded == f"openrouter:{openrouter_reranker_model(model_name)}"
+                )
+            )
+            if keep:
+                return model, "ready"
+            _rerankers.pop(model_name, None)
+            _reranker_max_lengths.pop(model_name, None)
+            _reranker_routes.pop(model_name, None)
 
         failed_at = _failed_rerankers.get(model_name)
         if (
@@ -191,28 +445,37 @@ def _load_reranker(model_name: str) -> tuple[Any | None, str]:
         ):
             return None, "cooldown"
 
-        try:
-            from sentence_transformers import CrossEncoder
-        except ImportError as exc:
-            _failed_rerankers[model_name] = time.monotonic()
-            print(f"[Index] reranker 의존성 없음, 기존 순위 유지: {exc}")
-            return None, "dependency_missing"
+        # 모델 생성까지 lock 안에서 수행해야 동시에 들어온 요청이 같은
+        # 대형 모델을 각각 메모리에 올리는 것을 막을 수 있다.
+        # 실제로 올라간 경로(_reranker_routes)는 각 loader 가 성공 시 스스로 기록한다 —
+        # CPU 폴백처럼 요청과 다른 장치로 올라간 경우까지 정확히 남기기 위함이다.
+        if provider == "openrouter":
+            model, status = _load_openrouter_reranker(model_name)
+        else:
+            model, status = _load_local_reranker(model_name)
 
-        try:
-            # 모델 생성까지 lock 안에서 수행해야 동시에 들어온 요청이 같은
-            # 대형 모델을 각각 메모리에 올리는 것을 막을 수 있다.
-            model = _new_cross_encoder(CrossEncoder, model_name)
-        except Exception as exc:
+        if model is None:
             _failed_rerankers[model_name] = time.monotonic()
-            print(
-                f"[Index] reranker 로드 실패, 기존 순위 유지 "
-                f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
-            )
-            return None, "model_load_failed"
+            return None, status
 
         _rerankers[model_name] = model
         _failed_rerankers.pop(model_name, None)
         return model, "ready"
+
+
+def _demote_reranker_to_cpu(model_name: str, exc: Exception) -> bool:
+    """추론 중 CUDA OOM 이면 이 모델을 CPU 로 고정한다. 고정했으면 True.
+
+    호출부의 _reranker_lock 안에서 부른다. 로드 때의 OOM 은 _load_local_reranker 가 잡지만,
+    추론 OOM 은 후보 수·청크 길이에 따라 나중에 터진다 — 그때 장치를 그대로 두면 쿨다운마다
+    같은 GPU 로 재시도해 계속 같은 자리에서 죽는다."""
+    route = _reranker_routes.get(model_name) or ""
+    if not route.startswith("local:cuda") or not _is_cuda_oom(exc):
+        return False
+    _reranker_device_overrides[model_name] = "cpu"
+    _reranker_routes.pop(model_name, None)
+    print("[Index] reranker 추론 중 GPU 메모리 부족 — 이 실행에서는 CPU 로 내립니다.")
+    return True
 
 
 def probe_reranker_capability(
@@ -220,15 +483,21 @@ def probe_reranker_capability(
     *,
     smoke_test: bool = True,
 ) -> dict[str, Any]:
-    """Index가 Optimize에 전달할 reranker 실행 가능성을 실제 모델로 확인한다."""
+    """Index가 Optimize에 전달할 reranker 실행 가능성을 실제 모델로 확인한다.
+
+    provider=openrouter 면 smoke inference 도 실제 유료 호출 1건(검색 1건)이다. 그래도
+    켜 두는 편이 맞다 — 키·모델명 오타를 Eval 수십 건을 태운 뒤가 아니라 여기서 잡는다.
+    끄려면 index_config 의 reranker_preflight 를 dependency_only 로 둔다."""
     resolved_name = str(model_name or DEFAULT_RERANKER_MODEL)
     model, load_status = _load_reranker(resolved_name)
     if model is None:
         return {
             "status": "unavailable",
             "model": resolved_name,
+            "route": None,
             "checked_at": time.time(),
-            "retryable": load_status not in {"dependency_missing"},
+            # 설정을 고쳐야 풀리는 실패는 재시도 대상이 아니다 — 의존성 누락과 같은 부류다.
+            "retryable": load_status not in {"dependency_missing", "api_key_missing"},
             "reason": load_status,
         }
 
@@ -240,13 +509,16 @@ def probe_reranker_capability(
             float(scores[0])
         except Exception as exc:
             with _reranker_lock:
+                demoted = _demote_reranker_to_cpu(resolved_name, exc)
                 if _rerankers.get(resolved_name) is model:
                     _rerankers.pop(resolved_name, None)
-                _failed_rerankers[resolved_name] = time.monotonic()
+                if not demoted:
+                    _failed_rerankers[resolved_name] = time.monotonic()
             print(f"[Index] reranker smoke inference 실패: {exc}")
             return {
                 "status": "unavailable",
                 "model": resolved_name,
+                "route": None,
                 "checked_at": time.time(),
                 "retryable": True,
                 "reason": "inference_failed",
@@ -255,6 +527,9 @@ def probe_reranker_capability(
     return {
         "status": "verified",
         "model": resolved_name,
+        # 어디서 계산됐는지를 capability 에 실어 둔다. 같은 "verified" 라도 로컬 GPU 와
+        # OpenRouter 는 모델 자체가 다르고(점수 스케일·순위가 다르다) 비용 구조도 다르다.
+        "route": reranker_route(resolved_name),
         "checked_at": time.time(),
         "retryable": False,
         "reason": None,
@@ -894,14 +1169,20 @@ def rerank_with_status(
     except Exception as exc:
         # 깨진 모델 객체로 매 요청마다 같은 실패를 반복하지 않고 쿨다운 후 다시 로드한다.
         with _reranker_lock:
+            demoted = _demote_reranker_to_cpu(model_name, exc)
             # 다른 요청이 이미 새 모델을 넣었다면 그 객체까지 지우지 않는다.
             if _rerankers.get(model_name) is model:
                 _rerankers.pop(model_name, None)
-            _failed_rerankers[model_name] = time.monotonic()
-        print(
-            f"[Index] reranker 추론 실패, 기존 순위 유지 "
-            f"({_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도): {exc}"
+            # CPU 로 내린 경우는 쿨다운을 걸지 않는다 — 다음 질의는 다른 장치로 올라가므로
+            # 기다릴 이유가 없고, 300초 동안 리랭크가 통째로 빠지는 편이 훨씬 비싸다.
+            if not demoted:
+                _failed_rerankers[model_name] = time.monotonic()
+        retry_note = (
+            "다음 질의부터 CPU 로 재시도"
+            if demoted
+            else f"{_FAILED_RERANKER_RETRY_SEC:.0f}초 후 재시도"
         )
+        print(f"[Index] reranker 추론 실패, 기존 순위 유지 ({retry_note}): {exc}")
         return results[:top_k], "inference_failed", 0.0
     reranked = [
         {**item, "retrieval_score": item.get("score", 0.0), "score": float(score)}
@@ -1031,7 +1312,7 @@ def _openrouter_embed_model(model_name: str) -> str:
 
 
 def _notify_embed_route_once(route: str, message: str) -> None:
-    """임베딩 경로를 경로마다 실행당 한 번씩 알린다.
+    """계산 경로(임베딩·리랭커·장치 폴백)를 경로마다 실행당 한 번씩 알린다.
 
     청크마다 찍으면 정작 봐야 할 로그를 덮는다(graph_index 의
     _notify_llm_extraction_once 와 같은 패턴). 한 번은 반드시 남겨야 하는 이유는,
@@ -1111,12 +1392,20 @@ def _embed_via_openrouter(texts: list[str], model_name: str) -> list[list[float]
     return [vector for group in vectors for vector in group]
 
 
-def resolve_embedding_device(device: str | None = None) -> str:
-    """요청한 임베딩 장치를 실제 사용 가능한 장치로 정규화한다.
+def resolve_embedding_device(
+    device: str | None = None,
+    *,
+    purpose: str = "임베딩",
+) -> str:
+    """요청한 장치를 실제 사용 가능한 장치로 정규화한다(임베딩·리랭커 공용).
 
     None → env INDEX_EMBED_DEVICE(기본 auto). auto 는 CUDA 가 있으면 cuda, 없으면
     cpu. cuda 를 명시했는데 쓸 수 없으면 경고하고 cpu 로 내린다 — 조용히 내리면
-    "GPU 로 돌리는 중" 이라 믿은 실행이 CPU 속도(실측 2 chunks/sec)로 기어간다."""
+    "GPU 로 돌리는 중" 이라 믿은 실행이 CPU 속도(실측 2 chunks/sec)로 기어간다.
+
+    purpose 는 경고 문구에만 쓴다. 리랭커가 이 함수를 물려 쓰기 시작하면서 필요해졌다 —
+    "CPU 임베딩으로 전환" 이라고만 찍으면 리랭커가 CPU 로 내려간 실행이 로그에서
+    임베딩 문제로 읽힌다."""
     requested = str(
         device if device is not None else os.getenv("INDEX_EMBED_DEVICE", "auto")
     ).strip().lower() or "auto"
@@ -1135,7 +1424,13 @@ def resolve_embedding_device(device: str | None = None) -> str:
                 return requested
         except Exception:
             pass
-        print("[Index] CUDA 를 사용할 수 없어 CPU 임베딩으로 전환합니다.")
+        # 리랭커는 이 함수를 질의마다 부른다(모델 캐시 조회 전에 경로를 계산한다).
+        # 매번 찍으면 정작 봐야 할 로그를 덮으므로 용도·요청값 조합당 한 번만 남긴다.
+        _notify_embed_route_once(
+            f"device_downgrade:{purpose}:{requested}",
+            f"[Index] CUDA 를 사용할 수 없어 {purpose} 계산을 CPU 로 내립니다"
+            f"(요청: {requested}).",
+        )
         return "cpu"
     return requested
 

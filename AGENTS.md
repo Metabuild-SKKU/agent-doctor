@@ -61,6 +61,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
   - 임베딩 실행 위치: `INDEX_EMBED_PROVIDER`(색인) / `INDEX_QUERY_EMBED_PROVIDER`(질의).
     기본 `openrouter`이며 `local`로 내릴 수 있습니다. 질의 축을 안 정하면 색인 축을
     따릅니다. 아래 "임베딩 provider" 참고
+  - 리랭크 실행 위치: `INDEX_RERANKER_PROVIDER`(기본 `local`) / `INDEX_RERANKER_DEVICE`.
+    임베딩과 기본값이 반대이고 경로를 바꾸면 모델도 바뀝니다. 아래 "리랭크 provider" 참고
 - 문서 임베딩과 질의 임베딩은 반드시 같은 모델·차원을 사용해야 합니다. 기존 컬렉션과 차원이
   다르면 오류가 나며, 재생성을 허용하려면 `index_config["recreate_collection_on_dimension_mismatch"] = True`를
   명시적으로 설정합니다.
@@ -135,6 +137,47 @@ python graph.py --embed openrouter --query-embed cpu   # 색인만 API
 Eval의 RAGAS `response_relevancy` 임베딩은 `EVAL_LLM_PROVIDER`를 따릅니다(별도 축).
 **provider를 바꾸면 코사인 분포가 달라지므로 실행 간 비교를 하려면 한 번 정한 뒤
 고정하세요.**
+
+---
+
+### 리랭크 provider (cross-encoder)
+
+리랭크도 **어디서 계산하느냐**를 고를 수 있습니다. 임베딩과 같은 3지선다지만
+**기본값이 반대(`local`)**이고, 임베딩과 달리 **경로를 바꾸면 모델도 바뀝니다.**
+
+| env | 기본값 | 대상 |
+|---|---|---|
+| `INDEX_RERANKER_PROVIDER` | `local` | `local` \| `openrouter` |
+| `INDEX_RERANKER_MODEL_OPENROUTER` | `cohere/rerank-v3.5` | `openrouter`일 때 부를 모델 |
+| `INDEX_RERANKER_DEVICE` | `INDEX_EMBED_DEVICE` 따름 (없으면 `auto`) | `local`일 때 `cuda`/`cpu` |
+
+```bash
+python graph.py --rerank gpu              # 로컬 CUDA (없으면 경고 후 CPU)
+python graph.py --rerank cpu              # 로컬 CPU
+python graph.py --rerank openrouter       # API (질의마다 과금)
+python graph.py --embed openrouter --rerank gpu   # 임베딩만 API, 리랭크는 로컬 GPU
+```
+
+**기본값이 `local`인 이유는 과금 단위입니다.** 임베딩은 색인 1회지만 리랭크는
+**질의마다** 부과됩니다(OpenRouter 리랭크는 토큰이 아니라 `search` 1건 단위 과금).
+Eval 한 번이 질문 수만큼이고 Optimize는 같은 셋을 반복 평가하므로, 기본값을 API로 두면
+실행할수록 조용히 곱해집니다. 임베딩 쪽 근거("예산이 있으면 API가 100배 빠르다")는 여기
+그대로 적용되지 않습니다 — 리랭크 후보는 보통 20건이라 로컬 GPU로도 한 자릿수 ms입니다.
+
+**바꾸면 안전하지 않습니다.** 로컬 `BAAI/bge-reranker-v2-m3`와 `cohere/rerank-v3.5`는
+서로 다른 모델이라 점수 스케일도 순위도 다릅니다(임베딩의 코사인 0.99997 같은 호환성이
+없습니다). OpenRouter 카탈로그에 bge 계열이 없어 이름 변환도 불가능합니다. 그래서 실제
+경로가 실행마다 남습니다 — `runtime_summary.reranker.routes`(리포트)와
+`runtime_capabilities.reranker.route`(Index preflight). **경로가 다른 두 실행의 점수를
+Optimize의 처방 효과로 읽지 마세요.**
+
+`openrouter`인데 `OPENROUTER_API_KEY`가 없으면 리랭크만 건너뛰고 원순위를 유지합니다
+(임베딩처럼 예외로 끊지 않습니다 — 리랭커는 optional이라 여기서 던지면 키 오타 하나로
+모든 검색이 죽습니다). 대신 capability에 `api_key_missing`이 재시도 불가로 남아 Index
+preflight 단계에서 드러납니다.
+
+로컬 경로에서 CUDA OOM이 나면(로드·추론 모두) 경고하고 CPU로 내려 그 실행 동안
+고정합니다. 쿨다운 후 같은 GPU로 재시도하면 같은 자리에서 계속 죽기 때문입니다.
 
 ## 3. 아키텍처 요약
 
