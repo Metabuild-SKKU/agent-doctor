@@ -66,14 +66,16 @@ Chunking 77(20%) · Retrieval 161(43%) · Reranking 46(12%) · Generation 93(25%
 
 | RAGEC | 건수 | 우리 라벨 | 판단 |
 |---|---|---|---|
-| **E4 Missed Retrieval** | **152** | `retrieval_missing_gold` (기본) · `corpus_gap`(문서 자체가 없을 때) | 문서 존재 여부로 갈린다 |
+| **E4 Missed Retrieval** | **152** | `retrieval_missing_gold` | ✅ **확정** — `corpus_gap` 은 0건 |
 | **E5 Low Relevance** | 6 | `retrieval_low_rank` · `retrieval_semantic_mismatch` | ? |
 | **E6 Semantic Drift** | 3 | `retrieval_semantic_mismatch` | 사례가 "인접 주제로 흘렀다" 라 부합 |
 
-> E4 는 DragonBall 에 문서가 **있는데** 검색이 못 가져온 경우다(코퍼스 결손이 아니다).
-> 사례: 정답이 "October 2021" 인데 답변이 "January 2021" 사건을 말한다. 따라서 기본 대응은
-> `retrieval_missing_gold` 이고, `corpus_gap` 은 `ground_truth.doc_ids` 가 가리키는 문서가 실제로
-> 인덱스에 없을 때만이다 — 배관(8-c) 에서 확인 가능하다.
+> **E4 는 확정했다.** 152건 전부 `ground_truth.doc_ids` 가 가리키는 문서가 DragonBall 코퍼스에
+> 존재한다(실측 152/152, 코퍼스 결손 0건, 골드 문서 미지정 0건). 즉 **문서는 있는데 검색이 못
+> 가져온 것**이라 `retrieval_missing_gold` 하나로 대응한다. `corpus_gap` 은 이 정답지로 검증할 수
+> 없다(D그룹 커버리지 참고).
+>
+> 사례도 부합한다 — 정답이 "October 2021" 인데 답변이 "January 2021" 사건을 말한다.
 
 ### Reranking
 
@@ -90,7 +92,7 @@ Chunking 77(20%) · Retrieval 161(43%) · Reranking 46(12%) · Generation 93(25%
 
 | RAGEC | 건수 | 우리 라벨 | 판단 |
 |---|---|---|---|
-| **E9 Abstention Failure** | 23 | `generation_abstention_failure` | 이름·정의 일치 |
+| **E9 Abstention Failure** | 23 | `generation_abstention_failure` | 이름·정의 일치. 20건이 `ground_truth="Unable to answer"`(그중 19가 E9) |
 | **E10 Fabricated Content** | 3 | `generation_hallucination` | 정의 일치 |
 | E11 Parametric Overreliance | **0** | `generation_parametric_overreliance` | 이름 동일. **정답지에 사례 없음** |
 | **E12 Incomplete Answer** | 33 | `generation_partial_answer` | 정의 일치 |
@@ -173,6 +175,25 @@ E2·E11 도 같은 이유로 0건인데 우리는 그 라벨을 이미 갖고 �
 
 > `Summarization Question`(30)과 `Summary Question`(13)이 따로 존재한다. 같은 개념을 다르게 적은
 > 것으로 보이며 데이터 자체의 흠일 수 있다 — 집계 시 합칠지 정해야 한다.
+
+---
+
+## 이 표에서 아직 확정되지 않은 것
+
+대응 자체는 13종 전부 적었지만, **아래 둘은 배관(8-c) 전에는 확정할 수 없다.** 사례마다
+갈리는 것이라 표를 보고 정할 수 없고, 실제로 돌려 봐야 안다.
+
+| | 미확정 | 왜 |
+|---|---|---|
+| **E1 Overchunking (55건)** | `chunking_overchunking` ↔ `retrieval_incomplete_enumeration` | 근거가 청크로 쪼개져서인지 검색 개수가 모자라서인지는 실제 청킹·검색 결과를 봐야 갈린다. **처방이 다르다**(청크 크기 ↔ 검색 개수) |
+| **E5 Low Relevance (6건)** | `retrieval_low_rank` ↔ `retrieval_semantic_mismatch` | 순위가 밀린 것인지 표현이 안 맞은 것인지. 표본이 작아 영향은 제한적 |
+
+E1 은 **377건 중 55건(15%)** 으로 단일 항목 2위다. 포함 채점에서는 우리가 둘 중 하나만 내도
+통과하므로 **정확도 수치 자체는 안 흔들리지만**, "어느 쪽으로 진단했나" 를 따로 집계해 두면
+청킹 처방과 검색 처방 중 무엇이 실제로 맞았는지 볼 수 있다.
+
+나머지 11종은 이름·정의가 일치하거나(E3·E8·E9·E10·E12·E13·E16) 실측으로 확정했다(E4).
+E14 는 우리가 별도 라벨을 두지 않기로 한 자리이고, E2·E11·E15 는 사례가 없다.
 
 ---
 
