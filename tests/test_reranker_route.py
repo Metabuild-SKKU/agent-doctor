@@ -1,4 +1,4 @@
-﻿"""리랭크 실행 경로(provider × device) — 로컬 CPU/GPU 와 OpenRouter /rerank.
+"""리랭크 실행 경로(provider × device) — 로컬 CPU/GPU 와 OpenRouter /rerank.
 
 임베딩 축과 **일부러 다르게** 만든 지점들이 여기서 고정된다.
   - 기본값이 반대다(임베딩 openrouter / 리랭크 local). 과금이 색인 1회가 아니라 질의마다다.
@@ -27,6 +27,7 @@ def _clear_reranker_state() -> None:
     qdrant_store._reranker_max_lengths.clear()
     qdrant_store._reranker_routes.clear()
     qdrant_store._reranker_device_overrides.clear()
+    qdrant_store._reranker_applied_devices.clear()
     qdrant_store._embed_routes_notified.clear()
 
 
@@ -296,6 +297,19 @@ class OpenRouterRerankerModelTest(unittest.TestCase):
         self.assertEqual(capability["reason"], "api_key_missing")
         self.assertFalse(capability["retryable"])
 
+    def test_missing_api_key_judgment_survives_repeat_probe(self):
+        """키 없음을 쿨다운에 넣으면 300초 안의 두 번째 조회가 "cooldown"(retryable=True)
+        으로 바뀌어 첫 판정(설정을 고쳐야 풀림, retryable=False)을 스스로 뒤집는다 —
+        상태를 비우지 않고 연달아 조회해도 같은 판정이 나와야 한다."""
+        del os.environ["OPENROUTER_API_KEY"]
+
+        first = qdrant_store.probe_reranker_capability()
+        second = qdrant_store.probe_reranker_capability()
+
+        self.assertEqual(first["reason"], "api_key_missing")
+        self.assertEqual(second["reason"], "api_key_missing")
+        self.assertFalse(second["retryable"])
+
     def test_capability_carries_the_route(self):
         transport = Mock(return_value=[(0, 0.5)])
 
@@ -304,6 +318,69 @@ class OpenRouterRerankerModelTest(unittest.TestCase):
 
         self.assertEqual(capability["status"], "verified")
         self.assertEqual(capability["route"], "openrouter:voyageai/rerank-2.5-lite")
+
+
+class RerankTimingTest(unittest.TestCase):
+    """rerank_seconds 는 추론(호출) 시간만 재야 한다 — 이 계측이 리랭커 존폐의 심판이다."""
+
+    def setUp(self):
+        _clear_reranker_state()
+
+    def tearDown(self):
+        _clear_reranker_state()
+
+    def test_rerank_seconds_prefers_model_reported_pure_time(self):
+        """모델이 순수 호출 시간을 보고하면 벽시계 대신 그 값을 쓴다. API 경로의
+        429 재시도 대기(기본 5~10초)가 벽시계에 섞이면 쌍당 ms 가 수 배로 부푼다."""
+        model_name = "test/pure-time"
+        model = Mock()
+        model.predict.return_value = [0.5]
+        model.last_predict_seconds = 0.2
+        qdrant_store._rerankers[model_name] = model
+        ticks = iter([100.0, 160.0])          # 벽시계로는 60초가 걸린 것처럼 보인다
+
+        with patch(
+            "agents.index.qdrant_store.time.monotonic",
+            side_effect=lambda: next(ticks),
+        ):
+            _out, status, seconds = qdrant_store.rerank_with_status(
+                "질문",
+                [{"chunk_id": "c1", "text": "본문", "score": 0.5}],
+                model_name=model_name,
+                top_k=1,
+            )
+
+        self.assertEqual(status, "applied")
+        self.assertEqual(seconds, 0.2)
+
+    def test_openrouter_predict_excludes_retry_wait(self):
+        """429 재시도의 대기·실패한 시도 시간은 last_predict_seconds 에서 빠진다 —
+        성공한 시도의 HTTP 호출 시간만 남는다."""
+        calls = {"n": 0}
+
+        def flaky(_query, _documents, _model, *, api_key, tag):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                error = RuntimeError("429 too many requests")
+                error.status_code = 429
+                raise error
+            return [(0, 0.9)]
+
+        reranker = qdrant_store._OpenRouterReranker("test/model", "key")
+        # 시도1 시작 100(실패, 끝 시각은 안 읽음) / 시도2 시작 110 → 성공 112 = 2초
+        ticks = iter([100.0, 110.0, 112.0])
+
+        with patch.object(qdrant_store, "openrouter_rerank", side_effect=flaky):
+            with patch(
+                "agents.index.qdrant_store.time.monotonic",
+                side_effect=lambda: next(ticks),
+            ):
+                with patch("core.llm_retry.time.sleep"):
+                    scores = reranker.predict([("질문", "본문")])
+
+        self.assertEqual(scores, [0.9])
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(reranker.last_predict_seconds, 2.0)
 
 
 class RerankerRouteSwitchTest(unittest.TestCase):
@@ -346,6 +423,29 @@ class RerankerRouteSwitchTest(unittest.TestCase):
 
         self.assertIs(model, double)
         self.assertEqual(status, "ready")
+
+    def test_unsupported_provider_value_does_not_reload_every_query(self):
+        """미지원 값(오타·"gpu" 등)은 dispatch 가 local 로 처리한다. 캐시 유지 판정이
+        "local" 리터럴만 보면 그 값이 항상 경로 불일치가 돼, 질의마다 2GB 대 모델을
+        새로 올린다 — 리뷰에서 3회 호출에 3회 로드로 실측된 문제."""
+        import sys
+        import types
+
+        model_name = "test/typo-provider"
+        loads = []
+        fake_module = types.ModuleType("sentence_transformers")
+        fake_module.CrossEncoder = lambda _name, **kw: (
+            loads.append(_name) or Mock(predict=Mock(return_value=[0.1]))
+        )
+
+        with patch.dict(os.environ, {"INDEX_RERANKER_PROVIDER": "gpu"}):
+            with patch.dict(sys.modules, {"sentence_transformers": fake_module}):
+                first, status1 = qdrant_store._load_reranker(model_name)
+                second, status2 = qdrant_store._load_reranker(model_name)
+
+        self.assertEqual((status1, status2), ("ready", "ready"))
+        self.assertIs(first, second)
+        self.assertEqual(len(loads), 1)
 
 
 class RerankerCudaFallbackTest(unittest.TestCase):

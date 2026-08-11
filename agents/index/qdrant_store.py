@@ -117,6 +117,10 @@ _reranker_routes: dict[str, str] = {}
 # model_name → 강제 장치. CUDA OOM 을 만난 모델을 CPU 로 내려 고정하는 데만 쓴다.
 # env 를 덮는 게 아니라 "이 프로세스에서 이 모델은 GPU 로 못 올린다"는 실측 기록이다.
 _reranker_device_overrides: dict[str, str] = {}
+# model_name → 생성자에 실제로 넘어간 device(None = 안 넘김, 라이브러리 기본). 경로(route)
+# 기록이 이 값을 따라야 한다 — 요청 장치를 그대로 적으면 device 를 못 받는 구현에서
+# "local:cuda" 로 기록되고 실제로는 라이브러리가 고른 장치로 도는 어긋남이 생긴다.
+_reranker_applied_devices: dict[str, str | None] = {}
 _FAILED_RERANKER_RETRY_SEC = _env_float("INDEX_RERANKER_RETRY_SEC", 300.0)
 # 리랭커(cross-encoder) 입력 토큰 상한. 0 이하면 모델 기본값(이 모델은 8192)을 쓴다.
 #
@@ -182,9 +186,17 @@ def _new_cross_encoder(cross_encoder_cls, model_name: str, device: str | None = 
         else:
             print("[Index] reranker 구현이 max_length 를 받지 않아 입력 길이 상한 없이 로드한다 "
                   "(청크가 크면 리랭크 비용이 그만큼 커진다)")
-    if device and _accepts_kwarg(cross_encoder_cls, "device"):
-        kwargs["device"] = device
+    if device:
+        if _accepts_kwarg(cross_encoder_cls, "device"):
+            kwargs["device"] = device
+        else:
+            # max_length 와 같은 규약 — 인자를 빼고 진행하되 조용히 넘어가지 않는다.
+            # 여기서 탈락한 사실은 아래 applied 기록으로도 남아, 경로(route)가
+            # "요청한 장치"가 아니라 "실제로 넘긴 장치"를 말하게 된다.
+            print("[Index] reranker 구현이 device 를 받지 않아 장치 지정 없이 로드한다 "
+                  "(장치는 라이브러리 기본값을 따른다)")
     _reranker_max_lengths[model_name] = kwargs.get("max_length")
+    _reranker_applied_devices[model_name] = kwargs.get("device")
     return cross_encoder_cls(model_name, **kwargs)
 
 
@@ -303,10 +315,16 @@ class _OpenRouterReranker:
     def __init__(self, model: str, api_key: str):
         self.model = model
         self.api_key = api_key
+        # 마지막 predict 에서 HTTP 호출 자체에 든 시간(재시도 대기 제외, 성공한 시도만).
+        # rerank_with_status 의 타이머는 predict 전체를 감싸므로 429 대기가 그대로
+        # 쌍당 비용(ms_per_pair)에 실린다 — 그 계측이 리랭커 존폐를 가리는 심판이라,
+        # 순수 호출 시간을 따로 보고해 타이머가 이 값을 우선하게 한다.
+        self.last_predict_seconds: float | None = None
 
     def predict(self, pairs):
         pairs = [(query, text) for query, text in pairs]
         if not pairs:
+            self.last_predict_seconds = 0.0
             return []
         queries = {query for query, _ in pairs}
         if len(queries) != 1:
@@ -318,17 +336,22 @@ class _OpenRouterReranker:
         # 빈 문서는 API 가 400 으로 거절한다. 자리를 비우면 인덱스가 밀려 점수가 엉뚱한
         # 청크에 붙으므로, 공백 한 칸으로 채워 자리만 지킨다(점수는 바닥에 깔린다).
         documents = [text if text.strip() else " " for _query, text in pairs]
-        scored = run_with_retry(
-            lambda: openrouter_rerank(
+
+        def _call():
+            attempt_started = time.monotonic()
+            result = openrouter_rerank(
                 pairs[0][0],
                 documents,
                 self.model,
                 api_key=self.api_key,
                 tag="Index",
-            ),
-            label="리랭크",
-            tag="Index",
-        )
+            )
+            # 성공한 시도 안에서 기록해야 재시도 대기·실패한 시도의 시간이 안 섞인다.
+            self.last_predict_seconds = time.monotonic() - attempt_started
+            return result
+
+        self.last_predict_seconds = None
+        scored = run_with_retry(_call, label="리랭크", tag="Index")
 
         scores: list[float | None] = [None] * len(documents)
         for index, score in scored:
@@ -357,10 +380,13 @@ def _load_openrouter_reranker(model_name: str) -> tuple[Any | None, str]:
     Index preflight 단계에서 사람이 보게 한다."""
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        print(
+        # 쿨다운 없이 매 질의 이 경로로 들어오므로(아래 _load_reranker 주석 참고)
+        # 경고는 실행당 한 번만 찍는다 — 질의마다 찍으면 정작 봐야 할 로그를 덮는다.
+        _notify_embed_route_once(
+            "reranker:openrouter:api_key_missing",
             "[Index] INDEX_RERANKER_PROVIDER=openrouter 인데 OPENROUTER_API_KEY 가 "
             "없습니다. 리랭크를 건너뛰고 기존 순위를 유지합니다 "
-            "(키를 채우거나 INDEX_RERANKER_PROVIDER=local 로 두세요)."
+            "(키를 채우거나 INDEX_RERANKER_PROVIDER=local 로 두세요).",
         )
         return None, "api_key_missing"
 
@@ -393,7 +419,9 @@ def _load_local_reranker(model_name: str) -> tuple[Any | None, str]:
     device = _reranker_soft_device(model_name)
     try:
         model = _new_cross_encoder(CrossEncoder, model_name, device)
-        _reranker_routes[model_name] = f"local:{device or 'auto'}"
+        # 요청 장치가 아니라 생성자에 실제로 넘어간 장치를 적는다(위 dict 주석 참고).
+        applied = _reranker_applied_devices.get(model_name)
+        _reranker_routes[model_name] = f"local:{applied or 'auto'}"
         return model, "ready"
     except Exception as exc:
         if not (device or "").startswith("cuda") or not _is_cuda_oom(exc):
@@ -407,7 +435,8 @@ def _load_local_reranker(model_name: str) -> tuple[Any | None, str]:
     _reranker_device_overrides[model_name] = "cpu"
     try:
         model = _new_cross_encoder(CrossEncoder, model_name, "cpu")
-        _reranker_routes[model_name] = "local:cpu"
+        applied = _reranker_applied_devices.get(model_name)
+        _reranker_routes[model_name] = f"local:{applied or 'auto'}"
         return model, "ready"
     except Exception as exc:
         print(
@@ -434,9 +463,12 @@ def _load_reranker(model_name: str) -> tuple[Any | None, str]:
             # cuda 로 기록된 모델을 cpu 설정에서 발견했다고 2GB 를 다시 로드하는 건
             # 낭비일 뿐이다. 경로 기록이 없는 객체는 테스트가 직접 꽂은 더블이므로
             # 건드리지 않는다.
+            # local 판정은 아래 dispatch 와 같은 기준(!= openrouter)이어야 한다 — "local"
+            # 리터럴만 보면 미지원 값(오타·"gpu" 등, dispatch 는 local 로 처리)이 항상
+            # 경로 불일치가 돼 질의마다 2GB 대 모델을 다시 올린다.
             keep = (
                 recorded is None
-                or (provider == "local" and recorded.startswith("local:"))
+                or (provider != "openrouter" and recorded.startswith("local:"))
                 or (
                     provider == "openrouter"
                     and recorded == f"openrouter:{openrouter_reranker_model(model_name)}"
@@ -465,7 +497,12 @@ def _load_reranker(model_name: str) -> tuple[Any | None, str]:
             model, status = _load_local_reranker(model_name)
 
         if model is None:
-            _failed_rerankers[model_name] = time.monotonic()
+            # 키 없음은 쿨다운에 넣지 않는다. 넣으면 300초 안의 다음 capability 조회가
+            # "cooldown"(retryable=True)으로 바뀌어 "설정을 고쳐야 풀린다"(retryable=False)
+            # 는 첫 판정을 스스로 뒤집는다. 쿨다운이 막아 주던 반복 비용도 여기엔 없다 —
+            # 이 경로는 env 조회 한 번이라 매 질의 다시 들어와도 공짜다(경고는 1회만 찍음).
+            if status != "api_key_missing":
+                _failed_rerankers[model_name] = time.monotonic()
             return None, status
 
         _rerankers[model_name] = model
@@ -1172,6 +1209,12 @@ def rerank_with_status(
             model.predict([(query, item.get("text", "")) for item in results])
         )
         elapsed = time.monotonic() - started
+        # API 리랭커는 predict 안에서 429 재시도 대기(기본 5~10초)가 벽시계에 섞인다.
+        # 모델이 순수 호출 시간을 보고하면 그 값을 쓴다 — 안 그러면 429 한 번에
+        # 쌍당 ms 집계가 수 배로 부풀어, 그 계측을 심판 삼는 리랭커 존폐 판정이 왜곡된다.
+        pure = getattr(model, "last_predict_seconds", None)
+        if isinstance(pure, (int, float)) and not isinstance(pure, bool):
+            elapsed = float(pure)
         if len(scores) != len(results):
             raise ValueError(
                 f"reranker 점수 개수 불일치: {len(scores)} != {len(results)}"
