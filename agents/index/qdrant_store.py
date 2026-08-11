@@ -86,6 +86,12 @@ def _env_int(name: str, default: int) -> int:
 # 키를 문자열과 튜플로 섞어 쓰면 같은 모델이 두 벌 상주하고(각 수 GB),
 # count_tokens 처럼 한쪽 키로만 조회하는 곳이 조용히 캐시 미스가 된다.
 _models: dict[tuple[str, str], Any] = {}
+# 모델 로드 직렬화 락. _reranker_lock 과 같은 이유인데 실제 사고로 확인됐다 —
+# 배치 판정 완료 직후 fan-out 폭(최대 수백)의 스레드가 동시에 relevancy 임베딩을
+# 요청하면, 캐시가 비어 있는 첫 순간에 전원이 SentenceTransformer() 를 각자 생성한다
+# (실측: 'Loading weights' 13회 → 모델 13벌 상주 → 340바이트 할당 실패로 OS 프리즈).
+# CPU 폴백이 같은 함수를 재귀 호출하므로 RLock 이어야 한다.
+_embed_model_lock = threading.RLock()
 # (model_name, device) → 마지막 로드 실패 시각(monotonic). 실패를 영구 캐시하면
 # 일시적 원인(네트워크 등) 후에도 프로세스 내내 fallback 임베딩만 조용히 쓰게
 # 되므로, 쿨다운이 지나면 재시도한다.
@@ -1150,6 +1156,23 @@ def _load_embedding_model(
     후 재시도한다 — fallback 임베딩은 의미 검색이 안 되는 해시 벡터라, 이 상태로
     Eval/Optimize 가 돌면 점수 전체가 무효가 되므로 반드시 복구 기회를 줘야 한다."""
     actual_device = resolve_embedding_device(device)
+    key = (model_name, actual_device)
+    cached = _models.get(key)
+    if cached is not None:          # 빠른 경로 — 로드가 끝난 뒤에는 락을 잡지 않는다
+        return cached, actual_device
+
+    with _embed_model_lock:
+        return _load_embedding_model_locked(model_name, actual_device)
+
+
+def _load_embedding_model_locked(
+    model_name: str,
+    actual_device: str,
+) -> tuple[Any | None, str]:
+    """_load_embedding_model 의 본체 — _embed_model_lock 을 잡은 채로만 부를 것.
+
+    락 획득 후 캐시를 다시 확인한다(double-checked locking): 대기하던 스레드들은
+    첫 스레드가 로드를 마친 뒤 순서대로 들어와 여기서 캐시 히트로 끝난다."""
     key = (model_name, actual_device)
     cached = _models.get(key)
     if cached is not None:
