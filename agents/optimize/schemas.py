@@ -606,12 +606,22 @@ class Verdict:
 
     Attributes:
         keep: True면 유지, False면 롤백.
-        before_score: 처방 전 단일 점수(Eval overall_score). 최적화 탐색 신호(0~1).
-        after_score: 처방 후 단일 점수(Eval overall_score). 최적화 탐색 신호(0~1).
+        before_score: 처방 전 단일 점수. 최적화 탐색 신호(0~1)이며 판정 전용이다.
+            history._read_score 가 composite_score.total÷100 으로 만든다(과거에는
+            overall_score 였으나 #47 이후 composite 기반). 사용자에게 이 값을 그대로
+            보여주면 안 된다 — 표시용은 아래 composite 쌍이다.
+        after_score: 처방 후 단일 점수. 스케일·용도는 before_score 와 같다.
+            ⚠️ sweep 경로에서는 adapter 의 best_score 가 그대로 들어오며, chunk
+            prescreener 는 종합점수가 아닌 정답 span 포함률을 낸다(proxy_only 참조).
         before_composite: 처방 전 설계 종합점수(composite_score.total, 0~100).
         after_composite: 처방 후 설계 종합점수(composite_score.total, 0~100).
-            유지/롤백 판정은 overall(탐색 신호)로 하되, 표시·게이트용으로 composite 를
-            함께 실어 리포트가 사용자에게 정직한 종합점수를 보여줄 수 있게 한다.
+            유지/롤백 판정은 탐색 신호로 하되, 표시·게이트용으로 composite 를 함께
+            실어 리포트가 사용자에게 정직한 종합점수를 보여줄 수 있게 한다.
+            ⚠️ 표시할 때 한쪽만 None 이면 나머지를 score×100 으로 채우지 말 것 —
+            축이 섞인다. 변환은 score_display.resolve_display_scores 가 단독으로 한다.
+        proxy_only: before_score/after_score 가 eval 종합점수가 아니라 프록시 지표인
+            경우 True(chunk prescreener 경로). 표시 계층이 이 값을 "종합점수"라고
+            부르지 않게 하는 신호다.
         floor_violations: 하한선을 위반한 지표명 목록. 있으면 무조건 롤백.
         reason: 이 판정을 내린 이유(사람이 읽는 설명).
         unjudgeable: 리포트 부재로 '측정 자체가 없어' 롤백한 경우 True.
@@ -632,6 +642,7 @@ class Verdict:
     reason: str = ""
     unjudgeable: bool = False
     margin_rejected: bool = False
+    proxy_only: bool = False
 
 
 @dataclass

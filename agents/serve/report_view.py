@@ -11,6 +11,7 @@ import os
 from typing import Any, Optional
 
 from agents.optimize import gate
+from agents.optimize.score_display import DisplayScores, display_scores_from_metadata
 from core.state import AgentDoctorState
 
 _EVAL_MODE_LABELS = {
@@ -267,14 +268,13 @@ def _build_metrics(report, history: list) -> list[dict[str, Any]]:
     return out
 
 
-def _course_point_score(item, key: str, fallback: float) -> float:
-    """치료경과 한 점의 헤드라인 점수(0~100). 설계 종합점수(composite, 이미 0~100)를
-    우선 쓰고, 없으면 구버전 overall(0~1)×100 로 폴백. key 는 'before'|'after'."""
-    comp = item.metadata.get(f"{key}_composite")
-    if comp is not None:
-        return round(float(comp), 1)
-    raw = item.metadata.get(f"{key}_score")
-    return _to_100(raw) if raw is not None else fallback
+def _course_scores(item) -> DisplayScores:
+    """이 이력 항목의 표시용 점수 쌍. 변환 규약은 score_display 가 단독으로 갖는다.
+
+    한쪽만 composite 인 경우(prescreener 처럼 after 가 프록시 지표인 경로) 축이 섞인
+    숫자를 만들지 않고 `available=False` 를 돌려준다 — 호출부가 그 점을 어떻게 다룰지
+    정한다(차트는 점을 빼고, 카드는 점수 행을 뺀다)."""
+    return display_scores_from_metadata(item.metadata)
 
 
 def _is_study_error(item) -> bool:
@@ -327,8 +327,12 @@ def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
 
         kept = item.status == "applied" and not item.metadata.get("pending")
         rolled_back = item.status == "failed"
-        before = _course_point_score(item, "before", baseline_score)
-        after = _course_point_score(item, "after", before)
+        scores = _course_scores(item)
+        # 점수 쌍이 같은 축으로 갖춰지지 않으면 차트에 점을 찍지 않는다. study 오류와
+        # 같은 이유다 — 축이 섞인 값으로 가짜 상승·하락 곡선을 그리지 않는다.
+        if not scores.available:
+            continue
+        before, after = scores.before, scores.after
         # 같은 진단 라벨에 여러 처방을 시도해도 Rx 순번만으로 뭉뚱그리지 않고,
         # 차트에서는 실제 처방 이름을 점 이름으로 쓴다.
         label = _course_point_label(item, prescription_index)
@@ -390,14 +394,15 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             ]
 
         # 헤드라인(composite)과 일관되게 처방 카드 점수도 종합점수로 표시.
-        # (유지/롤백 판정 자체는 overall 탐색 신호 기준이므로 direction 과 verdict 이
-        #  드물게 어긋날 수 있으나, 표시 점수는 사용자가 보는 종합점수로 통일한다.)
+        # (유지/롤백 판정 자체는 탐색 신호 기준이므로 direction 과 verdict 이 드물게
+        #  어긋날 수 있으나, 표시 점수는 사용자가 보는 종합점수로 통일한다.)
+        # 축이 섞인 쌍은 점수 행 자체를 뺀다 — report.html 은 score=None 을 이미 다룬다.
         score = None
         if not study_error:
-            before_head = _course_point_score(item, "before", 0.0)
-            after_head = _course_point_score(item, "after", before_head)
-            direction = "up" if after_head >= before_head else "down"
-            score = [str(before_head), str(after_head), direction]
+            rx_scores = _course_scores(item)
+            if rx_scores.available:
+                direction = "up" if rx_scores.after >= rx_scores.before else "down"
+                score = [str(rx_scores.before), str(rx_scores.after), direction]
 
         # 이 변경을 지지한 라벨 전체를 보여준다. 대표 하나로 좁히면 "왜 이걸
         # 골랐나"의 핵심(여러 문제가 같은 변경을 원했다)이 사라진다.

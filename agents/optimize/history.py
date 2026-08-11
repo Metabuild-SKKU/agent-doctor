@@ -39,6 +39,7 @@ from typing import Any
 from core.schema import DiagnosticReport
 from core.state import AgentDoctorState
 from agents.optimize.config_mapper import canonical_config_view, canonicalize_path
+from agents.optimize.score_display import to_display_scale
 from agents.optimize.schemas import (
     ActionAttemptKey,
     ActionStudyKey,
@@ -550,6 +551,10 @@ def judge(
     # 판정도 표시도 모두 composite 기준. 심판용(0~1)과 표시용(0~100)을 함께 싣는다.
     before_composite = _read_composite(before_report)
     after_composite = _read_composite(after_report)
+    # reason 은 사용자에게 그대로 노출된다(report_view 처방 카드의 "판정 근거" 캡션).
+    # 판정은 0~1 탐색 신호로 하되, 문장 안의 숫자는 리포트 헤드라인과 같은 0~100 이어야
+    # 한다 — "종합점수"라고 이름을 대면서 0.780 을 보여주면 상단의 78.0 과 앞뒤가 안 맞는다.
+    show_before, show_after = to_display_scale(before_score), to_display_scale(after_score)
 
     violations = check_floor(after_report.ragas_scores)
     if violations:
@@ -572,8 +577,9 @@ def judge(
             before_composite=before_composite,
             after_composite=after_composite,
             reason=(
-                f"종합점수 상승 {before_score:.3f}→{after_score:.3f} "
-                f"(+{improvement:.3f} ≥ 마진 {MIN_IMPROVEMENT_MARGIN:.3f}) → 유지"
+                f"종합점수 상승 {show_before:.1f}→{show_after:.1f} "
+                f"(+{to_display_scale(improvement):.1f} ≥ 마진 "
+                f"{to_display_scale(MIN_IMPROVEMENT_MARGIN):.1f}) → 유지"
             ),
         )
 
@@ -587,8 +593,9 @@ def judge(
             after_composite=after_composite,
             margin_rejected=True,
             reason=(
-                f"종합점수 상승폭 부족 {before_score:.3f}→{after_score:.3f} "
-                f"(+{improvement:.3f}, 필요 +{MIN_IMPROVEMENT_MARGIN:.3f}) → 롤백"
+                f"종합점수 상승폭 부족 {show_before:.1f}→{show_after:.1f} "
+                f"(+{to_display_scale(improvement):.1f}, 필요 "
+                f"+{to_display_scale(MIN_IMPROVEMENT_MARGIN):.1f}) → 롤백"
             ),
         )
 
@@ -598,7 +605,7 @@ def judge(
         after_score=after_score,
         before_composite=before_composite,
         after_composite=after_composite,
-        reason=f"종합점수 미상승 {before_score:.3f}→{after_score:.3f} → 롤백",
+        reason=f"종합점수 미상승 {show_before:.1f}→{show_after:.1f} → 롤백",
     )
 
 
