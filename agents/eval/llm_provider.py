@@ -76,6 +76,25 @@ def _provider() -> str:
     return raw
 
 
+def provider_name() -> str:
+    """활성 심판 provider 이름(외부 조회용). metrics_ragas 의 compact 변형 게이트가 쓴다 —
+    _provider() 를 직접 노출하면 경고 부작용까지 계약이 되므로 이름만 감싼다."""
+    return _provider()
+
+
+def judge_fanout(n_items: int, default: int) -> int:
+    """RAGAS 판정 fan-out 폭. anthropic 배치 모드에서는 동시성이 곧 배치 크기이므로
+    항목 수 전체로 넓힌다 — 스레드는 배치 결과를 기다리며 잠들 뿐이라 넓혀도 비용이
+    없고, 좁히면 EVAL_LLM_CONCURRENCY 개씩 배치가 쪼개져 배치당 대기(수 분)가 곱해진다.
+
+    답변 생성(RAG provider)은 대상이 아니다 — 이 함수는 심판(EVAL_LLM_PROVIDER) 호출을
+    묶는 parallel_map 에만 쓸 것."""
+    from core.llm_clients import anthropic_batch_enabled
+    if _provider() == "anthropic" and anthropic_batch_enabled():
+        return max(1, n_items)
+    return default
+
+
 def has_key() -> bool:
     """활성 provider의 API 키가 설정돼 있는지."""
     provider = _provider()

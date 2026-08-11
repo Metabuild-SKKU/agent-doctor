@@ -106,6 +106,22 @@ def _fused_max_tokens() -> int:
     return _env_int("EVAL_RAGAS_FUSED_MAX_TOKENS", 4096)
 
 
+def _compact_enabled() -> bool:
+    """anthropic 심판 전용 압축 변형(correctness 인덱스화 + faithfulness reason 제거 +
+    프롬프트 내 스키마 문자열 생략) 사용 여부. 기본 켬 — EVAL_RAGAS_COMPACT=0 으로 끈다.
+
+    anthropic 으로 한정하는 이유는 cache_prefix 와 같다(chat_json 주석 참고) — 다른
+    provider 의 프롬프트를 바꾸지 않는다. deepseek 등 반복 실행용 심판의 판정 분포가
+    이 절감 때문에 움직이면 실행 간 비교가 깨지고, 스키마 강제(output_config)가 없는
+    provider 에서 인덱스 배열 형식은 비준수 → 파싱 실패 위험이 있다.
+
+    실측 근거(2026-08-11, haiku-4-5 · 20 probe A/B ×2): reason 은 faithfulness ·
+    correctness 판정을 바꾸지 않는다(자기일치 바닥선 이내). context_precision/recall
+    은 reason 제거 시 +0.05 관대해지므로 그 두 블록(context_verdicts ·
+    recall_classifications)의 reason 은 유지한다."""
+    return llm_provider.provider_name() == "anthropic" and _env_flag("EVAL_RAGAS_COMPACT", True)
+
+
 # ══════════════════════════════════════════════════════════════════
 #  RAGAS 프롬프트 (ragas 0.4.3 소스 verbatim)
 # ══════════════════════════════════════════════════════════════════
@@ -470,6 +486,44 @@ _FUSED_BLOCKS: dict[str, tuple[str, str, Any]] = {
     ),
 }
 
+# ── 압축 변형 (_compact_enabled 일 때만 위 표를 부분 교체) ─────────
+#
+# 바꾸는 블록은 딱 둘이다. 실측(2026-08-11)이 근거다:
+#   faithfulness_verdicts — reason 제거. 판정(verdict)만 소비되고, reason 유무는 판정을
+#     바꾸지 않았다(자기일치 바닥선 이내). statement 는 남긴다 — 인덱스 참조 전환(A-3)은
+#     아직 검증 실험이 없다.
+#   correctness — {statement, reason} 목록 → 인덱스 배열. 소비처(_fused_correctness_counts)
+#     가 len() 만 읽으므로 정보 손실이 없다. TP/FP 는 answer_statements, FN 은
+#     reference_statements 의 0-기반 인덱스다.
+# context_verdicts · recall_classifications 는 손대지 않는다 — reason 을 빼면 판정이
+# +0.05 관대해지는 것이 두 쌍의 A/B 에서 일관되게 관측됐다.
+_COMPACT_BLOCK_OVERRIDES: dict[str, tuple[str, str, Any]] = {
+    "faithfulness_verdicts": (
+        f"{_FAITH_NLI_INSTRUCTION} The statements are the \"answer_statements\" you produced above, "
+        f"and the context is the concatenation of every entry in `contexts`. Return one entry per "
+        f"statement, in the same order, in \"faithfulness_verdicts\".",
+        '"faithfulness_verdicts": {"items": {"properties": {"statement": {"type": "string"}, '
+        '"verdict": {"type": "integer"}}, '
+        '"required": ["statement", "verdict"], "type": "object"}, "type": "array"}',
+        [{"statement": "Albert Einstein was a German-born theoretical physicist.", "verdict": 1},
+         {"statement": "Albert Einstein is best known for the theory of relativity.", "verdict": 1}],
+    ),
+    "correctness": (
+        "Given ground truth statements and answer statements, classify each answer statement as "
+        "TP (true positive: directly supported by one or more ground truth statements) or FP "
+        "(false positive: not directly supported), and classify each ground truth statement that "
+        "is missing from the answer as FN (false negative). Each answer statement belongs to "
+        "exactly one of TP or FP. Refer to statements by INDEX only: \"TP\" and \"FP\" are arrays "
+        "of 0-based indexes into your \"answer_statements\", and \"FN\" is an array of 0-based "
+        "indexes into your \"reference_statements\". Return the classification in \"correctness\".",
+        '"correctness": {"properties": {"TP": {"items": {"type": "integer"}, "type": "array"}, '
+        '"FP": {"items": {"type": "integer"}, "type": "array"}, '
+        '"FN": {"items": {"type": "integer"}, "type": "array"}}, '
+        '"required": ["TP", "FP", "FN"], "type": "object"}',
+        {"TP": [0, 1], "FP": [], "FN": [2]},
+    ),
+}
+
 # ── fused 응답의 JSON Schema (anthropic output_config.format 전용) ─
 #
 # 위 _FUSED_BLOCKS 의 스키마 조각은 **프롬프트에 글자로 박히는 문자열**이라 모델이 지키든
@@ -516,18 +570,33 @@ _FUSED_SCHEMA_PROPS: dict[str, dict] = {
             {"statement": _STR, "reason": _STR, "attributed": _INT01}))},
 }
 
+# 압축 변형의 스키마 몫 — _COMPACT_BLOCK_OVERRIDES 와 키 집합이 같아야 한다
+# (tests/test_ragas_fused.py 가 두 표의 대칭을 핀으로 잡는다).
+_INT_ARR = _arr({"type": "integer"})
+_COMPACT_SCHEMA_OVERRIDES: dict[str, dict] = {
+    "faithfulness_verdicts": {
+        "faithfulness_verdicts": _arr(_obj({"statement": _STR, "verdict": _INT01}))},
+    "correctness": {
+        "correctness": _obj({"TP": _INT_ARR, "FP": _INT_ARR, "FN": _INT_ARR})},
+}
 
-def _fused_json_schema(blocks: list[str]) -> dict | None:
+
+def _fused_json_schema(blocks: list[str], *, compact: bool = False) -> dict | None:
     """선택된 블록만으로 응답 JSON Schema 를 만든다. 블록이 없으면 None.
 
     프로퍼티 순서 = 블록 순서 = 모델이 답을 만들어야 하는 순서(분해 → 판정)다.
     스키마 강제는 순서를 요구하지 않지만, 순서를 맞춰두면 프롬프트와 스키마가 같은
-    이야기를 해서 모델이 헷갈릴 여지가 줄어든다."""
+    이야기를 해서 모델이 헷갈릴 여지가 줄어든다.
+
+    compact 는 anthropic 전용 압축 변형(_compact_enabled)의 스키마 몫이다."""
     if not blocks:
         return None
     props: dict = {}
     for name in blocks:
-        props.update(_FUSED_SCHEMA_PROPS[name])
+        if compact and name in _COMPACT_SCHEMA_OVERRIDES:
+            props.update(_COMPACT_SCHEMA_OVERRIDES[name])
+        else:
+            props.update(_FUSED_SCHEMA_PROPS[name])
     return _obj(props)
 
 
@@ -562,8 +631,16 @@ def _fused_prompt(blocks: list[str], question: str, answer: str,
     return prefix + suffix
 
 
+def _fused_block_table(compact: bool) -> dict[str, tuple[str, str, Any]]:
+    """조립에 쓸 블록 표. compact 면 검증된 두 블록만 압축판으로 교체한다."""
+    if not compact:
+        return _FUSED_BLOCKS
+    return {**_FUSED_BLOCKS, **_COMPACT_BLOCK_OVERRIDES}
+
+
 def _fused_prompt_parts(blocks: list[str], question: str, answer: str,
-                        contexts: list[str], reference: str) -> tuple[str, str]:
+                        contexts: list[str], reference: str,
+                        *, compact: bool = False) -> tuple[str, str]:
     """fused 프롬프트를 (안정 프리픽스, 가변 입력) 두 부분으로 조립한다.
 
     나누는 이유는 **프롬프트 캐싱**이다. 프리픽스(헤더·지시문·스키마·few-shot)는 블록
@@ -583,9 +660,10 @@ def _fused_prompt_parts(blocks: list[str], question: str, answer: str,
     블록 순서 = 모델이 답을 만들어야 하는 순서(분해 → 판정)이므로 호출부 순서를 지킨다.
     (anthropic 이 아닌 provider 는 두 부분이 이어붙어 예전과 같은 한 덩어리가 된다 —
     _fused_prompt 참고. 캐싱만 못 쓸 뿐 프롬프트 내용은 동일하다.)"""
+    table = _fused_block_table(compact)
     instructions, schema_parts, example_out = [], [], {}
     for i, name in enumerate(blocks, start=1):
-        instr, schema, example = _FUSED_BLOCKS[name]
+        instr, schema, example = table[name]
         instructions.append(f"({i}) " + instr.replace("{n}", str(RELEVANCY_STRICTNESS)))
         schema_parts.append(schema)
         if name == "relevancy":
@@ -609,16 +687,24 @@ def _fused_prompt_parts(blocks: list[str], question: str, answer: str,
         f"Input: {json.dumps(_FUSED_EXAMPLE_INPUT, indent=4, ensure_ascii=False)}\n"
         f"Output: {json.dumps(example_out, indent=4, ensure_ascii=False)}"
     )
+    # 프롬프트 속 스키마 문자열은 강제력이 없는 안내문이다(위 _FUSED_SCHEMA_PROPS 주석).
+    # compact(anthropic)에서는 output_config 가 디코딩 단계에서 같은 스키마를 강제하므로
+    # 이 문단은 이중 전송(호출당 ~600토큰)이라 생략한다. 다른 provider 는 이 문단이
+    # 유일한 스키마 안내라 유지한다.
+    schema_str = (
+        "" if compact else
+        "\n\nPlease return the output in a JSON format that complies with the following schema "
+        "as specified in JSON Schema:\n"
+        + f"{schema}Do not use single quotes in your response but double quotes, "
+          "properly escaped with a backslash."
+    )
     # 캐시 지점 앞 — 블록 구성이 같으면 매 호출 바이트가 동일해야 한다.
     # 여기에 질문·컨텍스트가 섞여 들어가면 캐시가 probe 마다 무효화된다.
     prefix = (
         f"{_FUSED_HEADER}\n\n"
         + "\n\n".join(instructions)
-        + "\n\nPlease return the output in a JSON format that complies with the following schema "
-          "as specified in JSON Schema:\n"
-        + f"{schema}Do not use single quotes in your response but double quotes, "
-          "properly escaped with a backslash.\n\n"
-        + f"{example_str}\n"
+        + schema_str
+        + f"\n\n{example_str}\n"
         + "-----------------------------\n\n"
           "Now perform the same with the following input\n"
     )
@@ -812,8 +898,10 @@ def _fused_track(judge, question: str, answer: str, contexts: list[str], referen
     # 프리픽스(지시문·스키마·few-shot)와 입력을 나눠 보낸다 — 앞부분이 anthropic 의
     # 캐시 지점이 된다. 블록 구성이 같으면 프리픽스 바이트가 동일하므로, 실제/오라클
     # 두 모양에 대해 각각 1회만 캐시를 쓰고 나머지는 전부 읽기(입력가의 0.1배)다.
-    prefix, user_input = _fused_prompt_parts(blocks, question, answer, contexts, reference)
-    schema = _fused_json_schema(blocks)
+    compact = _compact_enabled()
+    prefix, user_input = _fused_prompt_parts(blocks, question, answer, contexts, reference,
+                                             compact=compact)
+    schema = _fused_json_schema(blocks, compact=compact)
     d = _chat(judge, user_input, max_output_tokens=_fused_max_tokens(),
               label="fused", cache_prefix=prefix, json_schema=schema) if blocks else {}
     d = _refetch_fused_if_incomplete(judge, d, user_input, blocks,

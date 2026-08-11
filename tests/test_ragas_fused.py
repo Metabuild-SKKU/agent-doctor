@@ -96,16 +96,20 @@ def _record():
 
 
 class _FusedTestBase(unittest.TestCase):
-    """_chat/_embed 스텁 + fused 환경변수를 테스트 단위로 격리한다."""
+    """_chat/_embed 스텁 + fused 환경변수를 테스트 단위로 격리한다.
 
-    ENV = {"EVAL_RAGAS_FUSED": "1", "EVAL_RAGAS_FUSED_REPAIR": "1"}
+    EVAL_LLM_PROVIDER 를 고정하는 이유: compact 변형(_compact_enabled)이 provider 로
+    갈리므로, 개발 머신 .env 가 anthropic 이면 레거시 계약 테스트가 조용히 compact
+    프롬프트를 검증하게 된다."""
+
+    ENV = {"EVAL_RAGAS_FUSED": "1", "EVAL_RAGAS_FUSED_REPAIR": "1",
+           "EVAL_LLM_PROVIDER": "openrouter"}
 
     def setUp(self):
         self.stub = _Stub()
         self._orig = (metrics_ragas._chat, metrics_ragas._embed)
         metrics_ragas._chat, metrics_ragas._embed = self.stub.chat, self.stub.embed
-        self._env = {k: os.environ.get(k) for k in
-                     ("EVAL_RAGAS_FUSED", "EVAL_RAGAS_FUSED_REPAIR")}
+        self._env = {k: os.environ.get(k) for k in self.ENV}
         os.environ.update(self.ENV)
 
     def tearDown(self):
@@ -395,6 +399,89 @@ class FusedSchemaReachesTransportTest(_FusedTestBase):
         # 지시문은 cache_prefix(캐시 지점), 입력은 prompt 로 갈려야 한다.
         self.assertIn("evaluation judge", self.stub.systems[0])
         self.assertNotIn("질문", self.stub.systems[0])
+
+
+# compact 응답 — correctness 는 인덱스 배열, faithfulness 는 reason 없음.
+_COMPACT_PAYLOAD = dict(
+    _FUSED_PAYLOAD,
+    faithfulness_verdicts=[{"statement": "a1", "verdict": 1},
+                           {"statement": "a2", "verdict": 0}],
+    correctness={"TP": [0, 1], "FP": [], "FN": [1]},
+)
+
+
+class CompactVariantTest(_FusedTestBase):
+    """anthropic 전용 압축 변형(A-2 correctness 인덱스화 + A-1b faithfulness reason 제거
+    + D-2 프롬프트 내 스키마 문자열 생략)의 계약 고정.
+
+    실측 근거(2026-08-11, 20 probe A/B ×2): reason 은 faithfulness·correctness 판정을
+    바꾸지 않고, context 지표의 reason 제거는 +0.05 관대화를 만든다 — 그래서 두 블록만
+    바꾸고 context_verdicts·recall_classifications 는 그대로 둔다."""
+
+    ENV = {"EVAL_RAGAS_FUSED": "1", "EVAL_RAGAS_FUSED_REPAIR": "1",
+           "EVAL_LLM_PROVIDER": "anthropic", "EVAL_RAGAS_COMPACT": "1"}
+
+    def setUp(self):
+        super().setUp()
+        self.stub.fused_payload = dict(_COMPACT_PAYLOAD)
+
+    def test_compact_gate_is_provider_scoped(self):
+        self.assertTrue(metrics_ragas._compact_enabled())
+        with patch.dict(os.environ, {"EVAL_LLM_PROVIDER": "openrouter"}):
+            self.assertFalse(metrics_ragas._compact_enabled())     # 다른 provider 는 불변
+        with patch.dict(os.environ, {"EVAL_RAGAS_COMPACT": "0"}):
+            self.assertFalse(metrics_ragas._compact_enabled())     # kill switch
+
+    def test_compact_schema_drops_reason_and_uses_index_arrays(self):
+        schema = metrics_ragas._fused_json_schema(_REAL_BLOCKS, compact=True)
+        faith_props = schema["properties"]["faithfulness_verdicts"]["items"]["properties"]
+        self.assertNotIn("reason", faith_props)                     # A-1(b)
+        corr = schema["properties"]["correctness"]["properties"]
+        for bucket in ("TP", "FP", "FN"):
+            self.assertEqual(corr[bucket], {"items": {"type": "integer"}, "type": "array"})  # A-2
+        # 관대화가 실측된 두 블록의 reason 은 남아야 한다.
+        ctx = schema["properties"]["context_verdicts"]["items"]["properties"]
+        recall = schema["properties"]["recall_classifications"]["items"]["properties"]
+        self.assertIn("reason", ctx)
+        self.assertIn("reason", recall)
+        # required 규칙·구조 유효성은 레거시와 같은 규약을 지켜야 한다(Anthropic 400 방지).
+        self.assertEqual(schema["required"],
+                         metrics_ragas._fused_required_keys(_REAL_BLOCKS))
+
+    def test_compact_prefix_omits_schema_paragraph(self):
+        # D-2: output_config 가 스키마를 강제하므로 프롬프트 속 스키마 문단은 이중 전송이다.
+        legacy, _ = metrics_ragas._fused_prompt_parts(_REAL_BLOCKS, "q", "a", ["c"], "r")
+        compact, _ = metrics_ragas._fused_prompt_parts(
+            _REAL_BLOCKS, "q", "a", ["c"], "r", compact=True)
+        self.assertIn("complies with the following schema", legacy)
+        self.assertNotIn("complies with the following schema", compact)
+        self.assertIn("--------EXAMPLE-----------", compact)        # few-shot 은 유지
+        self.assertIn('"TP": [', compact)                           # 인덱스 배열 예시 노출
+        self.assertLess(len(compact), len(legacy))
+
+    def test_compact_scores_match_legacy_formulas(self):
+        # 형식이 바뀌어도 점수 계산은 같은 함수·같은 식이다(len/verdict 만 소비).
+        out = metrics_ragas.evaluate_real_track(_record(), True)
+        self.assertAlmostEqual(out["faithfulness"], 0.5)
+        self.assertEqual((out["answer_correctness_tp"], out["answer_correctness_fp"],
+                          out["answer_correctness_fn"]), (2, 0, 1))
+        self.assertAlmostEqual(out["context_recall"], 0.5)          # 비압축 블록은 그대로
+        # 호출에 실린 스키마·프리픽스도 compact 여야 한다(조립만 되고 안 실리면 무의미).
+        self.assertEqual(len(self.stub.chat_calls), 1)
+        sent = self.stub.schemas[0]
+        self.assertEqual(sent["properties"]["correctness"]["properties"]["TP"],
+                         {"items": {"type": "integer"}, "type": "array"})
+        self.assertNotIn("complies with the following schema", self.stub.systems[0])
+
+    def test_compact_counts_survive_index_arrays(self):
+        self.assertEqual(
+            metrics_ragas._fused_correctness_counts(
+                {"correctness": {"TP": [0, 2], "FP": [1], "FN": []}}),
+            (2, 1, 0))
+
+    def test_block_and_schema_override_tables_are_in_sync(self):
+        self.assertEqual(set(metrics_ragas._COMPACT_BLOCK_OVERRIDES),
+                         set(metrics_ragas._COMPACT_SCHEMA_OVERRIDES))
 
 
 if __name__ == "__main__":
