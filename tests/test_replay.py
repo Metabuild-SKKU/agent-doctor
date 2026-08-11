@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.eval import replay
 from agents.eval.log_intake import parse_record
-from agents.eval.metrics_basic import char_f1
+from agents.eval.metrics_basic import answer_match, char_f1
 from core.schema import DiagnosticReport
 
 NO_LLM = {"EVAL_ENABLE_LLM": "0"}
@@ -56,8 +56,19 @@ class TestBuildReplayRecords(unittest.TestCase):
         rec = replay.build_replay_records(logs)[0]
         self.assertEqual(rec.probe.ground_truth, "700만원입니다")
         self.assertAlmostEqual(
-            rec.f1_score, char_f1("700만원입니다", "700만원입니다"))
+            rec.f1_score, answer_match("700만원입니다", "700만원입니다"))
         self.assertGreater(rec.f1_score, 0.9)
+
+    def test_uses_answer_match_not_raw_char_f1(self):
+        """내부 모드(_compute_metrics)는 record.f1_score 에 raw char_f1 이 아니라
+        answer_match(짧은 정답 containment 보정)를 쓴다 - 같은 필드·같은 문턱(0.5)에
+        리플레이만 다른 지표를 실으면 외부 RAG 가 체계적으로 저평가된다.
+        (완결 문장으로 짧은 정답을 답한 케이스: char_f1 0.625 vs answer_match 1.0.)"""
+        pred, ref = "정답은 700만원입니다.", "700만원"
+        self.assertNotAlmostEqual(char_f1(pred, ref), answer_match(pred, ref))
+        logs = [_log(answer=pred, contexts=["ctx"], ground_truth=ref)]
+        rec = replay.build_replay_records(logs)[0]
+        self.assertAlmostEqual(rec.f1_score, answer_match(pred, ref))
 
     def test_no_ground_truth(self):
         rec = replay.build_replay_records([_log(contexts=["ctx"])])[0]

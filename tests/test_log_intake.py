@@ -89,6 +89,18 @@ class LoadExternalLogTest(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             load_external_log(os.path.join("없는", "경로", "log.jsonl"))
 
+    def test_utf8_bom_first_line_is_not_lost(self):
+        """Windows 메모장·엑셀이 만드는 UTF-8 BOM 파일 - 첫 줄이 오류로 유실되면
+        1건짜리 스모크 로그는 진단 전체가 '유효 레코드 없음'이 된다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "log.jsonl")
+            with open(path, "w", encoding="utf-8-sig") as f:
+                f.write(json.dumps({"question": "q1", "answer": "a1"}, ensure_ascii=False) + "\n")
+                f.write(json.dumps({"question": "q2", "answer": "a2"}, ensure_ascii=False) + "\n")
+            records, errors = load_external_log(path)
+        self.assertEqual([r.question for r in records], ["q1", "q2"])
+        self.assertEqual(errors, [])
+
 
 class AssessCapabilityTest(unittest.TestCase):
     def _record(self, **kw):
@@ -157,6 +169,13 @@ class SchemaV1FieldsTest(unittest.TestCase):
         self.assertEqual(rec.ground_truth, "700만원")
         empty = parse_record({"question": "q", "answer": "a", "ground_truth": []})
         self.assertIsNone(empty.ground_truth)
+
+    def test_ground_truth_dict_item_extracts_text(self):
+        """KorQuAD 원본 포맷 answers=[{"text":...,"answer_start":...}] - dict 를 str() 하면
+        "{'text': '700만원', ...}" 이 정답이 돼 채점을 조용히 오염시킨다."""
+        rec = parse_record({"question": "q", "answer": "a",
+                            "ground_truth": [{"text": "700만원", "answer_start": 10}]})
+        self.assertEqual(rec.ground_truth, "700만원")
 
     def test_capability_counts_exam_fields(self):
         records = [

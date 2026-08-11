@@ -64,6 +64,29 @@ class TestLoadQaSet(unittest.TestCase):
         # 정답이 빈 행도 질문은 있으므로 적재되되 값은 None
         self.assertIsNone(qa_map[normalize_question("빈 정답 행")]["ground_truth"])
 
+    def test_cp949_csv_does_not_crash(self):
+        """한국어 Windows 엑셀의 기본 'CSV(쉼표로 분리)' 저장은 cp949 - utf-8-sig 로만
+        열면 UnicodeDecodeError 가 diagnose_external_log 까지 그대로 전파돼 CLI 가 죽는다."""
+        with tempfile.TemporaryDirectory() as td:
+            qa = os.path.join(td, "qa.csv")
+            with open(qa, "w", encoding="cp949", newline="") as f:
+                f.write("question,ground_truth\n")
+                f.write("공제 한도는?,700만원\n")
+            qa_map, errors = load_qa_set(qa)
+        entry = qa_map[normalize_question("공제 한도는")]
+        self.assertEqual(entry["ground_truth"], "700만원")
+
+    def test_korquad_style_answers_dict_extracts_text(self):
+        """answers=[{"text":...,"answer_start":...}] - dict 를 str() 통짜 변환하면
+        "{'text': '700만원', ...}" 이 정답이 돼 F1/correctness 가 조용히 붕괴한다."""
+        with tempfile.TemporaryDirectory() as td:
+            qa = _write(td, "qa.json", json.dumps([
+                {"question": "공제 한도는", "answers": [{"text": "700만원", "answer_start": 10}]},
+            ], ensure_ascii=False))
+            qa_map, errors = load_qa_set(qa)
+        entry = qa_map[normalize_question("공제 한도는?")]
+        self.assertEqual(entry["ground_truth"], "700만원")
+
     def test_xlsx_format(self):
         openpyxl = __import__("openpyxl")
         with tempfile.TemporaryDirectory() as td:

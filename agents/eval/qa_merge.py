@@ -58,9 +58,14 @@ def _first_key(obj: dict, keys: tuple[str, ...]) -> Any:
 
 
 def _as_text(value: Any) -> Optional[str]:
-    """정답 후보 → 텍스트 하나. 리스트(KorQuAD식 복수 정답)는 첫 항목(v1 규약)."""
+    """정답 후보 → 텍스트 하나. 리스트(KorQuAD식 복수 정답)는 첫 항목(v1 규약).
+    항목이 dict(KorQuAD 원본 answers=[{"text":...,"answer_start":...}])면 그 dict 를
+    str() 통짜 변환하지 않고 "text" 키를 꺼낸다 - 안 그러면 "{'text': ..., ...}" 가
+    정답이 돼 채점을 조용히 오염시킨다."""
     if isinstance(value, list):
         value = value[0] if value else None
+    if isinstance(value, dict):
+        value = value.get("text") or value.get("answer")
     text = str(value or "").strip()
     return text or None
 
@@ -133,6 +138,20 @@ def _entries_from_xlsx(path: str) -> tuple[list[Any], list[str]]:
     return entries, []
 
 
+def _read_text(path: str) -> tuple[Optional[str], list[str]]:
+    """utf-8-sig(BOM 붙은 엑셀 CSV 수용) 로 먼저 읽고, 실패하면 cp949(한국어 Windows
+    엑셀의 기본 'CSV(쉼표로 분리)' 저장 인코딩) 로 재시도한다. 둘 다 실패하면 예외
+    대신 사람이 읽을 오류로 돌려준다 - 골든셋 하나가 못 깨져도 CLI 가 죽으면 안 된다
+    (이 모듈의 폴백 철학)."""
+    for encoding in ("utf-8-sig", "cp949"):
+        try:
+            with open(path, encoding=encoding) as f:
+                return f.read(), []
+        except UnicodeDecodeError:
+            continue
+    return None, [f"{path}: 인코딩을 인식하지 못했습니다(utf-8/cp949 시도 실패)"]
+
+
 def load_qa_set(path: str) -> tuple[dict[str, dict], list[str]]:
     """QA셋 파일 → {정규화 질문: {"ground_truth", "gold_contexts"}}, 오류 목록.
 
@@ -143,8 +162,9 @@ def load_qa_set(path: str) -> tuple[dict[str, dict], list[str]]:
     if ext in (".xlsx", ".xlsm"):
         entries, errors = _entries_from_xlsx(path)
     else:
-        with open(path, encoding="utf-8-sig") as f:   # BOM 붙은 엑셀 CSV 수용
-            content = f.read()
+        content, errors = _read_text(path)
+        if content is None:
+            return {}, errors
         if ext == ".csv":
             entries, errors = _entries_from_csv(content)
         elif ext == ".jsonl":
@@ -181,7 +201,7 @@ def merge_qa_into_log(log_path: str, qa_path: str, out_path: str) -> dict:
              "conflicts": 0, "qa_errors": qa_errors}
     matched_keys: set[str] = set()
 
-    with open(log_path, encoding="utf-8") as fin, \
+    with open(log_path, encoding="utf-8-sig") as fin, \
             open(out_path, "w", encoding="utf-8") as fout:
         for line in fin:
             stripped = line.strip()

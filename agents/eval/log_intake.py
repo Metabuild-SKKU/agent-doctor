@@ -124,6 +124,10 @@ def parse_record(obj: Any) -> ExternalLogRecord:
     gt_raw = obj.get("ground_truth")
     if isinstance(gt_raw, list):
         gt_raw = gt_raw[0] if gt_raw else None
+    # KorQuAD 원본 포맷 answers=[{"text":...,"answer_start":...}] - dict 를 str() 하면
+    # "{'text': ..., 'answer_start': ...}" 가 정답이 돼 채점을 조용히 오염시킨다.
+    if isinstance(gt_raw, dict):
+        gt_raw = gt_raw.get("text") or gt_raw.get("answer")
 
     return ExternalLogRecord(
         question=str(obj["question"]).strip(),
@@ -149,7 +153,9 @@ def load_external_log(path: str) -> tuple[list[ExternalLogRecord], list[str]]:
     빈 로그로 오인하지 않게)."""
     records: list[ExternalLogRecord] = []
     errors: list[str] = []
-    with open(path, encoding="utf-8") as f:
+    # utf-8-sig: BOM 이 있으면 벗기고, 없으면 utf-8 과 동일하게 읽는다(상위 호환) -
+    # Windows 메모장·엑셀이 만드는 BOM 파일의 첫 줄이 파싱 오류로 유실되는 것을 막는다.
+    with open(path, encoding="utf-8-sig") as f:
         for lineno, line in enumerate(f, start=1):
             line = line.strip()
             if not line:

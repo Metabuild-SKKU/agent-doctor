@@ -34,7 +34,7 @@ from core.schema import DiagnosticReport, Probe
 from agents.eval.log_intake import (
     TIER_NONE, TIER_QA_ONLY, ExternalLogRecord, assess_capability, load_external_log,
 )
-from agents.eval.metrics_basic import char_f1
+from agents.eval.metrics_basic import answer_match
 from agents.eval.metrics_ragas import _judge, evaluate_real_track
 from agents.eval.replay_labels import apply_ext_labels, gold_context_recall
 from agents.eval.report import build_report
@@ -77,7 +77,12 @@ def build_replay_records(logs: list[ExternalLogRecord]) -> list[EvalRecord]:
             recall_at_k=-1.0,
         )
         if gt:
-            rec.f1_score = char_f1(log.answer, gt)
+            # 내부 모드(_compute_metrics)와 같은 지표: raw char_f1 이 아니라 answer_match
+            # (짧은 정답 containment·서술형 창 F1 보정). 같은 필드(f1_score)·같은 문턱(0.5)을
+            # 두 모드가 다른 지표로 채우면 외부 RAG 가 체계적으로 저평가된다.
+            score = answer_match(log.answer, gt)
+            rec.f1_score = score
+            rec.raw_f1_score = score
         records.append(rec)
     return records
 
