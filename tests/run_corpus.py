@@ -41,6 +41,12 @@ sys.path.insert(0, str(REPO_ROOT))
 from core.console import force_utf8_stdio
 force_utf8_stdio()   # cp949 콘솔에서 '—' 등이 UnicodeEncodeError 를 내지 않도록(로깅과 독립)
 
+from core.embedding_cli import (   # noqa: E402
+    add_embedding_args,
+    apply_embedding_args,
+    describe_embedding_route,
+)
+
 def _load_env() -> None:
     """.env 로드. import 시점이 아니라 main() 에서만 부른다.
 
@@ -278,9 +284,15 @@ def main():
     parser.add_argument("--regen-qa", action="store_true", help="기존 qa.json 을 버리고 재생성")
     parser.add_argument("--loop", action="store_true",
                         help="품질 미달 시 Optimize→재색인→재평가 반복(기본은 1회)")
+    add_embedding_args(parser)
     args = parser.parse_args()
 
     _load_env()   # 실제 실행할 때만 .env 를 적용한다(import 부작용 방지)
+
+    # .env 뒤에 적용한다 — _load_env 가 override=True 라 먼저 적용하면 덮어쓰인다.
+    applied = apply_embedding_args(args)
+    if applied:
+        print(f"  임베딩 설정 적용: {applied}")
 
     # 로깅은 파이프라인 import 보다 먼저 설치한다 — 모델 로딩 경고처럼 import 시점에
     # 나오는 출력까지 로그에 담기게. (setup 이전 출력은 콘솔에만 남는다.)
@@ -289,6 +301,7 @@ def main():
 
     print(f"  문서   : {find_source_doc().name}")
     print(f"  진단   : EVAL_MODE=full (RAGAS 포함)")
+    print(f"  {describe_embedding_route()}")
 
     try:
         state = run_pipeline_for(CORPUS_ROOT, regen_qa=args.regen_qa, loop=args.loop)

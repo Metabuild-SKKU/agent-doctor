@@ -1417,13 +1417,43 @@ def bad_gold_chunk(record: EvalRecord) -> Optional[Finding]:
         return None                      # 골드로 답이 나오면 골드 청크는 정상
     if not _f1_ok(record):
         return None                      # 실제 답도 틀리면 골드 문제로 단정 못 함(진짜 실패 영역)
+
+    # 여기까지 온 두 조건(_f1_ok · not _oracle_ok)은 **재실행해도 같은 값**이다(글자 비교).
+    # 그 둘만으로 "골드 컨텍스트로는 이 답이 안 나온다"가 이미 성립하므로, 경쟁 슬롯의
+    # 검색 원인(retrieval_*)은 이 시점에 이미 거짓이다 — 못 가져온 골드가 애초에 답을
+    # 담고 있지 않다.
+    #
+    # faithfulness 는 남은 갈림길 하나만 정한다: 답이 **검색 근거**에서 나왔나(→ 골드 오라벨),
+    # 아니면 모델 **기억**에서 나왔나(→ parametric 쪽). 그래서 이 값은 라벨의 존재가 아니라
+    # 확정/예비만 가른다.
+    #
+    # 예전에는 미달이면 return None 이라 라벨이 통째로 사라졌다. 그게 실측에서 사고를 냈다
+    # (output/logs/corpus_20260804_103059.txt): probe_qa_4195 는 답도 검색 결과도 5회 내내
+    # 같았는데 반복 3 에서만 faithfulness 가 1.000→0.000 으로 튀어 라벨이 사라졌고,
+    # 그 자리를 retrieval_rerank_candidate_miss 가 차지해 처방(rerank_candidates 20→22)까지
+    # 만들어 최종 config 에 남았다. 결정론적 신호 둘이 일치하는데 흔들리는 신호 하나가
+    # 뒤집은 것이다.
+    #
+    # 반복 평균으로는 못 막는다 — 같은 모델의 배심원단은 에러 상관 ρ=0.944~0.972 라
+    # 같은 곳에서 같이 틀린다(arXiv 2607.08535). 그래서 판정 구조 쪽을 고친다.
+    #
+    # 예비도 **점수에서는 확정과 똑같이 뺀다**(report.is_gold_labeling_error 는 confirmed 를
+    # 요구하지 않는다). 확정만 빼면 제외 여부 자체가 심판 노이즈를 그대로 타서, 같은 probe 가
+    # 회차마다 빠졌다 들어왔다 하며 종합점수를 흔든다 — 덜 빼는 것보다 그쪽이 더 불안정하다.
+    # 확정/예비가 실제로 가르는 건 점수가 아니라 **억제 범위**다(확정은 검색·생성·컨텍스트
+    # 전부, 예비는 검색만 — 아래 diagnose() 의 preliminary_gold 참고).
     faith = _faith(record)
-    if faith is None or faith < RAGAS_FAITHFULNESS_MIN:
-        return None                      # 답이 검색 근거에 안 붙으면(parametric 등) 골드 단정 불가
+    if faith is None:
+        return None                      # 미측정(DEEP 미만) — 근거성에 대해 아무 말도 못 한다.
+                                         # 여기서 예비로라도 세우면 RAGAS 를 안 켠 실행 전체가
+                                         # 검색 진단을 잃는다(측정 없이 주장하는 셈).
+    grounded = faith >= RAGAS_FAITHFULNESS_MIN
+    basis = (f"faithfulness={_v(faith)}(검색 근거 있음)" if grounded
+             else f"faithfulness={_v(faith)}(측정됐으나 미달 — 기억에서 답했을 수 있어 예비)")
     return _finding(
-        record, "bad_gold_chunk", "gap", confirmed=True,
+        record, "bad_gold_chunk", "gap", confirmed=grounded,
         reason=f"f1={_v(record.f1_score)}(실제 답 정답)·oracle_f1={_v(record.oracle_f1)}(골드론 실패)"
-               f", faithfulness={_v(faith)}(검색 근거 있음) → 골드 청크 오라벨(정답 텍스트는 정상)",
+               f", {basis} → 골드 청크 오라벨(정답 텍스트는 정상)",
     )
 
 
@@ -1615,6 +1645,170 @@ _RANK_LABELS = {
 }
 
 
+# 라벨은 사람이 읽는 원인명이고, 아래 metadata 는 후속 단계가 읽을 실패 위치다.
+# Optimize/Serve 가 "어느 값이 바뀌었나"보다 "어느 단계를 고치나"를 먼저 볼 수 있게 둔다.
+_FAILURE_LOCALIZATION = {
+    # 검색 질의·후보 생성 단계
+    "retrieval_missing_bridge_dependency": {
+        "failure_stage": "query_planning",
+        "repair_scope": "decompose_query_or_expand_bridge_entity",
+    },
+    "retrieval_incomplete_enumeration": {
+        "failure_stage": "retrieval",
+        "repair_scope": "increase_top_k_or_enable_mmr",
+    },
+    "retrieval_rank_fusion_loss": {
+        "failure_stage": "retrieval",
+        "repair_scope": "rebalance_hybrid_fusion",
+    },
+    "retrieval_duplicate_crowding": {
+        "failure_stage": "retrieval",
+        "repair_scope": "deduplicate_or_diversify_candidates",
+    },
+    "retrieval_rerank_candidate_miss": {
+        "failure_stage": "retrieval",
+        "repair_scope": "expand_rerank_candidate_pool",
+    },
+    "retrieval_reranker_demotion": {
+        "failure_stage": "retrieval",
+        "repair_scope": "tune_or_rollback_reranker",
+    },
+    "retrieval_reranker_ineffective": {
+        "failure_stage": "retrieval",
+        "repair_scope": "tune_or_disable_reranker",
+    },
+    "retrieval_low_rank": {
+        "failure_stage": "retrieval",
+        "repair_scope": "increase_candidate_pool_or_rerank",
+    },
+    "retrieval_lexical_mismatch": {
+        "failure_stage": "retrieval",
+        "repair_scope": "improve_lexical_retrieval",
+    },
+    "retrieval_semantic_mismatch": {
+        "failure_stage": "retrieval",
+        "repair_scope": "improve_dense_retrieval",
+    },
+    "retrieval_missing_gold": {
+        "failure_stage": "retrieval",
+        "repair_scope": "reretrieve_or_expand_search",
+    },
+    "retrieval_failure": {
+        "failure_stage": "retrieval",
+        "repair_scope": "rerun_with_deeper_retrieval_diagnosis",
+    },
+
+    # 인덱싱·컨텍스트 구성 단계
+    "chunking_overchunking": {
+        "failure_stage": "indexing",
+        "repair_scope": "merge_or_resize_chunks",
+    },
+    "chunking_context_mismatch": {
+        "failure_stage": "indexing",
+        "repair_scope": "adjust_chunk_overlap_or_size",
+    },
+    "chunking_underchunking": {
+        "failure_stage": "indexing",
+        "repair_scope": "split_or_shrink_chunks",
+    },
+    "too_long_context": {
+        "failure_stage": "context_packaging",
+        "repair_scope": "compress_or_shorten_context",
+    },
+    "lost_in_the_middle": {
+        "failure_stage": "context_packaging",
+        "repair_scope": "reorder_or_reduce_context",
+    },
+    "context_noise_interference": {
+        "failure_stage": "context_packaging",
+        "repair_scope": "filter_noise_or_rerank_context",
+    },
+    "reranker_low_precision": {
+        "failure_stage": "retrieval",
+        "repair_scope": "tune_or_disable_reranker",
+    },
+    "context_failure": {
+        "failure_stage": "context_packaging",
+        "repair_scope": "rerun_with_deeper_context_diagnosis",
+    },
+
+    # 답변 생성 단계
+    "generation_wrongful_abstention": {
+        "failure_stage": "generation",
+        "repair_scope": "regenerate_with_relaxed_abstention",
+    },
+    "generation_abstention_failure": {
+        "failure_stage": "generation",
+        "repair_scope": "regenerate_with_stricter_abstention",
+    },
+    "generation_parametric_overreliance": {
+        "failure_stage": "generation",
+        "repair_scope": "regenerate_with_stricter_grounding",
+    },
+    "generation_hallucination": {
+        "failure_stage": "generation",
+        "repair_scope": "regenerate_with_stricter_grounding",
+    },
+    "generation_contradiction": {
+        "failure_stage": "generation",
+        "repair_scope": "verify_or_regenerate_answer",
+    },
+    "generation_numerical_error": {
+        "failure_stage": "generation",
+        "repair_scope": "add_calculation_check",
+    },
+    "generation_misinterpretation": {
+        "failure_stage": "generation",
+        "repair_scope": "restate_question_then_regenerate",
+    },
+    "generation_hop_binding_error": {
+        "failure_stage": "generation",
+        "repair_scope": "decompose_or_require_hop_citation",
+    },
+    "generation_partial_answer": {
+        "failure_stage": "generation",
+        "repair_scope": "regenerate_with_completeness_prompt",
+    },
+    "generation_failure": {
+        "failure_stage": "generation",
+        "repair_scope": "rerun_with_deeper_generation_diagnosis",
+    },
+
+    # RAG 파이프라인이 아니라 검증셋·코퍼스 입력 문제
+    "bad_gold_answer": {
+        "failure_stage": "evaluation_data",
+        "repair_scope": "regenerate_probe_answer",
+    },
+    "bad_gold_chunk": {
+        "failure_stage": "evaluation_data",
+        "repair_scope": "manual_gold_relabel",
+    },
+    "corpus_gap": {
+        "failure_stage": "corpus",
+        "repair_scope": "add_or_fix_source_document",
+    },
+    "corpus_gap_partial_hop": {
+        "failure_stage": "corpus",
+        "repair_scope": "add_or_fix_missing_hop_document",
+    },
+}
+
+
+def _localization_for(label: str, ftype: str) -> dict:
+    """후속 repair 가 읽을 실패 위치 metadata. 미등록 라벨은 그룹 기반으로 보수 폴백한다."""
+    found = _FAILURE_LOCALIZATION.get(label)
+    if found is not None:
+        return dict(found)
+    group = _group_of(label, ftype)
+    if group == "A":
+        return {"failure_stage": "retrieval", "repair_scope": "rerun_retrieval_diagnosis"}
+    if group == "B":
+        return {"failure_stage": "generation", "repair_scope": "rerun_generation_diagnosis"}
+    if group == "D":
+        return {"failure_stage": "evaluation_data", "repair_scope": "manual_review"}
+    return {"failure_stage": "context_packaging", "repair_scope": "rerun_context_diagnosis"}
+
+
 def _v(x) -> str:
     """reason 문자열용 값 포맷(float 은 소수 3자리, None 은 '-').
 
@@ -1666,6 +1860,7 @@ def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool, reason
     group = _group_of(label, ftype)
     prefix = "" if confirmed else "[예비] "
     metadata: dict = {"group": group, "reason": reason}
+    metadata.update(_localization_for(label, ftype))
     if label in _RANK_LABELS:
         ranks = _gold_ranks(record)
         if ranks:
@@ -1710,18 +1905,34 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
     # 오라클 트랙 RAGAS — 소비처가 B그룹 라벨·_oracle_ok 뿐이라 실패 probe 에서만 지불한다.
     _compute_ragas_oracle(record)
 
+    # 예비 골드 오라벨(확정이면 아래에서 단락한다). 코퍼스 결손 경로에서는 판정하지 않으므로
+    # None 으로 시작한다.
+    preliminary_gold: Optional[Finding] = None
+
     # 아래 두 단락(골드 오라벨·검증된 label-recall miss)은 골드가 코퍼스에 있을 때만 탄다.
     # gold 가 코퍼스에 없으면(_corpus_gap_premise) 없는 청크를 '재지정'할 수도(bad_gold_chunk),
     # '다른 유효 근거로 검증됐다'고 볼 수도(label-recall miss) 없다 — 단락하면 additive 인
     # corpus_gap/corpus_gap_partial_hop(자료 결손·누락 gold 표기)이 통째로 사라진다(리뷰 지적).
     # 이 경우 정상 경로로 흘려 corpus_gap 이 그 사실을 보고하게 양보한다.
     if not _corpus_gap_premise(record):
+        # 정답 텍스트 자체가 의심되면 파이프라인 원인 판정을 멈춘다.
+        # bad_gold_answer 는 optimize 로 고칠 수 있는 검색·생성 문제가 아니라 데이터 검수 대상이다.
+        # 단, 자료 자체가 없으면 corpus_gap 을 먼저 보고해야 하므로 이 가드는 코퍼스 gap 밖에서만 탄다.
+        # oracle 이 이미 통과한 probe 는 정답셋 오류가 아니라 검색/컨텍스트/생성 원인으로 내려간다.
+        gold_answer_error = None if _oracle_ok(record) else bad_gold_answer_oracle(record)
+        if gold_answer_error is not None:
+            return [gold_answer_error]
+
         # 골드 청크 오라벨: 실제 답은 맞는데(f1 통과) 골드 청크로는 못 맞춘 경우 — 검색·생성이
         # 아니라 골드 라벨이 틀린 것이다. 경쟁 슬롯의 거짓 원인(retrieval_low_rank·generation_*)을
         # 막고 이 하나만 남겨 검수로 보낸다(점수에서는 report 가 거짓 실패로 제외).
         chunk_mislabel = bad_gold_chunk(record)
-        if chunk_mislabel is not None:
+        if chunk_mislabel is not None and chunk_mislabel.confirmed:
             return [chunk_mislabel]
+        # 예비는 단락하지 않는다 — 아래에서 검색 슬롯만 닫고 나머지는 정상 경로로 흘린다.
+        # (예비의 뜻이 "골드가 못 쓰는 건 확실한데 왜인지는 미확인"이므로, 확신하는 만큼만
+        #  막는다. 자세한 이유는 아래 preliminary_gold 주석.)
+        preliminary_gold = chunk_mislabel
 
         # 검증된 label-recall miss: 라벨 골드는 못 집었지만 답이 정답·검색 근거에 붙고 골드도
         # 유효하면, 검색은 다른 유효 근거로 정답을 뒷받침한 것이라 실패가 아니다. recall 스윙
@@ -1731,10 +1942,23 @@ def diagnose(record: EvalRecord, mode: Optional[int] = None) -> list[Finding]:
             record.retrieval_axis = _faith(record)
             return []
 
+    # 예비 골드 오라벨: 확정과 달리 단락하지 않고 additive 로 얹는다.
+    #
+    # 확정이면 "골드가 틀렸다"가 서므로 경쟁 원인을 전부 막는 게 맞다. 예비는 그보다
+    # 약한 주장이다 — 결정론적 두 신호(_f1_ok · not _oracle_ok)로 "이 골드로는 이 답이
+    # 안 나온다"까지는 확실하지만, 왜인지(골드 오라벨 vs 파라미터 기억)는 미확인이다.
+    # 그래서 **확신하는 만큼만 막는다**: 검색 원인만 닫고 생성·컨텍스트는 살려 둔다.
+    #
+    #   검색을 막는 이유 : 못 가져온 골드가 애초에 답을 담고 있지 않다. "왜 안 가져왔나"는
+    #                      faithfulness 와 무관하게 이미 거짓 진단이다. 실측 사고
+    #                      (probe_qa_4195, 반복 3)의 rerank_candidates 처방이 여기서 나왔다.
+    #   생성을 살리는 이유: 오라클 트랙이 스스로 근거 없이 답한 경우(hallucination)는 골드가
+    #                      아니라 생성기에 대한 증거다. 예비 상태에서 그것까지 지우면
+    #                      측정된 신호를 추측으로 덮는 셈이다.
     # 추가 진단
-    findings = []
+    findings = [preliminary_gold] if preliminary_gold is not None else []
     if 0 <= record.recall_at_k < 1:                     # A: 검색 실패 (gold 있는데 일부 미검색)
-        if _retrieval_fixable(record):                  # 코퍼스 밖·무응답 기대는 검색 몫이 아니다
+        if preliminary_gold is None and _retrieval_fixable(record):
             findings.append(_pick(record, _RETRIEVAL_CAUSE))
         findings.append(corpus_gap(record))             # D: 코퍼스에 gold 없음 (additive)
         findings.append(corpus_gap_partial_hop(record))

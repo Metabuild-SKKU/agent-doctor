@@ -56,6 +56,12 @@ from agents.eval.types import (
     resolve_probe_source,
     taxonomy_qa_path,
 )
+from core.llm_clients import (
+    SCHEMA_INT,
+    SCHEMA_STR,
+    array_of,
+    strict_object,
+)
 from core.parallel import parallel_map
 
 # 자동 생성 기본 개수 (설계: testset_size=5~10 으로 시작해 비용 확인 후 확대)
@@ -226,6 +232,28 @@ _HEURISTIC_EVIDENCE_MAX_CHARS = 240
 # 함께 소진한다. 여기서 잘리면 JSON 파싱이 실패해 휴리스틱 폴백으로 떨어진다.
 _SYNTHESIS_MAX_OUTPUT_TOKENS = 4096
 
+# ── Probe 합성 응답 스키마 (anthropic output_config.format 전용) ───
+#
+# 파싱 실패의 대가가 파이프라인에서 가장 크다. RAGAS 심판이 실패하면 그 지표만 결측이고
+# 보수 경로가 되묻지만, 여기서 실패하면 휴리스틱 폴백으로 떨어져 **쓰레기 gold 가
+# eval_probes.json 에 박제**되고 이후 모든 채점이 그 gold 를 기준으로 오염된다.
+# 아래 print("... → 휴리스틱 폴백") 로그들이 그 사고의 흔적이다.
+#
+# system 프롬프트가 이미 같은 모양을 글자로 지시하고 있지만 그건 강제력이 없다.
+# 스키마를 실으면 디코딩 단계에서 강제돼 "빈 응답/파싱 실패" 자체가 불가능해진다.
+# (anthropic 이 아닌 provider 는 이 값을 무시하므로 동작이 예전과 같다.)
+_SCHEMA_QA = strict_object({"question": SCHEMA_STR, "ground_truth": SCHEMA_STR})
+_SCHEMA_TOPIC = strict_object({"topic": SCHEMA_STR})
+_SCHEMA_QUESTION = strict_object({"question": SCHEMA_STR})
+_SCHEMA_QA_EVIDENCE = strict_object({
+    "question": SCHEMA_STR,
+    "ground_truth": SCHEMA_STR,
+    # evidence 는 빈 배열도 유효하다(_parse_evidence 가 결측을 감당한다). required 에
+    # 남겨두는 이유는 키 자체가 사라지는 걸 막기 위함 — 값이 없으면 [] 로 오게 된다.
+    "evidence": array_of(strict_object({"source_index": SCHEMA_INT,
+                                        "quote": SCHEMA_STR})),
+})
+
 
 # ── Probe 품질 게이트 ─────────────────────────────────────────────
 #
@@ -386,6 +414,7 @@ def _from_chunks(
         lambda chunk: _llm_generate_single_hop(chunk.text),
         targets,
         resolve_llm_concurrency(),
+        label="  [Eval] STEP1 single-hop probe 합성",
     )
     for chunk, generated in zip(targets, results):
         if len(probes) >= size:
@@ -560,6 +589,7 @@ def _llm_generate_single_hop(chunk_text: str) -> tuple[str, str] | None:
             user=f"[컨텍스트]\n{chunk_text}",
             max_output_tokens=_SYNTHESIS_MAX_OUTPUT_TOKENS,
             label="probe.single_hop",
+            json_schema=_SCHEMA_QA,
         )
         question = (data.get("question") or "").strip()
         ground_truth = (data.get("ground_truth") or "").strip()
@@ -656,6 +686,11 @@ def _build_doc_position_index(doc: Document, chunks: list[Chunk]) -> list[tuple[
 
     chunk_index 순서로 훑으면서 직전 청크의 start로 cursor를 옮기기 때문에
     (겹치는) 청크가 순서를 지켜 반복 등장해도 이전 위치를 앞지르지 않는다.
+
+    dedup 이 버린 쌍둥이의 자리는 그 본문을 대표하는 청크 몫으로 달아 준다. 이게 없으면
+    그 구간에 걸린 gold span 이 어느 청크에도 안 붙어 gold_chunk_ids 가 비고, '어떤 gold
+    청크를 놓쳤나'를 근거로 삼는 검색 라벨이 통째로 침묵한다.
+    쌍둥이는 다른 문서에 있을 수 있으므로 doc_id 로 이 문서 몫만 고른다.
     """
     doc_chunks = sorted(
         (c for c in chunks if c.doc_id == doc.doc_id),
@@ -684,6 +719,13 @@ def _build_doc_position_index(doc: Document, chunks: list[Chunk]) -> list[tuple[
         index.append((c.chunk_id, start, end))
         # overlap 청크도 허용하면서 동일 텍스트의 다음 등장을 찾을 수 있게 한 칸 전진한다.
         cursor = start + 1
+    # 별칭은 본래 좌표를 다 넣은 뒤에 붙인다 — 청크 하나를 id 로 되찾는 쪽
+    # (_chunk_fallback_span)이 앞의 제 좌표를 먼저 집게 하려는 것이다.
+    # 이 문서 청크만이 아니라 전체를 훑는다: 쌍둥이가 다른 문서 청크일 수 있다.
+    for c in chunks:
+        for start, end in _declared_alias_spans(c, doc.doc_id):
+            if end <= len(doc.content):
+                index.append((c.chunk_id, start, end))
     return index
 
 
@@ -706,6 +748,40 @@ def _declared_chunk_span(chunk: Chunk) -> tuple[int, int] | None:
     ):
         return None
     return start, end
+
+
+def _declared_alias_spans(chunk: Chunk, doc_id: str) -> list[tuple[int, int]]:
+    """이 청크가 doc_id 안에서 대신 대표하는 구간들(dedup 이 버린 쌍둥이 자리).
+
+    core/schema.py::Chunk.duplicate_spans 참고. 좌표계가 char_span 과 달리 트림 전이라
+    content[start:end] 가 청크 텍스트와 정확히 같지는 않다(앞뒤 공백 포함). 그래서
+    _valid_document_span 의 텍스트 일치 검증은 걸지 않고 길이로만 거른다 — 본문이
+    같으니 구간이 텍스트 길이보다 짧을 수는 없다.
+    """
+    raw = chunk.duplicate_spans
+    if not raw and chunk.metadata:
+        raw = chunk.metadata.get("duplicate_spans")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    spans: list[tuple[int, int]] = []
+    for entry in raw:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            continue
+        alias_doc, start, end = entry
+        if alias_doc != doc_id:
+            continue
+        if (
+            isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, int)
+            or not isinstance(end, int)
+            or start < 0
+            or end <= start
+            or end - start < len(chunk.text)
+        ):
+            continue
+        spans.append((start, end))
+    return spans
 
 
 def _valid_document_span(
@@ -1191,7 +1267,8 @@ def _generate_ragas_probes(
         specs.append(_plan_ragas_probe(nodes, quadrant, subtype))
 
     # 합성 단계(병렬): LLM 호출만. 실패는 태스크 안에서 None 으로 흡수(예외 무전파).
-    results = parallel_map(_synthesize_ragas_query, specs, resolve_llm_concurrency())
+    results = parallel_map(_synthesize_ragas_query, specs, resolve_llm_concurrency(),
+                           label="  [Eval] STEP1 RAGAS probe 합성")
 
     # 조립 단계(순차, plan 순서): probe_id 번호(성공분만 카운트) 규칙 보존
     probes: list[Probe] = []
@@ -1245,7 +1322,8 @@ def _generate_datamorgana_probes(
             persona=s["persona"], style="conversational",
             length="long", evol_dir="breadth",
         ),
-        specs, resolve_llm_concurrency())
+        specs, resolve_llm_concurrency(),
+        label="  [Eval] STEP1 DataMorgana probe 합성")
 
     probes: list[Probe] = []
     for spec, result in zip(specs, results):
@@ -1334,7 +1412,8 @@ def _generate_held_out_probes(chunks: list[Chunk], n: int) -> list[Probe]:
             break
         specs.append({"index": i, "node": random.choice(usable)})
     results = parallel_map(lambda s: _held_out_question(s["node"].text, s["index"]),
-                           specs, resolve_llm_concurrency())
+                           specs, resolve_llm_concurrency(),
+                           label="  [Eval] STEP1 held-out probe 합성")
 
     probes: list[Probe] = []
     for spec, question in zip(specs, results):
@@ -1409,6 +1488,7 @@ def _llm_topic(chunk_text: str) -> str | None:
                     "반드시 {\"topic\": str} 형태의 JSON으로만 답하라."),
             user=f"[컨텍스트]\n{chunk_text}",
             label="probe.topic",
+            json_schema=_SCHEMA_TOPIC,
         )
         topic = (data.get("topic") or "").strip()
         # LLM 결과에도 furniture 가 섞일 수 있으니 게이트를 태워 걸러낸다(잔여물이면 폐기 → 폴백).
@@ -1435,7 +1515,8 @@ def _generate_false_premise_probes(graph: knowledge_graph.KGraph, n: int, start_
             break
         specs.append({"index": i, "node": random.choice(usable)})
     results = parallel_map(lambda s: _false_premise_question(s["node"].text),
-                           specs, resolve_llm_concurrency())
+                           specs, resolve_llm_concurrency(),
+                           label="  [Eval] STEP1 false-premise probe 합성")
 
     probes: list[Probe] = []
     for spec, question in zip(specs, results):
@@ -1481,6 +1562,7 @@ def _false_premise_question(chunk_text: str) -> str | None:
                         "반드시 {\"question\": str} 형태의 JSON으로만 답하라."),
                 user=f"[컨텍스트]\n{chunk_text}",
                 label="probe.adversarial",
+                json_schema=_SCHEMA_QUESTION,
             )
             question = (data.get("question") or "").strip()
             if question:
@@ -1668,6 +1750,7 @@ def _llm_synthesize_query(
             user=f"[컨텍스트]\n{_format_sources_for_llm(nodes)}",
             max_output_tokens=_SYNTHESIS_MAX_OUTPUT_TOKENS,
             label="probe.quadrant",
+            json_schema=_SCHEMA_QA_EVIDENCE,
         )
         question = (data.get("question") or "").strip()
         ground_truth = (data.get("ground_truth") or "").strip()

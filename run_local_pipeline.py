@@ -31,6 +31,24 @@ except ImportError:
 from core.console import force_utf8_stdio
 force_utf8_stdio()   # cp949 콘솔에서 '—' 등이 UnicodeEncodeError 를 내지 않도록(로깅과 독립)
 
+# 임베딩 실행 위치만 플래그로 받는다(--embed openrouter|gpu|cpu). 소스는 기존대로 env.
+# load_dotenv 뒤에 적용해야 한다 — override=True 라 먼저 적용하면 .env 가 덮어쓴다.
+import argparse  # noqa: E402
+
+from core.embedding_cli import (  # noqa: E402
+    add_embedding_args,
+    apply_embedding_args,
+    describe_embedding_route,
+)
+
+_parser = argparse.ArgumentParser(
+    description="전체 파이프라인 로컬 스모크(Ingest→Index→Eval→Optimize, Serve 제외)",
+)
+add_embedding_args(_parser)
+_applied = apply_embedding_args(_parser.parse_args())
+if _applied:
+    print(f"[Pipeline] 임베딩 설정 적용: {_applied}")
+
 from core.run_logger import setup_run_logging
 setup_run_logging(prefix="local_pipeline")  # 이후 모든 print 를 콘솔+로그파일에 동시 출력
 
@@ -43,6 +61,7 @@ from agents.optimize.agent import run as optimize_run
 # 기본값은 레포에 포함된 sample_docs/hr_policy.md(file) 로 둔다 — korquad 는 data/ 파일을
 # 별도 준비해야 하므로(gitignore), 클론 직후 바로 실행되려면 file 이어야 한다(graph.py 와 동일).
 SOURCE_TYPE = os.getenv("SOURCE_TYPE", "file").strip().lower()
+print(f"[Pipeline] {describe_embedding_route()}")
 
 state = AgentDoctorState()
 state.source_type = SOURCE_TYPE

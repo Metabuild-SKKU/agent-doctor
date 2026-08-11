@@ -47,10 +47,16 @@ Use `Retrieval Bottleneck Signals` to check whether `retrieval_low_rank`,
 Use `Action-Centered Summary` for Issue #67. It groups prescriptions by their
 actual config action, such as:
 
-- `top_k:increase`
-- `rerank_candidates:increase`
-- `use_reranker:enable`
-- `context_compression:enable`
+- `retriever.top_k:increase`
+- `reranker.candidate_count:increase`
+- `reranker.enabled:enable`
+- `context.compression.enabled:enable`
+
+Action axes use the same canonical paths as the Optimize action inventory
+(`tests/test_action_inventory.py`), not the flat `state.index_config` keys that
+appear in the log lines. Both the fixed prescription mapping and the values
+derived from before/after config are normalized to those paths, so one config
+axis stays one row.
 
 This makes it easier to discuss which action deserves the next experiment
 instead of deciding from label names alone.

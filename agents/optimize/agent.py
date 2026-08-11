@@ -344,6 +344,15 @@ def _active_excluded_action_keys(state: AgentDoctorState) -> set[str]:
     return active
 
 
+def _visit_exclusions(state: AgentDoctorState) -> set[Any]:
+    """이번 Optimize 방문에서 planner 가 제외해야 하는 action/attempt/study 목록."""
+    exclusions: set[Any] = set(state.blocked_action_attempts)
+    exclusions.update(state.completed_action_studies)
+    exclusions.update(_unjudgeable_exclusions(state.optimization_history))
+    exclusions.update(_rollback_action_cooldown_exclusions(state.optimization_history))
+    return exclusions
+
+
 def _block_action_study(
     state: AgentDoctorState,
     item: OptimizationHistoryItem,
@@ -874,14 +883,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         #   ActionAttemptKey  → 정확한 전이만 차단(후보값 단위)
         #   ActionStudyKey    → 그 baseline 에서 결론이 난 탐색을 차단
         #   action key 문자열 → 이번 방문에서만 막는 visit-local 제외
-        visit_exclusions: set[Any] = set(state.blocked_action_attempts)
-        visit_exclusions.update(state.completed_action_studies)
-        visit_exclusions.update(
-            _unjudgeable_exclusions(state.optimization_history)
-        )
-        visit_exclusions.update(
-            _rollback_action_cooldown_exclusions(state.optimization_history)
-        )
+        visit_exclusions = _visit_exclusions(state)
         deferred_runtime: list[dict[str, Any]] = []
         if (
             judged_item is not None

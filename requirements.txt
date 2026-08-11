@@ -14,7 +14,7 @@ openpyxl               # XLSX parsing
 hwp5                   # HWP parsing
 
 # Serve Agent
-mcp[cli]               # MCP server (incl. FastMCP)
+mcp[cli]<2             # MCP server (FastMCP path used by agents/serve/mcp_server.py)
 fastapi
 uvicorn
 python-multipart        # FastAPI UploadFile parsing (web_api.py PDF upload)
@@ -35,6 +35,8 @@ tiktoken
 #   prompts/algorithms in metrics_ragas.py because ragas conflicts with langchain 1.x / langgraph
 #   (installing it causes pip ResolutionImpossible).
 google-genai            # only when EVAL_LLM_PROVIDER=gemini (temp bridge before OpenAI token approval)
+anthropic>=0.120        # only when EVAL_LLM_PROVIDER=anthropic (심판 축). output_config.format·
+                        #   prompt caching·thinking 제어가 이 버전부터 정식 파라미터다(beta 헤더 불필요)
 
 # Optimize Agent
 #ragbuilder==0.1.6       # version pinned for adapter contract checks
