@@ -38,7 +38,8 @@ from agents.eval.metrics_basic import char_f1
 from agents.eval.metrics_ragas import _judge, evaluate_real_track
 from agents.eval.replay_labels import apply_ext_labels, gold_context_recall
 from agents.eval.report import build_report
-from agents.eval.types import EvalRecord, llm_eval_enabled
+from agents.eval.types import EvalRecord, llm_eval_enabled, resolve_llm_concurrency
+from core.parallel import parallel_map
 from agents.eval.scoring import format_composite
 # 권고 카드는 Optimize 소관 — 라벨→처방 지식은 rules.py 를 아는 쪽이 갖는다
 # (reporter.py 가 내부 모드에서 하는 "결정 → 사람이 읽는 번역"의 외부 모드 짝).
@@ -89,16 +90,28 @@ def run_replay(records: list[EvalRecord], *, iteration: int = 1) -> DiagnosticRe
     STEP4(내부 원인 진단)는 부르지 않는다 - 현행 30라벨은 gold 전제라 전부
     침묵한다(docs §4). 대신 리플레이 전용 ext_ 라벨(docs §5)이 record.findings
     를 채우고, build_report 는 라벨 이름을 해석하지 않으므로 무변경 합류.
-    LLM 비활성/실패는 기존 폴백 규약대로 {}로 넘어간다(→ ext_ 라벨도 침묵)."""
+    LLM 비활성/실패는 기존 폴백 규약대로 {}로 넘어간다(→ ext_ 라벨도 침묵).
+
+    RAGAS 채점은 레코드 단위 병렬(EVAL_LLM_CONCURRENCY) - 일반 모드(agent.py
+    STEP3)와 같은 팬아웃. 리플레이는 검색이 없어(로그가 이미 컨텍스트를 갖고 옴)
+    signals 전역·진단 캐시 같은, 일반 모드가 병렬 구간을 좁힌 이유가 없다."""
     judge = _judge() if llm_eval_enabled() else None
-    for rec in records:
-        if judge is not None and not rec.ragas_done:
+    pending = [rec for rec in records if not rec.ragas_done] if judge is not None else []
+    if pending:
+        def _score(rec: EvalRecord) -> dict:
             try:
-                rec.ragas = evaluate_real_track(rec, judge)
+                return evaluate_real_track(rec, judge)
             except Exception as exc:
                 print(f"[Replay] RAGAS 실패({exc}) -> 폴백")
-                rec.ragas = {}
-            rec.ragas_done = True
+                return {}
+        concurrency = resolve_llm_concurrency()
+        print(f"  probe {len(pending)}개 RAGAS 채점"
+              f"{f' 병렬 (동시성 {concurrency})' if concurrency > 1 and len(pending) > 1 else ' 순차'}")
+        scores = parallel_map(_score, pending, concurrency)
+        for rec, score in zip(pending, scores):
+            rec.ragas, rec.ragas_done = score, True
+
+    for rec in records:
         # 검색축 신뢰도: gold 겹침(결정적, LLM 불필요)을 우선한다 - "질문의 근거를
         # 가져왔나"에 faithfulness("가져온 걸 충실히 썼나")보다 직접 답한다.
         # GT 있고 LLM 없는 실행에서도 이 경로로 실측된다.
