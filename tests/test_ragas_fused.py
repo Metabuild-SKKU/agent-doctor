@@ -66,15 +66,17 @@ class _Stub:
         self.embed_calls: list[list[str]] = []
         self.schemas: list[dict | None] = []
         self.systems: list[str] = []
+        self.batchable: list[bool] = []
 
     def chat(self, judge, prompt, max_output_tokens=None, label="",
-             cache_prefix="", json_schema=None):
+             cache_prefix="", json_schema=None, batchable=False):
         # fused 경로는 지시문을 cache_prefix(anthropic 에서 캐시 지점)로, 입력만
         # prompt 로 보낸다. 어느 호출인지 가리는 마커는 지시문 쪽에 있으므로 둘을
         # 합쳐서 본다 — prompt 만 보면 fused 호출을 legacy 로 오인한다.
         self.chat_calls.append(cache_prefix + prompt)
         self.schemas.append(json_schema)
         self.systems.append(cache_prefix)
+        self.batchable.append(batchable)
         for marker, reply in _LEGACY_REPLIES:
             if marker in cache_prefix + prompt:
                 return dict(self.fused_payload) if reply is None else dict(reply)
@@ -399,6 +401,20 @@ class FusedSchemaReachesTransportTest(_FusedTestBase):
         # 지시문은 cache_prefix(캐시 지점), 입력은 prompt 로 갈려야 한다.
         self.assertIn("evaluation judge", self.stub.systems[0])
         self.assertNotIn("질문", self.stub.systems[0])
+
+    def test_only_the_fanned_out_fused_call_is_batchable(self):
+        """배치 opt-in 은 fused 호출 하나뿐이다.
+
+        보수(_fused_repair)로 되살아나는 legacy 개별 호출까지 배치로 보내면, 드물게
+        도는 그 호출 하나가 배치 턴어라운드(수 분)를 통째로 기다린다 — 아끼는 돈보다
+        잃는 시간이 크다. Phase C 순차 판정(기권·추론모드)도 같은 이유로 제외한다."""
+        stub = _Stub(fused_payload={})           # 빈 응답 → 전 지표 보수 호출로 흘러간다
+        metrics_ragas._chat = stub.chat
+        with redirect_stdout(io.StringIO()):
+            metrics_ragas.evaluate_real_track(_record(), object())
+        self.assertGreater(len(stub.batchable), 1)          # fused 1 + 보수 n
+        self.assertTrue(stub.batchable[0])                  # fused 만 True
+        self.assertFalse(any(stub.batchable[1:]))
 
 
 # compact 응답 — correctness 는 인덱스 배열, faithfulness 는 reason 없음.

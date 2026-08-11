@@ -150,14 +150,53 @@ _ANTHROPIC_CACHE_READ_MULT = 0.10
 _ANTHROPIC_BATCH_DISCOUNT = 0.5
 
 
+def _env_float(name: str, default: float) -> float:
+    """숫자 env 를 안전하게 읽는다 — 비수치·0 이하면 경고 1회 후 기본값.
+
+    배치 수집기는 이 값들을 **백그라운드 스레드 안에서** 읽는다. 그대로 float() 를
+    부르면 오타 하나(EVAL_ANTHROPIC_BATCH_POLL=15s)로 스레드가 죽고, 호출부는
+    Future.result() 에서 영원히 잠든다 — 무인 실행에서 실패보다 나쁜 실패 모드다.
+    .env.example 에 값이 노출돼 있어 실제로 충분히 일어날 수 있다(리뷰 지적)."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        _warn_once(f"env-float-{name}",
+                   f"[LLM] {name}='{raw}' 은 숫자가 아닙니다 — 기본값 {default} 을 씁니다.")
+        return default
+    if value <= 0:
+        _warn_once(f"env-float-{name}",
+                   f"[LLM] {name}={value} 는 0 이하라 쓸 수 없습니다 — 기본값 {default} 을 씁니다.")
+        return default
+    return value
+
+
 def anthropic_batch_enabled() -> bool:
-    """Message Batches 경로 사용 여부 (EVAL_ANTHROPIC_BATCH=1, 기본 끔).
+    """Message Batches 경로를 **쓸 수 있는지** (EVAL_ANTHROPIC_BATCH=1, 기본 끔).
+
+    이 스위치만으로는 아무 호출도 배치로 가지 않는다. 실제 경로 선택은 호출부가
+    anthropic_chat(use_batch=True) 로 명시할 때만 일어난다 — env 하나가 Eval 의 모든
+    anthropic 호출(probe 합성 등)을 조용히 비동기로 바꾸지 않게 하기 위해서다(리뷰 지적).
+    현재 opt-in 하는 곳은 RAGAS fused 판정 하나뿐이다(agents/eval/metrics_ragas.py).
 
     동일 요청을 50% 가격에 처리하는 대신 결과가 비동기다(제출→폴링). 판정처럼
-    "여러 건 던지고 전부 기다리는" 워크로드 전용 — 대화형 경로에는 켜지 말 것.
+    "여러 건 던지고 전부 기다리는" 워크로드 전용 — 대화형·순차 경로에는 켜지 말 것
+    (1건짜리 배치가 되어 건마다 폴링 대기를 그대로 지불한다).
     실측(2026-08-11, 한국 오전): 5건 배치 제출→종료 3.2분. 한국 낮 = 미국 밤이라
     큐 대기가 사실상 0이고, 미국 업무 시간대에는 이보다 느릴 수 있다."""
     return (os.getenv("EVAL_ANTHROPIC_BATCH") or "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _batch_wait_timeout() -> float:
+    """호출부가 Future 를 기다릴 상한(초).
+
+    수집기 자체 timeout 보다 넉넉히 길게 잡는다 — 정상 상태에서는 수집기가 먼저
+    TimeoutError 를 Future 에 실어 주고, 이 값은 수집기 스레드가 통째로 사라진
+    경우에만 걸리는 최후 방어선이다. 값이 짧으면 정상 대기를 오탐으로 끊는다."""
+    return (_env_float("EVAL_ANTHROPIC_BATCH_TIMEOUT", 7200.0)
+            + _env_float("EVAL_ANTHROPIC_BATCH_WINDOW", 2.0) + 300.0)
 
 
 class _AnthropicBatchCollector:
@@ -177,6 +216,43 @@ class _AnthropicBatchCollector:
         self._seq = 0
         self._thread: threading.Thread | None = None
         self._client = None
+        # 실행 요약용 누적(print_batch_summary). 배치는 비용을 절반으로 줄이는 대신
+        # 벽시계 시간을 늘리므로, 그 대가를 비용 표 옆에서 읽을 수 있어야 한다.
+        self._stats = {"batches": 0, "items": 0, "wait_s": 0.0}
+
+    def stats(self) -> dict:
+        with self._cond:
+            return dict(self._stats)
+
+    def _record(self, n_items: int, elapsed: float) -> None:
+        with self._cond:
+            self._stats["batches"] += 1
+            self._stats["items"] += n_items
+            self._stats["wait_s"] += elapsed
+
+    @staticmethod
+    def _settle(fut: Future, exc: BaseException) -> None:
+        """Future 에 예외를 싣는다. 이미 결과가 실렸으면 덮어쓰지 않는다."""
+        try:
+            fut.set_exception(exc)
+        except Exception:                          # InvalidStateError 등
+            pass
+
+    def _fail_items(self, items, exc: BaseException) -> None:
+        """이 배치에 속한 항목만 예외로 깨운다(큐에 남은 다음 배치는 건드리지 않는다)."""
+        for _, _, fut in items:
+            self._settle(fut, exc)
+
+    def _fail_all(self, items, exc: BaseException) -> None:
+        """진행 중이던 항목과 아직 큐에 남은 항목 **전부**를 예외로 깨운다.
+
+        수집기 스레드가 접힐 때만 쓴다. 하나라도 빠뜨리면 그 호출 스레드가
+        Future.result() 에서 잠든 채 남는다 — 스레드가 죽은 뒤에는 아무도 그 Future 를
+        해소해 주지 않기 때문이다."""
+        with self._cond:
+            pending, self._pending = self._pending, []
+            self._thread = None                    # 다음 submit 이 새 스레드를 띄우게 한다
+        self._fail_items(list(items) + pending, exc)
 
     def submit(self, client, params: dict) -> Future:
         fut: Future = Future()
@@ -194,19 +270,35 @@ class _AnthropicBatchCollector:
 
     def _run(self):
         while True:
-            items = self._drain()
-            if not items:
-                return                       # 새 일감 없음 — 스레드 종료(다음 submit 이 재기동)
-            self._dispatch(items)
+            items: list[tuple[str, dict, Future]] = []
+            try:
+                items = self._drain()
+                if not items:
+                    return                   # 새 일감 없음 — 스레드 종료(다음 submit 이 재기동)
+                self._dispatch(items)
+            except BaseException as exc:     # noqa: BLE001 — 여기서 안 잡으면 호출부가 영구 대기
+                # daemon thread 가 조용히 죽는 것이 이 구조의 최악 시나리오다.
+                # _dispatch 안의 개별 try/except 가 못 잡은 것(예: env 파싱, SDK 시그니처
+                # 변경, MemoryError)까지 여기서 전원에게 전달하고 스레드를 접는다.
+                print(f"[Anthropic] 배치 수집기 중단({type(exc).__name__}: {exc}) "
+                      f"— 대기 중인 호출을 모두 실패로 깨웁니다.")
+                self._fail_all(items, exc)
+                return
 
     def _drain(self) -> list[tuple[str, dict, Future]]:
         """수집 창이 조용해질 때까지 모은 뒤 스냅샷을 돌려준다."""
-        window = float(os.getenv("EVAL_ANTHROPIC_BATCH_WINDOW", "2.0"))
+        window = _env_float("EVAL_ANTHROPIC_BATCH_WINDOW", 2.0)
         with self._cond:
             while True:
                 if not self._pending:
                     self._cond.wait(timeout=5.0)
                     if not self._pending:
+                        # 종료 선언을 **락 안에서** 한다. 그냥 빠져나가면 submit 이
+                        # is_alive() 로 "아직 살아 있다"를 보고 큐에만 넣는 창이 열리고,
+                        # 그 사이 스레드가 죽으면 그 Future 는 영원히 안 깨어난다.
+                        # 여기서 None 을 박으면 submit 이 같은 락 아래에서 반드시
+                        # "스레드 없음"을 보고 새로 띄운다.
+                        self._thread = None
                         return []
                     continue
                 before = len(self._pending)
@@ -219,14 +311,13 @@ class _AnthropicBatchCollector:
 
     def _dispatch(self, items: list[tuple[str, dict, Future]]) -> None:
         client = self._client
-        poll = float(os.getenv("EVAL_ANTHROPIC_BATCH_POLL", "15"))
-        timeout = float(os.getenv("EVAL_ANTHROPIC_BATCH_TIMEOUT", "7200"))
+        poll = _env_float("EVAL_ANTHROPIC_BATCH_POLL", 15.0)
+        timeout = _env_float("EVAL_ANTHROPIC_BATCH_TIMEOUT", 7200.0)
         try:
             batch = client.messages.batches.create(
                 requests=[{"custom_id": cid, "params": params} for cid, params, _ in items])
-        except Exception as exc:               # 제출 실패 — 전원에게 즉시 알린다
-            for _, _, fut in items:
-                fut.set_exception(exc)
+        except Exception as exc:               # 제출 실패 — 이 배치 전원에게 즉시 알린다
+            self._fail_items(items, exc)
             return
         print(f"[Anthropic] 배치 제출: {len(items)}건 ({batch.id}) — 완료까지 폴링")
 
@@ -245,33 +336,47 @@ class _AnthropicBatchCollector:
                 print(f"[Anthropic] 배치 진행: {done}/{len(items)}건 · {now - started:.0f}s 경과")
                 last_note = now
             if now - started > timeout:
-                exc = TimeoutError(
+                self._record(len(items), now - started)
+                self._fail_items(items, TimeoutError(
                     f"anthropic 배치 {batch.id} 가 {timeout:.0f}s 안에 끝나지 않았습니다 — "
-                    f"EVAL_ANTHROPIC_BATCH_TIMEOUT 을 늘리거나 배치를 끄세요")
-                for _, _, fut in items:
-                    fut.set_exception(exc)
+                    f"EVAL_ANTHROPIC_BATCH_TIMEOUT 을 늘리거나 배치를 끄세요"))
                 return
 
+        elapsed = time.monotonic() - started
+        self._record(len(items), elapsed)
         try:
             by_id = {r.custom_id: r.result for r in client.messages.batches.results(batch.id)}
         except Exception as exc:
-            for _, _, fut in items:
-                fut.set_exception(exc)
+            self._fail_items(items, exc)
             return
-        elapsed = time.monotonic() - started
         print(f"[Anthropic] 배치 완료: {len(items)}건 · {elapsed:.0f}s ({elapsed / 60:.1f}분)")
         for cid, _, fut in items:
             res = by_id.get(cid)
             if res is None:
-                fut.set_exception(RuntimeError(f"배치 결과에 {cid} 누락"))
+                self._settle(fut, RuntimeError(f"배치 결과에 {cid} 누락"))
             elif res.type == "succeeded":
                 fut.set_result(res.message)
             else:                              # errored | canceled | expired
-                fut.set_exception(RuntimeError(
+                self._settle(fut, RuntimeError(
                     f"배치 항목 실패({res.type}): {getattr(res, 'error', None)}"))
 
 
 _batch_collector = _AnthropicBatchCollector()
+
+
+def print_batch_summary() -> None:
+    """배치 실행 요약 한 줄. 배치를 한 번도 안 썼으면 아무것도 찍지 않는다.
+
+    비용 표(print_agent_table)에는 배치로 싸진 것만 보인다. 배치는 비용을 절반으로
+    줄이는 대신 벽시계 시간을 늘리는 거래라, 그 대가(제출 수·평균 대기)를 같은 자리에서
+    읽을 수 있어야 "확정 실행이 멈춘 것처럼 보인다"는 오해가 안 생긴다(리뷰 지적)."""
+    s = _batch_collector.stats()
+    if not s["batches"]:
+        return
+    avg = s["wait_s"] / s["batches"]
+    print(f"\n  Anthropic Message Batches: {s['batches']}배치 · {s['items']}건 · "
+          f"배치당 평균 대기 {avg:.0f}s({avg / 60:.1f}분) · "
+          f"단가 {_ANTHROPIC_BATCH_DISCOUNT:.0%} 반영됨")
 
 
 def _anthropic_caps(model: str) -> tuple:
@@ -558,6 +663,7 @@ def anthropic_chat(
     api_key: str | None = None,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     cache_system: bool = True,
+    use_batch: bool = False,
     tag: str = "LLM",
 ) -> str:
     """Anthropic Messages API 1회 호출 → 응답 텍스트("" 가능).
@@ -580,6 +686,12 @@ def anthropic_chat(
     parallel_map 으로 동시 채점하므로, 실행 시작 시 같이 출발한 EVAL_LLM_CONCURRENCY 개
     호출은 전부 캐시 미스이고 각자 쓰기(1.25배)를 지불한다. "판정 1건 50% 절감" 은 캐시가
     더워진 정상 상태의 수치라 실행 전체로는 그만큼 나오지 않는다.
+
+    use_batch 는 이 호출을 Message Batches 로 보낼지의 **호출부 의사표시**다. 실제 배치
+    사용은 use_batch 와 EVAL_ANTHROPIC_BATCH 가 모두 참일 때만 일어난다. env 만으로
+    결정하면 스위치 하나가 Eval 의 anthropic 호출 전체(probe 합성 등)를 비동기로 바꾸고,
+    순차 구간의 호출은 1건짜리 배치가 되어 건마다 폴링 대기를 지불한다 — 그래서 "묶여
+    날아가는 것을 아는" 호출부만 켠다. 기본값 False 를 바꾸지 말 것.
 
     실측 기반 추정(probe 30, 실제 30 + 오라클 15 호출, EVAL_LLM_CONCURRENCY=10):
         캐시 없음        $0.998
@@ -628,7 +740,7 @@ def anthropic_chat(
         kwargs["system"] = [block]
 
     client = anthropic.Anthropic(**({"api_key": api_key} if api_key else {}))
-    batch = anthropic_batch_enabled()
+    batch = use_batch and anthropic_batch_enabled()
 
     def _call(limit: int):
         request = dict(
@@ -640,7 +752,10 @@ def anthropic_chat(
         if batch:
             # 수집기에 넘기고 배치 완료까지 이 스레드는 잠든다. 결과(Message)는 동기
             # 호출과 같은 형태라 아래 usage/stop_reason 처리가 그대로 통한다.
-            resp = _batch_collector.submit(client, request).result()
+            # timeout 은 수집기 스레드가 통째로 사라진 경우의 최후 방어선이다 —
+            # 무인 실행에서는 예외보다 hang 이 나쁘므로 무한 대기를 두지 않는다.
+            resp = _batch_collector.submit(client, request).result(
+                timeout=_batch_wait_timeout())
         else:
             resp = client.messages.create(**request)
         usage = getattr(resp, "usage", None)

@@ -82,16 +82,43 @@ def provider_name() -> str:
     return _provider()
 
 
+# 배치 모드 fan-out 상한. 이 값이 곧 parallel_map 의 worker 스레드 수이므로, 권장 실행이
+# 150 QA 로 커지면 스레드도 그만큼 생긴다. 대부분 배치 결과를 기다리며 잠들어 있어 비용은
+# 작지만, 로컬·CI·Windows 에서 스레드 수 자체가 부담이 될 수 있어 안전선을 둔다(리뷰 지적).
+# 기본값은 현재 권장 실행(150 QA)을 한 배치로 담을 만큼 크게 잡는다 — 상한이 낮으면
+# 배치가 쪼개져 배치당 대기(수 분)가 곱해지므로, 낮추는 쪽이 오히려 위험하다.
+_BATCH_MAX_FANOUT_DEFAULT = 256
+
+
+def _batch_max_fanout() -> int:
+    """EVAL_ANTHROPIC_BATCH_MAX_FANOUT (기본 256). 비수치·0 이하면 기본값."""
+    raw = (os.getenv("EVAL_ANTHROPIC_BATCH_MAX_FANOUT") or "").strip()
+    if not raw:
+        return _BATCH_MAX_FANOUT_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"[Eval] EVAL_ANTHROPIC_BATCH_MAX_FANOUT='{raw}' 은 정수가 아닙니다 "
+              f"— 기본값 {_BATCH_MAX_FANOUT_DEFAULT} 을 씁니다.")
+        return _BATCH_MAX_FANOUT_DEFAULT
+    return value if value > 0 else _BATCH_MAX_FANOUT_DEFAULT
+
+
 def judge_fanout(n_items: int, default: int) -> int:
     """RAGAS 판정 fan-out 폭. anthropic 배치 모드에서는 동시성이 곧 배치 크기이므로
-    항목 수 전체로 넓힌다 — 스레드는 배치 결과를 기다리며 잠들 뿐이라 넓혀도 비용이
+    항목 수 전체로 넓힌다 — 스레드는 배치 결과를 기다리며 잠들 뿐이라 넓혀도 API 비용이
     없고, 좁히면 EVAL_LLM_CONCURRENCY 개씩 배치가 쪼개져 배치당 대기(수 분)가 곱해진다.
+    즉 배치 모드에서는 EVAL_LLM_CONCURRENCY 가 심판 호출에 한해 무시된다.
+
+    다만 이 값이 곧 로컬 스레드 수라 EVAL_ANTHROPIC_BATCH_MAX_FANOUT(기본 256)으로
+    상한을 둔다. 상한을 넘으면 그 크기의 배치 여러 개로 나뉘고, 배치 수만큼 대기가
+    직렬로 붙는다(150 QA 는 기본값 안에 들어와 한 배치다).
 
     답변 생성(RAG provider)은 대상이 아니다 — 이 함수는 심판(EVAL_LLM_PROVIDER) 호출을
     묶는 parallel_map 에만 쓸 것."""
     from core.llm_clients import anthropic_batch_enabled
     if _provider() == "anthropic" and anthropic_batch_enabled():
-        return max(1, n_items)
+        return max(1, min(n_items, _batch_max_fanout()))
     return default
 
 
@@ -129,6 +156,7 @@ def chat_json(
     label: str = "",
     json_schema: dict | None = None,
     cache_prefix: str = "",
+    batchable: bool = False,
 ) -> dict:
     """JSON 응답 강제 chat 호출 → dict. 실패 시 {} (API 예외는 호출부로 전파).
 
@@ -148,7 +176,13 @@ def chat_json(
     system 블록으로 올려 cache_control 을 걸고, 나머지 provider 에서는 user 앞에 도로
     붙여 예전과 바이트가 같은 한 덩어리를 만든다. 그냥 system 에 실으면 지시문이
     user → system 으로 역할이 바뀌어, 캐싱과 무관한 provider 의 판정 분포까지 건드리게
-    된다(같은 글자라도 역할이 다르면 모델이 다르게 받아들일 수 있다)."""
+    된다(같은 글자라도 역할이 다르면 모델이 다르게 받아들일 수 있다).
+
+    batchable 은 "이 호출이 다른 호출들과 **동시에** 날아간다"는 호출부의 보증이다.
+    anthropic + EVAL_ANTHROPIC_BATCH=1 일 때만 실제로 Message Batches 로 간다(50% 할인,
+    대신 결과가 수 분 뒤). 기본 False 인 이유는 순차 구간의 호출이 1건짜리 배치가 되면
+    건마다 폴링 대기를 그대로 지불하기 때문이다 — 지금 켜는 곳은 RAGAS fused 판정
+    하나뿐이고, probe 합성·보수 호출 등은 켜지 않는다."""
     def _do():
         provider = _provider()
         # anthropic 이 아니면 캐시 지점이라는 개념이 없다 → 원래대로 user 앞에 이어붙인다.
@@ -177,7 +211,8 @@ def chat_json(
         elif provider == "anthropic":
             return _anthropic_generate(
                 sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL_ANTHROPIC", "claude-sonnet-5"),
-                json_schema=json_schema, max_output_tokens=max_output_tokens)
+                json_schema=json_schema, max_output_tokens=max_output_tokens,
+                batchable=batchable)
         return _openai_generate(
             sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL", "gpt-4o"),
             json_mode=True, max_output_tokens=max_output_tokens)
@@ -369,13 +404,15 @@ def _openrouter_embed(texts: list[str], model: str) -> list[list[float]]:
 def _anthropic_generate(
     system: str, user: str, model: str, json_schema: dict | None = None,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    batchable: bool = False,
 ) -> str:
     """Anthropic transport. 다른 transport 와 달리 json_mode 대신 json_schema 를 받는다 —
     Messages API 에는 스키마 없는 JSON 모드가 없기 때문이다(core/llm_clients.py 참고).
-    temperature 도 넘기지 않는다(Sonnet 5 이후 세대는 비기본 sampling 값을 400 으로 거부)."""
+    temperature 도 넘기지 않는다(Sonnet 5 이후 세대는 비기본 sampling 값을 400 으로 거부).
+    batchable 은 Message Batches 사용을 호출부가 명시적으로 켠 경우만 True 다."""
     return anthropic_chat(
         system, user, model, json_schema=json_schema,
-        max_output_tokens=max_output_tokens,
+        max_output_tokens=max_output_tokens, use_batch=batchable,
         api_key=os.getenv("ANTHROPIC_API_KEY"), tag="Eval",
     )
 

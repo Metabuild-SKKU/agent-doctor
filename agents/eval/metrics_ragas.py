@@ -902,8 +902,12 @@ def _fused_track(judge, question: str, answer: str, contexts: list[str], referen
     prefix, user_input = _fused_prompt_parts(blocks, question, answer, contexts, reference,
                                              compact=compact)
     schema = _fused_json_schema(blocks, compact=compact)
+    # batchable=True 는 여기 하나뿐이다 — 이 호출만 STEP3 의 parallel_map 팬아웃 안에서
+    # 트랙 전체가 동시에 날아가, 배치 하나로 묶여 50% 할인을 받는다. 아래 refetch·보수와
+    # 진단 Phase C 의 순차 판정은 켜지 않는다(1건 배치 = 건마다 폴링 대기).
     d = _chat(judge, user_input, max_output_tokens=_fused_max_tokens(),
-              label="fused", cache_prefix=prefix, json_schema=schema) if blocks else {}
+              label="fused", cache_prefix=prefix, json_schema=schema,
+              batchable=True) if blocks else {}
     d = _refetch_fused_if_incomplete(judge, d, user_input, blocks,
                                      cache_prefix=prefix, json_schema=schema)
 
@@ -1075,6 +1079,18 @@ def answer_similarity(record: EvalRecord, track: str):
         return None
     return _cosine(vecs[0], vecs[1])
 
+
+# ── fused 밖에 남은 판정 둘 (evaluate_abstention / evaluate_reasoning_mode) ────────
+# 이 둘만 fused 를 안 타고 _chat 을 직접 부른다. 그래서 이번 절감 셋 중 어느 것도 안 걸린다:
+#   · compact 변형 없음 — 압축 표(_COMPACT_*_OVERRIDES)는 fused 블록만 교체한다.
+#   · cache_prefix 없음 — 프리픽스가 짧아(수백~2천 토큰) 심판 모델 haiku 의 캐시 최소
+#     4096 토큰에 못 미친다. 걸어도 조용히 무시되므로 지금은 걸지 않는다.
+#   · 배치 없음(batchable=False) — 호출 자리가 STEP4 diagnose(Phase C, 순차)라 묶일
+#     상대가 없다. 켜면 probe 하나당 1건짜리 배치가 되어 폴링 대기(수 분)가 probe 수만큼
+#     직렬로 붙는다(30건이면 수십 분). 배치 모드에서도 이 둘은 동기 호출로 남는다.
+# 실측 입력(리뷰 지적): abstention 2,612 / reasoning_mode 3,289 토큰. #128 F 표의
+# "probe당 호출 수"와 기준선 $11 은 이 둘을 빼고 센 값이라 그만큼 과소집계돼 있다.
+# 이 둘을 fused 로 접는 것은 응답 스키마와 호출 시점(진단 분기 뒤)이 달라 별건이다.
 
 def evaluate_reasoning_mode(record: EvalRecord, judge) -> dict:
     """오라클 답변의 추론 실패 모드 단일 분류(모순/수치/해석/결합/기타)."""
@@ -1366,7 +1382,8 @@ def _average_precision(verdicts: list[int]) -> float:
     return numerator / denominator
 
 def _chat(judge, prompt: str, max_output_tokens: int | None = None, label: str = "",
-          cache_prefix: str = "", json_schema: dict | None = None) -> dict:
+          cache_prefix: str = "", json_schema: dict | None = None,
+          batchable: bool = False) -> dict:
     """RAGAS 형식 프롬프트를 JSON 강제로 호출 → dict. 실패 시 {}.
 
     max_output_tokens 는 fused 처럼 응답 구조가 큰 호출만 명시한다(미지정=provider 기본).
@@ -1379,7 +1396,12 @@ def _chat(judge, prompt: str, max_output_tokens: int | None = None, label: str =
     provider 의 프롬프트를 바꾸지 않기 위해서다. 기본값 "" 은 기존 호출부(지표별 legacy
     경로)가 한 덩어리 프롬프트를 그대로 쓰게 둔다.
 
-    json_schema 도 anthropic 전용이다(output_config.format). 나머지 provider 는 무시한다."""
+    json_schema 도 anthropic 전용이다(output_config.format). 나머지 provider 는 무시한다.
+
+    batchable 은 "이 호출이 parallel_map 팬아웃 안에서 다른 호출들과 동시에 날아간다"는
+    뜻이다. anthropic 배치 모드에서만 의미가 있고(50% 할인), 켜는 곳은 fused 판정
+    하나뿐이다 — 순차 구간(진단 Phase C)의 호출을 켜면 1건짜리 배치가 되어 건마다
+    폴링 대기(수 분)를 그대로 지불한다. 기본 False 를 유지할 것."""
     kwargs: dict = {"label": label}
     if max_output_tokens is not None:
         kwargs["max_output_tokens"] = max_output_tokens
@@ -1387,6 +1409,8 @@ def _chat(judge, prompt: str, max_output_tokens: int | None = None, label: str =
         kwargs["json_schema"] = json_schema
     if cache_prefix:
         kwargs["cache_prefix"] = cache_prefix
+    if batchable:
+        kwargs["batchable"] = True
     return llm_provider.chat_json("", prompt, **kwargs)
 
 
