@@ -75,7 +75,10 @@ class JudgeMarginTest(unittest.TestCase):
         self.assertTrue(verdict.margin_rejected)
         self.assertIn("상승폭 부족", verdict.reason)
         # 사용자가 "얼마나 모자랐는지" 알 수 있어야 사후 조정이 가능하다.
-        self.assertIn(f"필요 +{MARGIN:.3f}", verdict.reason)
+        # reason 은 사용자에게 노출되므로 리포트 헤드라인과 같은 0~100 스케일로 쓴다
+        # (판정 자체는 아래처럼 0~1 탐색 신호로 한다).
+        self.assertIn(f"필요 +{MARGIN * 100:.1f}", verdict.reason)
+        self.assertAlmostEqual(verdict.before_score, 0.80)
 
     def test_gain_exactly_at_margin_is_kept(self):
         # 경계 포함. internal_adapter 의 math.isclose 판정과 같아야 한다.

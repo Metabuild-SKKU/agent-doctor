@@ -77,13 +77,61 @@ class OptimizeTickerScoreTest(unittest.TestCase):
         self.assertNotIn("종합 0→0", text)
         self.assertNotIn("종합 1→1", text)
 
-    def test_no_scores_keeps_generic_message(self):
-        """점수가 아예 없으면(pending 등) 기존의 일반 문구를 유지한다."""
+    def test_no_scores_reports_action_without_inventing_a_number(self):
+        """점수가 없으면 숫자를 지어내지 않는다 — 무엇을 했는지는 계속 말해준다."""
         state = _state_with_history({})
 
         _tag, text, _kind = _summarize_stage_event("optimize", state)
 
+        self.assertIn("retriever.top_k:increase", text)
+        self.assertNotIn("종합", text)
+
+    def test_no_scores_and_no_action_falls_back_to_generic_message(self):
+        """이름 붙일 것이 아무것도 없으면 기존 일반 문구로 돌아간다."""
+        state = _state_with_history({})
+        item = state.optimization_history[0]
+        item.action_key = ""
+        item.selected_prescription_id = ""
+
+        _tag, text, _kind = _summarize_stage_event("optimize", state)
+
         self.assertEqual(text, "설정 조정 시도")
+
+    def test_partial_composite_never_mixes_axes(self):
+        """한쪽만 composite 인 이력(prescreener 경로)은 종합점수를 표시하지 않는다.
+
+        after_score 는 정답 span 포함률이라 ×100 하면 composite 자리에 다른 축이
+        들어간다 — '종합 72→92' 처럼 믿을 만해 보이는 틀린 숫자가 나온다.
+        """
+        state = _state_with_history(
+            {
+                "before_score": 0.724,
+                "after_score": 0.92,      # prescreener 프록시 지표(포함률)
+                "before_composite": 72.4,
+                "after_composite": None,  # sweep 이 full report 를 남기지 않음
+            }
+        )
+
+        _tag, text, _kind = _summarize_stage_event("optimize", state)
+
+        self.assertNotIn("92", text)
+        self.assertNotIn("종합", text)
+
+    def test_proxy_only_history_is_never_called_composite(self):
+        """proxy_only 이력은 값이 있어도 '종합점수'라는 이름을 빌려주지 않는다."""
+        state = _state_with_history(
+            {
+                "before_score": 0.724,
+                "after_score": 0.92,
+                "before_composite": 72.4,
+                "after_composite": 92.0,
+                "proxy_only": True,
+            }
+        )
+
+        _tag, text, _kind = _summarize_stage_event("optimize", state)
+
+        self.assertNotIn("종합", text)
 
 
 if __name__ == "__main__":

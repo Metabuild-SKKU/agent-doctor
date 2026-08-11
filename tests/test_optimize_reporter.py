@@ -285,6 +285,58 @@ class ScoreDisplayTest(unittest.TestCase):
         self.assertEqual(report.metadata["before_composite"], 72.4)
         self.assertEqual(report.metadata["after_composite"], 78.1)
 
+    def test_partial_composite_omits_the_number_instead_of_mixing_axes(self):
+        """한쪽만 composite 이면 숫자를 빼고 미측정이라고 말한다.
+
+        prescreener sweep 이 이 경우다 — after_score 는 종합점수가 아니라 정답 span
+        포함률이라, ×100 으로 채우면 "점수가 72.4→92.0로 올라"처럼 축이 다른 두 값이
+        한 문장에 들어간다. 눈에 보이는 오류를 그럴듯한 오류로 바꾸는 셈이라 표시를 뺀다.
+        """
+        verdict = Verdict(
+            keep=True,
+            before_score=0.724,
+            after_score=0.92,
+            before_composite=72.4,
+            after_composite=None,
+        )
+
+        report = reporter.build_trial_report(self._item(), verdict)
+
+        self.assertNotIn("92.0", report.summary)
+        self.assertNotIn("72.4→", report.summary)
+        self.assertIn("유지", report.summary)
+
+    def test_proxy_only_verdict_never_shows_a_composite_number(self):
+        """proxy_only 판정은 값이 갖춰져 있어도 종합점수로 표시하지 않는다."""
+        verdict = Verdict(
+            keep=True,
+            before_score=0.724,
+            after_score=0.92,
+            before_composite=72.4,
+            after_composite=92.0,
+            proxy_only=True,
+        )
+
+        report = reporter.build_trial_report(self._item(), verdict)
+
+        self.assertNotIn("92.0", report.summary)
+
+    def test_rollback_summary_carries_the_reason_on_display_scale(self):
+        """롤백 요약은 history 가 만든 reason 을 그대로 싣는다(그쪽이 0~100 으로 쓴다)."""
+        verdict = Verdict(
+            keep=False,
+            before_score=0.780,
+            after_score=0.750,
+            before_composite=78.0,
+            after_composite=75.0,
+            reason="종합점수 미상승 78.0→75.0 → 롤백",
+        )
+
+        report = reporter.build_trial_report(self._item(), verdict)
+
+        self.assertIn("78.0→75.0", report.summary)
+        self.assertNotIn("0.780", report.summary)
+
 
 class NoActionReportTest(unittest.TestCase):
     """실행 가능한 action 이 하나도 없으면 request 가 없다 — 그래도 이유는 남아야 한다."""

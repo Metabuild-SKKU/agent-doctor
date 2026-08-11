@@ -436,6 +436,18 @@ def _fmt_score(value: float | None) -> str:
     return "None" if value is None else f"{value:.2f}"
 
 
+def _fmt_verdict_score(value: float | None) -> str:
+    """판정 로그용 점수. 탐색 신호(0~1)와 표시 스케일(0~100)을 함께 찍는다.
+
+    로그는 개발자용이라 판정에 실제로 쓰인 0~1 값을 숨기면 안 되지만, 리포트는
+    0~100 으로 나간다. 두 스케일을 한 줄에 두어야 실행 로그와 리포트를 나란히 놓고
+    원인을 찾을 때 대조가 된다(before=0.75 와 "75.0→" 이 같은 사건으로 보이게).
+    """
+    if value is None:
+        return "None"
+    return f"{value:.2f}({value * 100:.1f})"
+
+
 def _fmt_composite(report: DiagnosticReport | None) -> str:
     if report is None or not isinstance(report.composite_score, dict):
         return "-"
@@ -716,8 +728,8 @@ def _log_optimize_verdict(
     print(
         f"[Optimize] 이전 처방 판정: {verdict_label}, "
         f"action={item.action_key or '-'}, "
-        f"before={_fmt_score(verdict.before_score)}, "
-        f"after={_fmt_score(verdict.after_score)}"
+        f"before={_fmt_verdict_score(verdict.before_score)}, "
+        f"after={_fmt_verdict_score(verdict.after_score)}"
     )
     print(f"[Optimize] 판정 근거: {verdict.reason or '-'}")
     _log_optimize_transition(
@@ -734,8 +746,8 @@ def _log_optimize_verdict(
     )
     print(
         f"[Optimize] 판정 결과: keep={_fmt_bool(verdict.keep)}, "
-        f"before={_fmt_score(verdict.before_score)}, "
-        f"after={_fmt_score(verdict.after_score)}"
+        f"before={_fmt_verdict_score(verdict.before_score)}, "
+        f"after={_fmt_verdict_score(verdict.after_score)}"
     )
 
 
@@ -1321,6 +1333,10 @@ def _finish_internal_study(
     best_score = result.metadata.get("best_score")
     after_score = float(best_score) if isinstance(best_score, (int, float)) else before_score
     baseline_selected = result.metadata.get("error_code") == "baseline_selected"
+    # chunk 사전검증(prescreener)이 고른 후보의 best_score 는 종합점수가 아니라 정답
+    # span 포함률이다. after_score 자리에 다른 축이 들어온다는 뜻이므로, 표시 계층이
+    # 이 값을 "종합점수"라고 부르지 않도록 판정·이력에 함께 실어 보낸다.
+    proxy_only = bool(result.metadata.get("proxy_only"))
     best_metrics = _best_trial_metrics(
         item.metadata.get("trial_results", []),
         result,
@@ -1334,6 +1350,7 @@ def _finish_internal_study(
             keep=False,
             before_score=before_score,
             after_score=after_score,
+            proxy_only=proxy_only,
             reason="모든 후보 평가 후 baseline이 가장 좋아 원래 설정을 유지",
         )
         # 탐색은 정상적으로 끝났다(결론이 baseline 이었을 뿐) → study 로 기록한다.
@@ -1352,6 +1369,7 @@ def _finish_internal_study(
                 before_score=before_score,
                 after_score=after_score,
                 floor_violations=floor_violations,
+                proxy_only=proxy_only,
                 reason=f"sweep 최적 후보가 하한선을 위반함 {floor_violations} → baseline 복원",
             )
             # 하한선 위반은 품질 실패다 — 승자 전이를 attempt 로 막고, 같은 탐색을
@@ -1375,6 +1393,7 @@ def _finish_internal_study(
                 keep=True,
                 before_score=before_score,
                 after_score=after_score,
+                proxy_only=proxy_only,
                 reason="모든 top_k 후보 평가 후 가장 좋은 후보를 선택",
             )
             # 비교 기준은 before_config(study baseline)가 아니라 after_config 가 맞다.
@@ -1411,11 +1430,12 @@ def _finish_internal_study(
     item.rollback_reason = None if verdict.keep else verdict.reason
     # 표시·게이트용 종합점수(0~100). before 는 baseline 리포트에서, after 는 baseline
     # 복원 시 before 와 동일(설정을 되돌렸으므로), 아니면 sweep 이 full report 를 남기지
-    # 않아 미상(None) — 표시부가 fallback 한다.
+    # 않아 미상(None).
     before_composite = history._read_composite(item.metadata.get("before_report"))
     # baseline 복원이면 설정을 되돌렸으니 after=before. 새 후보가 이겼으면 그 후보의
-    # 관측값에 실린 composite_total 을 쓴다(_report_metrics 가 실어둠). 없으면 None →
-    # 표시부가 overall×100 으로 폴백.
+    # 관측값에 실린 composite_total 을 쓴다(_report_metrics 가 실어둠). 없으면 None
+    # — 이때 표시부는 after_score×100 으로 채우지 않는다(그 값이 composite 라는 보장이
+    # 없다). score_display 가 한쪽만 있는 쌍을 표시하지 않는 이유다.
     after_composite = (
         before_composite if baseline_selected
         else best_metrics.get("composite_total")
@@ -1428,6 +1448,8 @@ def _finish_internal_study(
             "after_score": verdict.after_score,
             "before_composite": before_composite,
             "after_composite": after_composite,
+            # 표시 계층이 프록시 지표를 "종합점수"로 부르지 않게 하는 신호.
+            "proxy_only": proxy_only,
             "best_config": dict(result.best_config or {}),
         }
     )
