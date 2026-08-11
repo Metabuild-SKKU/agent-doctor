@@ -13,9 +13,10 @@ agents/eval/replay.py
   기본값 0.0을 그대로 두면 report._rule_means가 "진짜 0점"으로 집계한다.
 - 로그에 ground_truth(정답 텍스트)가 있으면 규칙 char F1과 RAGAS의
   correctness/context_precision/recall까지 실측된다(없으면 faithfulness/relevancy만).
-- faithfulness가 실측되면 retrieval_axis(검색축 신뢰도 seam)로 넘긴다 -
-  reliability_score가 recall 센티널(-1→0 클램프)로 오염되는 것을 막는다.
-  GT가 있는데 LLM이 없는 실행은 이 seam이 비어 composite가 보수적으로 나온다.
+- 검색축 신뢰도 seam(retrieval_axis)은 gold_contexts 겹침(gold_context_recall,
+  결정적·LLM 불필요)을 우선으로, 없으면 faithfulness를 채운다. 둘 다 없으면
+  None으로 남기고 reliability_score(scoring.py)가 그 레코드를 평균에서
+  제외한다(recall 센티널을 0점으로 클램프해 신뢰도를 오염시키던 문제 수정).
 
 CLI: python -m agents.eval.replay <log.jsonl> --golden=<golden.xlsx> [--limit N]
      골든셋(시험지)은 진단의 기본 입력이다 - 없으면 검색축 라벨 3종이 침묵하고
@@ -35,7 +36,7 @@ from agents.eval.log_intake import (
 )
 from agents.eval.metrics_basic import char_f1
 from agents.eval.metrics_ragas import _judge, evaluate_real_track
-from agents.eval.replay_labels import apply_ext_labels
+from agents.eval.replay_labels import apply_ext_labels, gold_context_recall
 from agents.eval.report import build_report
 from agents.eval.types import EvalRecord, llm_eval_enabled
 from agents.eval.scoring import format_composite
@@ -98,8 +99,14 @@ def run_replay(records: list[EvalRecord], *, iteration: int = 1) -> DiagnosticRe
                 print(f"[Replay] RAGAS 실패({exc}) -> 폴백")
                 rec.ragas = {}
             rec.ragas_done = True
+        # 검색축 신뢰도: gold 겹침(결정적, LLM 불필요)을 우선한다 - "질문의 근거를
+        # 가져왔나"에 faithfulness("가져온 걸 충실히 썼나")보다 직접 답한다.
+        # GT 있고 LLM 없는 실행에서도 이 경로로 실측된다.
+        overlap = gold_context_recall(rec)
         faith = rec.ragas.get("faithfulness")
-        if faith is not None:
+        if overlap is not None:
+            rec.retrieval_axis = overlap
+        elif faith is not None:
             rec.retrieval_axis = float(faith)
     apply_ext_labels(records)
     return build_report(records, iteration=iteration)
@@ -292,9 +299,10 @@ def _main(argv: list[str]) -> int:
         print("소견: 없음 (지표 미측정이거나 문턱 이상)")
     if not llm_eval_enabled():
         print("(참고: EVAL_ENABLE_LLM=1 이 아니어서 RAGAS 지표는 미측정)")
-        if scores.get("mean_f1") is not None:
-            print("(주의: 정답 텍스트는 있는데 faithfulness 가 미측정이라 신뢰도의 "
-                  "검색축이 0으로 보수 집계된다 - 종합점수는 참고만)")
+        if scores.get("mean_f1") is not None and not cap.get("with_gold_contexts"):
+            print("(주의: 정답 텍스트는 있는데 근거문단(gold_contexts)이 없어 검색축이 "
+                  "미측정이다 - 해당 probe는 신뢰도 평균에서 제외된다. 근거문단을 "
+                  "골든셋에 추가하면 LLM 없이도 검색축이 실측된다)")
     return 0
 
 

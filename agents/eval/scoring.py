@@ -53,13 +53,16 @@ def reliability_score(records: list[EvalRecord]) -> Optional[float]:
     각 probe 를 [0,1] 연속 신뢰도로 바꾸면 '거의 통과'가 부분점수를 받아 신호가 매끄러워지고,
     composite 하나로 탐색·표시를 통일할 수 있다(_probe_reliability 참고)."""
     evaluable = [r for r in records if _is_evaluable(r)]
-    if not evaluable:
+    values = [v for v in (_probe_reliability(r) for r in evaluable) if v is not None]
+    if not values:
         return None
-    return sum(_probe_reliability(r) for r in evaluable) / len(evaluable)
+    return sum(values) / len(values)
 
 
-def _probe_reliability(record: EvalRecord) -> float:
+def _probe_reliability(record: EvalRecord) -> Optional[float]:
     """probe 1개의 신뢰도를 [0,1] 연속값으로 — 이진 판정(_is_success)의 매끄러운 대응물.
+    검색축이 진짜 미측정이면 None(quality_score 와 같은 '측정된 것만' 원칙 — 평균에서 제외,
+    0점으로 클램프하지 않는다. 안 그러면 정답을 완벽히 맞힌 probe 도 신뢰도 0으로 깎인다).
 
     · 무응답 기대(answer_exists=False): 연속 축이 없어 finding 유무로 1/0(옳게 기권=1).
     · gold 대조 probe: 검색축(recall@k) × 답변축. 답변축은 게이트와 같은 혼합 점수
@@ -72,16 +75,21 @@ def _probe_reliability(record: EvalRecord) -> float:
         return 0.0 if record.findings else 1.0
     # 검색축: 기본은 recall(라벨 골드를 top-k 에 넣었나)이되, diagnose 가 '라벨 골드는 놓쳤지만
     # 검색이 다른 유효 근거로 정답을 뒷받침했다'(검증된 label-recall miss)고 판정하면 그 크레딧
-    # (retrieval_axis=faithfulness)을 쓴다. pass/fail(findings=[])과 같은 판정이라, 재청킹 recall
-    # 스윙으로 둘이 따로 놀지 않는다. parametric·골드오류엔 axis 가 안 실려 recall 그대로다.
-    retrieval = _clamp01(record.retrieval_axis
-                         if record.retrieval_axis is not None
-                         else record.recall_at_k)
+    # (retrieval_axis=faithfulness/gold 겹침, 리플레이 seam)을 쓴다. pass/fail(findings=[])과
+    # 같은 판정이라, 재청킹 recall 스윙으로 둘이 따로 놀지 않는다. parametric·골드오류엔 axis 가
+    # 안 실려 recall 그대로다. 리플레이의 -1 센티널(recall_at_k 미측정)은 axis 도 없으면 진짜
+    # 미측정이라 None — retrieval=0 으로 클램프해 신뢰도를 조작하지 않는다.
+    if record.retrieval_axis is not None:
+        retrieval = _clamp01(record.retrieval_axis)
+    elif record.recall_at_k >= 0:
+        retrieval = record.recall_at_k
+    else:
+        return None
     return retrieval * _clamp01(record.answer_score)
 
 
 def _clamp01(value: float) -> float:
-    """[0,1] 로 자른다(recall_at_k 의 -1 sentinel·부동소수 초과 방어)."""
+    """[0,1] 로 자른다(부동소수 초과 방어)."""
     return 0.0 if value < 0 else (1.0 if value > 1 else value)
 
 
