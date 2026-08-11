@@ -1736,10 +1736,13 @@ def _relax_reranker_precision_floor(
         before_composite=verdict.before_composite,
         after_composite=verdict.after_composite,
         floor_violations=[],
+        # judge 의 reason 과 같은 규약 — "종합점수"라고 이름을 대는 문장의 숫자는
+        # 리포트 헤드라인과 같은 0~100 이어야 한다(판정은 계속 0~1 탐색 신호로 한다).
         reason=(
             "reranker 적용 후 context_precision 단독 하한선 위반이 있었지만 "
-            f"종합점수 상승 {verdict.before_score:.3f}→{verdict.after_score:.3f}"
-            f"(마진 {history.MIN_IMPROVEMENT_MARGIN:.3f} 충족), "
+            f"종합점수 상승 {history.to_display_scale(verdict.before_score):.1f}"
+            f"→{history.to_display_scale(verdict.after_score):.1f}"
+            f"(마진 {history.to_display_scale(history.MIN_IMPROVEMENT_MARGIN):.1f} 충족), "
             f"retrieval_low_rank 감소 {before_low_rank}→{after_low_rank}로 유지"
         ),
         unjudgeable=verdict.unjudgeable,

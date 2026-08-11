@@ -43,6 +43,20 @@ from typing import Any, Optional
 UNMEASURED_CAPTION = "실측 종합점수 미측정"
 
 
+def to_display_scale(score_0_to_1: float) -> float:
+    """탐색 신호(0~1)를 표시 스케일(0~100)로 올린다.
+
+    판정 사유 문자열(`Verdict.reason`)처럼 **판정과 같은 자리에서 만들어지지만
+    사용자에게 노출되는** 문구용이다. `history._read_score` 가 composite÷100 이므로
+    ×100 은 원래 종합점수의 정확한 복원이다(composite 미측정으로 overall 폴백을 탄
+    경우만 예외 — 그때는 판정에 쓴 값 자체가 overall 이라 문장도 같은 값을 보여주는
+    게 맞다).
+
+    ⚠️ 이력·Verdict 에서 **표시 점수 쌍을 뽑을 때는 이 함수를 직접 쓰지 말 것** —
+    한쪽만 composite 인 경우 축이 섞인다. 그쪽은 resolve_display_scores 를 쓴다."""
+    return score_0_to_1 * 100
+
+
 @dataclass(frozen=True)
 class DisplayScores:
     """표시용 점수 한 쌍과, 그 숫자를 뭐라고 불러도 되는지에 대한 판단.

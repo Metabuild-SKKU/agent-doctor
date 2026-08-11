@@ -39,6 +39,7 @@ from typing import Any
 from core.schema import DiagnosticReport
 from core.state import AgentDoctorState
 from agents.optimize.config_mapper import canonical_config_view, canonicalize_path
+from agents.optimize.score_display import to_display_scale
 from agents.optimize.schemas import (
     ActionAttemptKey,
     ActionStudyKey,
@@ -506,16 +507,6 @@ def _read_score(report: DiagnosticReport) -> float:
     return report.overall_score if report.overall_score is not None else 0.0
 
 
-def _reason_scale(score_0_to_1: float) -> float:
-    """판정 사유 문장에 쓰는 0~100 스케일 값.
-
-    `_read_score` 가 composite÷100 이므로 ×100 은 원래 종합점수의 정확한 복원이다
-    (composite 미측정으로 overall 폴백을 탄 경우만 예외 — 그때는 판정에 쓴 값 자체가
-    overall 이라 문장도 판정과 같은 값을 보여주는 게 맞다). 표시 계층의 변환 규약은
-    score_display 가 갖지만, 이 문자열은 판정과 함께 만들어져 여기서 스케일을 맞춘다."""
-    return score_0_to_1 * 100
-
-
 def _read_composite(report: DiagnosticReport | None) -> float | None:
     """설계 종합점수(composite_score.total, 0~100)를 읽는다. 표시·게이트용.
     (판정은 overall 로 하고 이 값은 리포트에 함께 실어주기 위한 것 — 없으면 None.)"""
@@ -563,7 +554,7 @@ def judge(
     # reason 은 사용자에게 그대로 노출된다(report_view 처방 카드의 "판정 근거" 캡션).
     # 판정은 0~1 탐색 신호로 하되, 문장 안의 숫자는 리포트 헤드라인과 같은 0~100 이어야
     # 한다 — "종합점수"라고 이름을 대면서 0.780 을 보여주면 상단의 78.0 과 앞뒤가 안 맞는다.
-    show_before, show_after = _reason_scale(before_score), _reason_scale(after_score)
+    show_before, show_after = to_display_scale(before_score), to_display_scale(after_score)
 
     violations = check_floor(after_report.ragas_scores)
     if violations:
@@ -587,8 +578,8 @@ def judge(
             after_composite=after_composite,
             reason=(
                 f"종합점수 상승 {show_before:.1f}→{show_after:.1f} "
-                f"(+{_reason_scale(improvement):.1f} ≥ 마진 "
-                f"{_reason_scale(MIN_IMPROVEMENT_MARGIN):.1f}) → 유지"
+                f"(+{to_display_scale(improvement):.1f} ≥ 마진 "
+                f"{to_display_scale(MIN_IMPROVEMENT_MARGIN):.1f}) → 유지"
             ),
         )
 
@@ -603,8 +594,8 @@ def judge(
             margin_rejected=True,
             reason=(
                 f"종합점수 상승폭 부족 {show_before:.1f}→{show_after:.1f} "
-                f"(+{_reason_scale(improvement):.1f}, 필요 "
-                f"+{_reason_scale(MIN_IMPROVEMENT_MARGIN):.1f}) → 롤백"
+                f"(+{to_display_scale(improvement):.1f}, 필요 "
+                f"+{to_display_scale(MIN_IMPROVEMENT_MARGIN):.1f}) → 롤백"
             ),
         )
 

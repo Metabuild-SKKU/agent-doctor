@@ -334,6 +334,20 @@ class RerankerFloorRelaxationMarginTest(unittest.TestCase):
         self.assertEqual(relaxed.floor_violations, [])
         self.assertIn("retrieval_low_rank 감소 3→1", relaxed.reason)
 
+    def test_relaxed_reason_uses_display_scale(self):
+        """이 reason 도 "종합점수"라고 이름을 대므로 judge 와 같은 0~100 이어야 한다.
+
+        keep=True 판정이라 이력·로그에 그대로 남는다 — 여기만 0~1 이면 같은 실행의
+        다른 판정 사유와 스케일이 갈린다.
+        """
+        relaxed = self._relax(0.800, 0.800 + MARGIN)
+
+        self.assertIn("80.0→82.0", relaxed.reason)
+        self.assertIn("마진 2.0", relaxed.reason)
+        self.assertNotIn("0.800", relaxed.reason)
+        # 판정에 쓰는 값 자체는 그대로 0~1 탐색 신호다.
+        self.assertAlmostEqual(relaxed.before_score, 0.800)
+
 
 class PassThresholdMarginTest(unittest.TestCase):
     """게이트를 넘었다는 사실만으로는 부족하다 — 노이즈로 넘었을 수 있다."""
