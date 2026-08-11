@@ -239,7 +239,7 @@ _ASPECT_ABSTENTION = ("Does the response decline to answer — stating that it d
                       "that the information is unavailable, or that the question cannot be "
                       "answered from the given context — instead of asserting a substantive answer?")
 
-# ── 추론 실패 모드 다중분류 (모순/수치/해석/결합) ───────────────────
+# ── 추론 실패 모드 다중분류 (모순/수치/해석/결합/시간축) ─────────────
 #   셋 이상이 같은 실패를 두고 경쟁하는 설명이라, 이진 판정 여러 번 대신 단일 분류로 배타성을
 #   측정 자체에 넣는다(이진 판정을 나눠 물으면 여러 개가 동시에 참이 되어 순서가 원인을 정한다).
 _REASONING_MODE_INSTRUCTION = (
@@ -247,10 +247,13 @@ _REASONING_MODE_INSTRUCTION = (
     "Identify the single most likely failure mode and return it in 'mode'. "
     "Use exactly one of these values:\n"
     "- 'contradiction': the response asserts something that conflicts with the context.\n"
-    "- 'numerical_error': a number, unit, date, or calculation is wrong.\n"
+    "- 'numerical_error': a number, unit, date, or calculation is itself wrong — the value, "
+    "not the order of events.\n"
     "- 'misinterpretation': the context was read but its meaning, or a condition of the question, "
     "was misunderstood.\n"
     "- 'hop_binding': the individual facts are each correct but were combined or related incorrectly.\n"
+    "- 'chronological': every date or event is quoted correctly, but their order, sequence, or the "
+    "duration between them is stated wrongly.\n"
     "- 'other': none of the above."
 )
 _SCHEMA_REASONING_MODE = ('{"properties": {"reason": {"type": "string"}, "mode": {"type": "string"}}, '
@@ -274,9 +277,19 @@ _REASONING_MODE_EXAMPLES = [
       "reference": "No, it is only recommended."},
      {"reason": "The context says recommended, the response asserts it is required.",
       "mode": "contradiction"}),
+    # 시간축 예시는 연도를 '맞게' 인용한 상태로 순서만 뒤집는다 — numerical_error 와 갈리는
+    # 지점이 값의 정확성이라, 예시가 값까지 틀리면 두 모드가 다시 겹친다.
+    ({"user_input": "Which came first, the pilot program or the policy revision?",
+      "response": "The policy revision came first in 2021, and the pilot program followed in 2019.",
+      "retrieved_contexts": ["The pilot program started in 2019.",
+                             "The policy was revised in 2021."],
+      "reference": "The pilot program came first."},
+     {"reason": "Both years are quoted correctly but the order of the two events is reversed.",
+      "mode": "chronological"}),
 ]
 _REASONING_MODES = frozenset(
-    {"contradiction", "numerical_error", "misinterpretation", "hop_binding", "other"}
+    {"contradiction", "numerical_error", "misinterpretation", "hop_binding",
+     "chronological", "other"}
 )
 
 # ── Answer Correctness: TP/FP/FN 분류 (CorrectnessClassifierPrompt) ──

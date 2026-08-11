@@ -479,7 +479,7 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `generation_hallucination` | B 생성 | 3 | RAGAS faithfulness |
 | `generation_partial_answer` | B 생성 | 3 | RAGAS relevancy |
 | `generation_hop_binding_error` | B 생성 | 3 | RAGAS faithfulness(+추론검증) |
-| `generation_contradiction` / `numerical_error` / `misinterpretation` | B 생성 | 3 | 추론 실패 모드 단일분류(LLM 1회) |
+| `generation_contradiction` / `numerical_error` / `misinterpretation` / `chronological_error` | B 생성 | 3 | 추론 실패 모드 단일분류(LLM 1회) |
 | `generation_abstention_failure` | B 생성 | 2~3 | 기권했어야 하는데 지어냄(두 갈래는 `metadata.trigger`로 구분 — `no_answer_expected` / `corpus_gap`) |
 | `generation_wrongful_abstention` | B 생성 | 1~3 | 근거는 검색됐는데(recall=1) 기권 — C 전제를 닫고 자리를 가져간다. 처방 `relax_abstention` |
 | `generation_parametric_overreliance` | B 생성 | 3 | 정답이지만 real faithfulness 낮음 |
