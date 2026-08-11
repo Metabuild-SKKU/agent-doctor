@@ -79,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-qa-only", action="store_true",
                         help="컨텍스트 없는 로그도 진단(동문서답 검사만)")
     parser.add_argument("--limit", type=int, default=None, help="레코드 수 제한")
+    # fixture 로그는 골든셋이 이미 병합돼 있어(ground_truth/gold_contexts 인라인)
+    # 기본값이 없다. 골든셋이 분리된 로그를 볼 때 이 인자를 쓴다.
+    parser.add_argument("--golden", default=None,
+                        help="골든셋 파일(xlsx/csv/jsonl/json) — 질문 매칭으로 병합")
     args = parser.parse_args(argv)
 
     from core.console import force_utf8_stdio
@@ -132,7 +136,14 @@ def main(argv: list[str] | None = None) -> int:
 
     with step("Replay", 2, "지표 실측 + 원인 판정"):
         report, cap, errors = diagnose_external_log(
-            str(log_path), limit=args.limit, allow_qa_only=args.allow_qa_only)
+            str(log_path), limit=args.limit, allow_qa_only=args.allow_qa_only,
+            golden_path=args.golden)
+        g = cap.get("golden")
+        if g:
+            print(f"  골든셋 병합: {g['qa_entries']}건 중 {g['matched']}건 매칭 "
+                  f"· 정답 {g['filled_ground_truth']}건 · 근거문단 {g['filled_gold_contexts']}건")
+            if g["qa_entries"] and not g["matched"]:
+                print("  ! 한 건도 매칭되지 않았습니다 — 질문 표기를 확인하세요")
         print(f"  진단 수준 {cap['tier']}")
         for note in cap.get("notes", []):
             print(f"    · {note}")

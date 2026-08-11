@@ -17,7 +17,10 @@ agents/eval/replay.py
   reliability_score가 recall 센티널(-1→0 클램프)로 오염되는 것을 막는다.
   GT가 있는데 LLM이 없는 실행은 이 seam이 비어 composite가 보수적으로 나온다.
 
-CLI: python -m agents.eval.replay <log.jsonl> [--limit N]
+CLI: python -m agents.eval.replay <log.jsonl> --golden=<golden.xlsx> [--limit N]
+     골든셋(시험지)은 진단의 기본 입력이다 - 없으면 검색축 라벨 3종이 침묵하고
+     환각도 예비에 머문다(7종 중 3종만). 그래서 CLI 는 기본적으로 거부하고,
+     정답지가 아예 없는 상황만 --no-golden 으로 옵트인시킨다.
      RAGAS 실측에는 EVAL_ENABLE_LLM=1 과 LLM 키가 필요하다(없으면 규칙 지표만).
 """
 
@@ -102,15 +105,62 @@ def run_replay(records: list[EvalRecord], *, iteration: int = 1) -> DiagnosticRe
     return build_report(records, iteration=iteration)
 
 
+def apply_golden_set(logs: list, qa_path: str) -> dict:
+    """골든셋(시험지)을 로그(답안지)에 질문 매칭으로 병합한다. 반환: 집계 dict.
+
+    qa_merge 의 파일 경로 버전(merge_qa_into_log)과 같은 규칙을 메모리에서 적용한다 -
+    진단 한 번에 중간 파일(.merged.jsonl)을 만들지 않기 위해서다. 로더·정규화·키
+    관용 규칙은 qa_merge 가 단독으로 갖는다(여기서 재구현하지 않는다).
+
+    채우기만 한다: 로그에 이미 값이 있으면 덮지 않고 충돌로 집계한다 - 로그 제공자가
+    직접 넣은 값을 신뢰한다(qa_merge 와 동일 규칙)."""
+    from agents.eval.qa_merge import load_qa_set, normalize_question
+
+    qa_map, qa_errors = load_qa_set(qa_path)
+    stats = {"qa_entries": len(qa_map), "matched": 0, "filled_ground_truth": 0,
+             "filled_gold_contexts": 0, "conflicts": 0, "qa_errors": qa_errors}
+    for rec in logs:
+        entry = qa_map.get(normalize_question(rec.question))
+        if not entry:
+            continue
+        stats["matched"] += 1
+        gt = entry.get("ground_truth")
+        if gt:
+            if not rec.ground_truth:
+                rec.ground_truth = gt
+                stats["filled_ground_truth"] += 1
+            elif rec.ground_truth != gt:
+                stats["conflicts"] += 1
+        gold = entry.get("gold_contexts") or []
+        if gold:
+            if not rec.gold_contexts:
+                rec.gold_contexts = list(gold)
+                stats["filled_gold_contexts"] += 1
+            elif list(rec.gold_contexts) != list(gold):
+                stats["conflicts"] += 1
+    return stats
+
+
 def diagnose_external_log(path: str, *, limit: int | None = None,
                           allow_qa_only: bool = False,
+                          golden_path: str | None = None,
                           ) -> tuple[DiagnosticReport | None, dict, list[str]]:
     """파일 경로 → (리포트, 적재 판정, 적재 오류). 리포트가 None 인 경우:
     유효 레코드 없음(tier none), 또는 컨텍스트 부족(tier qa_only)인데
     allow_qa_only=False - 파일 단위 게이트(docs §3). 줄 단위 결손은 관용하되
-    파일 전체가 contexts 없는 로그에 "진단"을 내주지 않는다."""
+    파일 전체가 contexts 없는 로그에 "진단"을 내주지 않는다.
+
+    golden_path 가 주어지면 적재 직후·판정 전에 병합한다 - 순서가 중요하다.
+    assess_capability 가 정답/근거 보유량을 세어 tier·notes 를 만들므로, 병합을
+    나중에 하면 "정답 0건"으로 판정된 채 리포트가 나간다."""
     logs, errors = load_external_log(path)
+    if golden_path:
+        merge_stats = apply_golden_set(logs, golden_path)
+        errors = errors + [f"골든셋 파싱 오류: {e}" for e in merge_stats["qa_errors"]]
+    else:
+        merge_stats = None
     cap = assess_capability(logs)
+    cap["golden"] = merge_stats
     if cap["tier"] == TIER_NONE:
         return None, cap, errors
     if cap["tier"] == TIER_QA_ONLY and not allow_qa_only:
@@ -127,6 +177,23 @@ def _fmt(value) -> str:
     return f"{value:.3f}" if isinstance(value, (int, float)) else "미측정"
 
 
+def _print_golden_summary(cap: dict) -> None:
+    """골든셋 병합 결과. 매칭이 0건이면 조용히 넘어가면 안 된다 —
+    질문 표기가 달라 못 붙었는데 '골든셋 줬으니 됐다'고 오해하게 된다."""
+    g = cap.get("golden")
+    if g is None:
+        print("골든셋: 없음 (--no-golden) — 검색축 라벨 3종 침묵, 환각은 예비 고정")
+        return
+    print(f"골든셋: {g['qa_entries']}건 중 {g['matched']}건 매칭 "
+          f"· 정답 {g['filled_ground_truth']}건 · 근거문단 {g['filled_gold_contexts']}건"
+          + (f" · 충돌 {g['conflicts']}건" if g["conflicts"] else ""))
+    if g["qa_entries"] and not g["matched"]:
+        print("  ! 한 건도 매칭되지 않았습니다 — 골든셋 질문과 로그 질문의 표기를 확인하세요"
+              " (공백·문장부호·대소문자는 자동 정규화됩니다).")
+    elif g["matched"] < g["qa_entries"]:
+        print(f"  · 골든셋 {g['qa_entries'] - g['matched']}건은 로그에서 해당 질문을 찾지 못했습니다.")
+
+
 def _main(argv: list[str]) -> int:
     # graph.py와 같은 규약: CLI로 직접 부를 때만 .env를 읽는다(라이브러리 사용 시엔
     # 호출자 환경을 존중). 미설치면 조용히 넘어간다 - 키 없이도 규칙 지표는 돈다.
@@ -140,17 +207,35 @@ def _main(argv: list[str]) -> int:
 
     args = [a for a in argv if not a.startswith("--")]
     limit = None
+    golden = None
     for a in argv:
         if a.startswith("--limit="):
             limit = int(a.split("=", 1)[1])
+        elif a.startswith("--golden="):
+            golden = a.split("=", 1)[1]
     allow_qa_only = "--allow-qa-only" in argv
     if len(args) != 1:
-        print("사용법: python -m agents.eval.replay <log.jsonl> [--limit=N] [--allow-qa-only]")
+        print("사용법: python -m agents.eval.replay <log.jsonl> --golden=<golden.xlsx>"
+              " [--limit=N] [--allow-qa-only] [--no-golden]")
+        return 2
+
+    # 골든셋은 진단의 기본 입력이다(멘토 피드백 2026-08-07 §1). 빼먹으면 검색축
+    # 라벨 3종이 침묵하고 환각도 예비에 머무는데, 그 사실을 모른 채 얕은 진단을
+    # 받아가는 것을 막는다. 정답지가 아예 없는 상황은 --no-golden 으로 옵트인한다
+    # (contexts 파일 게이트와 같은 구조 - 기본은 거부, 명시하면 허용).
+    if not golden and "--no-golden" not in argv:
+        print("골든셋(시험지)이 없습니다 — 진단의 기본 입력입니다.")
+        print("  --golden=<golden.xlsx|csv|jsonl|json> 로 질문·정답 세트를 주세요.")
+        print("  · 필수 열: question, ground_truth   · 권장: gold_contexts(정답 근거 원문)")
+        print("  · 이미 쓰는 테스트셋이 있으면 그대로 주셔도 됩니다(열 이름 관용 인식)")
+        print("  골든셋 없이 돌리려면: --no-golden")
+        print("    → 검색축 라벨 3종이 침묵하고 환각은 '예비'에 머뭅니다(7종 중 3종만).")
         return 2
 
     report, cap, errors = diagnose_external_log(
-        args[0], limit=limit, allow_qa_only=allow_qa_only)
+        args[0], limit=limit, allow_qa_only=allow_qa_only, golden_path=golden)
     print(f"적재: 정상 {cap['records']}건 / 오류 {len(errors)}건 / 진단 수준 {cap['tier']}")
+    _print_golden_summary(cap)
     if report is None:
         if cap["tier"] == TIER_QA_ONLY:
             print("검색 컨텍스트(contexts)가 없거나 부족해 진단이 성립하지 않습니다.")
