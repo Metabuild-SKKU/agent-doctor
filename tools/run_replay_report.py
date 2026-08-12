@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     with step("Replay", 2, "지표 실측 + 원인 판정"):
         report, cap, errors = diagnose_external_log(
             str(log_path), limit=args.limit, allow_qa_only=args.allow_qa_only,
-            golden_path=args.golden)
+            golden_path=args.golden, logs=raw, errors=load_errors)
         g = cap.get("golden")
         if g:
             print(f"  골든셋 병합: {g['qa_entries']}건 중 {g['matched']}건 매칭 "

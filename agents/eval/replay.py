@@ -130,7 +130,7 @@ def run_replay(records: list[EvalRecord], *, iteration: int = 1) -> DiagnosticRe
     return build_report(records, iteration=iteration)
 
 
-def apply_golden_set(logs: list, qa_path: str) -> dict:
+def apply_golden_set(logs: list, qa_path: str, *, qa: tuple[dict, list[str]] | None = None) -> dict:
     """골든셋(시험지)을 로그(답안지)에 질문 매칭으로 병합한다. 반환: 집계 dict.
 
     qa_merge 의 파일 경로 버전(merge_qa_into_log)과 같은 규칙을 메모리에서 적용한다 -
@@ -138,10 +138,13 @@ def apply_golden_set(logs: list, qa_path: str) -> dict:
     관용 규칙은 qa_merge 가 단독으로 갖는다(여기서 재구현하지 않는다).
 
     채우기만 한다: 로그에 이미 값이 있으면 덮지 않고 충돌로 집계한다 - 로그 제공자가
-    직접 넣은 값을 신뢰한다(qa_merge 와 동일 규칙)."""
-    from agents.eval.qa_merge import load_qa_set, normalize_question
+    직접 넣은 값을 신뢰한다(qa_merge 와 동일 규칙 - apply_qa_entry 를 공유한다).
 
-    qa_map, qa_errors = load_qa_set(qa_path)
+    qa 를 미리 넘기면(호출자가 이미 load_qa_set 을 불렀으면) 다시 읽지 않는다 -
+    CLI 프리플라이트 안내 출력(_main)이 같은 골든셋 파일을 두 번 파싱하지 않도록."""
+    from agents.eval.qa_merge import apply_qa_entry, load_qa_set, normalize_question
+
+    qa_map, qa_errors = qa if qa is not None else load_qa_set(qa_path)
     stats = {"qa_entries": len(qa_map), "matched": 0, "filled_ground_truth": 0,
              "filled_gold_contexts": 0, "conflicts": 0, "qa_errors": qa_errors}
     for rec in logs:
@@ -149,26 +152,23 @@ def apply_golden_set(logs: list, qa_path: str) -> dict:
         if not entry:
             continue
         stats["matched"] += 1
-        gt = entry.get("ground_truth")
-        if gt:
-            if not rec.ground_truth:
-                rec.ground_truth = gt
-                stats["filled_ground_truth"] += 1
-            elif rec.ground_truth != gt:
-                stats["conflicts"] += 1
-        gold = entry.get("gold_contexts") or []
-        if gold:
-            if not rec.gold_contexts:
-                rec.gold_contexts = list(gold)
-                stats["filled_gold_contexts"] += 1
-            elif list(rec.gold_contexts) != list(gold):
-                stats["conflicts"] += 1
+        apply_qa_entry(
+            entry,
+            get_ground_truth=lambda r=rec: r.ground_truth,
+            set_ground_truth=lambda v, r=rec: setattr(r, "ground_truth", v),
+            get_gold_contexts=lambda r=rec: r.gold_contexts,
+            set_gold_contexts=lambda v, r=rec: setattr(r, "gold_contexts", v),
+            stats=stats,
+        )
     return stats
 
 
 def diagnose_external_log(path: str, *, limit: int | None = None,
                           allow_qa_only: bool = False,
                           golden_path: str | None = None,
+                          logs: list[ExternalLogRecord] | None = None,
+                          errors: list[str] | None = None,
+                          qa: tuple[dict, list[str]] | None = None,
                           ) -> tuple[DiagnosticReport | None, dict, list[str]]:
     """파일 경로 → (리포트, 적재 판정, 적재 오류). 리포트가 None 인 경우:
     유효 레코드 없음(tier none), 또는 컨텍스트 부족(tier qa_only)인데
@@ -177,10 +177,18 @@ def diagnose_external_log(path: str, *, limit: int | None = None,
 
     golden_path 가 주어지면 적재 직후·판정 전에 병합한다 - 순서가 중요하다.
     assess_capability 가 정답/근거 보유량을 세어 tier·notes 를 만들므로, 병합을
-    나중에 하면 "정답 0건"으로 판정된 채 리포트가 나간다."""
-    logs, errors = load_external_log(path)
+    나중에 하면 "정답 0건"으로 판정된 채 리포트가 나간다.
+
+    logs/errors 를 미리 넘기면(호출자가 이미 load_external_log 를 불렀으면) 파일을
+    다시 읽지 않는다 - CLI 프리플라이트 골든셋 게이트 체크(_main)와
+    tools/run_replay_report.py 의 STEP1 통계 출력이 같은 로그를 두 번 파싱하지
+    않도록. qa 는 apply_golden_set 에 그대로 전달한다(같은 취지)."""
+    if logs is None:
+        logs, errors = load_external_log(path)
+    else:
+        errors = list(errors or [])
     if golden_path:
-        merge_stats = apply_golden_set(logs, golden_path)
+        merge_stats = apply_golden_set(logs, golden_path, qa=qa)
         errors = errors + [f"골든셋 파싱 오류: {e}" for e in merge_stats["qa_errors"]]
     else:
         merge_stats = None
@@ -260,9 +268,13 @@ def _main(argv: list[str]) -> int:
     # 단, 로그 자체에 이미 ground_truth/gold_contexts 가 인라인으로 있으면(문서·
     # 시뮬레이터가 안내하는 --golden 없는 명령이 이 경우다) 골든셋이 없는 게
     # 아니므로 거부하지 않는다.
+    # 아래서 미리 읽은 로그/골든셋은 diagnose_external_log 에 그대로 넘겨 같은 파일을
+    # 두 번 파싱하지 않는다(logs=/qa= 파라미터 - 대용량 로그·골든셋에서 I/O 가 겹친다).
+    preloaded_logs = preloaded_errors = preloaded_qa = None
+
     if not golden and "--no-golden" not in argv:
-        inline_logs, _ = load_external_log(args[0])
-        inline_cap = assess_capability(inline_logs)
+        preloaded_logs, preloaded_errors = load_external_log(args[0])
+        inline_cap = assess_capability(preloaded_logs)
         if not inline_cap["with_ground_truth"] and not inline_cap["with_gold_contexts"]:
             print("골든셋(시험지)이 없습니다 — 진단의 기본 입력입니다.")
             print("  --golden=<golden.xlsx|csv|jsonl|json> 로 질문·정답 세트를 주세요.")
@@ -274,7 +286,8 @@ def _main(argv: list[str]) -> int:
 
     if golden:
         from agents.eval.qa_merge import load_qa_set
-        qa_map, _ = load_qa_set(golden)
+        qa_map, qa_errors = load_qa_set(golden)
+        preloaded_qa = (qa_map, qa_errors)
         n = len(qa_map)
         print(f"골든셋 권장 크기: 50~{GOLDEN_RECOMMENDED_MAX}건 (현재 {n}건)")
         if n > GOLDEN_HARD_CAP:
@@ -285,7 +298,8 @@ def _main(argv: list[str]) -> int:
             return 2
 
     report, cap, errors = diagnose_external_log(
-        args[0], limit=limit, allow_qa_only=allow_qa_only, golden_path=golden)
+        args[0], limit=limit, allow_qa_only=allow_qa_only, golden_path=golden,
+        logs=preloaded_logs, errors=preloaded_errors, qa=preloaded_qa)
     print(f"적재: 정상 {cap['records']}건 / 오류 {len(errors)}건 / 진단 수준 {cap['tier']}")
     for err in errors[:10]:
         print(f"  ! {err}")
