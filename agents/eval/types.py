@@ -383,6 +383,22 @@ class EvalRecord:
         return blend_answer_score(self.oracle_f1, self.oracle_answer_semantic)
 
 
+def has_language_mismatch(record: EvalRecord) -> bool:
+    """RAG 답변이 프롬프트가 요구한 언어와 다른지 판단한다.
+
+    콘솔 로그와 report JSON이 같은 기준을 쓰도록 EvalRecord 옆에 둔다. unknown/mixed는
+    판정 신호로 쓰기 애매하므로 mismatch로 보지 않는다.
+    """
+    return (
+        record.target_answer_language in {"ko", "en"}
+        and record.generated_answer_language not in {
+            record.target_answer_language,
+            "unknown",
+            "mixed",
+        }
+    )
+
+
 def _gold_coverage(ragas: dict) -> Optional[float]:
     """RAGAS 트랙 dict 의 TP/FN 카운트에서 gold 커버리지를 계산. 카운트 없으면 None."""
     if "answer_correctness_fn" not in ragas:

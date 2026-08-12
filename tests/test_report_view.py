@@ -257,6 +257,11 @@ class FailedQuestionViewTest(unittest.TestCase):
             "question": "무료 체험 기간은 며칠인가요?",
             "expected_answer": "14일",
             "actual_answer": "30일입니다.",
+            "question_language": "unknown",
+            "target_answer_language": "unknown",
+            "generated_answer_language": "unknown",
+            "oracle_answer_language": "unknown",
+            "language_mismatch": False,
         }])
         self.assertEqual(len(view["qas"]), 1)
         self.assertEqual(view["qas"][0]["q"], probe.question)

@@ -81,7 +81,12 @@ def detect_text_language(text: str) -> str:
     코드/라이브러리 식별자는 질문 언어가 아니라 인용된 대상이다. 이 토큰들을 라틴
     문자 수에 넣으면 Optimize iteration마다 답변 언어가 흔들리는 mixed 오탐이 생긴다.
     """
-    visible_text = _language_visible_text(text or "")
+    raw = text or ""
+    # 기술 식별자 제거는 한국어 질문에 섞인 라틴 토큰을 빼기 위한 보정이다.
+    # 한글이 아예 없는 질문에서는 제거하지 않는다. 그렇지 않으면
+    # "OAuth2 SSO SAML IdP?"처럼 식별자만으로 된 영어 질문이 전부 지워져
+    # unknown -> ko 폴백을 타게 된다.
+    visible_text = _language_visible_text(raw) if _HANGUL_RE.search(raw) else raw
     hangul = len(_HANGUL_RE.findall(visible_text))
     latin = len(_LATIN_RE.findall(visible_text))
     total = hangul + latin

@@ -25,7 +25,7 @@ from collections import Counter
 from core.schema import DiagnosticReport
 from agents.eval.types import (
     EvalRecord, RAGAS_WEIGHTS, PASS_SCORE_THRESHOLD, F1_PASS_THRESHOLD,
-    resolve_mode,
+    has_language_mismatch, resolve_mode,
 )
 from agents.eval.scoring import compute_composite, format_composite
 from agents.eval.diagnose import _oracle_ok   # oracle 통과 판정은 진단과 같은 함수를 쓴다
@@ -226,22 +226,11 @@ def _failed_questions(records: list[EvalRecord]) -> list[dict]:
             "target_answer_language": record.target_answer_language,
             "generated_answer_language": record.generated_answer_language,
             "oracle_answer_language": record.oracle_answer_language,
-            "language_mismatch": _language_mismatch(record),
+            "language_mismatch": has_language_mismatch(record),
         }
         for record in records
         if record.findings and not is_gold_labeling_error(record)
     ]
-
-
-def _language_mismatch(record: EvalRecord) -> bool:
-    return (
-        record.target_answer_language in {"ko", "en"}
-        and record.generated_answer_language not in {
-            record.target_answer_language,
-            "unknown",
-            "mixed",
-        }
-    )
 
 
 def _findings_summary(records: list[EvalRecord], mode: int) -> dict:

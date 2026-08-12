@@ -40,7 +40,7 @@ from core.state import AgentDoctorState
 
 from agents.eval.types import (
     EvalRecord, DEFAULT_TOP_K, Mode, resolve_mode, llm_eval_enabled,
-    resolve_llm_concurrency, resolve_probe_source,
+    has_language_mismatch, resolve_llm_concurrency, resolve_probe_source,
     PROBE_SOURCE_MADE, PROBE_SOURCE_TAXONOMY,
 )
 from agents.eval.probe_gen import (
@@ -903,10 +903,7 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
         )
         if rec.oracle_answer is not None:
             language_line += f", oracle={rec.oracle_answer_language}"
-        if (
-            rec.target_answer_language in {"ko", "en"}
-            and rec.generated_answer_language not in {rec.target_answer_language, "unknown", "mixed"}
-        ):
+        if has_language_mismatch(rec):
             language_line += "  language_mismatch=true"
         print(language_line)
     print(f"    검색 [{retrieved}] / 골드 [{gold}]")

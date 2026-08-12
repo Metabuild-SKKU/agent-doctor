@@ -425,6 +425,12 @@ class RagGeneratorTests(unittest.TestCase):
             "ko",
         )
 
+    def test_detect_text_language_keeps_identifier_only_english_questions(self):
+        self.assertEqual(detect_text_language("OAuth2 SSO SAML IdP?"), "en")
+        self.assertEqual(detect_text_language("state-of-the-art RAG"), "en")
+        self.assertEqual(detect_text_language("partial_fit() warm_start"), "en")
+        self.assertEqual(detect_text_language("CI/CD?"), "en")
+
     def test_build_prompt_answers_english_question_in_english_by_default(self):
         system, _ = _build_prompt(
             "How many remote work days are allowed?",
