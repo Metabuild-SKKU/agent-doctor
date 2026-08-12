@@ -35,6 +35,8 @@ import re
 import sys
 from typing import Any, Optional
 
+from agents.eval.log_intake import normalize_answer_field
+
 # QA셋에서 받아들이는 키 이름(앞에 있을수록 우선)
 QUESTION_KEYS = ("question", "q", "query")
 GROUND_TRUTH_KEYS = ("ground_truth", "gold_answer", "answer", "answers")
@@ -55,22 +57,6 @@ def _first_key(obj: dict, keys: tuple[str, ...]) -> Any:
         if k in obj and obj[k] not in (None, "", []):
             return obj[k]
     return None
-
-
-def _as_text(value: Any) -> Optional[str]:
-    """정답 후보 → 텍스트 하나. 리스트(KorQuAD식 복수 정답)는 첫 항목(v1 규약).
-    항목이 dict(KorQuAD 원본 answers=[{"text":...,"answer_start":...}])면 그 dict 를
-    str() 통짜 변환하지 않고 "text" 키를 꺼낸다 - 안 그러면 "{'text': ..., ...}" 가
-    정답이 돼 채점을 조용히 오염시킨다."""
-    if isinstance(value, list):
-        value = value[0] if value else None
-    if isinstance(value, dict):
-        value = value["text"] if value.get("text") is not None else value.get("answer")
-    # `or` 로 비면(falsy) 정답이 숫자 0("0원"류)일 때 통째로 사라진다 - None 여부로 분기.
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 def _as_text_list(value: Any) -> list[str]:
@@ -183,17 +169,41 @@ def load_qa_set(path: str) -> tuple[dict[str, dict], list[str]]:
         if not isinstance(entry, dict):
             errors.append(f"항목 {i}: 오브젝트가 아님")
             continue
-        question = _as_text(_first_key(entry, QUESTION_KEYS))
+        question = normalize_answer_field(_first_key(entry, QUESTION_KEYS))
         if not question:
             errors.append(f"항목 {i}: 질문 없음")
             continue
         if normalize_question(question) in qa_map:
             errors.append(f"항목 {i}: 중복 질문(마지막 항목 우선): {question[:30]}")
         qa_map[normalize_question(question)] = {
-            "ground_truth": _as_text(_first_key(entry, GROUND_TRUTH_KEYS)),
+            "ground_truth": normalize_answer_field(_first_key(entry, GROUND_TRUTH_KEYS)),
             "gold_contexts": _as_text_list(_first_key(entry, GOLD_CONTEXT_KEYS)),
         }
     return qa_map, errors
+
+
+def apply_qa_entry(qa_entry: dict, *, get_ground_truth, set_ground_truth,
+                    get_gold_contexts, set_gold_contexts, stats: dict) -> None:
+    """QA 엔트리(ground_truth/gold_contexts)를 대상에 채운다 - 이미 값이 있으면
+    덮지 않고 충돌로만 집계한다(로그 제공자가 직접 넣은 값을 신뢰). accessor 로
+    dict 필드든 dataclass 속성이든 같은 규칙을 적용한다 - merge_qa_into_log(파일
+    경로 버전)와 agents/eval/replay.py 의 apply_golden_set(메모리 버전)이 공유한다."""
+    gt = qa_entry.get("ground_truth")
+    if gt is not None:
+        cur = get_ground_truth()
+        if cur is None:
+            set_ground_truth(gt)
+            stats["filled_ground_truth"] += 1
+        elif cur != gt:
+            stats["conflicts"] += 1
+    gold = qa_entry.get("gold_contexts") or []
+    if gold:
+        cur_gold = get_gold_contexts()
+        if not cur_gold:
+            set_gold_contexts(list(gold))
+            stats["filled_gold_contexts"] += 1
+        elif list(cur_gold) != list(gold):
+            stats["conflicts"] += 1     # GT 와 같은 규칙 - 불일치를 조용히 버리지 않는다
 
 
 def merge_qa_into_log(log_path: str, qa_path: str, out_path: str) -> dict:

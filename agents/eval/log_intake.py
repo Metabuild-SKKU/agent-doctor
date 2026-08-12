@@ -98,6 +98,24 @@ def _normalize_context(entry: Any) -> Optional[dict]:
     return None
 
 
+def normalize_answer_field(value: Any) -> Optional[str]:
+    """정답 후보(문자열/리스트/dict) → 텍스트 하나. 리스트(KorQuAD식 복수 정답)는
+    첫 항목(v1 규약). dict(KorQuAD 원본 answers=[{"text":...,"answer_start":...}])는
+    str() 통짜 변환하지 않고 "text" 키를 꺼낸다 - 안 그러면 "{'text': ..., ...}" 가
+    정답이 돼 채점을 조용히 오염시킨다. `x or ""` 로 비우면(falsy) 숫자 0("0원"류)
+    정답이 통째로 사라지므로 None 여부로만 분기한다.
+
+    agents/eval/qa_merge.py 의 골든셋 파싱과 공유한다(같은 입력 포맷을 받는다)."""
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, dict):
+        value = value["text"] if value.get("text") is not None else value.get("answer")
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def parse_record(obj: Any) -> ExternalLogRecord:
     """JSON 오브젝트 1개 → ExternalLogRecord. 스키마 위반은 ValueError 로 알린다."""
     if not isinstance(obj, dict):
@@ -128,22 +146,12 @@ def parse_record(obj: Any) -> ExternalLogRecord:
     config = obj.get("config")
     latency = obj.get("latency_ms")
     feedback = obj.get("feedback")
-    # ground_truth 가 리스트(KorQuAD식 복수 정답)면 첫 항목(v1 규약, qa_merge 와 동일).
-    # str() 통짜 변환하면 "['a','b']" 가 정답이 돼 char_f1/correctness 를 조용히 오염시킨다.
-    gt_raw = obj.get("ground_truth")
-    if isinstance(gt_raw, list):
-        gt_raw = gt_raw[0] if gt_raw else None
-    # KorQuAD 원본 포맷 answers=[{"text":...,"answer_start":...}] - dict 를 str() 하면
-    # "{'text': ..., 'answer_start': ...}" 가 정답이 돼 채점을 조용히 오염시킨다.
-    if isinstance(gt_raw, dict):
-        gt_raw = gt_raw["text"] if gt_raw.get("text") is not None else gt_raw.get("answer")
 
     return ExternalLogRecord(
         question=str(obj["question"]).strip(),
         answer=str(obj["answer"]).strip(),
         contexts=contexts,
-        # `or` 로 비면(falsy) 정답이 숫자 0("0원"류)일 때 통째로 사라진다 - None 여부로 분기.
-        ground_truth=None if gt_raw is None else (str(gt_raw).strip() or None),
+        ground_truth=normalize_answer_field(obj.get("ground_truth")),
         gold_contexts=gold_contexts,
         config=config if isinstance(config, dict) else {},
         feedback=str(feedback) if feedback not in (None, "") else None,
