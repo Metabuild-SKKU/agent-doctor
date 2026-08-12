@@ -271,7 +271,17 @@ def _reranker_soft_device(model_name: str) -> str | None:
     충돌해 access violation 으로 죽는다(실측: Windows, torch 2.x). 실제 로드 경로에서는
     이 함수가 진짜 sentence_transformers import **뒤에** 불리므로 torch 는 이미 올라와
     있고, auto 판정은 항상 정확하다. torch 가 없으면(=가짜 모듈 경로) None 으로 물러나
-    라이브러리 기본 장치에 맡긴다."""
+    라이브러리 기본 장치에 맡긴다.
+
+    **확인 못 한 cuda 는 주장하지 않는다.** torch 가 없으면 CUDA 가 실제로 쓸 수 있는지
+    알 수 없는데, 그때 요청값 "cuda" 를 그대로 돌려주면 두 가지가 어긋난다.
+      - 이 값이 경로 기록(intended_reranker_route)에 그대로 실려, CUDA 가 없는 머신의
+        리포트에 local:cuda 가 남는다. 기록이 거짓말하지 않게 하려고 만든 축이 정확히
+        그 자리에서 거짓말한다.
+      - 같은 env 를 torch 를 import 할 수 있는 resolve_reranker_device 가 읽으면 cpu 라
+        답해, 실행 머리 요약과 실제 경로가 갈린다.
+    확인이 안 되면 auto 와 똑같이 None(= 라이브러리 기본)으로 물러난다. 실제 로드 경로는
+    항상 torch 가 올라온 뒤라 이 완화가 발동하지 않는다."""
     override = _reranker_device_overrides.get(model_name)
     if override:
         return override
@@ -281,14 +291,15 @@ def _reranker_soft_device(model_name: str) -> str | None:
         or "auto"
     ) or "auto"
     torch = sys.modules.get("torch")
+    if torch is None:
+        # cpu 처럼 확인이 필요 없는 값만 그대로 통과시킨다.
+        return None if raw == "auto" or raw.startswith("cuda") else raw
     if raw == "auto":
-        if torch is None:
-            return None
         try:
             return "cuda" if torch.cuda.is_available() else "cpu"
         except Exception:
             return "cpu"
-    if raw.startswith("cuda") and torch is not None:
+    if raw.startswith("cuda"):
         try:
             if not torch.cuda.is_available():
                 _notify_route_once(
@@ -391,6 +402,13 @@ class _OpenRouterReranker:
         # AttributeError 로 죽는다 — API 경로만 더 관대할 이유는 없지만, 죽는 자리가
         # 검색 한복판이라 자리만 지키고 넘어가는 편이 낫다).
         documents = [(text or " ") if (text or "").strip() else " " for _q, text in pairs]
+        # 실제로 API 를 부르는 자리에서만 안내한다 — 로드 시점에 찍으면 리랭커가 꺼져
+        # 있는(=한 푼도 안 나가는) 실행의 preflight 에서도 과금 경고가 뜬다.
+        _notify_route_once(
+            f"reranker:openrouter:{self.model}",
+            f"[Index] 리랭크를 OpenRouter({self.model})로 계산합니다 - 질의마다 "
+            f"과금됩니다(로컬 계산은 INDEX_RERANKER_PROVIDER=local).",
+        )
 
         def _call():
             attempt_started = time.monotonic()
@@ -446,11 +464,9 @@ def _load_openrouter_reranker(model_name: str) -> tuple[Any | None, str]:
         return None, "api_key_missing"
 
     model = openrouter_reranker_model(model_name)
-    _notify_route_once(
-        f"reranker:openrouter:{model}",
-        f"[Index] 리랭크를 OpenRouter({model})로 계산합니다 - 질의마다 과금됩니다"
-        f"(로컬 계산은 INDEX_RERANKER_PROVIDER=local).",
-    )
+    # 과금 안내는 여기가 아니라 실제로 호출하는 자리(_OpenRouterReranker.predict)에서 찍는다.
+    # 이 함수는 리랭커가 꺼져 있는 실행에서도 preflight 때문에 불리는데, 그때 "질의마다
+    # 과금됩니다" 를 찍으면 한 푼도 안 나가는 실행마다 거짓 경고가 뜬다.
     # 입력 길이 상한은 로컬 전용 장치다(토크나이저가 여기 없다). 상한 없이 도는 실행으로
     # 남겨야 리포트의 capped/uncapped 구분이 거짓말을 하지 않는다.
     _reranker_max_lengths[model_name] = None
@@ -570,14 +586,32 @@ def _demote_reranker_to_cpu(model_name: str, exc: Exception) -> bool:
 
     호출부의 _reranker_lock 안에서 부른다. 로드 때의 OOM 은 _load_local_reranker 가 잡지만,
     추론 OOM 은 후보 수·청크 길이에 따라 나중에 터진다 — 그때 장치를 그대로 두면 쿨다운마다
-    같은 GPU 로 재시도해 계속 같은 자리에서 죽는다."""
+    같은 GPU 로 재시도해 계속 같은 자리에서 죽는다.
+
+    경로 기록은 **여기서 지우지 않는다.** 지우는 건 캐시에서 그 모델을 실제로 걷어내는
+    쪽(_forget_reranker)의 몫이다. 둘을 갈라 두지 않으면, 다른 스레드가 이미 새 모델을
+    올려 둔 사이에 이 함수가 경로만 지우고 모델은 남는 조합이 생긴다 — 그러면
+    _load_reranker 가 "경로 기록이 없는 객체 = 테스트 더블" 로 보고 계속 재사용해,
+    그 프로세스의 남은 실행 전부가 경로 없는 리랭크로 기록된다."""
     route = _reranker_routes.get(model_name) or ""
     if not route.startswith("local:cuda") or not _is_cuda_oom(exc):
         return False
     _reranker_device_overrides[model_name] = "cpu"
-    _reranker_routes.pop(model_name, None)
     print("[Index] reranker 추론 중 GPU 메모리 부족 - 이 실행에서는 CPU 로 내립니다.")
     return True
+
+
+def _forget_reranker(model_name: str, model: Any) -> None:
+    """이 모델 객체를 캐시에서 걷어내고 그에 딸린 기록도 같이 지운다.
+
+    호출부의 _reranker_lock 안에서 부른다. 다른 요청이 이미 새 모델을 넣었다면 아무것도
+    건드리지 않는다 — 그 객체까지 지우면 남의 로드를 취소하는 셈이고, 기록만 지우면
+    모델과 경로가 어긋난 채로 남는다. 그래서 판정과 삭제를 한 곳에 묶는다."""
+    if _rerankers.get(model_name) is not model:
+        return
+    _rerankers.pop(model_name, None)
+    _reranker_routes.pop(model_name, None)
+    _reranker_max_lengths.pop(model_name, None)
 
 
 def probe_reranker_capability(
@@ -618,8 +652,7 @@ def probe_reranker_capability(
         except Exception as exc:
             with _reranker_lock:
                 demoted = _demote_reranker_to_cpu(resolved_name, exc)
-                if _rerankers.get(resolved_name) is model:
-                    _rerankers.pop(resolved_name, None)
+                _forget_reranker(resolved_name, model)
                 if not demoted:
                     _failed_rerankers[resolved_name] = time.monotonic()
             print(f"[Index] reranker smoke inference 실패: {exc}")
@@ -1289,8 +1322,7 @@ def rerank_with_status(
         with _reranker_lock:
             demoted = _demote_reranker_to_cpu(model_name, exc)
             # 다른 요청이 이미 새 모델을 넣었다면 그 객체까지 지우지 않는다.
-            if _rerankers.get(model_name) is model:
-                _rerankers.pop(model_name, None)
+            _forget_reranker(model_name, model)
             # CPU 로 내린 경우는 쿨다운을 걸지 않는다 — 다음 질의는 다른 장치로 올라가므로
             # 기다릴 이유가 없고, 300초 동안 리랭크가 통째로 빠지는 편이 훨씬 비싸다.
             if not demoted:

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
+import types
 import unittest
 from unittest.mock import Mock, patch
 
@@ -64,17 +66,23 @@ class RerankerRouteResolutionTest(unittest.TestCase):
 
     def test_gpu_is_accepted_as_cuda_alias(self):
         """`--rerank gpu` 가 CLI 어휘라 env 에 그대로 옮겨 적기 쉬운데, torch 는 "gpu" 를
-        모른다 — 그대로 넘기면 로드가 죽고 리랭커가 300초 쿨다운으로 조용히 빠진다."""
-        with patch.dict(os.environ, {"INDEX_RERANKER_DEVICE": "gpu"}):
-            self.assertIn(
-                qdrant_store._reranker_soft_device("test/alias"), {"cuda", "cpu"}
-            )
-            self.assertNotEqual(
-                qdrant_store._reranker_soft_device("test/alias"), "gpu"
-            )
-        # 임베딩 축도 같은 어휘를 쓴다(`--embed gpu`).
-        with patch.dict(os.environ, {"INDEX_EMBED_DEVICE": "gpu"}):
-            self.assertNotEqual(qdrant_store.resolve_embedding_device(), "gpu")
+        모른다 — 그대로 넘기면 로드가 죽고 리랭커가 300초 쿨다운으로 조용히 빠진다.
+
+        CUDA 가 있는 상태를 가짜 torch 로 고정한다. 실제 머신의 GPU 유무나 torch 가
+        언제 import 됐는지에 결과가 달리면, 별칭이 먹었는지 아닌지를 못 가린다."""
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = types.SimpleNamespace(is_available=lambda: True)
+
+        with patch.dict(sys.modules, {"torch": fake_torch}):
+            with patch.dict(os.environ, {"INDEX_RERANKER_DEVICE": "gpu"}):
+                self.assertEqual(
+                    qdrant_store._reranker_soft_device("test/alias"), "cuda"
+                )
+                self.assertEqual(qdrant_store.resolve_reranker_device(), "cuda")
+            # 임베딩 축도 같은 어휘를 쓴다(`--embed gpu`).
+            with patch.dict(os.environ, {"INDEX_EMBED_DEVICE": "gpu"}):
+                os.environ.pop("INDEX_RERANKER_DEVICE", None)
+                self.assertEqual(qdrant_store.resolve_embedding_device(), "cuda")
 
     def test_empty_device_env_still_inherits_embedding_axis(self):
         """`.env` 의 `# INDEX_RERANKER_DEVICE=` 주석만 풀면 값이 "" 가 된다. 이걸
@@ -89,12 +97,22 @@ class RerankerRouteResolutionTest(unittest.TestCase):
 
     def test_two_device_resolvers_agree(self):
         """머리 요약(resolve_reranker_device)과 실제 로드(_reranker_soft_device)가
-        env 를 다르게 읽으면, 요약이 실제 경로를 못 맞힌다."""
+        env 를 다르게 읽으면, 요약이 실제 경로를 못 맞힌다.
+
+        torch 를 먼저 올려 두 함수를 같은 조건에 세운다. soft 쪽은 torch 가
+        sys.modules 에 있을 때만 장치를 확정하므로, 이걸 안 하면 결과가 "이 테스트보다
+        먼저 누가 torch 를 import 했나"에 달린다(실제로 단독 실행에서 깨졌다)."""
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            self.skipTest("torch 가 없으면 두 해석기 모두 장치를 확정하지 않는다")
+
         cases = [
             {"INDEX_RERANKER_DEVICE": "cpu"},
             {"INDEX_RERANKER_DEVICE": "", "INDEX_EMBED_DEVICE": "cpu"},
             {"INDEX_EMBED_DEVICE": "cpu"},
             {"INDEX_RERANKER_DEVICE": "gpu", "INDEX_EMBED_DEVICE": "cpu"},
+            {"INDEX_RERANKER_DEVICE": "cuda", "INDEX_EMBED_DEVICE": "cpu"},
         ]
         for env in cases:
             with self.subTest(env=env):
@@ -102,10 +120,24 @@ class RerankerRouteResolutionTest(unittest.TestCase):
                 with patch.dict(os.environ, full):
                     for name in [k for k, v in full.items() if not v]:
                         os.environ.pop(name, None)
-                    soft = qdrant_store._reranker_soft_device("test/agree")
-                    # soft 쪽은 torch 가 없으면 None(라이브러리 기본)으로 물러난다.
-                    if soft is not None:
-                        self.assertEqual(qdrant_store.resolve_reranker_device(), soft)
+                    self.assertEqual(
+                        qdrant_store.resolve_reranker_device(),
+                        qdrant_store._reranker_soft_device("test/agree"),
+                    )
+
+    def test_soft_device_does_not_claim_unverified_cuda(self):
+        """torch 없이는 CUDA 가 실제로 쓸 수 있는지 알 수 없다. 그때 요청값 cuda 를
+        그대로 돌려주면 CUDA 없는 머신의 리포트에 local:cuda 가 남는다 —
+        기록이 거짓말하지 않게 하려고 만든 축이 정확히 그 자리에서 거짓말한다."""
+        with patch.dict(os.environ, {"INDEX_RERANKER_DEVICE": "cuda"}):
+            with patch.dict(sys.modules, {"torch": None}):
+                self.assertIsNone(qdrant_store._reranker_soft_device("test/no-torch"))
+        # 확인이 필요 없는 값은 그대로 통과한다(cpu 는 어디에나 있다).
+        with patch.dict(os.environ, {"INDEX_RERANKER_DEVICE": "cpu"}):
+            with patch.dict(sys.modules, {"torch": None}):
+                self.assertEqual(
+                    qdrant_store._reranker_soft_device("test/no-torch"), "cpu"
+                )
 
     def test_openrouter_model_is_not_derived_from_local_name(self):
         """로컬 이름 소문자화(임베딩 규칙)를 쓰면 404 다 — 카탈로그에 bge 계열이 없다."""
@@ -455,27 +487,38 @@ class RerankTimingTest(unittest.TestCase):
     def test_concurrent_predicts_do_not_mix_timings(self):
         """이 객체는 모델 캐시에 들어가 프로세스 전체가 공유한다. Serve 의 /search 는
         동기 엔드포인트라 동시 질의가 각자 스레드에서 같은 객체를 부르는데, 계측을
-        인스턴스 속성 하나로 두면 A 질의의 시간이 B 질의 리포트에 실린다."""
+        인스턴스 속성 하나로 두면 A 질의의 시간이 B 질의 리포트에 실린다.
+
+        대역은 **스레드 밖에서 한 번만** 갈아끼운다. 스레드마다 patch.object 로 같은
+        모듈 속성을 덮으면 늦게 건 쪽이 둘 다를 먹어(느린 쪽이 빠른 대역을 부른다)
+        테스트가 주장하는 것을 검증하지 못하고, 해제 순서가 엇갈리면 대역이 모듈에
+        그대로 남아 뒤 테스트까지 오염된다."""
         import threading
 
         reranker = qdrant_store._OpenRouterReranker("test/model", "key")
+        delays = {"slow": 0.25, "fast": 0.0}
         seen: dict[str, float | None] = {}
         started = threading.Barrier(2)
 
-        def _run(name, delay):
-            def _fake(_q, _d, _m, *, api_key, tag):
-                time.sleep(delay)
-                return [(0, 0.5)]
+        def _fake(_query, _documents, _model, *, api_key, tag):
+            # 호출한 스레드 이름으로 지연을 고른다 — 대역이 하나라 경합이 없다.
+            time.sleep(delays[threading.current_thread().name])
+            return [(0, 0.5)]
 
-            with patch.object(qdrant_store, "openrouter_rerank", side_effect=_fake):
-                started.wait()
-                reranker.predict([("질문", "본문")])
-                seen[name] = reranker.last_predict_seconds
+        def _run(name):
+            started.wait()
+            reranker.predict([("질문", "본문")])
+            seen[name] = reranker.last_predict_seconds
 
-        slow = threading.Thread(target=_run, args=("slow", 0.25))
-        fast = threading.Thread(target=_run, args=("fast", 0.0))
-        slow.start(); fast.start()
-        slow.join(); fast.join()
+        with patch.object(qdrant_store, "openrouter_rerank", side_effect=_fake):
+            threads = [
+                threading.Thread(target=_run, args=(name,), name=name)
+                for name in delays
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
 
         self.assertGreaterEqual(seen["slow"], 0.2)
         self.assertLess(seen["fast"], 0.2)
@@ -661,6 +704,38 @@ class RerankerCudaFallbackTest(unittest.TestCase):
         self.assertEqual(qdrant_store._reranker_device_overrides[model_name], "cpu")
         self.assertNotIn(model_name, qdrant_store._failed_rerankers)
         self.assertNotIn(model_name, qdrant_store._rerankers)
+
+    def test_demotion_does_not_orphan_another_threads_model(self):
+        """OOM 을 만난 스레드가 경로만 지우고 모델은 남기면, _load_reranker 가 그
+        모델을 "경로 기록 없는 테스트 더블" 로 보고 계속 재사용한다 — 그 프로세스의
+        남은 실행 전부가 경로 없이 기록된다(리포트의 routes 가 통째로 빈다)."""
+        model_name = qdrant_store.DEFAULT_RERANKER_MODEL
+        stale = Mock()
+        stale.predict.side_effect = RuntimeError("CUDA out of memory.")
+        fresh = Mock()
+        fresh.predict.return_value = [0.4]
+        qdrant_store._rerankers[model_name] = stale
+        qdrant_store._reranker_routes[model_name] = "local:cuda"
+
+        # 이 스레드가 OOM 을 처리하기 직전에, 다른 스레드가 이미 같은 이름으로 새 모델을
+        # 올려 두고 경로까지 기록한 상태를 재현한다(그쪽도 cuda 로 올렸다).
+        def _replace(*_args, **_kwargs):
+            qdrant_store._rerankers[model_name] = fresh
+            qdrant_store._reranker_routes[model_name] = "local:cuda"
+            raise RuntimeError("CUDA out of memory.")
+
+        stale.predict.side_effect = _replace
+
+        qdrant_store.rerank_with_status(
+            "질문", [{"chunk_id": "c1", "text": "본문", "score": 0.5}], top_k=1
+        )
+
+        # 강등 자체는 일어난다(다음 로드는 CPU 로).
+        self.assertEqual(qdrant_store._reranker_device_overrides[model_name], "cpu")
+        # 그러나 남의 모델과 그 경로는 그대로 살아 있어야 한다 — 경로만 지우면
+        # _load_reranker 가 그 모델을 "기록 없는 더블" 로 보고 영영 재사용한다.
+        self.assertIs(qdrant_store._rerankers[model_name], fresh)
+        self.assertEqual(qdrant_store._reranker_routes[model_name], "local:cuda")
 
     def test_non_oom_failure_still_cools_down(self):
         model_name = qdrant_store.DEFAULT_RERANKER_MODEL

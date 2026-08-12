@@ -137,9 +137,13 @@ def describe_embedding_route() -> str:
     else:
         embed_line = f"임베딩: 색인={index_route}, 질의={query_route}"
 
+    # 판정 기준은 로더(qdrant_store._load_reranker)와 같아야 한다 — 거기는
+    # "openrouter 가 아니면 로컬" 이라 미지원 값(오타·`gpu` 등)도 로컬로 돈다.
+    # 여기서만 `== "local"` 로 보면 그런 값이 API 경로로 표시돼, 유료 호출이 나갈
+    # 것처럼 읽히는 실행이 실제로는 로컬로 돈다(그 반대보다 낫지도 않다).
     rerank_provider = resolve_reranker_provider()
-    if rerank_provider == "local":
-        rerank_route = f"local:{resolve_reranker_device()}"
+    if rerank_provider == "openrouter":
+        rerank_route = f"openrouter:{openrouter_reranker_model()}"
     else:
-        rerank_route = f"{rerank_provider}:{openrouter_reranker_model()}"
+        rerank_route = f"local:{resolve_reranker_device()}"
     return f"{embed_line} / 리랭크: {rerank_route}"
