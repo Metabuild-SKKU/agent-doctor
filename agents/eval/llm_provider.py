@@ -101,6 +101,28 @@ def _run_with_retry(fn, label: str = "LLM"):
 # 참고: STEP2 답변 생성은 이 모듈이 아니라 agents/rag/generator.py 가 담당한다
 # (그쪽은 RAG_LLM_PROVIDER / RAG_*_MODEL 계열 env 를 쓴다).
 
+def _strip_code_fence(raw: str) -> str:
+    """```json … ``` 로 감싼 응답에서 본문만 꺼낸다.
+
+    **왜 필요한가.** JSON 스키마를 강제할 수 있는 호출은 모델이 순수 JSON 을 주지만, 스키마
+    없이 프롬프트로만 요청하는 호출(`aspect_critic` 등)은 모델이 마크다운 코드펜스를 씌워
+    돌려주는 일이 흔하다. 그러면 `json.loads` 가 실패하고 `{}` 로 떨어져 **그 지표가 조용히
+    결측**된다(실측: RAGEC 스모크 10건에서 aspect_critic 3건 전부 이 이유로 실패했다.
+    기권 판정에 쓰이는 지표라 무응답 probe 판정이 통째로 날아갈 뻔했다).
+
+    provider 를 가리지 않고 파서 쪽에서 흡수한다 — 어느 모델이 언제 펜스를 씌울지는
+    호출부가 알 수 없고, 스키마 강제가 되는 경로에서도 이 함수는 무해하다(펜스가 없으면
+    원문 그대로 돌려준다).
+    """
+    text = (raw or "").strip()
+    if not text.startswith("```"):
+        return text
+    # 첫 줄은 ``` 또는 ```json — 언어 태그가 붙어도 벗긴다.
+    _, _, rest = text.partition("\n")
+    end = rest.rfind("```")
+    return (rest[:end] if end != -1 else rest).strip()
+
+
 def chat_json(
     system: str,
     user: str,
@@ -173,7 +195,7 @@ def chat_json(
         print(f"[Eval] chat_json{where} 빈 응답 → {{}}")
         return {}
     try:
-        obj = json.loads(raw)
+        obj = json.loads(_strip_code_fence(raw))
     except json.JSONDecodeError:
         # 응답 길이와 그 호출에 적용된 상한을 함께 남긴다 — 상한 절단이면 끝이 잘린 채로
         # 끝나므로 "모델이 JSON 을 못 만든 것"과 "만들다 잘린 것"을 로그만으로 가를 수 있다.

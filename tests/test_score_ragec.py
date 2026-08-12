@@ -122,11 +122,34 @@ class ExclusionTest(unittest.TestCase):
 
 class StageScoringTest(unittest.TestCase):
     def test_stage_matches_even_when_label_is_wrong(self):
-        """단계 채점은 라벨보다 거칠어 정책 차이에 강하다 — 그래서 병기한다."""
-        result = score([_found("1", "retrieval_low_rank")],
+        """단계 채점은 라벨보다 거칠어 정책 차이에 강하다 — 그래서 병기한다.
+
+        E3(청킹 단계)를 우리가 retrieval 라벨로 잡은 경우: 라벨은 틀렸는데 단계는
+        둘 다 검색 계열이 아니라 갈린다 — 여기서는 라벨·단계 모두 틀린 예다.
+        """
+        result = score([_found("1", "generation_hallucination")],
                        [_key("1", "E4 Missed Retrieval", "Retrieval")])
-        self.assertEqual(result["total_hit"], 0)          # 라벨은 틀림
+        self.assertEqual(result["total_hit"], 0)          # 라벨 틀림
+        self.assertEqual((result["stage_hit"], result["stage_total"]), (0, 1))  # 단계도 틀림
+
+    def test_stage_can_be_right_while_label_is_wrong(self):
+        """E3(Chunking)를 우리가 다른 청킹 라벨로 잡으면 라벨은 틀리고 단계는 맞는다."""
+        result = score([_found("1", "chunking_overchunking")],
+                       [_key("1", "E3 Context Mismatch", "Chunking")])
+        self.assertEqual(result["total_hit"], 0)
         self.assertEqual((result["stage_hit"], result["stage_total"]), (1, 1))
+
+    def test_e4_accepts_the_specific_cause_labels(self):
+        """E4 는 '검색 결과에 정답이 없다' 는 롤업이다 — 원인을 더 짚었으면 맞은 것이다.
+
+        처음엔 retrieval_missing_gold 하나로 좁혔다가 실측 10건에서 E4 3건을 전부
+        놓쳤다(우리는 retrieval_low_rank 를 냈다).
+        """
+        for label in ("retrieval_missing_gold", "retrieval_low_rank",
+                      "retrieval_rerank_candidate_miss", "retrieval_semantic_mismatch"):
+            result = score([_found("1", label)],
+                           [_key("1", "E4 Missed Retrieval", "Retrieval")])
+            self.assertEqual(result["total_hit"], 1, label)
 
     def test_reranker_labels_are_reranking_not_retrieval(self):
         """우리 A그룹 안에 청킹·리랭킹이 섞여 있어, 그룹으로 재면 A 정확도가 거저 오른다.

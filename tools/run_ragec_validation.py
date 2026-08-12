@@ -92,6 +92,12 @@ def main() -> int:
     os.environ["KORQUAD_QA_LIMIT"] = str(max(0, args.limit))
     os.environ.setdefault("EVAL_MODE", "deep")     # 라벨을 확정하려면 RAGAS 가 필요하다
     os.environ.setdefault("EVAL_ENABLE_LLM", "1")
+    # DragonBall 은 영어 코퍼스다. 생성 프롬프트 기본값(한국어)으로 두면 질문은 영어인데
+    # 답변만 한국어로 나와 char-F1 이 **구조적으로 0** 이 되고, _is_success 의 lexical 축이
+    # 항상 실패라 **검색이 완벽해도 실패로 집계된다**(실측: recall=1.00·gold 2/2 검색인데
+    # f1=0.00 → generation_hallucination 오진). 그러면 채점이 진단 품질이 아니라 언어
+    # 불일치를 재게 된다.
+    os.environ.setdefault("RAG_ANSWER_LANGUAGE", "match")
 
     from core.run_logger import setup_run_logging
     log_path = setup_run_logging(prefix="ragec")

@@ -578,6 +578,31 @@ def _gen_flag(config: dict | None, name: str, default: bool) -> bool:
     return bool(value)
 
 
+# 답변 언어 지시. 기본은 한국어 — 기존 KorQuAD 실행이 그대로 돌아야 한다.
+#
+# **왜 손잡이가 필요한가.** 언어가 프롬프트에 박혀 있으면 영어 코퍼스에서 질문은 영어인데
+# 답변만 한국어로 나오고, char-F1(문자 겹침)이 **구조적으로 0** 이 된다. 그러면 _is_success
+# 의 lexical 축이 항상 실패라 **검색이 완벽해도 실패로 집계된다**(실측: DragonBall probe 에서
+# recall=1.00·gold 2/2 검색인데 f1=0.00 → generation_hallucination 오진).
+#
+# "질문과 같은 언어" 는 모델에 맡긴다 — 언어를 코드가 판별하려면 감지기가 필요하고,
+# 그 오판이 다시 같은 문제를 만든다. 지시만 바꾸면 모델이 알아서 맞춘다.
+_ANSWER_LANGUAGE = {
+    "ko": "한국어로",
+    "en": "in English",
+    "match": "질문과 같은 언어로",     # 다국어 코퍼스용
+}
+
+
+def _answer_language(config: dict | None) -> str:
+    """답변 언어 지시문. config > env(RAG_ANSWER_LANGUAGE) > 기본(한국어)."""
+    raw = _config_value(config, "answer_language")
+    if raw is None:
+        raw = os.getenv("RAG_ANSWER_LANGUAGE", "")
+    key = str(raw or "").strip().lower()
+    return _ANSWER_LANGUAGE.get(key, _ANSWER_LANGUAGE["ko"])
+
+
 def _build_prompt(
     question: str,
     contexts: list[str] | list[PromptContext],
@@ -603,14 +628,15 @@ def _build_prompt(
     # 넘기고 실제 문구는 여기서 소유한다(use_hybrid/use_reranker와 같은 패턴).
     # 기본값(grounding_strict·require_citation=True, 나머지 False)은 과거 하드코딩
     # 프롬프트를 그대로 재현하므로, Optimize가 손대기 전엔 동작이 바뀌지 않는다.
+    language = _answer_language(config)
     clauses = ["너는 사내 문서 QA 어시스턴트다."]
     if _gen_flag(config, "grounding_strict", True):
         clauses.append(
-            "반드시 제공된 컨텍스트만 근거로 한국어로 답하라. "
+            f"반드시 제공된 컨텍스트만 근거로 {language} 답하라. "
             "컨텍스트에 근거가 없으면 '제공된 정보로는 알 수 없습니다'라고 답하라."
         )
     else:
-        clauses.append("한국어로 답하라.")
+        clauses.append(f"{language} 답하라.")
     # 기권 성향은 한 축의 양방향이라 둘을 동시에 싣지 않는다.
     #
     # 어느 쪽이 이길지는 여기서 정하지 않는다 — 처방 적용 시점에 config_mapper 의

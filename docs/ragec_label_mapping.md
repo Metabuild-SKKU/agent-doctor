@@ -66,16 +66,46 @@ Chunking 77(20%) · Retrieval 161(43%) · Reranking 46(12%) · Generation 93(25%
 
 | RAGEC | 건수 | 우리 라벨 | 판단 |
 |---|---|---|---|
-| **E4 Missed Retrieval** | **152** | `retrieval_missing_gold` | ✅ **확정** — `corpus_gap` 은 0건 |
+| **E4 Missed Retrieval** | **152** | `retrieval_missing_gold` **+ 그 하위 원인 라벨 전부** | 아래 참고 |
 | **E5 Low Relevance** | 6 | `retrieval_low_rank` · `retrieval_semantic_mismatch` | ? |
 | **E6 Semantic Drift** | 3 | `retrieval_semantic_mismatch` | 사례가 "인접 주제로 흘렀다" 라 부합 |
 
-> **E4 는 확정했다.** 152건 전부 `ground_truth.doc_ids` 가 가리키는 문서가 DragonBall 코퍼스에
-> 존재한다(실측 152/152, 코퍼스 결손 0건, 골드 문서 미지정 0건). 즉 **문서는 있는데 검색이 못
-> 가져온 것**이라 `retrieval_missing_gold` 하나로 대응한다. `corpus_gap` 은 이 정답지로 검증할 수
-> 없다(D그룹 커버리지 참고).
+> **`corpus_gap` 은 아니다(확정).** 152건 전부 `ground_truth.doc_ids` 가 가리키는 문서가
+> DragonBall 코퍼스에 존재한다(실측 152/152, 코퍼스 결손 0건). 즉 **문서는 있는데 검색이 못
+> 가져온 것**이다. `corpus_gap` 은 이 정답지로 검증할 수 없다.
 >
-> 사례도 부합한다 — 정답이 "October 2021" 인데 답변이 "January 2021" 사건을 말한다.
+> **그런데 `retrieval_missing_gold` 하나로 좁힌 것은 틀렸다(2026-08-11 정정).** 우리 라벨 사전이
+> 그 라벨을 이렇게 정의한다.
+>
+> > 정답 청크가 코퍼스에는 있는데 검색 결과에 안 들어왔다. **어느 단계에서 놓쳤는지는 모른다**
+>
+> 즉 `retrieval_missing_gold` 는 **롤업**이고, 나머지 A 라벨들이 같은 현상을 원인별로 쪼갠
+> 것이다 — 후보엔 있었는데 순위가 밀렸나(`low_rank`), 리랭커 후보에 없었나
+> (`rerank_candidate_miss`), 리랭커가 떨어뜨렸나(`reranker_demotion`), 표현이 안 맞았나
+> (`lexical_mismatch`·`semantic_mismatch`).
+>
+> **E4 는 "검색 결과에 정답 문서가 없다" 라는 같은 해상도의 서술이다.** 우리가 원인을 더 짚었다면
+> 틀린 게 아니라 **더 말한 것**이고, 그건 이 문서가 채택한 포함 채점의 취지 그대로다.
+>
+> 실측이 이걸 드러냈다 — 10건 스모크에서 E4 3건에 우리는 `retrieval_low_rank` 2건 ·
+> `generation_hallucination` 1건을 냈고, 좁은 대조표로는 **3건 모두 오답**이었다.
+
+**E4 대응 라벨** (포함 채점이라 이 중 하나만 맞아도 통과)
+
+```
+retrieval_missing_gold            롤업 — 단계 미상
+retrieval_low_rank                후보엔 있었으나 top-k 밖
+retrieval_rerank_candidate_miss   리랭커 후보 목록에 없음
+retrieval_reranker_demotion       리랭커가 떨어뜨림
+retrieval_reranker_ineffective    리랭커가 못 올림
+retrieval_lexical_mismatch        벡터는 놓치고 키워드로는 찾힘
+retrieval_semantic_mismatch       벡터·키워드 둘 다 못 찾음
+```
+
+> **리랭커 계열이 E4 에도 들어가는 게 어색해 보일 수 있다.** RAGEC 은 리랭킹을 별도 단계로
+> 두고 E7·E8 을 따로 매겼는데, 그건 **그들 시스템이 리랭커를 썼을 때** 얘기다. 우리 실행이
+> 리랭커를 끄고 돌면 같은 현상이 A 슬롯의 다른 라벨로 나온다. 단계 채점이 이 차이를 따로
+> 잡아 주므로(라벨은 맞고 단계는 틀림, 또는 반대), 라벨 쪽은 넓게 인정한다.
 
 ### Reranking
 

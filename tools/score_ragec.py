@@ -50,7 +50,20 @@ RAGEC_TO_OURS: dict[str, set[str]] = {
     "E2 Underchunking": {"chunking_underchunking"},
     "E3 Context Mismatch": {"chunking_context_mismatch"},
     # Retrieval
-    "E4 Missed Retrieval": {"retrieval_missing_gold"},
+    #
+    # E4 는 "검색 결과에 정답 문서가 없다" 는 **롤업 수준**의 서술이다. 우리 사전도
+    # retrieval_missing_gold 를 "어느 단계에서 놓쳤는지는 모른다" 로 정의하고, 나머지 A
+    # 라벨들이 같은 현상을 원인별로 쪼갠 것이다. 우리가 원인을 더 짚었으면 틀린 게 아니라
+    # 더 말한 것이라 전부 인정한다(포함 채점의 취지).
+    #
+    # 처음엔 retrieval_missing_gold 하나로 좁혔다가 10건 스모크에서 E4 3건을 전부 놓쳤다
+    # (우리는 retrieval_low_rank 를 냈다). 대조표 참고.
+    "E4 Missed Retrieval": {
+        "retrieval_missing_gold", "retrieval_low_rank",
+        "retrieval_rerank_candidate_miss", "retrieval_reranker_demotion",
+        "retrieval_reranker_ineffective",
+        "retrieval_lexical_mismatch", "retrieval_semantic_mismatch",
+    },
     "E5 Low Relevance": {"retrieval_low_rank", "retrieval_semantic_mismatch"},
     "E6 Semantic Drift": {"retrieval_semantic_mismatch"},
     # Reranking
@@ -251,11 +264,45 @@ def format_report(result: dict) -> str:
     return "\n".join(lines)
 
 
+def format_detail(findings_rows: list[dict], key_rows: list[dict]) -> str:
+    """probe 별 '정답 라벨 ↔ 우리 진단' 대조표.
+
+    정확도 숫자만 보면 **어디서 어긋났는지** 를 알 수 없다. 대조표를 고칠 근거도, 진단을
+    고칠 근거도 이 표에서 나온다(실측: E4 3건에 우리가 전부 retrieval_low_rank 를 낸 걸
+    보고 E4 대응이 너무 좁다는 걸 알았다).
+    """
+    ours = {str(r["qa_id"]): r for r in findings_rows}
+    lines = ["", "=" * 78, "  probe 별 대조", "=" * 78,
+             f"  {'qa_id':<8}{'판정':<6}{'RAGEC 정답':<30}우리 진단"]
+    for key in key_rows:
+        qa_id = str(key["qa_id"])
+        row = ours.get(qa_id)
+        if row is None:
+            continue
+        labels = row.get("labels") or []
+        expected = RAGEC_TO_OURS.get(key["ragec_category"].strip())
+        if not row.get("failed", bool(labels)):
+            mark = "성공"          # 우리 파이프라인이 이 질문에 성공 — 채점 제외
+        elif expected and set(labels) & expected:
+            mark = "O"
+        elif not expected:
+            mark = "-"            # 대응 라벨 없음 — 채점 제외
+        else:
+            mark = "X"
+        lines.append(f"  {qa_id:<8}{mark:<6}{key['ragec_category']:<30}"
+                     f"{', '.join(labels) or '(라벨 없음)'}")
+    lines.append("")
+    lines.append("  O 맞음 · X 틀림 · 성공=우리가 성공(제외) · - 대응 라벨 없음(제외)")
+    return "\n".join(lines)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="우리 진단 ↔ RAGEC 사람 라벨 대조")
     ap.add_argument("--findings", required=True,
-                    help='JSONL: {"qa_id": "...", "labels": [...]}')
+                    help='JSONL: {"qa_id": "...", "labels": [...], "failed": bool}')
     ap.add_argument("--key", default="data/ragec_answer_key.jsonl")
+    ap.add_argument("--detail", action="store_true",
+                    help="probe 별 '정답 라벨 ↔ 우리 진단' 대조표를 함께 출력")
     args = ap.parse_args()
 
     for path in (args.findings, args.key):
@@ -263,8 +310,11 @@ def main() -> int:
             print(f"[오류] 파일이 없습니다: {path}", file=sys.stderr)
             return 1
 
-    result = score(_read_jsonl(args.findings), _read_jsonl(args.key))
-    print(format_report(result))
+    findings_rows = _read_jsonl(args.findings)
+    key_rows = _read_jsonl(args.key)
+    print(format_report(score(findings_rows, key_rows)))
+    if args.detail:
+        print(format_detail(findings_rows, key_rows))
     return 0
 
 
