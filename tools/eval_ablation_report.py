@@ -30,6 +30,7 @@ KNOWN_LABELS = {
     "chunking_context_mismatch",
     "chunking_underchunking",
     "context_noise_interference",
+    "generation_chronological_error",
     "generation_hallucination",
     "generation_misinterpretation",
     "generation_partial_answer",

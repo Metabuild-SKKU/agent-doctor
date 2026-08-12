@@ -247,13 +247,13 @@ _REASONING_MODE_INSTRUCTION = (
     "Identify the single most likely failure mode and return it in 'mode'. "
     "Use exactly one of these values:\n"
     "- 'contradiction': the response asserts something that conflicts with the context.\n"
-    "- 'numerical_error': a number, unit, date, or calculation is itself wrong — the value, "
-    "not the order of events.\n"
+    "- 'numerical_error': a number, unit, date, or a computed value such as a duration or an "
+    "interval between two dates is itself wrong — the value, not the order of events.\n"
     "- 'misinterpretation': the context was read but its meaning, or a condition of the question, "
     "was misunderstood.\n"
     "- 'hop_binding': the individual facts are each correct but were combined or related incorrectly.\n"
-    "- 'chronological': every date or event is quoted correctly, but their order, sequence, or the "
-    "duration between them is stated wrongly.\n"
+    "- 'chronological': every date or event is quoted correctly, but the order or sequence "
+    "between them — which one came before or after — is stated wrongly.\n"
     "- 'other': none of the above."
 )
 _SCHEMA_REASONING_MODE = ('{"properties": {"reason": {"type": "string"}, "mode": {"type": "string"}}, '
@@ -279,6 +279,7 @@ _REASONING_MODE_EXAMPLES = [
       "mode": "contradiction"}),
     # 시간축 예시는 연도를 '맞게' 인용한 상태로 순서만 뒤집는다 — numerical_error 와 갈리는
     # 지점이 값의 정확성이라, 예시가 값까지 틀리면 두 모드가 다시 겹친다.
+    # 기간·간격이 틀린 경우는 numerical_error 다(계산값이라 처방이 계산 검산 쪽).
     ({"user_input": "Which came first, the pilot program or the policy revision?",
       "response": "The policy revision came first in 2021, and the pilot program followed in 2019.",
       "retrieved_contexts": ["The pilot program started in 2019.",
