@@ -21,8 +21,11 @@ from agents.eval.replay_labels import (
 GOLD = "연금저축 세액공제 한도는 연 700만원이다."
 
 
-def _record(contexts=None, gold_contexts=None, ragas=None, ground_truth=None):
-    obj = {"question": "공제 한도는?", "answer": "700만원입니다"}
+def _record(contexts=None, gold_contexts=None, ragas=None, ground_truth=None,
+            answer=None):
+    # answer 는 obj 로 넘겨야 build_replay_records 가 f1_score 를 그 답변으로 계산한다
+    # (rec.generated_answer 를 나중에 덮어쓰면 f1 이 옛 답변에 남아 어긋난다).
+    obj = {"question": "공제 한도는?", "answer": answer or "700만원입니다"}
     if contexts is not None:
         obj["contexts"] = contexts
     if gold_contexts is not None:
@@ -177,6 +180,26 @@ class AbstentionIsNotAFailureTests(unittest.TestCase):
         rec = self._rec("연차 휴가는 연 15일입니다.", rel=0.1, faith=0.9)
         labels = [f.label for f in diagnose_replay_record(rec)]
         self.assertIn("ext_answer_off_topic", labels)
+
+    def test_grounded_negative_answer_is_not_wrongful_abstention(self):
+        """확장 마커("포함되어 있지 않")에 걸리지만 실제로는 맞은 답인 경우.
+
+        그대로 두면 ext_wrongful_abstention(critical·확정)이 뜨고, 상대 팀에는
+        "기권 조건을 완화하세요" 라는 정반대 처방 카드가 나간다."""
+        rec = _record(contexts=[f"머리말. {GOLD} 꼬리말."], gold_contexts=[GOLD],
+                      ground_truth="위약금 조항이 포함되어 있지 않습니다",
+                      answer="계약서에 위약금 조항이 포함되어 있지 않습니다")
+        labels = [f.label for f in diagnose_replay_record(rec)]
+        self.assertNotIn("ext_wrongful_abstention", labels)
+
+    def test_real_abstention_with_evidence_still_flagged(self):
+        """게이트가 과하게 먹지 않는지 - 진짜 기권은 정답과 일치하지 않으므로
+        근거가 있었으면 종전대로 ext_wrongful_abstention 이 나와야 한다."""
+        rec = _record(contexts=[f"머리말. {GOLD} 꼬리말."], gold_contexts=[GOLD],
+                      ground_truth="700만원",
+                      answer="제공된 정보로는 알 수 없습니다")
+        labels = [f.label for f in diagnose_replay_record(rec)]
+        self.assertIn("ext_wrongful_abstention", labels)
 
     def test_abstention_marker_covers_common_phrasings(self):
         """'확인할 수 없'만 있어 '확인되지 않습니다'류를 통째로 놓쳤다 —

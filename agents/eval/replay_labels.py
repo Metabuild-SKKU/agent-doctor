@@ -28,7 +28,7 @@ from typing import Optional
 from core.schema import Finding
 
 from agents.eval.metrics_basic import is_abstention
-from agents.eval.types import CONTEXT_CHARS_MAX, EvalRecord
+from agents.eval.types import CONTEXT_CHARS_MAX, F1_PASS_THRESHOLD, EvalRecord
 from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
 
 # ── 발동 문턱 ─────────────────────────────────────────────────────
@@ -195,6 +195,28 @@ def _retrieval_axis(record: EvalRecord) -> Optional[tuple[bool, str]]:
     return _axis_signal(record, prefer_worst=True)
 
 
+def _answered_correctly(record: EvalRecord) -> bool:
+    """기권 마커에 걸렸지만 실제로는 정답을 낸 경우인가.
+
+    확장 마커(_ABSTENTION_MARKERS_EXT)는 리콜을 위해 "포함되어 있지 않"/"다루지 않"
+    같은 범용 부정 표현까지 잡는데, 그건 진짜 기권뿐 아니라 **근거 있는 정상 부정
+    답변**("계약서에 위약금 조항이 포함되어 있지 않습니다")에도 매치된다. 그대로 두면
+    맞은 답이 ext_wrongful_abstention(critical·확정)으로 잡히고, 상대 팀에는
+    "기권 조건을 완화하세요" 라는 정반대 처방 카드가 나간다.
+
+    둘을 가르는 결정적 신호는 '답이 실제로 맞았나'다 - 진짜 기권은 정답과 일치하지
+    않는다. 내부 모드도 같은 규칙을 쓴다(diagnose._wrongful_abstention_premise 의
+    _f1_ok 게이트). 둘 중 하나라도 "맞았다"고 하면 소견을 내지 않는다 - 이 분기가
+    이미 따르는 원칙("놓치는 것이 오진보다 낫다")과 같은 방향이다.
+
+    정답 텍스트가 없는 로그는 f1_score 가 기본값 0.0 이고 correctness 도 미측정이라
+    항상 False - 종전 동작 그대로다."""
+    corr = record.ragas.get("answer_correctness")
+    if corr is not None and corr >= EXT_CORRECTNESS_LOW:
+        return True
+    return record.f1_score >= F1_PASS_THRESHOLD
+
+
 def _evidence_reached(record: EvalRecord) -> Optional[tuple[bool, str]]:
     """기권 분기 전용 — '근거가 컨텍스트에 도달했나'. _retrieval_axis 와 다른 질문이다.
 
@@ -237,7 +259,12 @@ def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
     #   근거가 있었는데 기권  → ext_wrongful_abstention (겁먹음 - 답할 수 있었다)
     #   근거가 없어서 기권    → ext_retrieval_starved_abstention (검색/코퍼스 탓)
     #   검색축 미측정         → 소견 없음 (놓치는 것이 오진보다 낫다)
+    #
+    # 단, 마커에 걸렸어도 답이 실제로 정답이면 기권이 아니다(_answered_correctly) -
+    # 확장 마커가 근거 있는 정상 부정 답변까지 잡는 것을 여기서 거른다.
     if is_abstention(record.generated_answer, extended=True):
+        if _answered_correctly(record):
+            return findings
         axis = _evidence_reached(record)
         if axis is None:
             return findings
