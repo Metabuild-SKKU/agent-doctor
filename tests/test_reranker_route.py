@@ -489,16 +489,24 @@ class RerankTimingTest(unittest.TestCase):
         동기 엔드포인트라 동시 질의가 각자 스레드에서 같은 객체를 부르는데, 계측을
         인스턴스 속성 하나로 두면 A 질의의 시간이 B 질의 리포트에 실린다.
 
-        대역은 **스레드 밖에서 한 번만** 갈아끼운다. 스레드마다 patch.object 로 같은
-        모듈 속성을 덮으면 늦게 건 쪽이 둘 다를 먹어(느린 쪽이 빠른 대역을 부른다)
-        테스트가 주장하는 것을 검증하지 못하고, 해제 순서가 엇갈리면 대역이 모듈에
-        그대로 남아 뒤 테스트까지 오염된다."""
+        두 가지를 일부러 이렇게 짰다.
+
+        1) 대역은 **스레드 밖에서 한 번만** 갈아끼운다. 스레드마다 patch.object 로 같은
+           모듈 속성을 덮으면 늦게 건 쪽이 둘 다를 먹어(느린 쪽이 빠른 대역을 부른다)
+           검증이 성립하지 않고, 해제 순서가 엇갈리면 대역이 모듈에 남아 뒤 테스트까지
+           오염된다.
+        2) predict 를 마친 뒤 **둘 다 끝날 때까지 기다렸다가** 읽는다. 곧바로 읽으면
+           빠른 쪽은 t=0, 느린 쪽은 t=0.25 에 읽어 읽기 구간이 안 겹치고, 그러면 계측이
+           공유 속성 하나여도 각자 제 값을 본다 — 즉 옛 구현을 못 잡는다(실측 확인).
+           읽기를 뒤로 모으면 공유 구현에서는 나중 값(0.25)이 둘 다에 보인다.
+        """
         import threading
 
         reranker = qdrant_store._OpenRouterReranker("test/model", "key")
         delays = {"slow": 0.25, "fast": 0.0}
         seen: dict[str, float | None] = {}
-        started = threading.Barrier(2)
+        started = threading.Barrier(len(delays))
+        predicted = threading.Barrier(len(delays))
 
         def _fake(_query, _documents, _model, *, api_key, tag):
             # 호출한 스레드 이름으로 지연을 고른다 — 대역이 하나라 경합이 없다.
@@ -508,6 +516,7 @@ class RerankTimingTest(unittest.TestCase):
         def _run(name):
             started.wait()
             reranker.predict([("질문", "본문")])
+            predicted.wait()
             seen[name] = reranker.last_predict_seconds
 
         with patch.object(qdrant_store, "openrouter_rerank", side_effect=_fake):
