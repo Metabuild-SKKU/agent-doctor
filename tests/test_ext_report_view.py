@@ -225,10 +225,32 @@ class ExtSectionLayoutTests(unittest.TestCase):
         self.assertIn({"section": "recommendations", "before": "dxs"}, moves)
 
     def test_notice_warns_score_is_not_comparable(self):
-        """검색축이 recall 이 아니라 faithfulness 대역이라 내부 점수와 비교 불가."""
+        """검색축이 gold 청크 recall 이 아니라 로그 기반 근거 신호(겹침·precision,
+        재료가 없으면 faithfulness)라 내부 점수와 비교할 수 없다."""
         notice = build_ext_report_view(_report(), {})["mode"]["notice"]
-        self.assertIn("faithfulness", notice)
+        self.assertIn("recall", notice)
         self.assertIn("비교", notice)
+
+    def test_notice_warns_report_carries_raw_log_text(self):
+        """진단서는 상대 팀에 넘기거나 사내에 공유하는 문서다. '실패한 검증 질문'이
+        로그 원문을 그대로 싣는다는 걸 문서 자신이 밝혀야 공유 전에 한 번 보게 된다."""
+        notice = build_ext_report_view(_report(), {})["mode"]["notice"]
+        self.assertIn("원문", notice)
+        self.assertIn("민감정보", notice)
+
+    def test_score_is_named_differently_from_internal(self):
+        """'종합점수'라는 같은 이름을 쓰면 안내에 '비교 불가'라고 적어둬도 사람은
+        내부 실행의 종합점수와 나란히 놓고 본다."""
+        mode = build_ext_report_view(_report(), {})["mode"]
+        self.assertNotIn("종합", mode["score_label"])
+        self.assertIn("recall", mode["score_note"])
+
+    def test_template_uses_the_view_supplied_score_label(self):
+        """화면이 '종합 점수'를 하드코딩하면 뷰가 이름을 바꿔도 안 따라온다."""
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        self.assertIn("mode.score_label", REPORT_TEMPLATE.read_text(encoding="utf-8"))
 
     def test_hero_gets_evidence_counts(self):
         """외부 hero 는 처방 수 대신 확정/예비를 보여준다."""
