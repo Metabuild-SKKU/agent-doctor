@@ -31,6 +31,14 @@ def _pin_embedding_provider_to_local():
     keys = {
         "INDEX_EMBED_PROVIDER": "local",
         "INDEX_QUERY_EMBED_PROVIDER": "local",
+        # Eval 채점 임베딩축. 여기만 "" 인 이유는 이 축의 기본값이 local 이 아니라
+        # "심판 provider 를 따름" 이기 때문이다 - 빈 값이 그 기본을 뜻한다(_embed_provider).
+        # 이게 없으면 실행 머신의 .env 에 EVAL_EMBED_PROVIDER=openrouter 가 있을 때
+        # 심판축 대역만 걸어둔 테스트가 임베딩축으로 새어 **실제 API 를 호출**한다
+        # (tests/test_provider_notices.py 의 clear=False 경로가 그렇다).
+        # 셸 export 만의 이야기가 아니다 - graph.py 가 load_dotenv(override=True) 라
+        # 그걸 import 하는 테스트가 먼저 수집되면 .env 가 os.environ 에 들어온다.
+        "EVAL_EMBED_PROVIDER": "",
     }
     previous = {name: os.environ.get(name) for name in keys}
     os.environ.update(keys)

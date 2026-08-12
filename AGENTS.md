@@ -84,6 +84,18 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 | `INDEX_EMBED_DEVICE` | `auto` | `local`일 때 `cuda`/`cpu` |
 | `EVAL_EMBED_PROVIDER` | `EVAL_LLM_PROVIDER` 따름 | Eval 채점 (`response_relevancy`) |
 
+`EVAL_EMBED_PROVIDER`가 받는 값은 `openai` · `gemini` · `openrouter` · `local` 입니다.
+`anthropic`·`github`는 심판으로는 되지만 임베딩 엔드포인트가 없어 여기서는 거부합니다
+(경고 후 심판 provider를 따릅니다) — 그대로 두면 OpenAI로 떨어져 "anthropic으로
+임베딩한다"고 적어둔 실행이 실제로는 OpenAI에 과금 호출을 하기 때문입니다.
+
+**미지원 값의 폴백 방향이 색인축과 반대입니다.** 색인축은 오타를 `local`로 떨어뜨리지만
+(`qdrant_store.resolve_embedding_provider` — "오타가 '조용히 API 과금'이 아니라 '조용히
+로컬'로") 채점축은 심판 provider로 되돌립니다. 두 축의 비용 구조가 달라서입니다: 색인은
+코퍼스 전량이라 오타 한 번이 통째로 과금되지만, 채점 임베딩은 probe 수십 건이라 금액이
+작고 대신 **경로가 바뀌면 코사인 분포가 달라져 실행 간 비교가 깨집니다.** 그래서 채점축은
+"설정이 무시됐다(= 미지정과 같은 동작)"를 택했습니다.
+
 Eval 축만 기본값이 다릅니다. **심판 provider 를 따라가고, 키가 있다고 자동 전환하지
 않습니다.** `anthropic`·`github` 는 임베딩 엔드포인트가 없어 `OPENROUTER_API_KEY` 가
 있으면 그쪽으로 보내고 싶어지지만(실측 로컬 16.8s vs OpenRouter 3.1s, 코사인 1.00000),

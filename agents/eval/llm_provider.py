@@ -63,24 +63,29 @@ def _warn_unknown_provider_once(raw: str) -> None:
           f"(openai|gemini|github|openrouter|anthropic)")
 
 
-# 임베딩 엔드포인트가 없는 provider. 심판으로는 쓸 수 있지만 EVAL_EMBED_PROVIDER 로
-# 지정하면 안 된다(아래 _embed_provider 참고).
-_NO_EMBEDDING_PROVIDERS = {"anthropic", "github"}
+# 임베딩축 전용 값 집합. 심판축(_KNOWN_PROVIDERS)을 재사용하면 양방향으로 틀린다 —
+# 임베딩 엔드포인트가 없는 anthropic·github 를 받아 조용히 다른 모델로 새고(코사인 분포가
+# 달라져 실행 간 비교가 깨진다), 정작 "임베딩 실행 위치" 축의 대표 값인 local 은 거부해
+# 심판축(과금 경로)으로 떨어뜨린다. 형제 축 INDEX_EMBED_PROVIDER 와 값이 맞아야
+# "같은 계약" 이라는 이 축의 설명이 사실이 된다.
+_EMBED_PROVIDERS = {"openai", "gemini", "openrouter", "local"}
 
 
-def _warn_unknown_embed_provider_once(raw: str) -> None:
+def _warn_unusable_embed_provider_once(raw: str) -> None:
     """쓸 수 없는 EVAL_EMBED_PROVIDER 값 경고를 값당 한 번만 출력한다.
 
-    같은 set 을 공유하면 EVAL_LLM_PROVIDER 에 같은 오타를 낸 실행이 이 경고를 삼킨다."""
+    같은 set 을 공유하면 EVAL_LLM_PROVIDER 에 같은 오타를 낸 실행이 이 경고를 삼킨다.
+    사유를 둘로 가른다 - 오타와 "심판으로는 되지만 임베딩은 안 되는 값"은 고치는 방법이
+    다르다(전자는 철자, 후자는 축 선택)."""
     key = f"embed:{raw}"
     with _warned_providers_lock:
         if key in _warned_providers:
             return
         _warned_providers.add(key)
     why = ("는 임베딩 엔드포인트가 없습니다"
-           if normalize_provider(raw) in _NO_EMBEDDING_PROVIDERS else "는 지원하지 않는 값입니다")
+           if normalize_provider(raw) in _KNOWN_PROVIDERS else "는 지원하지 않는 값입니다")
     print(f"[Eval] EVAL_EMBED_PROVIDER '{raw}'{why} · 심판 provider 를 따릅니다 "
-          f"(openai|gemini|openrouter)")
+          f"({'|'.join(sorted(_EMBED_PROVIDERS))})")
 
 
 def _provider() -> str:
@@ -263,29 +268,49 @@ def _embed_provider() -> str:
     죽는다. 전환은 EVAL_EMBED_PROVIDER 를 적은 사람만 받는다 — Index 의
     INDEX_EMBED_PROVIDER 와 같은 계약이다.
 
-    미지원 값은 심판 provider 로 떨어뜨린다(경고 후). 임베딩만 조용히 다른 곳으로
-    가면 코사인 분포가 달라져 실행 간 response_relevancy 비교가 깨진다.
+    받는 값은 _EMBED_PROVIDERS — openai·gemini·openrouter·local. anthropic·github 는
+    심판으로는 되지만 임베딩 엔드포인트가 없어 여기서는 거부한다(그대로 두면 아래 분기가
+    openai 로 떨어져, 'anthropic 으로 임베딩한다'고 적어둔 실행이 실제로는 OpenAI 에
+    과금 호출을 한다 - 심판축의 폴백 사슬과 달리 여기서는 사용자가 직접 고른 값이라
+    조용히 바꾸면 안 된다).
 
-    임베딩 엔드포인트가 없는 provider(anthropic·github)를 **명시**한 경우도 같이
-    거부한다. 그대로 두면 아래 분기가 openai 로 떨어져, 'anthropic 으로 임베딩한다'고
-    적어둔 실행이 실제로는 OpenAI 에 과금 호출을 한다 - 심판축의 폴백 사슬과 달리
-    여기서는 사용자가 직접 고른 값이라 조용히 바꾸면 안 된다."""
+    **미지원 값은 심판 provider 로 떨어뜨린다(경고 후).** 형제 축
+    (qdrant_store.resolve_embedding_provider)은 같은 상황에서 local 로 떨어뜨린다 -
+    "오타가 '조용히 API 과금' 이 아니라 '조용히 로컬' 로 끝나게" 라는 fail-safe 다.
+    여기서 방향이 다른 이유는 두 축의 비용 구조가 달라서다: 색인은 코퍼스 전량이라
+    오타 한 번이 통째로 과금되지만, 채점 임베딩은 probe 수십 건이라 금액이 작고 대신
+    **경로가 바뀌면 코사인 분포가 달라져 실행 간 response_relevancy 비교가 깨진다**.
+    그래서 여기서는 "설정이 무시됐다(= 미지정과 같은 동작)" 를 택했다. 이 선택이
+    안전한 건 가장 흔한 오타 대상인 local 이 이제 정식 값이기 때문이다."""
     raw = os.getenv("EVAL_EMBED_PROVIDER", "").strip().lower()
     if not raw:
         return _provider()
     provider = normalize_provider(raw)
-    if provider not in _KNOWN_PROVIDERS:
-        _warn_unknown_embed_provider_once(raw)
-        return _provider()
-    if provider in _NO_EMBEDDING_PROVIDERS:
-        _warn_unknown_embed_provider_once(raw)
+    if provider not in _EMBED_PROVIDERS:
+        _warn_unusable_embed_provider_once(raw)
         return _provider()
     return provider
+
+
+def _embed_axis_label() -> str:
+    """폴백 안내에 쓸 "어느 설정 때문인가" 문구.
+
+    축을 나눠 놓고 로그가 심판축 이름만 말하면 판정 주체와 문구가 어긋난다 - 사용자가
+    EVAL_EMBED_PROVIDER 를 적었는데 "EVAL_LLM_PROVIDER=openrouter 는 임베딩 엔드포인트가
+    없어" 라고 찍히면 엉뚱한 변수를 들여다보게 된다. 두 축이 같을 때만 심판축 이름을 쓴다."""
+    embed = _embed_provider()
+    if embed == _provider():
+        return f"EVAL_LLM_PROVIDER={embed}"
+    return f"EVAL_EMBED_PROVIDER={embed}"
 
 
 def _api_embeddings_available() -> bool:
     """활성 임베딩 provider 로 임베딩 API 를 부를 수 있는지. 키 유무만 본다(호출은 안 한다)."""
     provider = _embed_provider()
+    if provider == "local":
+        # 사용자가 로컬을 못 박았다 - 키가 있어도 API 를 부르지 않는다.
+        # embed_texts 가 아래 로컬 분기로 이어진다.
+        return False
     if provider == "gemini":
         return bool(os.getenv("GEMINI_API_KEY"))
     if provider == "openrouter":
@@ -363,10 +388,14 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
     if _local_embeddings_available():
         # AGENTS.md 규약대로 공통 모듈을 통해서만 임베딩한다(직접 모델 로드 금지).
         from agents.index.qdrant_store import embed_batch
+        if api_failure is not None:
+            head = f"[Eval] 임베딩 API 호출이 실패해({api_failure}) "
+        elif _embed_provider() == "local":
+            head = "[Eval] EVAL_EMBED_PROVIDER=local 이라 "
+        else:
+            head = f"[Eval] {_embed_axis_label()} 는 임베딩 엔드포인트가 없어 "
         _notify_embed_once(
-            (f"[Eval] 임베딩 API 호출이 실패해({api_failure}) "
-             if api_failure is not None else
-             f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없어 ") +
+            head +
             f"로컬 임베딩(BGE-M3)으로 계산합니다 · 비용 0, 외부 호출 없음. "
             f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
             f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요.")
@@ -375,7 +404,7 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
         return embed_batch(texts, provider="local")
 
     _notify_embed_once(
-        f"[Eval] EVAL_LLM_PROVIDER={_provider()} 의 임베딩 키도, OPENAI_API_KEY 도, "
+        f"[Eval] {_embed_axis_label()} 의 임베딩 키도, OPENAI_API_KEY 도, "
         f"로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표(response_relevancy)를 "
         f"건너뜁니다 · bad_gold_answer 라벨도 함께 침묵합니다.")
     return []
