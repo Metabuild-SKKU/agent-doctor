@@ -44,6 +44,16 @@ class PromptContext:
 
 _HANGUL_RE = re.compile(r"[가-힣]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
+_URL_RE = re.compile(r"https?://\S+|www\.\S+")
+_BACKTICK_RE = re.compile(r"`[^`]*`")
+_DOTTED_IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+\b")
+_FUNCTION_IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()")
+_SNAKE_IDENTIFIER_RE = re.compile(r"\b[A-Za-z]+_[A-Za-z0-9_]+\b")
+_LATIN_WITH_KOREAN_SUFFIX_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_.-]*(?=[가-힣])")
+_TECHNICAL_LATIN_RE = re.compile(
+    r"\b(?:[A-Z]{2,}[A-Za-z0-9]*|[A-Za-z]+(?:-[A-Za-z0-9]+)+|[A-Za-z]*[a-z][A-Z][A-Za-z0-9]*)\b"
+)
+_MIXED_LANGUAGE_MIN_RATIO = 0.35
 _ANSWER_LANGUAGE_AUTO = {"", "auto", "same", "same_as_question", "question", "question_language"}
 _ANSWER_LANGUAGE_ALIASES = {
     "ko": "ko",
@@ -59,22 +69,45 @@ _ANSWER_LANGUAGE_ALIASES = {
     "bilingual": "mixed",
     "multi": "mixed",
 }
+_warned_answer_languages: set[str] = set()
+_warned_answer_languages_lock = threading.Lock()
 
 
 # 질문/답변의 주된 문자권을 가볍게 판별한다.
 def detect_text_language(text: str) -> str:
-    """Return ``ko``, ``en``, ``mixed`` or ``unknown`` from visible script counts."""
-    hangul = len(_HANGUL_RE.findall(text or ""))
-    latin = len(_LATIN_RE.findall(text or ""))
+    """Return ``ko``, ``en``, ``mixed`` or ``unknown`` from visible script counts.
+
+    한국어 질문에 섞인 ``learning_curve()``, ``sklearn.impute``, ``KNNImputer`` 같은
+    코드/라이브러리 식별자는 질문 언어가 아니라 인용된 대상이다. 이 토큰들을 라틴
+    문자 수에 넣으면 Optimize iteration마다 답변 언어가 흔들리는 mixed 오탐이 생긴다.
+    """
+    visible_text = _language_visible_text(text or "")
+    hangul = len(_HANGUL_RE.findall(visible_text))
+    latin = len(_LATIN_RE.findall(visible_text))
     total = hangul + latin
     if total == 0:
         return "unknown"
     if hangul and latin:
         hangul_ratio = hangul / total
         latin_ratio = latin / total
-        if hangul_ratio >= 0.3 and latin_ratio >= 0.3:
+        if hangul_ratio >= _MIXED_LANGUAGE_MIN_RATIO and latin_ratio >= _MIXED_LANGUAGE_MIN_RATIO:
             return "mixed"
     return "ko" if hangul >= latin else "en"
+
+
+# 언어 판별에서 제외할 기술 식별자를 지운다.
+def _language_visible_text(text: str) -> str:
+    cleaned = _URL_RE.sub(" ", text)
+    cleaned = _BACKTICK_RE.sub(" ", cleaned)
+    for pattern in (
+        _DOTTED_IDENTIFIER_RE,
+        _FUNCTION_IDENTIFIER_RE,
+        _SNAKE_IDENTIFIER_RE,
+        _LATIN_WITH_KOREAN_SUFFIX_RE,
+        _TECHNICAL_LATIN_RE,
+    ):
+        cleaned = pattern.sub(" ", cleaned)
+    return cleaned
 
 
 # RAG 답변 언어를 정한다. 기본은 질문 언어, 필요하면 config/env 로 고정한다.
@@ -85,8 +118,13 @@ def resolve_answer_language(question: str, config: dict | None = None) -> str:
     if normalized in _ANSWER_LANGUAGE_AUTO:
         detected = detect_text_language(question)
         return detected if detected != "unknown" else "ko"
+    mapped = _ANSWER_LANGUAGE_ALIASES.get(normalized)
+    if mapped is not None:
+        return mapped
+    if normalized:
+        _warn_unknown_answer_language_once(str(raw))
     detected = detect_text_language(question)
-    return _ANSWER_LANGUAGE_ALIASES.get(normalized, detected if detected != "unknown" else "ko")
+    return detected if detected != "unknown" else "ko"
 
 
 # answer_language 는 top-level, generation_config, env 어느 쪽에 둬도 같은 의미로 본다.
@@ -96,8 +134,6 @@ def _answer_language_config(config: dict | None) -> Any:
         "rag_answer_language",
         "response_language",
         "generation_answer_language",
-        "generation_config.answer_language",
-        "generation_config.response_language",
     )
     value = _config_value(config, *names)
     if value is not None:
@@ -109,6 +145,18 @@ def _answer_language_config(config: dict | None) -> Any:
             if nested is not None and nested != "":
                 return nested
     return os.getenv("RAG_ANSWER_LANGUAGE")
+
+
+# 잘못된 답변 언어 설정은 질문 언어 폴백 전에 한 번만 알려준다.
+def _warn_unknown_answer_language_once(raw: str) -> None:
+    with _warned_answer_languages_lock:
+        if raw in _warned_answer_languages:
+            return
+        _warned_answer_languages.add(raw)
+    print(
+        f"[RAG] 지원하지 않는 answer_language '{raw}' 은 무시하고 질문 언어를 따릅니다 "
+        "(RAG_ANSWER_LANGUAGE/answer_language: same_as_question|ko|en|mixed)"
+    )
 
 
 # system prompt 에 들어갈 언어 지시문만 따로 둬서 한국어 고정을 피한다.

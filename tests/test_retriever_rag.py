@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
+from agents.eval import report as eval_report
+from agents.eval.types import EvalRecord
 from agents.ingest.document_type import detect_document_type, has_math_signal
 from agents.index.qdrant_store import (
     build_client,
@@ -28,6 +31,7 @@ from agents.rag.generator import (
     _generation_temperature,
 )
 from core.schema import Chunk
+from core.schema import Finding, Probe
 
 
 class ChunkFromDictTests(unittest.TestCase):
@@ -404,8 +408,22 @@ class RagGeneratorTests(unittest.TestCase):
     def test_detect_text_language_classifies_korean_english_and_mixed(self):
         self.assertEqual(detect_text_language("재택근무는 며칠인가요?"), "ko")
         self.assertEqual(detect_text_language("How many remote work days are allowed?"), "en")
-        self.assertEqual(detect_text_language("API policy 정책 변경"), "mixed")
+        self.assertEqual(detect_text_language("Please summarize 정책 변경 내용을 한국어로"), "mixed")
         self.assertEqual(detect_text_language("12345"), "unknown")
+
+    def test_detect_text_language_ignores_code_identifiers_in_korean_questions(self):
+        self.assertEqual(
+            detect_text_language("Scikit-Learn의 learning_curve() 함수를 사용하여 점진적 학습을 수행하려면?"),
+            "ko",
+        )
+        self.assertEqual(
+            detect_text_language("sklearn.impute 패키지에서 제공하는 KNNImputer와 IterativeImputer가 다른 점은?"),
+            "ko",
+        )
+        self.assertEqual(
+            detect_text_language("모델이 partial_fit()이나 warm_start를 지원해야 하는 이유는?"),
+            "ko",
+        )
 
     def test_build_prompt_answers_english_question_in_english_by_default(self):
         system, _ = _build_prompt(
@@ -444,6 +462,29 @@ class RagGeneratorTests(unittest.TestCase):
             "ko",
         )
 
+    def test_answer_language_reads_nested_generation_config(self):
+        self.assertEqual(
+            resolve_answer_language(
+                "How many remote work days are allowed?",
+                {"generation_config": {"answer_language": "ko"}},
+            ),
+            "ko",
+        )
+
+    def test_invalid_answer_language_warns_once_and_falls_back_to_question(self):
+        from agents.rag import generator as rag_generator
+
+        rag_generator._warned_answer_languages.clear()
+        self.addCleanup(rag_generator._warned_answer_languages.clear)
+
+        with patch.dict(os.environ, {"RAG_ANSWER_LANGUAGE": "jp"}), \
+             patch("builtins.print") as printed:
+            self.assertEqual(resolve_answer_language("How many days?", None), "en")
+            self.assertEqual(resolve_answer_language("How many days?", None), "en")
+
+        self.assertEqual(printed.call_count, 1)
+        self.assertIn("answer_language 'jp'", printed.call_args.args[0])
+
     def test_answer_question_reports_language_metadata(self):
         retriever = build_retriever(
             [
@@ -469,6 +510,37 @@ class RagGeneratorTests(unittest.TestCase):
         self.assertEqual(response["question_language"], "en")
         self.assertEqual(response["target_answer_language"], "en")
         self.assertEqual(response["actual_answer_language"], "en")
+
+    def test_failed_question_report_keeps_language_metadata(self):
+        probe = Probe(
+            probe_id="p-lang",
+            question="How many remote work days are allowed?",
+            source="unit",
+            ground_truth="Two days.",
+        )
+        rec = EvalRecord(probe=probe, generated_answer="재택근무는 주 2일까지 가능합니다.")
+        rec.question_language = "en"
+        rec.target_answer_language = "en"
+        rec.generated_answer_language = "ko"
+        rec.oracle_answer_language = "en"
+        rec.findings = [
+            Finding(
+                finding_id="f-lang",
+                type="generation_failure",
+                severity="warning",
+                description="language mismatch",
+                label="generation_failure",
+                affected_probes=["p-lang"],
+            )
+        ]
+
+        failed = eval_report._failed_questions([rec])
+
+        self.assertEqual(failed[0]["question_language"], "en")
+        self.assertEqual(failed[0]["target_answer_language"], "en")
+        self.assertEqual(failed[0]["generated_answer_language"], "ko")
+        self.assertEqual(failed[0]["oracle_answer_language"], "en")
+        self.assertTrue(failed[0]["language_mismatch"])
 
     def test_generate_answer_falls_back_to_top_context(self):
         with patch("agents.rag.generator._llm_generate", return_value=None):

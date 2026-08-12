@@ -222,10 +222,26 @@ def _failed_questions(records: list[EvalRecord]) -> list[dict]:
             "question": record.probe.question,
             "expected_answer": record.probe.ground_truth or "",
             "actual_answer": record.generated_answer or "",
+            "question_language": record.question_language,
+            "target_answer_language": record.target_answer_language,
+            "generated_answer_language": record.generated_answer_language,
+            "oracle_answer_language": record.oracle_answer_language,
+            "language_mismatch": _language_mismatch(record),
         }
         for record in records
         if record.findings and not is_gold_labeling_error(record)
     ]
+
+
+def _language_mismatch(record: EvalRecord) -> bool:
+    return (
+        record.target_answer_language in {"ko", "en"}
+        and record.generated_answer_language not in {
+            record.target_answer_language,
+            "unknown",
+            "mixed",
+        }
+    )
 
 
 def _findings_summary(records: list[EvalRecord], mode: int) -> dict:
