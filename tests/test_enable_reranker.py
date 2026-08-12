@@ -682,6 +682,8 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
                 "ms_per_pair": None,
                 "max_lengths": [],
                 "routes": [],
+                "attempted_routes": [],
+                "mixed_models": False,
                 "status_counts": {
                     "load_failed": 1,
                     "applied": 1,

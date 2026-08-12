@@ -623,6 +623,101 @@ class RerankRouteReachesReportTest(unittest.TestCase):
 
         self.assertEqual(result["rerank_route"], "local:cuda")
 
+    def test_failed_attempt_keeps_the_route_it_tried(self):
+        """실패야말로 "OpenRouter 를 켰는데 왜 리랭크가 안 됐지" 를 봐야 하는 순간이다 —
+        여기서 경로가 사라지면 리포트만 보고는 원인을 못 따라간다."""
+        model_name = "test/failing-route"
+        broken = Mock()
+        broken.predict.side_effect = ValueError("boom")
+        qdrant_store._rerankers[model_name] = broken
+        chunks = [{"chunk_id": "c1", "doc_id": "d1", "text": "alpha", "metadata": {}}]
+        retriever = Retriever(
+            chunks,
+            RetrievalSettings(
+                use_reranker=True, reranker_model=model_name, rerank_candidates=1
+            ),
+            client=None,
+        )
+
+        with patch.dict(
+            os.environ,
+            {"INDEX_RERANKER_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "k"},
+        ):
+            result = retriever.search_with_details("alpha", top_k=1)
+
+        self.assertEqual(result["reranker_status"], "inference_failed")
+        self.assertEqual(
+            result["rerank_route"], "openrouter:voyageai/rerank-2.5-lite"
+        )
+
+    def test_disabled_reranker_reports_no_route(self):
+        """시도조차 안 한 실행에 경로가 찍히면 "리랭크가 돌았다" 로 읽힌다."""
+        chunks = [{"chunk_id": "c1", "doc_id": "d1", "text": "alpha", "metadata": {}}]
+        retriever = Retriever(chunks, RetrievalSettings(use_reranker=False), client=None)
+
+        result = retriever.search_with_details("alpha", top_k=1)
+
+        self.assertIsNone(result["rerank_route"])
+
+    def test_report_separates_applied_and_attempted_routes(self):
+        records = [
+            EvalRecord(
+                probe=Probe("p1", "질문", "test"),
+                retrieval_details={
+                    "reranker_attempted": True, "reranker_status": "applied",
+                    "reranked": True, "rerank_pairs": 3, "rerank_seconds": 0.1,
+                    "rerank_route": "local:cuda",
+                },
+            ),
+            EvalRecord(
+                probe=Probe("p2", "질문", "test"),
+                retrieval_details={
+                    "reranker_attempted": True, "reranker_status": "api_key_missing",
+                    "reranked": False, "rerank_pairs": 0,
+                    "rerank_route": "openrouter:voyageai/rerank-2.5-lite",
+                },
+            ),
+        ]
+
+        rerank = build_report(records, iteration=1).runtime_summary["reranker"]
+
+        self.assertEqual(rerank["routes"], ["local:cuda"])
+        self.assertEqual(
+            rerank["attempted_routes"],
+            ["local:cuda", "openrouter:voyageai/rerank-2.5-lite"],
+        )
+        # 실제로 채점한 모델은 하나뿐이다 — 실패한 시도는 점수를 만들지 않았다.
+        self.assertFalse(rerank["mixed_models"])
+
+    def test_report_flags_runs_scored_by_different_models(self):
+        """local + openrouter 가 섞이면 점수 분포가 섞여 처방 전후 비교가 성립하지 않는다."""
+        def _record(probe_id, route):
+            return EvalRecord(
+                probe=Probe(probe_id, "질문", "test"),
+                retrieval_details={
+                    "reranker_attempted": True, "reranker_status": "applied",
+                    "reranked": True, "rerank_pairs": 3, "rerank_seconds": 0.1,
+                    "rerank_route": route,
+                },
+            )
+
+        mixed = build_report(
+            [
+                _record("p1", "local:cuda"),
+                _record("p2", "openrouter:voyageai/rerank-2.5-lite"),
+            ],
+            iteration=1,
+        ).runtime_summary["reranker"]
+        # CUDA OOM 강등은 경로만 둘이고 모델은 같다 — 점수가 같으므로 경고 대상이 아니다.
+        demoted = build_report(
+            [_record("p1", "local:cuda"), _record("p2", "local:cpu")],
+            iteration=1,
+        ).runtime_summary["reranker"]
+
+        self.assertTrue(mixed["mixed_models"])
+        self.assertFalse(demoted["mixed_models"])
+        self.assertEqual(len(demoted["routes"]), 2)
+
     def test_report_lists_every_route_that_actually_ran(self):
         """경로가 섞인 실행은 리포트에서 드러나야 한다 — 두 경로는 서로 다른 모델이라
         점수 차이를 처방 효과로 읽으면 안 된다."""

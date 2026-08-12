@@ -34,6 +34,7 @@ from agents.index.qdrant_store import (
     query_embedding_config_error,
     hybrid_search,
     keyword_search,
+    intended_reranker_route,
     rerank_with_status,
     reranker_max_length,
     reranker_route,
@@ -632,8 +633,19 @@ class Retriever:
             # 어디서 계산했나("local:cuda" / "openrouter:<model>"). 임베딩과 달리 리랭커는
             # provider 를 바꾸면 모델 자체가 바뀌어(로컬 bge ↔ Voyage) 점수 스케일도 순위도
             # 달라진다 — 경로를 안 남기면 Optimize 가 그 차이를 처방 효과로 읽는다.
+            #
+            # 실패한 시도는 **시도한 경로**를 남긴다. 실패야말로 "OpenRouter 를 켰는데 왜
+            # 리랭크가 안 됐지" 를 봐야 하는 순간인데, 여기서 None 이 되면 리포트에서
+            # 경로가 통째로 사라져 status·capability 를 따로 따라가야 한다.
+            # 아예 안 켠 실행(attempted=False)만 None 이다.
             "rerank_route": (
-                reranker_route(self.settings.reranker_model) if reranked else None
+                reranker_route(self.settings.reranker_model)
+                if reranked
+                else (
+                    intended_reranker_route(self.settings.reranker_model)
+                    if reranker_attempted
+                    else None
+                )
             ),
             "search_seconds": round(time.monotonic() - search_started, 3),
             "results": results,

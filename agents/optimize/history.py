@@ -157,6 +157,11 @@ def _capability_identity(
     강등(local:cuda → local:cpu)이 실행 중에 일어나는 축이라 넣으면 baseline 이 스스로
     바뀌면서 이미 막아 둔 action 의 차단이 풀린다. 그래서 route 전체가 아니라 점수를
     바꾸는 값만 고른다.
+
+    Eval 캐시 키(agents/eval/agent.py 의 _EVAL_CACHE_ENV_KEYS)는 반대로 장치를 포함한다 —
+    의도한 비대칭이다. 이쪽은 "같은 조건의 측정인가" 를 묻고 틀리면 차단이 풀리지만,
+    저쪽은 "복원해도 되는가" 를 묻고 틀리면 남의 리포트가 조용히 복원된다. 후자는 보수적인
+    쪽이 안전하고 대가도 재실행 한 번뿐이다.
     """
     if not action_key.startswith("reranker.") or not isinstance(
         runtime_capabilities, dict

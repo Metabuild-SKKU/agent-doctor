@@ -315,6 +315,18 @@ def openrouter_reranker_model(model_name: str = DEFAULT_RERANKER_MODEL) -> str:
     ).strip()
 
 
+def intended_reranker_route(model_name: str = DEFAULT_RERANKER_MODEL) -> str:
+    """지금 설정이 **가리키는** 경로. 모델을 올리지 않고 env 만 보고 계산한다.
+
+    reranker_route() 는 실제로 올라간 경로라 로드에 실패하면 None 이다. 그런데 실패야말로
+    "OpenRouter 를 켰는데 왜 리랭크가 안 됐지" 를 알아야 하는 순간이라, 시도한 경로가
+    기록에서 사라지면 안 된다. 실패 사유는 reranker_status 가 따로 들고 있으므로 둘을
+    맞춰 보면 원인이 한 번에 잡힌다."""
+    if resolve_reranker_provider() == "openrouter":
+        return f"openrouter:{openrouter_reranker_model(model_name)}"
+    return f"local:{_reranker_soft_device(model_name) or 'auto'}"
+
+
 def effective_reranker_model(model_name: str = DEFAULT_RERANKER_MODEL) -> str:
     """실제로 채점하는 모델명. provider=openrouter 면 API 모델, 아니면 로컬 모델.
 
