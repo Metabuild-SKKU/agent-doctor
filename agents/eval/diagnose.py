@@ -929,6 +929,8 @@ def _reasoning_mode(record: EvalRecord) -> Optional[str]:
 # chronological(E15, RAGEC 택소노미)은 옆 셋과 처방이 갈려서 별도 라벨로 둔다 — 값은 다 맞고
 # 순서만 틀린 실패라 수치 검산(numerical_error)으로도, 근거 대조(contradiction)로도 안 잡힌다.
 # hop_binding 과 달리 홉이 하나여도 성립하므로(한 문장 안의 두 시점) 단일홉 흡수도 하지 않는다.
+# 반대로 멀티홉에서는 hop_binding 정의도 같이 참이 된다(시간 관계도 '관계'다). 그 갈림은
+# 프롬프트가 hop_binding 쪽에 배타 문구를 달아 정한다 — 틀린 관계가 선후뿐이면 chronological.
 _REASONING_LABELS = {
     "contradiction": "generation_contradiction",
     "numerical_error": "generation_numerical_error",
@@ -1107,8 +1109,12 @@ def _hop_binding_from_counts(record: EvalRecord, faith) -> Optional[Finding]:
     """분류기 미측정 시의 안전망 — 카운트로 결합 오류만 판정한다.
 
     FN=0 이 '결합' 신호다(필요한 gold 요소가 다 있는데 답이 틀렸으면 남는 설명은 잘못 엮었다는
-    것뿐이고, 그 주장이 FP 로 잡힌다). 나머지 셋(모순/수치/해석)은 카운트로 구분할 수 없다.
-    """
+    것뿐이고, 그 주장이 FP 로 잡힌다). 나머지 넷(모순/수치/해석/시간축)은 카운트로 구분할 수 없다.
+
+    [한계] 시간축 오류(generation_chronological_error)도 같은 카운트 모양이다 — 시점은 다 있고
+    (FN=0) 뒤집힌 결론 문장만 근거 없음(FP>0)이라, 분류기 없이 이 경로로 오면 결합 오류로
+    확정된다. 카운트만으로는 '무엇을 잘못 엮었나'가 안 보여서 여기서는 가를 수 없다.
+    시간축을 별도로 판정하려면 분류기(DEEP+ · 심판 자원)가 있어야 한다."""
     if not _is_multi_hop(record):
         return None
     counts = _correctness_counts_oracle(record)
