@@ -353,17 +353,43 @@ def _local_embeddings_available() -> bool:
         return False
 
 
+def embedding_route() -> str:
+    """실제 임베딩이 나갈 경로 — "openrouter" | "openai" | "gemini" | "local" | "none".
+
+    embed_texts 는 이 함수가 정한 경로로만 전송한다(분기 중복 금지). 리포트 메타데이터
+    (agents/eval/report.py 의 _embedding_source)도 같은 값을 그대로 남긴다 — 예전엔
+    리포트가 심판 provider 기준(_api_embeddings_available)으로 따로 판정해서,
+    EVAL_EMBED_PROVIDER 가 걸린 실행에서 실제 경로(openrouter)와 기록(local)이 갈릴
+    수 있었다(리뷰 지적). 갈리면 실행 간 코사인 비교의 근거 자체가 무너진다.
+
+    명시 override 는 **강제값**이다: 그 경로를 쓸 수 없으면 다른 provider 로 새지 않고
+    "none"(임베딩 의존 지표 결측)이다. 이번 사고(2026-08-11)의 핵심이 "로컬로 조용히
+    새서 GPU 경합"이었으므로, override 를 적은 사용자의 의도(그 경로만)를 지킨다.
+    override 가 없을 때만 기존 폴백 사슬(심판 provider API → 로컬 → 결측)을 탄다."""
+    override = _embed_provider_override()
+    if override == "local":
+        return "local" if _local_embeddings_available() else "none"
+    if override:
+        return override if _embed_api_key_ready(override) else "none"
+    if _api_embeddings_available():
+        provider = _provider()
+        # anthropic·github 은 임베딩 엔드포인트가 없어 openai 로 흡수(기존 else 분기).
+        return provider if provider in ("gemini", "openrouter") else "openai"
+    return "local" if _local_embeddings_available() else "none"
+
+
 def embeddings_available() -> bool:
-    """임베딩 의존 지표를 계산할 수 있는지(API 또는 로컬 모델)."""
-    return _api_embeddings_available() or _local_embeddings_available()
+    """임베딩 의존 지표를 계산할 수 있는지 — embedding_route 와 반드시 같은 판정."""
+    return embedding_route() != "none"
 
 
 def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
     """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파; rate limit 은 재시도)
 
-    우선순위: EVAL_EMBED_PROVIDER 명시(_embed_provider_override 참고)
-    > 활성 provider 의 임베딩 API > 로컬 BGE-M3 > 결측(빈 리스트).
-    로컬은 임베딩 API 가 없는 조합(GitHub Models·anthropic 등)이나 키가 없을 때만 쓰인다.
+    경로 결정은 embedding_route() 하나가 소유한다: EVAL_EMBED_PROVIDER 명시(강제값 —
+    못 쓰면 결측, 다른 provider 로 새지 않음) > 활성 provider 의 임베딩 API > 로컬
+    BGE-M3 > 결측(빈 리스트). 여기서 분기를 다시 만들지 말 것 — 리포트 메타데이터가
+    같은 함수를 봐서, 갈리면 실제 경로와 기록이 어긋난다.
 
     주의: provider 를 바꾸면 임베딩 모델이 바뀌고 코사인 분포도 달라진다.
     response_relevancy 를 실행 간에 비교하려면 한 번 정한 뒤 고정할 것.
@@ -375,22 +401,30 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
     if not texts:
         return []
 
-    override = _embed_provider_override()
-    if override and override != "local":
-        if _embed_api_key_ready(override):
-            return _run_with_retry(lambda: _embed_via_api(override, texts, model), "임베딩")
-        _notify_embed_once(
-            f"[Eval] EVAL_EMBED_PROVIDER={override} 인데 그 provider 의 키가 없습니다 "
-            f"— 기본 폴백 사슬로 내려갑니다.")
-        override = ""
+    route = embedding_route()
 
-    if override != "local" and _api_embeddings_available():
-        return _run_with_retry(lambda: _embed_via_api(_provider(), texts, model), "임베딩")
+    if route == "none":
+        override = _embed_provider_override()
+        if override:
+            # 명시 경로를 못 쓰는 상황 — 다른 provider 로 새지 않는다(embedding_route
+            # 주석의 정책). 이번 사고의 원인이 조용한 폴백이었으므로 결측을 택한다.
+            _notify_embed_once(
+                f"[Eval] EVAL_EMBED_PROVIDER={override} 를 쓸 수 없습니다"
+                f"({'로컬 모델 로드 불가' if override == 'local' else '해당 provider 키 없음'}) "
+                f"— 명시 경로는 다른 provider 로 폴백하지 않습니다. 임베딩 의존 지표"
+                f"(response_relevancy)와 bad_gold_answer 라벨을 건너뜁니다. "
+                f"키를 채우거나 EVAL_EMBED_PROVIDER 를 지우세요.")
+        else:
+            _notify_embed_once(
+                f"[Eval] EVAL_LLM_PROVIDER={_provider()} 의 임베딩 키도, OPENAI_API_KEY 도, "
+                f"로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표(response_relevancy)를 "
+                f"건너뜁니다 — bad_gold_answer 라벨도 함께 침묵합니다.")
+        return []
 
-    if _local_embeddings_available():
+    if route == "local":
         # AGENTS.md 규약대로 공통 모듈을 통해서만 임베딩한다(직접 모델 로드 금지).
         from agents.index.qdrant_store import embed_batch
-        if override == "local":
+        if _embed_provider_override() == "local":
             _notify_embed_once(
                 "[Eval] EVAL_EMBED_PROVIDER=local — 로컬 임베딩(BGE-M3)으로 계산합니다 "
                 "(비용 0, 외부 호출 없음).")
@@ -405,11 +439,7 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
         # "비용 0, 외부 호출 없음" 이라 찍어놓고 실제로는 과금 호출을 한다.
         return embed_batch(texts, provider="local")
 
-    _notify_embed_once(
-        f"[Eval] EVAL_LLM_PROVIDER={_provider()} 의 임베딩 키도, OPENAI_API_KEY 도, "
-        f"로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표(response_relevancy)를 "
-        f"건너뜁니다 — bad_gold_answer 라벨도 함께 침묵합니다.")
-    return []
+    return _run_with_retry(lambda: _embed_via_api(route, texts, model), "임베딩")
 
 
 # ── provider 별 transport (core/llm_clients.py 공용 구현에 위임) ──

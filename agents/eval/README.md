@@ -362,13 +362,15 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, confirmed
 |------|------|------|
 | `EVAL_MODE` | `fast` | **진단 깊이(비용 tier)**: `fast`/`standard`/`deep` 또는 `1`~`3`. `full`/`4` 는 `deep` 으로 접힌다. 아래 표 참고 |
 | `EVAL_ENABLE_LLM` | off | `1/true` 면 RAGAS(LLM-as-Judge) 진단 허용 (**+ `EVAL_MODE≥deep` 이어야 실제 실행**) |
-| `EVAL_LLM_PROVIDER` | `openai` | LLM 호출 provider 선택: `openai` / `gemini` / `github` / `openrouter` (아래 참고) |
+| `EVAL_LLM_PROVIDER` | `openai` | LLM 호출 provider 선택: `openai` / `gemini` / `github` / `openrouter` / `anthropic` (아래 참고) |
 | `OPENAI_API_KEY` | — | provider=openai 일 때 필요 |
 | `GEMINI_API_KEY` | — | provider=gemini 일 때 필요(Google AI Studio 무료 티어) |
 | `GITHUB_TOKEN` | — | provider=github 일 때 필요(`models:read` 권한 포함된 PAT) |
 | `OPENROUTER_API_KEY` | — | provider=openrouter 일 때 필요(유료) |
-| `EVAL_JUDGE_MODEL` / `..._GEMINI` / `..._GITHUB` / `..._OPENROUTER` | `gpt-4o` / `gemini-flash-latest` / `openai/gpt-4o` / `openai/gpt-4o` | Probe 질문 생성 + RAGAS 평가(심판) 모델(설계 원칙: 응답≠평가). 답변 생성 모델은 `RAG_*`(→ `agents/rag/generator.py`)가 담당 |
-| `EVAL_EMBED_MODEL` / `EVAL_EMBED_MODEL_GEMINI` | `text-embedding-3-small` / `gemini-embedding-001` | Response Relevancy 코사인용 임베딩. github·openrouter 는 임베딩 엔드포인트가 없어 OpenAI 키로 폴백하고, 그것도 없으면 **로컬 BGE-M3**(Index 와 같은 모델, 비용 0)로 계산한다 |
+| `ANTHROPIC_API_KEY` | — | provider=anthropic 일 때 필요(유료). 모델명은 접두사 없는 정식 ID(`claude-haiku-4-5`) |
+| `EVAL_JUDGE_MODEL` / `..._GEMINI` / `..._GITHUB` / `..._OPENROUTER` / `..._ANTHROPIC` | `gpt-4o` / `gemini-flash-latest` / `openai/gpt-4o` / `openai/gpt-4o` / `claude-sonnet-5` | Probe 질문 생성 + RAGAS 평가(심판) 모델(설계 원칙: 응답≠평가). 답변 생성 모델은 `RAG_*`(→ `agents/rag/generator.py`)가 담당 |
+| `EVAL_EMBED_MODEL` / `..._GEMINI` / `..._OPENROUTER` | `text-embedding-3-small` / `gemini-embedding-001` / `baai/bge-m3` | Response Relevancy 코사인용 임베딩 모델(경로별). 실제 경로는 아래 `EVAL_EMBED_PROVIDER` 와 폴백 사슬이 정한다 |
+| `EVAL_EMBED_PROVIDER` | — | **임베딩 provider 를 심판에서 분리**: `openrouter` / `openai` / `gemini` / `local`. 미설정이면 폴백 사슬(심판 provider 의 임베딩 API → 로컬 BGE-M3 → 결측). **명시하면 강제값** — 그 경로를 못 쓰면(키 없음 등) 다른 provider 로 새지 않고 임베딩 의존 지표가 결측된다. anthropic 심판은 임베딩 엔드포인트가 없어 로컬로 폴백하는데, GPU 가 좁으면 리랭커와 VRAM 경합이 나므로(실측: 검색 192초→31분) `openrouter` 명시 권장 |
 | `QDRANT_URL` / `QDRANT_API_KEY` | `:memory:` | 검색 인덱스 대상 |
 
 > 기본값만으로도(위 키 전부 미설정) **외부 API 없이** 규칙 지표 기반 진단이 동작합니다(폴백 설계).
@@ -397,15 +399,28 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
   - 모델명은 반드시 `publisher/model` 형식. 형식이 틀리면 404 → 폴백으로 조용히 강등된다.
   - **심판 모델은 `response_format=json_object` 지원 모델로 고를 것.** 미지원이면 `chat_json`
     파싱이 실패해 `{}` 로 폴백하고, 해당 점수가 결측 처리된다.
-  - 임베딩 엔드포인트가 없어(카탈로그 337개 중 임베딩 모델 0개) `embed_texts` 는 github 와
-    마찬가지로 OpenAI 키로 폴백하고, 키가 없으면 **로컬 BGE-M3** 로 계산한다(비용 0, 외부 호출 없음).
-    결측이 되면 지표 하나가 비는 데서 끝나지 않는다 — `diagnose` 의 `bad_gold_answer` /
-    `bad_gold_answer_oracle` 이 `rel` 을 AND 조건으로 요구해 두 라벨이 영구히 침묵하고,
-    그 라벨에 걸린 probe 자동 재생성 루프까지 멈춘다.
-    임베딩 모델이 바뀌면 코사인 분포도 달라지므로 **API 임베딩 실행과 값을 직접 비교하지 말 것**
-    (실행당 1회 안내가 나온다). 모델 로드에 실패해 해시 폴백 상태면 채점에 쓰지 않고 결측으로 둔다.
+  - **임베딩 엔드포인트가 있다**(`baai/bge-m3`, $0.01/1M — 사실상 공짜). provider=openrouter 면
+    `embed_texts` 가 이걸 쓴다. 벡터는 로컬 BGE-M3 와 코사인 0.99997 로 사실상 동일하다.
   - 비용은 단가표 추정이 아니라 **응답이 알려준 실제 과금액**으로 집계된다
     (`core/llm_clients.py` 가 요청에 `usage.include` 를 붙인다).
+- **anthropic**: Anthropic 직통(Messages API). 심판 전용으로 추가된 provider 다 —
+  `output_config.format` 으로 JSON **스키마를 API 단에서 강제**해 fused 판정의 키 누락·보수
+  경로가 발화하지 않고, compact 프롬프트(`EVAL_RAGAS_COMPACT`)·Message Batches
+  (`EVAL_ANTHROPIC_BATCH`, 50% 할인) 절감이 이 provider 에서만 걸린다.
+  - 모델명은 접두사 없는 정식 ID(`claude-haiku-4-5`). OpenRouter 의 `anthropic/claude-…` 와
+    형식이 다르다.
+  - **임베딩 엔드포인트가 없다** — `EVAL_EMBED_PROVIDER` 를 명시하지 않으면 로컬 BGE-M3 로
+    폴백한다. GPU 가 좁으면(8GB) 리랭커와 VRAM 경합이 나므로 `EVAL_EMBED_PROVIDER=openrouter`
+    를 권장한다(위 표 참고).
+
+임베딩 경로가 어디로 갔는지는 리포트의 `embedding_source`
+(`openrouter`/`openai`/`gemini`/`local`/`none`)에 남는다 — 실제 전송 경로와 같은 판정
+(`llm_provider.embedding_route`)을 쓰므로, 실행 간 코사인 비교 전에 이 값부터 대조할 것.
+결측(`none`)이 되면 지표 하나가 비는 데서 끝나지 않는다 — `diagnose` 의 `bad_gold_answer` /
+`bad_gold_answer_oracle` 이 `rel` 을 AND 조건으로 요구해 두 라벨이 영구히 침묵하고,
+그 라벨에 걸린 probe 자동 재생성 루프까지 멈춘다. 임베딩 모델이 바뀌면 코사인 분포도
+달라지므로 **다른 경로의 실행과 값을 직접 비교하지 말 것**(실행당 1회 안내가 나온다).
+로컬 모델 로드에 실패해 해시 폴백 상태면 채점에 쓰지 않고 결측으로 둔다.
 
 모델명·무료 티어 한도는 시점에 따라 바뀔 수 있다 — 401/403/404 가 나면 해당 콘솔에서 현재
 사용 가능한 모델명을 다시 확인할 것.
