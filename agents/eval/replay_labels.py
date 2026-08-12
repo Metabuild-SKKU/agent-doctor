@@ -54,19 +54,27 @@ _SEVERITY = {
     "ext_retrieval_starved_abstention": "warning",
 }
 
-# ext_ 라벨 → 기존 rules 처방 재참조 (복사 아님 - 처방 문구의 원본은 하나로 유지)
-EXT_RECOMMENDATIONS: dict[str, dict] = {
-    "ext_generation_hallucination": LABEL_TO_PRESCRIPTIONS["generation_hallucination"],
-    "ext_answer_off_topic": LABEL_TO_PRESCRIPTIONS["generation_misinterpretation"],
-    "ext_context_overflow": LABEL_TO_PRESCRIPTIONS["too_long_context"],
-    "ext_grounded_but_wrong": LABEL_TO_PRESCRIPTIONS["corpus_gap"],
+# ext_ 라벨 → 기존 rules 라벨(canonical). agents/optimize/ext_advisor.py 가 카드용으로
+# 그대로 재수입한다(patch/detail 까지 읽어야 해서) - 문자열 매핑이 원본이고, 아래
+# EXT_RECOMMENDATIONS(entry 참조가 필요한 CLI 처방 id 용)는 이걸로 파생시킨다.
+EXT_LABEL_TO_RULE: dict[str, str] = {
+    "ext_generation_hallucination": "generation_hallucination",
+    "ext_answer_off_topic": "generation_misinterpretation",
+    "ext_context_overflow": "too_long_context",
+    "ext_grounded_but_wrong": "corpus_gap",
     # 검색이 질문과 무관한 걸 가져왔다 → 검색 설정 점검(임베딩·청킹 계열).
     # 순위/리랭커 수준의 세부 원인은 상대 인덱스 없이 못 가르므로(docs §4)
     # 여기까지가 상한이다.
-    "ext_retrieval_irrelevant": LABEL_TO_PRESCRIPTIONS["retrieval_semantic_mismatch"],
-    "ext_wrongful_abstention": LABEL_TO_PRESCRIPTIONS["generation_wrongful_abstention"],
+    "ext_retrieval_irrelevant": "retrieval_semantic_mismatch",
+    "ext_wrongful_abstention": "generation_wrongful_abstention",
     # 검색이 굶어서 기권했다 → 더 가져오게 하거나(top_k·겹침) 코퍼스를 보강한다.
-    "ext_retrieval_starved_abstention": LABEL_TO_PRESCRIPTIONS["retrieval_missing_gold"],
+    "ext_retrieval_starved_abstention": "retrieval_missing_gold",
+}
+
+# ext_ 라벨 → 기존 rules 처방 재참조 (복사 아님 - 처방 문구의 원본은 하나로 유지)
+EXT_RECOMMENDATIONS: dict[str, dict] = {
+    ext_label: LABEL_TO_PRESCRIPTIONS[rule_label]
+    for ext_label, rule_label in EXT_LABEL_TO_RULE.items()
 }
 
 

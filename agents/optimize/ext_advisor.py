@@ -26,17 +26,10 @@ from core.schema import Finding
 from agents.optimize.rules import LABEL_TO_PRESCRIPTIONS
 
 # ── ext_ 라벨 → 기존 rules 라벨 ──────────────────────────────────
-# 재참조 매핑. replay_labels.EXT_RECOMMENDATIONS 와 같은 대응이지만, 저쪽은
-# 처방 id 만 필요한 CLI 출력용이고 여기는 patch/detail 까지 읽어 카드를 만든다.
-EXT_LABEL_TO_RULE: dict[str, str] = {
-    "ext_generation_hallucination": "generation_hallucination",
-    "ext_answer_off_topic": "generation_misinterpretation",
-    "ext_context_overflow": "too_long_context",
-    "ext_grounded_but_wrong": "corpus_gap",
-    "ext_retrieval_irrelevant": "retrieval_semantic_mismatch",
-    "ext_wrongful_abstention": "generation_wrongful_abstention",
-    "ext_retrieval_starved_abstention": "retrieval_missing_gold",
-}
+# 원본은 replay_labels.py(ext_ 라벨을 정의하는 쪽) - 여기는 patch/detail 까지 읽어
+# 카드를 만드는 소비자라 재수입만 한다(같은 매핑을 두 곳에 따로 적으면 라벨 추가 시
+# 한쪽만 고치고 잊는 사고가 난다).
+from agents.eval.replay_labels import EXT_LABEL_TO_RULE
 
 # 라벨 자체의 한 줄 설명 — 카드 제목 밑에 붙는다.
 LABEL_SUMMARY: dict[str, str] = {
