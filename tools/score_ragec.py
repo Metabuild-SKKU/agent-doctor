@@ -24,12 +24,17 @@ RAGEC 은 **질의당 라벨 1개**다(377 query_id / 377행, 중복 0). 단계 
     #    (report 객체에서 뽑는 헬퍼가 이 파일에 있다 — findings_from_report)
     # 2) 채점
     python tools/score_ragec.py \\
-        --findings output/ragec_findings.jsonl \\
+        --findings output/ragec/findings.jsonl \\
         --key data/ragec_answer_key.jsonl
 
-`--findings` 형식 (JSONL):
+probe 별 대조(질문·답변·정답 + RAGEC 정답 라벨 + 우리 진단)가 **기본으로** 나온다.
+총계만 보려면 `--no-detail`.
 
-    {"qa_id": "2135", "labels": ["retrieval_missing_gold", "generation_hallucination"]}
+`--findings` 형식 (JSONL). qa_id/labels/failed 가 채점에 쓰이고, 나머지는 대조 출력용이라
+없으면 그 줄만 비어 나온다:
+
+    {"qa_id": "2135", "labels": ["retrieval_missing_gold"], "failed": true,
+     "question": "...", "answer": "...", "gold_answer": "..."}
 """
 from __future__ import annotations
 
@@ -38,6 +43,7 @@ import collections
 import json
 import pathlib
 import sys
+import textwrap
 
 # ── 대조표 (docs/ragec_label_mapping.md 의 구현) ──────────────────
 #
@@ -114,16 +120,25 @@ def _qa_id(probe_id: str) -> str:
     return probe_id[len(prefix):] if probe_id.startswith(prefix) else probe_id
 
 
-def findings_from_report(report, probe_ids: list[str] | None = None) -> list[dict]:
+def findings_from_report(report, probes: list | None = None) -> list[dict]:
     """DiagnosticReport → 채점기 입력(JSONL 행 목록).
 
     **성공한 probe 도 실어야 한다.** RAGEC 377건은 *그들* RAG 시스템이 실패한 질문이고,
     우리 파이프라인은 같은 질문에서 성공할 수 있다(검색기·생성 모델이 다르다). 실패한
     probe 만 실으면 우리가 잘한 것이 채점기에서 '미진단' 으로 보여 오답이 된다.
 
-    probe_ids 를 주면 그 목록 전체를 싣고 findings 가 없는 것은 `failed=False` 로 표시한다.
+    probes 를 주면 그 목록 전체를 싣고 findings 가 없는 것은 `failed=False` 로 표시한다.
     안 주면 findings 가 있는 probe 만 실린다(구버전 호환 — 그 경우 채점기가 '우리는 성공'
     과 '실패했는데 원인을 못 짚음' 을 구분하지 못한다).
+
+    probes 는 `Probe` 객체 목록이거나 probe_id 문자열 목록이다. 객체를 주면 질문·정답
+    원문까지 실어서 대조표(format_detail)가 **왜 어긋났는지**를 같이 보여준다 — 라벨만
+    보면 대조표를 고쳐야 할지 진단을 고쳐야 할지 갈리지 않는다.
+
+    [한계] 생성 답변은 실패 probe 만 실린다. EvalRecord 는 Eval 이 끝나면 사라지고,
+    report 가 답변 원문을 남기는 곳은 `failed_questions` 뿐이라서다(성공 probe 는 애초에
+    '실패 목록' 이 아니라 빠진다). 성공 probe 는 채점 대상도 아니므로 질문·정답만으로
+    충분하다고 보고 여기서 넓히지 않는다.
     """
     by_probe: dict[str, set[str]] = collections.defaultdict(set)
     for finding in getattr(report, "findings", []) or []:
@@ -135,19 +150,40 @@ def findings_from_report(report, probe_ids: list[str] | None = None) -> list[dic
     # 실패 판정은 report 가 소유한다 — findings 유무로 추론하지 않는다. 골드 오류 probe 는
     # findings 는 있지만 failed_questions 에서 빠지므로(평가셋 결함이라 '실패한 검증 질문'
     # 이 아니다) 둘이 다르다.
-    failed_ids = {
-        row.get("probe_id", "")
+    answers = {
+        row.get("probe_id", ""): row
         for row in (getattr(report, "failed_questions", []) or [])
     }
 
-    ids = list(probe_ids) if probe_ids is not None else sorted(by_probe)
+    if probes is None:
+        entries: list[tuple[str, object]] = [(pid, None) for pid in sorted(by_probe)]
+    else:
+        entries = [
+            (p, None) if isinstance(p, str) else (getattr(p, "probe_id", ""), p)
+            for p in probes
+        ]
+
     rows = []
-    for probe_id in ids:
-        rows.append({
+    for probe_id, probe in entries:
+        answer_row = answers.get(probe_id, {})
+        row = {
             "qa_id": _qa_id(probe_id),
             "labels": sorted(by_probe.get(probe_id, ())),
-            "failed": probe_id in failed_ids or bool(by_probe.get(probe_id)),
-        })
+            "failed": probe_id in answers or bool(by_probe.get(probe_id)),
+        }
+        question = getattr(probe, "question", "") or answer_row.get("question", "")
+        gold = (
+            getattr(probe, "ground_truth", None)
+            or answer_row.get("expected_answer", "")
+        )
+        answer = answer_row.get("actual_answer", "")
+        if question:
+            row["question"] = question
+        if gold:
+            row["gold_answer"] = gold
+        if answer:
+            row["answer"] = answer
+        rows.append(row)
     return rows
 
 
@@ -264,35 +300,85 @@ def format_report(result: dict) -> str:
     return "\n".join(lines)
 
 
+_MARK_LEGEND = "  O 맞음 · X 틀림 · 성공=우리가 성공(제외) · - 대응 라벨 없음(제외)"
+
+
+def _verdict(row: dict, category: str) -> str:
+    """이 probe 의 채점 판정 한 글자. score() 의 분기와 같은 순서로 본다."""
+    labels = set(row.get("labels") or [])
+    if labels & GOLD_ERROR_LABELS:
+        return "gold"         # 평가셋 결함 주장 — 정확도에서 제외
+    expected = RAGEC_TO_OURS.get(category)
+    if not expected:
+        return "-"            # 대응 라벨 없음(E15) 또는 대조표에 없는 카테고리 — 제외
+    if not row.get("failed", bool(labels)):
+        return "성공"          # 우리 파이프라인이 이 질문에 성공 — 채점 제외
+    return "O" if labels & expected else "X"
+
+
+def _wrap(label: str, text: str, width: int = 88) -> list[str]:
+    """`  Q  본문…` 꼴로 접어 쓴다. 이어지는 줄은 본문 열에 맞춰 들여쓴다."""
+    body = " ".join((text or "").split()) or "(없음)"
+    head = f"  {label:<4}"
+    indent = " " * len(head)
+    wrapped = textwrap.wrap(body, width=width) or [""]
+    return [head + wrapped[0]] + [indent + line for line in wrapped[1:]]
+
+
 def format_detail(findings_rows: list[dict], key_rows: list[dict]) -> str:
-    """probe 별 '정답 라벨 ↔ 우리 진단' 대조표.
+    """probe 별 대조 — 질문·답변·정답(QAR)과 'RAGEC 정답 라벨 ↔ 우리 진단' 을 한자리에.
 
     정확도 숫자만 보면 **어디서 어긋났는지** 를 알 수 없다. 대조표를 고칠 근거도, 진단을
-    고칠 근거도 이 표에서 나온다(실측: E4 3건에 우리가 전부 retrieval_low_rank 를 낸 걸
-    보고 E4 대응이 너무 좁다는 걸 알았다).
+    고칠 근거도 여기서 나온다 — 실측 두 건이 다 그랬다:
+      · E4 3건에 우리가 전부 retrieval_low_rank 를 낸 걸 보고 E4 대응이 너무 좁다는 걸 알았다
+      · 영어 질문에 한국어 답변이 붙은 걸 보고 f1=0 의 원인이 진단이 아니라 프롬프트임을 알았다
+    두 번째는 **라벨만 봤으면 못 찾는다** — 답변 원문이 붙어 있어야 보인다.
+
+    블록(probe 하나씩)을 먼저 내고, 마지막에 한눈에 보는 압축 표를 붙인다.
     """
     ours = {str(r["qa_id"]): r for r in findings_rows}
-    lines = ["", "=" * 78, "  probe 별 대조", "=" * 78,
-             f"  {'qa_id':<8}{'판정':<6}{'RAGEC 정답':<30}우리 진단"]
+    lines = ["", "=" * 92, "  probe 별 대조 (질문·답변·정답 ↔ RAGEC 정답 라벨 ↔ 우리 진단)", "=" * 92]
+
+    shown = 0
+    for key in key_rows:
+        qa_id = str(key["qa_id"])
+        row = ours.get(qa_id)
+        if row is None:
+            continue          # 덤프에 없다 = 안 돌린 probe
+        shown += 1
+        category = key["ragec_category"].strip()
+        mark = _verdict(row, category)
+        stage = key.get("ragec_stage", "").strip()
+        qtype = key.get("query_type", "").strip()
+
+        lines.append("")
+        lines.append(f"── qa_id {qa_id}  [{mark}]  {category}"
+                     f"{f' ({stage})' if stage else ''}"
+                     f"{f' · {qtype}' if qtype else ''}")
+        lines += _wrap("Q", row.get("question", ""))
+        lines += _wrap("A", row.get("answer", "")
+                       or ("(성공 — 답변 원문은 실패 probe 만 보존됩니다)"
+                           if not row.get("failed") else ""))
+        lines += _wrap("R", row.get("gold_answer", ""))
+        lines += _wrap("진단", ", ".join(row.get("labels") or []) or "(라벨 없음)")
+
+    if not shown:
+        lines.append("")
+        lines.append("  덤프와 정답지에 공통으로 있는 probe 가 없습니다.")
+        return "\n".join(lines)
+
+    lines += ["", "=" * 92, "  요약 표", "=" * 92,
+              f"  {'qa_id':<8}{'판정':<6}{'RAGEC 정답':<30}우리 진단"]
     for key in key_rows:
         qa_id = str(key["qa_id"])
         row = ours.get(qa_id)
         if row is None:
             continue
-        labels = row.get("labels") or []
-        expected = RAGEC_TO_OURS.get(key["ragec_category"].strip())
-        if not row.get("failed", bool(labels)):
-            mark = "성공"          # 우리 파이프라인이 이 질문에 성공 — 채점 제외
-        elif expected and set(labels) & expected:
-            mark = "O"
-        elif not expected:
-            mark = "-"            # 대응 라벨 없음 — 채점 제외
-        else:
-            mark = "X"
-        lines.append(f"  {qa_id:<8}{mark:<6}{key['ragec_category']:<30}"
-                     f"{', '.join(labels) or '(라벨 없음)'}")
+        lines.append(f"  {qa_id:<8}{_verdict(row, key['ragec_category'].strip()):<6}"
+                     f"{key['ragec_category']:<30}"
+                     f"{', '.join(row.get('labels') or []) or '(라벨 없음)'}")
     lines.append("")
-    lines.append("  O 맞음 · X 틀림 · 성공=우리가 성공(제외) · - 대응 라벨 없음(제외)")
+    lines.append(_MARK_LEGEND + " · gold=정답지 오류 주장(제외)")
     return "\n".join(lines)
 
 
@@ -301,8 +387,12 @@ def main() -> int:
     ap.add_argument("--findings", required=True,
                     help='JSONL: {"qa_id": "...", "labels": [...], "failed": bool}')
     ap.add_argument("--key", default="data/ragec_answer_key.jsonl")
-    ap.add_argument("--detail", action="store_true",
-                    help="probe 별 '정답 라벨 ↔ 우리 진단' 대조표를 함께 출력")
+    # 기본 ON. 정확도 숫자만으로는 대조표를 고칠지 진단을 고칠지 못 정한다 — 실제로 두 번
+    # 다 probe 별 원문을 보고서야 원인을 찾았다(format_detail 참고). 끄는 쪽을 플래그로 둔다.
+    ap.add_argument("--detail", action="store_true", default=True,
+                    help="probe 별 대조(기본 ON)")
+    ap.add_argument("--no-detail", dest="detail", action="store_false",
+                    help="정확도 표만 출력")
     args = ap.parse_args()
 
     for path in (args.findings, args.key):
@@ -312,9 +402,11 @@ def main() -> int:
 
     findings_rows = _read_jsonl(args.findings)
     key_rows = _read_jsonl(args.key)
-    print(format_report(score(findings_rows, key_rows)))
+    # probe 별 대조를 먼저, 정확도 표를 마지막에 — 스크롤이 끝난 자리에 총계가 남는다.
     if args.detail:
         print(format_detail(findings_rows, key_rows))
+        print()
+    print(format_report(score(findings_rows, key_rows)))
     return 0
 
 

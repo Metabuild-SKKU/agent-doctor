@@ -107,7 +107,7 @@ def main() -> int:
     from agents.ingest.agent import run as ingest_run
     from core.state import AgentDoctorState
     from tools.score_ragec import (
-        _read_jsonl, findings_from_report, format_report, score,
+        _read_jsonl, findings_from_report, format_detail, format_report, score,
     )
 
     print(f"[RAGEC] {describe_embedding_route()}")
@@ -134,15 +134,19 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # 성공한 probe 도 실어야 채점기가 '우리는 성공' 과 '원인을 못 짚음' 을 가른다.
-    rows = findings_from_report(state.report, [p.probe_id for p in state.probes])
+    # probe 객체를 그대로 넘겨 질문·정답 원문까지 싣는다(probe_id 만 넘기면 대조 출력에서
+    # 라벨만 보이고, 진단이 틀린 건지 데이터가 틀린 건지 갈리지 않는다).
+    rows = findings_from_report(state.report, state.probes)
     findings_path = OUT_DIR / "findings.jsonl"
     with open(findings_path, "w", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     print(f"\nfindings → {findings_path}  ({len(rows)}건)")
 
+    key_rows = _read_jsonl(str(REPO_ROOT / KEY))
+    print(format_detail(rows, key_rows))
     print()
-    print(format_report(score(rows, _read_jsonl(str(REPO_ROOT / KEY)))))
+    print(format_report(score(rows, key_rows)))
     if log_path:
         print(f"\n[log] {log_path}")
     return 0

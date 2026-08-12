@@ -17,7 +17,7 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from tools.score_ragec import (
-    RAGEC_TO_OURS, findings_from_report, score, stage_of,
+    RAGEC_TO_OURS, findings_from_report, format_detail, score, stage_of,
 )
 
 
@@ -189,6 +189,111 @@ class FindingsFromReportTest(unittest.TestCase):
     def test_findings_without_label_are_skipped(self):
         report = self._Report([self._Finding(None, ["probe_qa_1"])])
         self.assertEqual(findings_from_report(report), [])
+
+    def test_probe_ids_as_strings_still_work(self):
+        """구 호출부는 probe_id 문자열 목록을 넘긴다 — 계약을 깨지 않는다."""
+        report = self._Report([self._Finding("retrieval_low_rank", ["probe_qa_1"])])
+        rows = findings_from_report(report, ["probe_qa_1", "probe_qa_2"])
+        self.assertEqual([r["qa_id"] for r in rows], ["1", "2"])
+        self.assertEqual([r["failed"] for r in rows], [True, False])
+
+
+class _Probe:
+    def __init__(self, probe_id, question, ground_truth):
+        self.probe_id = probe_id
+        self.question = question
+        self.ground_truth = ground_truth
+
+
+class DumpCarriesSourceTextTest(unittest.TestCase):
+    """덤프에 질문·답변·정답 원문을 싣는다.
+
+    라벨만 보면 **진단이 틀린 건지 데이터가 틀린 건지** 갈리지 않는다. 실측에서 영어 질문에
+    한국어 답변이 붙은 걸 답변 원문을 보고서야 찾았다 — 라벨(generation_hallucination)만
+    봤으면 진단 오류로 결론냈을 사안이다.
+    """
+
+    def _report(self):
+        finding = FindingsFromReportTest._Finding("retrieval_low_rank", ["probe_qa_1"])
+        report = FindingsFromReportTest._Report([finding])
+        report.failed_questions = [{
+            "probe_id": "probe_qa_1", "question": "Where?",
+            "expected_answer": "Guadeloupe", "actual_answer": "Bangalore",
+        }]
+        return report
+
+    def test_failed_probe_carries_question_answer_and_gold(self):
+        rows = findings_from_report(
+            self._report(), [_Probe("probe_qa_1", "Where?", "Guadeloupe")])
+        self.assertEqual(rows[0]["question"], "Where?")
+        self.assertEqual(rows[0]["answer"], "Bangalore")
+        self.assertEqual(rows[0]["gold_answer"], "Guadeloupe")
+
+    def test_passed_probe_carries_question_and_gold_without_answer(self):
+        """성공 probe 는 report 에 답변이 안 남는다(failed_questions 에만 있다).
+
+        그래도 질문·정답은 실어야 '우리가 성공했다' 는 판정을 사람이 검증할 수 있다.
+        """
+        rows = findings_from_report(
+            self._report(), [_Probe("probe_qa_9", "Which plant?", "Osaka")])
+        self.assertFalse(rows[0]["failed"])
+        self.assertEqual(rows[0]["question"], "Which plant?")
+        self.assertEqual(rows[0]["gold_answer"], "Osaka")
+        self.assertNotIn("answer", rows[0])
+
+
+class DetailReportTest(unittest.TestCase):
+    KEY = [_key("1", "E4 Missed Retrieval", "Retrieval")]
+
+    def _detail(self, row):
+        return format_detail([row], self.KEY)
+
+    def test_question_answer_and_gold_all_appear(self):
+        out = self._detail({
+            "qa_id": "1", "labels": ["retrieval_low_rank"], "failed": True,
+            "question": "Where is the plant?", "answer": "In Bangalore.",
+            "gold_answer": "Guadeloupe",
+        })
+        for expected in ("Where is the plant?", "In Bangalore.", "Guadeloupe",
+                         "retrieval_low_rank", "E4 Missed Retrieval"):
+            self.assertIn(expected, out, expected)
+
+    def test_verdict_matches_the_scorer(self):
+        """대조표의 판정이 채점기와 어긋나면 표를 근거로 고칠 수 없다.
+
+        gold 오류 주장은 score() 가 **제일 먼저** 걸러 정확도에서 뺀다. 표가 그걸 'X'(틀림)로
+        표시하면 사람이 없는 오진을 쫓게 된다.
+        """
+        gold_claim = {"qa_id": "1", "labels": ["bad_gold_chunk"], "failed": True}
+        self.assertIn("[gold]", self._detail(gold_claim))
+        self.assertEqual(score([gold_claim], self.KEY)["total"], 0)
+
+    def test_unmappable_category_is_marked_excluded_not_wrong(self):
+        row = {"qa_id": "1", "labels": ["generation_misinterpretation"], "failed": True}
+        key = [_key("1", "E15 Chronological Inconsistency", "Generation")]
+        self.assertIn("[-]", format_detail([row], key))
+
+    def test_passed_probe_is_marked_and_says_why_the_answer_is_missing(self):
+        out = self._detail({"qa_id": "1", "labels": [], "failed": False,
+                            "question": "Where?", "gold_answer": "Guadeloupe"})
+        self.assertIn("[성공]", out)
+        self.assertIn("실패 probe 만 보존", out)
+
+    def test_summary_table_still_follows_the_blocks(self):
+        """블록만 남기고 표를 없애면 30건 넘는 실행에서 전체를 못 본다."""
+        out = self._detail({"qa_id": "1", "labels": ["retrieval_low_rank"],
+                            "failed": True, "question": "Q", "gold_answer": "G"})
+        self.assertIn("요약 표", out)
+        self.assertLess(out.index("qa_id 1"), out.index("요약 표"))
+
+    def test_missing_text_fields_do_not_break_output(self):
+        """구버전 덤프(라벨만 있는 파일)로도 돌아야 한다."""
+        out = self._detail({"qa_id": "1", "labels": ["retrieval_low_rank"], "failed": True})
+        self.assertIn("(없음)", out)
+        self.assertIn("retrieval_low_rank", out)
+
+    def test_probe_absent_from_the_dump_is_skipped(self):
+        self.assertIn("공통으로 있는 probe 가 없습니다", format_detail([], self.KEY))
 
 
 class MappingIntegrityTest(unittest.TestCase):
