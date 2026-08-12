@@ -63,3 +63,8 @@ qdrant_storage/
 
 # 로컬 작업용 별도 클론(추적 대상 아님)
 pr34b/
+
+# 리플레이 진단서 산출물(tools/run_replay_report.py). 입력 로그(*.jsonl)는 추적하지만
+# 산출물은 실행할 때마다 새로 만들어지고, 로그 원문(질문·컨텍스트·답변)이 그대로
+# 박혀 있어 커밋되면 안 된다.
+tests/fixtures/external_rag/out/

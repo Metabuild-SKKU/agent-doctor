@@ -291,7 +291,7 @@ async def create_run(
         # _PIPELINE_LOCK 이 잡혀 있으므로 큰 로그 하나가 서버를 통째로 점유했다.
         # 백그라운드 스레드를 띄우기 **전에** 400 으로 돌려준다.
         from agents.eval.replay import (
-            LOG_HARD_CAP, golden_size_error, log_size_error, log_bytes_error,
+            golden_size_error, log_bytes_error, log_size_error,
         )
         from agents.eval.log_intake import load_external_log
 
