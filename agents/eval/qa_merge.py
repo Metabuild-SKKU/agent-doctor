@@ -232,18 +232,14 @@ def merge_qa_into_log(log_path: str, qa_path: str, out_path: str) -> dict:
             if qa is not None:
                 stats["matched"] += 1
                 matched_keys.add(normalize_question(obj.get("question") or ""))
-                if qa["ground_truth"]:
-                    if not str(obj.get("ground_truth") or "").strip():
-                        obj["ground_truth"] = qa["ground_truth"]
-                        stats["filled_ground_truth"] += 1
-                    elif str(obj["ground_truth"]).strip() != qa["ground_truth"]:
-                        stats["conflicts"] += 1
-                if qa["gold_contexts"]:
-                    if not obj.get("gold_contexts"):
-                        obj["gold_contexts"] = qa["gold_contexts"]
-                        stats["filled_gold_contexts"] += 1
-                    elif obj["gold_contexts"] != qa["gold_contexts"]:
-                        stats["conflicts"] += 1     # GT 와 같은 규칙 - 불일치를 조용히 버리지 않는다
+                apply_qa_entry(
+                    qa,
+                    get_ground_truth=lambda o=obj: normalize_answer_field(o.get("ground_truth")),
+                    set_ground_truth=lambda v, o=obj: o.__setitem__("ground_truth", v),
+                    get_gold_contexts=lambda o=obj: o.get("gold_contexts") or [],
+                    set_gold_contexts=lambda v, o=obj: o.__setitem__("gold_contexts", v),
+                    stats=stats,
+                )
             fout.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
     stats["qa_unmatched"] = len(qa_map) - len(matched_keys)
