@@ -147,6 +147,17 @@ _collection_native_hybrid_cache: WeakKeyDictionary[QdrantClient, dict[str, bool]
 _reranker_lock = threading.Lock()
 
 
+def _normalize_device_name(raw: str) -> str:
+    """장치 이름의 철자를 torch 가 아는 값으로. `gpu` → `cuda`.
+
+    CLI 어휘가 `--embed gpu` / `--rerank gpu` 라 그 값을 env 에 그대로 옮겨 적기 쉬운데,
+    torch 는 "gpu" 를 모른다 — 그대로 넘기면 모델 로드가 RuntimeError 로 죽고, 임베딩은
+    해시 폴백, 리랭커는 300초 쿨다운으로 조용히 빠진다. provider 축의 별칭표
+    (PROVIDER_ALIASES)와 같은 취급이다."""
+    value = str(raw or "").strip().lower()
+    return "cuda" if value == "gpu" else value
+
+
 def _accepts_kwarg(cross_encoder_cls, name: str) -> bool:
     """생성자가 이 키워드를 받나 — 예외로 떠보지 않고 시그니처로 판정한다.
 
@@ -258,11 +269,11 @@ def _reranker_soft_device(model_name: str) -> str | None:
     override = _reranker_device_overrides.get(model_name)
     if override:
         return override
-    raw = (
+    raw = _normalize_device_name(
         os.getenv("INDEX_RERANKER_DEVICE")
         or os.getenv("INDEX_EMBED_DEVICE")
         or "auto"
-    ).strip().lower() or "auto"
+    ) or "auto"
     torch = sys.modules.get("torch")
     if raw == "auto":
         if torch is None:
@@ -302,6 +313,19 @@ def openrouter_reranker_model(model_name: str = DEFAULT_RERANKER_MODEL) -> str:
     return os.getenv(
         "INDEX_RERANKER_MODEL_OPENROUTER", "voyageai/rerank-2.5-lite"
     ).strip()
+
+
+def effective_reranker_model(model_name: str = DEFAULT_RERANKER_MODEL) -> str:
+    """실제로 채점하는 모델명. provider=openrouter 면 API 모델, 아니면 로컬 모델.
+
+    설정값(index_config["reranker_model"])과 갈릴 수 있어 따로 둔다. openrouter 경로에서
+    설정값을 그대로 "이 실행이 쓴 모델" 로 보고하면 기록이 거짓말을 한다 — 이 PR 이
+    막으려는 바로 그 경우다. Optimize 의 baseline 정체성(history._capability_identity)이
+    이 값으로 두 경로를 가르므로, 여기서 어긋나면 로컬과 API 의 측정이 한 baseline 으로
+    섞인다."""
+    if resolve_reranker_provider() == "openrouter":
+        return openrouter_reranker_model(model_name)
+    return model_name
 
 
 class _OpenRouterReranker:
@@ -532,16 +556,22 @@ def probe_reranker_capability(
 ) -> dict[str, Any]:
     """Index가 Optimize에 전달할 reranker 실행 가능성을 실제 모델로 확인한다.
 
-    provider=openrouter 면 smoke inference 도 실제 유료 호출 1건(검색 1건)이다. 그래도
-    켜 두는 편이 맞다 — 키·모델명 오타를 Eval 수십 건을 태운 뒤가 아니라 여기서 잡는다.
-    끄려면 index_config 의 reranker_preflight 를 dependency_only 로 둔다."""
+    `model` 은 **실제로 채점할 모델**이다(effective_reranker_model). 요청받은 이름을 그대로
+    돌려주면 openrouter 경로에서 로컬 모델명이 찍혀, Optimize 가 로컬 baseline 과 API
+    baseline 을 같은 것으로 본다.
+
+    provider=openrouter 면 smoke inference 는 실제 API 호출 1건이다. 리랭커가 꺼져 있는
+    실행에서는 호출부(index/agent.py)가 smoke 를 끄고 부른다 — 안 쓰는 기능 때문에 Index
+    가 돌 때마다 네트워크를 타면 안 된다."""
     resolved_name = str(model_name or DEFAULT_RERANKER_MODEL)
+    scoring_model = effective_reranker_model(resolved_name)
     model, load_status = _load_reranker(resolved_name)
     if model is None:
         return {
             "status": "unavailable",
-            "model": resolved_name,
+            "model": scoring_model,
             "route": None,
+            "max_length": None,
             "checked_at": time.time(),
             # 설정을 고쳐야 풀리는 실패는 재시도 대상이 아니다 — 의존성 누락과 같은 부류다.
             "retryable": load_status not in {"dependency_missing", "api_key_missing"},
@@ -564,8 +594,9 @@ def probe_reranker_capability(
             print(f"[Index] reranker smoke inference 실패: {exc}")
             return {
                 "status": "unavailable",
-                "model": resolved_name,
+                "model": scoring_model,
                 "route": None,
+                "max_length": None,
                 "checked_at": time.time(),
                 "retryable": True,
                 "reason": "inference_failed",
@@ -573,10 +604,13 @@ def probe_reranker_capability(
 
     return {
         "status": "verified",
-        "model": resolved_name,
+        "model": scoring_model,
         # 어디서 계산됐는지를 capability 에 실어 둔다. 같은 "verified" 라도 로컬 GPU 와
         # OpenRouter 는 모델 자체가 다르고(점수 스케일·순위가 다르다) 비용 구조도 다르다.
         "route": reranker_route(resolved_name),
+        # 입력 상한은 같은 모델에서도 점수를 바꾼다(뒤가 잘린 청크). Optimize 의 baseline
+        # 정체성이 이 값을 본다 — capped 실행과 uncapped 폴백 실행이 섞이면 안 된다.
+        "max_length": reranker_max_length(resolved_name),
         "checked_at": time.time(),
         "retryable": False,
         "reason": None,
@@ -1459,9 +1493,9 @@ def resolve_embedding_device(
     purpose 는 경고 문구에만 쓴다. 리랭커가 이 함수를 물려 쓰기 시작하면서 필요해졌다 —
     "CPU 임베딩으로 전환" 이라고만 찍으면 리랭커가 CPU 로 내려간 실행이 로그에서
     임베딩 문제로 읽힌다."""
-    requested = str(
+    requested = _normalize_device_name(
         device if device is not None else os.getenv("INDEX_EMBED_DEVICE", "auto")
-    ).strip().lower() or "auto"
+    ) or "auto"
     if requested == "auto":
         try:
             import torch

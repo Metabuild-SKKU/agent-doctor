@@ -98,6 +98,14 @@ _EVAL_CACHE_ENV_KEYS = (
     # 심판 동작을 바꾸는 스위치라 EVAL_JUDGE_MODEL 과 같은 급이다 — 빠지면
     # 토글해도 캐시가 히트해 "켜서 비교" 자체가 불가능해진다.
     "OPENROUTER_REASONING",
+    # 리랭크 실행 축. 이 값들은 index_config 가 아니라 env 로 정해지는데, provider 를
+    # 바꾸면 리랭커 **모델 자체**가 바뀌어(로컬 bge ↔ OpenRouter voyage) 검색 순위가
+    # 달라진다. 빠지면 config 가 같다는 이유로 다른 리랭커의 리포트가 복원된다.
+    "INDEX_RERANKER_PROVIDER",
+    "INDEX_RERANKER_MODEL_OPENROUTER",
+    "INDEX_RERANKER_DEVICE",
+    # 상한이 걸리면 긴 청크의 뒤가 잘려 점수가 달라진다(장치와 달리 결과를 바꾼다).
+    "INDEX_RERANKER_MAX_LENGTH",
 )
 _EVAL_CACHE_SECRET_KEYS = (
     "OPENAI_API_KEY",

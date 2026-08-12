@@ -61,6 +61,20 @@ class RerankerRouteResolutionTest(unittest.TestCase):
         ):
             self.assertEqual(qdrant_store.resolve_reranker_device(), "cpu")
 
+    def test_gpu_is_accepted_as_cuda_alias(self):
+        """`--rerank gpu` 가 CLI 어휘라 env 에 그대로 옮겨 적기 쉬운데, torch 는 "gpu" 를
+        모른다 — 그대로 넘기면 로드가 죽고 리랭커가 300초 쿨다운으로 조용히 빠진다."""
+        with patch.dict(os.environ, {"INDEX_RERANKER_DEVICE": "gpu"}):
+            self.assertIn(
+                qdrant_store._reranker_soft_device("test/alias"), {"cuda", "cpu"}
+            )
+            self.assertNotEqual(
+                qdrant_store._reranker_soft_device("test/alias"), "gpu"
+            )
+        # 임베딩 축도 같은 어휘를 쓴다(`--embed gpu`).
+        with patch.dict(os.environ, {"INDEX_EMBED_DEVICE": "gpu"}):
+            self.assertNotEqual(qdrant_store.resolve_embedding_device(), "gpu")
+
     def test_openrouter_model_is_not_derived_from_local_name(self):
         """로컬 이름 소문자화(임베딩 규칙)를 쓰면 404 다 — 카탈로그에 bge 계열이 없다."""
         with patch.dict(os.environ, {}, clear=False):
@@ -310,6 +324,21 @@ class OpenRouterRerankerModelTest(unittest.TestCase):
         self.assertEqual(second["reason"], "api_key_missing")
         self.assertFalse(second["retryable"])
 
+    def test_capability_model_names_the_actual_scoring_model(self):
+        """요청받은 로컬 이름을 그대로 돌려주면 기록이 거짓말한다 — Optimize 의 baseline
+        정체성이 이 필드로 두 경로를 가르므로, 로컬과 API 측정이 한 baseline 으로 섞인다."""
+        transport = Mock(return_value=[(0, 0.5)])
+
+        with patch.object(qdrant_store, "openrouter_rerank", transport):
+            capability = qdrant_store.probe_reranker_capability(
+                qdrant_store.DEFAULT_RERANKER_MODEL
+            )
+
+        self.assertEqual(capability["model"], "voyageai/rerank-2.5-lite")
+        self.assertNotEqual(capability["model"], qdrant_store.DEFAULT_RERANKER_MODEL)
+        # API 경로에는 토크나이저가 없어 입력 상한이라는 개념 자체가 없다.
+        self.assertIsNone(capability["max_length"])
+
     def test_capability_carries_the_route(self):
         transport = Mock(return_value=[(0, 0.5)])
 
@@ -318,6 +347,44 @@ class OpenRouterRerankerModelTest(unittest.TestCase):
 
         self.assertEqual(capability["status"], "verified")
         self.assertEqual(capability["route"], "openrouter:voyageai/rerank-2.5-lite")
+
+
+class RerankRouteReachesDecisionKeysTest(unittest.TestCase):
+    """route 가 "보이는 기록"에만 있으면, 정작 판단 계층에서는 두 경로가 한 실행으로 섞인다."""
+
+    @staticmethod
+    def _cache_key(state):
+        from agents.eval.agent import _eval_cache_key
+
+        return _eval_cache_key(state, 1, "pipeline-v1", "probe-v1")
+
+    def _state(self):
+        from core.state import AgentDoctorState
+
+        return AgentDoctorState(
+            index_config={"use_reranker": True, "top_k": 5},
+            active_index_key="idx-1",
+        )
+
+    def test_reranker_axes_change_the_eval_cache_key(self):
+        """config 가 같아도 리랭커 경로가 바뀌면 검색 결과가 달라진다 — 캐시가 히트하면
+        이전 경로의 리포트가 복원돼, 경로 차이가 report 에 기록되기도 전에 묻힌다."""
+        state = self._state()
+        axes = {
+            "INDEX_RERANKER_PROVIDER": "openrouter",
+            "INDEX_RERANKER_MODEL_OPENROUTER": "cohere/rerank-v3.5",
+            "INDEX_RERANKER_DEVICE": "cpu",
+            "INDEX_RERANKER_MAX_LENGTH": "512",
+        }
+
+        with patch.dict(os.environ, {"INDEX_RERANKER_PROVIDER": "local"}):
+            baseline = self._cache_key(state)
+
+        for name, value in axes.items():
+            with self.subTest(env=name):
+                with patch.dict(os.environ, {**{"INDEX_RERANKER_PROVIDER": "local"},
+                                             name: value}):
+                    self.assertNotEqual(self._cache_key(state), baseline)
 
 
 class RerankTimingTest(unittest.TestCase):
@@ -381,6 +448,39 @@ class RerankTimingTest(unittest.TestCase):
         self.assertEqual(scores, [0.9])
         self.assertEqual(calls["n"], 2)
         self.assertEqual(reranker.last_predict_seconds, 2.0)
+
+
+class RerankerPreflightCostTest(unittest.TestCase):
+    """리랭커를 쓰지도 않는 실행이 Index 마다 유료 호출을 내면 안 된다.
+
+    이 preflight 는 optimize → index 루프를 도는 횟수만큼 반복된다 — 파이프라인당
+    1건이 아니다."""
+
+    def setUp(self):
+        _clear_reranker_state()
+
+    def tearDown(self):
+        _clear_reranker_state()
+
+    @staticmethod
+    def _smoke(use_reranker, provider):
+        from agents.index.agent import _should_smoke_test_reranker
+
+        with patch.dict(os.environ, {"INDEX_RERANKER_PROVIDER": provider}):
+            return _should_smoke_test_reranker(
+                "eager", {"use_reranker": use_reranker}
+            )
+
+    def test_disabled_reranker_skips_paid_smoke_call(self):
+        self.assertFalse(self._smoke(False, "openrouter"))
+
+    def test_enabled_reranker_still_verifies_the_api_path(self):
+        """켠 실행은 키·모델명 오타를 Eval 수십 건을 태우기 전에 잡아야 한다."""
+        self.assertTrue(self._smoke(True, "openrouter"))
+
+    def test_local_path_always_smokes(self):
+        """로컬 smoke 는 이미 올린 모델을 한 번 돌리는 것이라 공짜다."""
+        self.assertTrue(self._smoke(False, "local"))
 
 
 class RerankerRouteSwitchTest(unittest.TestCase):

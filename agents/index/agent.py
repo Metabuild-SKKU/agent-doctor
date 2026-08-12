@@ -813,6 +813,26 @@ def _as_bool(value: Any) -> bool:
     return bool(value)
 
 
+def _should_smoke_test_reranker(policy: str, config: dict) -> bool:
+    """preflight 에서 실제 추론까지 해볼지.
+
+    로컬 경로의 smoke 는 이미 올린 모델을 한 번 돌리는 것이라 공짜라서 항상 한다 —
+    가중치가 깨졌다거나 하는 문제를 Eval 수십 건을 태운 뒤가 아니라 여기서 잡는다.
+
+    반면 provider=openrouter 의 smoke 는 실제 API 호출이고, 이 함수는 Index 가 돌 때마다
+    (즉 optimize → index 루프를 도는 횟수만큼) 불린다. 리랭커를 쓰지도 않는 실행이 매
+    회차 네트워크를 타고 과금되는 건 놀랄 일이므로, 꺼져 있으면 호출 없이 설정만
+    확인한다(키·모델명 존재 여부는 그대로 남아 Optimize 가 처방을 낼 수 있다).
+    """
+    if policy == "dependency_only":
+        return False
+    if _as_bool(config.get("use_reranker")):
+        return True
+    from agents.index.qdrant_store import resolve_reranker_provider
+
+    return resolve_reranker_provider() != "openrouter"
+
+
 def _refresh_runtime_capabilities(
     state: AgentDoctorState,
     config: dict,
@@ -840,7 +860,7 @@ def _refresh_runtime_capabilities(
             capability = dict(
                 tools.probe_reranker_capability(
                     model_name,
-                    smoke_test=policy != "dependency_only",
+                    smoke_test=_should_smoke_test_reranker(policy, config),
                 )
             )
         except Exception as exc:
