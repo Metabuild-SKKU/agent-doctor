@@ -203,21 +203,69 @@
   .dropzone.dz-valid .dz-formats, .dropzone.dz-invalid .dz-formats { display: none; }
 
   .field-label { display: block; font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--faint); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 9px; }
-  .field-optional { font-family: var(--sans); font-size: 11.5px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--faint); margin-left: 4px; }
+  .field-optional { font-family: var(--sans); font-size: 12px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted); margin-left: 6px; }
+
+  /* 골든셋 옵트아웃 — 기본은 막고 명시 선택으로만 통과 (CLI 의 --no-golden 과 같은 구조) */
+  .optout { margin-top: 11px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+  .optout[hidden] { display: none; }
+  .optout-check { display: flex; align-items: center; gap: 9px; cursor: pointer; font-size: 13.2px; font-weight: 600; color: var(--ink); }
+  .optout-check input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer; flex: none; }
+  .optout-why { margin: 7px 0 0 24px; font-size: 12.8px; line-height: 1.6; color: var(--muted); }
+  .optout-why b { color: var(--ink); font-weight: 640; }
+  .optout.is-on { border-color: var(--warning); background: color-mix(in srgb, var(--warning) 8%, var(--surface)); }
+  .optout-inline { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; line-height: 1.55; color: var(--ink);
+    border-color: color-mix(in srgb, var(--good) 45%, var(--border)); background: color-mix(in srgb, var(--good) 8%, var(--surface)); }
+  .optout-inline svg { flex: none; margin-top: 2px; color: var(--good); }
+  .optout-inline code { font-family: var(--mono); font-size: 12px; font-weight: 600; background: var(--surface-2); border: 1px solid var(--border); padding: 1px 5px; border-radius: 5px; }
 
   .help-guide { margin-top: 16px; border: 1px solid var(--border); border-radius: 11px; background: var(--bg-2); overflow: hidden; }
-  .help-guide summary { cursor: pointer; list-style: none; padding: 12px 14px; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 550; color: var(--muted); }
+  .help-guide summary { cursor: pointer; list-style: none; padding: 12px 14px; display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 620; color: var(--ink); }
   .help-guide summary::-webkit-details-marker { display: none; }
-  .help-guide summary:hover { color: var(--ink); }
+  .help-guide summary:hover { color: var(--accent); }
   .help-guide summary .chev { margin-left: auto; color: var(--faint); transition: transform .15s; }
   .help-guide[open] summary .chev { transform: rotate(180deg); }
-  .help-guide .help-body { padding: 2px 16px 16px; font-size: 12.6px; color: var(--muted); line-height: 1.6; border-top: 1px solid var(--border); }
-  .help-guide .help-body h4 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); font-weight: 600; margin: 15px 0 7px; }
-  .help-guide .help-body h4:first-child { margin-top: 14px; }
-  .help-guide pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 11px 13px; font-family: var(--mono); font-size: 11.3px; line-height: 1.55; overflow-x: auto; color: var(--ink); margin: 6px 0; }
-  .help-guide code { font-family: var(--mono); font-size: 11.5px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
-  .help-guide ul { margin: 4px 0 0 18px; padding: 0; }
-  .help-guide li { margin: 3px 0; }
+  .help-guide .help-body { padding: 2px 16px 16px; font-size: 13.4px; color: var(--ink); line-height: 1.68; border-top: 1px solid var(--border); }
+  .help-guide .help-body h4 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 700; margin: 18px 0 7px; }
+  .help-guide pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; font-family: var(--mono); font-size: 12.2px; font-weight: 500; line-height: 1.6; overflow-x: auto; color: var(--ink); margin: 8px 0 0; }
+  .help-guide code { font-family: var(--mono); font-size: 12.3px; font-weight: 600; color: var(--ink); background: var(--surface-2); border: 1px solid var(--border); padding: 1.5px 6px; border-radius: 5px; }
+  .help-guide pre code { border: none; background: none; padding: 0; font-size: inherit; font-weight: inherit; }
+  .help-guide ul { margin: 6px 0 0 19px; padding: 0; }
+  .help-guide li { margin: 5px 0; }
+
+  /* 도움말 안쪽 탭 — 실행 로그 / 골든셋은 출처도 채우는 사람도 다른 파일이라
+     한 화면에 붙여 놓으면 어느 필드가 어느 파일 것인지 섞여 읽힌다. */
+  .help-tabs { display: flex; gap: 5px; padding: 4px; margin: 14px 0 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; }
+  .help-tab { flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 10px; font-family: var(--sans); font-size: 12.8px; font-weight: 620; letter-spacing: -.01em; border: none; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
+  .help-tab:hover { color: var(--ink); }
+  .help-tab[aria-selected="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+  .help-tab .ht-req { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .04em; padding: 2px 6px; border-radius: 999px; color: var(--faint); background: var(--bg-2); }
+  .help-tab[aria-selected="true"] .ht-req { color: var(--accent-ink); background: var(--accent-glow); }
+  .help-panel[hidden] { display: none; }
+
+  .help-intro { margin: 14px 0 0; padding: 11px 13px; border-radius: 9px; background: var(--surface); border: 1px solid var(--border); font-size: 13px; color: var(--muted); line-height: 1.6; }
+  .help-intro b { color: var(--ink); font-weight: 620; }
+
+  /* 필드 목록 — 필수/권장/선택 배지 + "넣으면 켜지는 진단" 한 줄 */
+  .field-list { list-style: none; margin: 12px 0 0; padding: 0; }
+  .field-list > li { margin: 0; padding: 11px 0; border-top: 1px solid var(--border); }
+  .field-list > li:first-child { border-top: none; padding-top: 2px; }
+  .fl-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .fl-note { font-size: 12.2px; color: var(--faint); font-weight: 500; }
+  .fl-desc { margin-top: 6px; font-size: 13.2px; color: var(--muted); }
+  .fl-gain { margin-top: 7px; padding: 7px 0 7px 12px; border-left: 2px solid var(--accent); font-size: 13.2px; color: var(--ink); }
+  .fl-gain b { color: var(--accent-ink); font-weight: 680; }
+  /* 한글에서 이탤릭은 읽기 나쁘다 — 강조는 굵기로만 준다. */
+  .fl-gain em, .fl-lack b, .fl-desc b, .help-foot li b { font-style: normal; font-weight: 650; color: var(--ink); }
+  .fl-lack { margin-top: 7px; padding: 7px 0 7px 12px; border-left: 2px solid var(--border-strong); font-size: 13.2px; color: var(--muted); }
+
+  .badge { font-family: var(--sans); font-size: 10.5px; font-weight: 750; letter-spacing: .02em; padding: 2.5px 8px; border-radius: 999px; flex: none; }
+  .badge-req { color: var(--surface); background: var(--ink); }
+  .badge-rec { color: var(--accent-ink); background: var(--accent-glow); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent); }
+  .badge-opt { color: var(--faint); background: transparent; box-shadow: inset 0 0 0 1px var(--border-strong); }
+
+  .help-foot { margin-top: 16px; padding-top: 13px; border-top: 1px solid var(--border); }
+
+  .dz-sub code { font-family: var(--mono); font-size: 12.2px; font-weight: 600; color: var(--ink); background: var(--surface-2); border: 1px solid var(--border); padding: 1px 5px; border-radius: 5px; }
 
   .text-input {
     width: 100%; font-family: var(--mono); font-size: 13px;
@@ -454,24 +502,38 @@
             </div>
           </div>
 
-          <label class="field-label" for="goldenInput" style="margin-top:16px">골든셋 — 시험지 (질문 · 정답 · 정답 근거)<span class="field-optional">권장 · 없어도 진단은 됨</span></label>
+          <label class="field-label" for="goldenInput" style="margin-top:16px">골든셋 — 시험지 (질문 · 정답 · 정답 근거)<span class="field-optional">필수 · 로그에 정답이 들어 있으면 생략 가능</span></label>
           <div class="dropzone dropzone-compact" id="goldenDropzone" tabindex="0">
             <input type="file" id="goldenInput" accept=".xlsx,.csv,.jsonl,.json" hidden>
             <svg class="dz-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 16V4m0 0 4 4m-4-4-4 4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke-linecap="round"/></svg>
             <div class="dz-text">
               <div class="dz-main" id="goldenDzMain">골든셋 파일을 끌어다 놓거나 클릭해 선택</div>
-              <div class="dz-sub" id="goldenDzSub">검색축 진단(임베딩·청킹 처방)에 필요합니다</div>
+              <div class="dz-sub" id="goldenDzSub">정답 대조가 있어야 원인 7종을 다 판정합니다</div>
             </div>
-            <div class="dz-formats">XLSX · CSV · JSONL</div>
+            <div class="dz-formats">XLSX · CSV · JSONL · 필수</div>
             <div class="dz-status">
               <svg class="dz-status-ok" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>
               <svg class="dz-status-bad" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 6l12 12M18 6 6 18" stroke-linecap="round"/></svg>
             </div>
           </div>
 
-          <p class="dz-sub" style="margin-top:11px;font-size:12.6px;color:var(--muted)">이미 운영 중인 RAG의 실행 로그를 올리면, 파이프라인을 바꾸지 않고 그대로 진단합니다.
+          <!-- 골든셋 옵트아웃 — CLI 의 --no-golden 과 같은 구조다(agents/eval/replay.py).
+               기본은 막고, 무엇을 잃는지 읽힌 뒤에만 통과시킨다. 로그에 정답이
+               인라인으로 들어 있으면 골든셋이 없는 게 아니므로 이 줄 대신 확인 문구를 띄운다. -->
+          <div class="optout" id="goldenOptOut">
+            <label class="optout-check">
+              <input type="checkbox" id="goldenSkip">
+              <span>골든셋 없이 진행할게요</span>
+            </label>
+            <p class="optout-why">정답지를 아직 만들지 못한 경우에만 선택하세요 — <b>검색축 원인 3종이 침묵하고 환각 판정은 ‘예비’에 머뭅니다.</b> 원인 7종 중 3종까지만 확정됩니다.</p>
+          </div>
+          <div class="optout optout-inline" id="goldenInlineNote" hidden>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>실행 로그 안에 정답(<code>ground_truth</code>)이 들어 있어 골든셋 파일 없이도 전체 진단이 가능합니다.</span>
+          </div>
+
+          <p class="dz-sub" style="margin-top:12px;font-size:13.2px;line-height:1.65;color:var(--muted)">이미 운영 중인 RAG의 실행 로그를 올리면, 파이프라인을 바꾸지 않고 그대로 진단합니다.
             top_k·청크 크기 같은 설정은 로그의 <code>config</code> 필드에 담아 주세요 — 권고에 현재값이 함께 실립니다.</p>
-          <p class="dz-sub" style="margin-top:6px;font-size:12.6px;color:var(--muted)">골든셋 없이도 진단할 수 있지만, 검색축 진단 3종이 빠지고 환각 판정은 ‘예비’에 머뭅니다.</p>
 
           <details class="help-guide">
             <summary>
@@ -480,27 +542,116 @@
               <svg class="chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </summary>
             <div class="help-body">
-              <h4>실행 로그 (JSONL · 한 줄 = 요청 1건)</h4>
-              <pre>{"question": "환불 규정이 뭐야",
+              <div class="help-tabs" role="tablist" aria-label="파일 형식">
+                <button class="help-tab" type="button" role="tab" id="htab-log" aria-selected="true" aria-controls="hpanel-log">실행 로그 <span class="ht-req">필수 파일</span></button>
+                <button class="help-tab" type="button" role="tab" id="htab-golden" aria-selected="false" aria-controls="hpanel-golden">골든셋 <span class="ht-req">필수 파일</span></button>
+              </div>
+
+              <!-- 실행 로그 -->
+              <div class="help-panel" id="hpanel-log" role="tabpanel" aria-labelledby="htab-log">
+                <p class="help-intro">운영 중인 RAG가 실제로 주고받은 기록입니다. <b>JSONL — 한 줄이 요청 1건.</b>
+                  <code>question</code>·<code>answer</code> 두 개만 있어도 진단은 시작되고, 나머지를 채울수록 원인을 좁힙니다.</p>
+                <pre>{"question": "환불 규정이 뭐야",
  "answer": "환불은 구매 후 7일 이내에...",
  "contexts": ["검색된 문단 1", "검색된 문단 2"],
  "config": {"top_k": 5, "chunk_size": 512}}</pre>
-              <ul>
-                <li><code>question</code> · <code>answer</code> — 필수</li>
-                <li><code>contexts</code> — 검색 결과 원문. 없으면 동문서답 검사만 가능(환각·검색 원인 분리는 불가)</li>
-                <li><code>config</code> — top_k·chunk_size 등. 있어야 권고 카드에 현재값이 실립니다</li>
-              </ul>
-              <h4>골든셋 (XLSX · CSV · JSONL · JSON)</h4>
-              <ul>
-                <li>필수 열: <code>question</code>, <code>ground_truth</code></li>
-                <li>권장 열: <code>gold_contexts</code>(정답 근거 원문) — 있어야 검색축 진단 3종이 켜집니다</li>
-                <li>질문은 실행 로그와 자동 매칭됩니다(공백·문장부호·대소문자 차이는 무시)</li>
-              </ul>
-              <h4>권장 크기</h4>
-              <ul>
-                <li>50~150건이 적당합니다 — 라벨별로 판단할 만큼 쌓이면서, 사람이 채우기엔 부담 없는 크기입니다</li>
-                <li>300건을 넘으면 매칭되는 레코드마다 검색축 지표를 추가로 재느라 비용이 커져 진단을 진행하지 않습니다</li>
-              </ul>
+
+                <h4>반드시 있어야 하는 것</h4>
+                <ul class="field-list">
+                  <li>
+                    <div class="fl-head"><code>question</code><span class="badge badge-req">필수</span></div>
+                    <div class="fl-desc">사용자가 실제로 던진 질문 원문. 골든셋과 짝을 맞추는 키로도 쓰입니다.</div>
+                  </li>
+                  <li>
+                    <div class="fl-head"><code>answer</code><span class="badge badge-req">필수</span></div>
+                    <div class="fl-desc">그 질문에 RAG가 내놓은 최종 답변.</div>
+                    <div class="fl-lack">두 필드만 있는 경우 <b>동문서답(질문과 딴소리)</b> 검사까지만 가능합니다 — 환각인지 검색 실패인지는 갈라내지 못합니다.</div>
+                  </li>
+                </ul>
+
+                <h4>넣으면 진단이 깊어지는 것</h4>
+                <ul class="field-list">
+                  <li>
+                    <div class="fl-head"><code>contexts</code><span class="badge badge-rec">권장</span><span class="fl-note">검색이 가져온 문단 원문</span></div>
+                    <div class="fl-desc">문자열 배열이거나 <code>{"text": "...", "score": 0.82}</code> 형태. 전체 로그의 절반 이상에 있어야 적용됩니다.</div>
+                    <div class="fl-gain"><b>켜지는 진단 ·</b> 환각 실측(답이 근거 밖으로 나갔는지)과 <b>책임 분리</b> — 틀린 답이 <em>검색이 못 찾아온 탓</em>인지 <em>찾아왔는데 생성이 망친 탓</em>인지 갈라냅니다. 리포트의 원인 라벨 대부분이 여기서 나옵니다.</div>
+                  </li>
+                  <li>
+                    <div class="fl-head"><code>score</code><span class="badge badge-opt">선택</span><span class="fl-note">contexts 항목 안의 유사도 점수</span></div>
+                    <div class="fl-desc">각 문단이 몇 점으로 뽑혔는지. <code>{"text": "...", "score": 0.82}</code> 형태로 넣습니다.</div>
+                    <div class="fl-gain"><b>켜지는 진단 ·</b> <b>랭킹 문제</b>(근거는 왔는데 뒤로 밀림)와 <b>커버리지 문제</b>(애초에 안 옴)를 구분합니다 — 앞쪽이면 리랭커, 뒤쪽이면 top_k·청킹으로 처방이 갈립니다.</div>
+                  </li>
+                  <li>
+                    <div class="fl-head"><code>config</code><span class="badge badge-rec">권장</span><span class="fl-note">top_k · chunk_size 등 현재 설정</span></div>
+                    <div class="fl-desc">시스템 설정이라 한 줄에만 넣어도 됩니다(모든 줄이 같은 값일 때 대표값으로 씁니다).</div>
+                    <div class="fl-gain"><b>켜지는 진단 ·</b> 권고 카드가 <b>구체적인 수치 제안</b>이 됩니다 — “청크가 큽니다”가 아니라 “chunk_size 512 → 768”. 없으면 증상까지만 알려주고 목표값은 비어 있습니다.</div>
+                  </li>
+                  <li>
+                    <div class="fl-head"><code>feedback</code><span class="badge badge-opt">선택</span><span class="fl-note">사용자 만족/불만 표시</span></div>
+                    <div class="fl-desc">“도움 안 됨” 같은 실제 반응이 남아 있다면.</div>
+                    <div class="fl-gain"><b>켜지는 진단 ·</b> 불만족 케이스를 <b>우선 표본</b>으로 삼아, 사용자가 실제로 아파한 질문부터 원인을 파고듭니다.</div>
+                  </li>
+                  <li>
+                    <div class="fl-head"><code>ground_truth</code> <code>gold_contexts</code><span class="badge badge-opt">선택</span><span class="fl-note">골든셋을 로그 안에 직접</span></div>
+                    <div class="fl-desc">정답과 정답 근거를 별도 파일 대신 로그 줄에 바로 넣는 방식입니다.</div>
+                    <div class="fl-gain"><b>켜지는 진단 ·</b> 골든셋 탭과 똑같은 진단이 켜지고, <b>골든셋 파일 업로드를 생략</b>할 수 있습니다. 보통은 정답지를 따로 관리하니 골든셋 파일 쪽이 편합니다.</div>
+                  </li>
+                  <li>
+                    <div class="fl-head"><code>latency_ms</code> <code>timestamp</code><span class="badge badge-opt">선택</span></div>
+                    <div class="fl-desc">응답 시간과 시각. 진단 판정에는 쓰이지 않고 리포트의 참고 정보로만 실립니다.</div>
+                  </li>
+                </ul>
+              </div>
+
+              <!-- 골든셋 -->
+              <div class="help-panel" id="hpanel-golden" role="tabpanel" aria-labelledby="htab-golden" hidden>
+                <p class="help-intro">사람이 만든 정답지이고, <b>진단의 기본 입력입니다.</b> 이게 있어야 “틀렸다”를 추측이 아니라 대조로 확정합니다.
+                  <code>XLSX · CSV · JSONL · JSON</code> 모두 받으니, <b>이미 쓰는 테스트셋이 있으면 그대로 주셔도 됩니다.</b></p>
+                <pre>question,ground_truth,gold_contexts
+환불 규정이 뭐야,구매 후 7일 이내 전액 환불,"제7조(환불) 구매일로부터 7일 이내…"</pre>
+
+                <h4>반드시 있어야 하는 열</h4>
+                <ul class="field-list">
+                  <li>
+                    <div class="fl-head"><code>question</code><span class="badge badge-req">필수</span></div>
+                    <div class="fl-desc">실행 로그의 질문과 <b>자동으로 짝지어집니다</b> — 공백·끝 문장부호·대소문자 차이는 무시하므로 토씨까지 맞출 필요는 없습니다.
+                      매칭된 건수만 골든셋 기반 진단에 들어가고, 못 맞춘 항목은 버려지지 않고 리포트에 집계됩니다.</div>
+                  </li>
+                  <li>
+                    <div class="fl-head"><code>ground_truth</code><span class="badge badge-req">필수</span><span class="fl-note">정답 텍스트</span></div>
+                    <div class="fl-desc">그 질문의 옳은 답. 문장이면 충분합니다.</div>
+                    <div class="fl-gain"><b>켜지는 진단 ·</b> 정답 일치도와 검색 정밀도·재현율이 측정되면서 환각 판정이 <b>‘예비’에서 ‘확정’으로</b> 올라갑니다.
+                      또 <b>“근거엔 충실한데 답이 틀린”</b> 경우 — 설정이 아니라 문서 자체가 낡거나 빠진 상황 — 를 따로 잡아냅니다.</div>
+                    <div class="fl-lack">골든셋 없이 진행하면 <b>검색축 원인 3종이 침묵하고 환각은 ‘예비’에 고정</b>됩니다 — 원인 7종 중 3종까지만 확정되고,
+                      임베딩·청킹 처방은 나오지 않습니다. 그래서 기본은 필수로 두고, 정답지가 없는 경우만 <b>‘골든셋 없이 진행’</b>으로 옵트인하게 합니다.</div>
+                  </li>
+                </ul>
+
+                <h4>넣으면 진단이 깊어지는 열</h4>
+                <ul class="field-list">
+                  <li>
+                    <div class="fl-head"><code>gold_contexts</code><span class="badge badge-rec">권장</span><span class="fl-note">정답 근거 문단</span></div>
+                    <div class="fl-desc">정답의 출처가 된 문단의 <b>원문 텍스트</b>를 넣습니다 — 청크 ID가 아닙니다(텍스트 겹침으로 판정하기 때문). 여러 개면 배열로.</div>
+                    <div class="fl-gain"><b>켜지는 진단 ·</b> <b>검색축 진단 3종</b>이 열립니다 — 엉뚱한 문단을 물어왔는지, 근거가 없어서 답을 포기한 건지,
+                      근거는 손에 쥐고도 답을 못 만든 건지. 임베딩·청킹 처방은 이 판정에서만 나옵니다.</div>
+                  </li>
+                </ul>
+
+                <h4>열 이름은 관용적으로 받습니다</h4>
+                <ul>
+                  <li>질문 — <code>question</code> · <code>q</code> · <code>query</code></li>
+                  <li>정답 — <code>ground_truth</code> · <code>gold_answer</code> · <code>answer</code></li>
+                  <li>근거 — <code>gold_contexts</code> · <code>evidence</code> · <code>context</code></li>
+                </ul>
+              </div>
+
+              <div class="help-foot">
+                <h4 style="margin-top:0">두 파일 공통 · 권장 크기</h4>
+                <ul>
+                  <li><b>50~150건</b>이 적당합니다 — 원인 라벨별로 판단이 설 만큼 쌓이면서, 사람이 채우기엔 부담 없는 크기입니다</li>
+                  <li>300건을 넘으면 매칭되는 레코드마다 검색축 지표를 추가로 재느라 비용이 커져 진단을 진행하지 않습니다</li>
+                </ul>
+              </div>
             </div>
           </details>
         </div>
@@ -631,6 +782,26 @@
     else document.getElementById('srcNote').innerHTML = '코퍼스 <b>1</b>개 준비됨';
   }
 
+  /* 파일 형식 안내 안쪽 탭(실행 로그 / 골든셋). details 안에 있어서 접힌 상태에선
+     보이지 않으므로 초기 상태만 맞춰 두고 클릭으로 전환한다. */
+  var helpTabs = [document.getElementById('htab-log'), document.getElementById('htab-golden')];
+  helpTabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      helpTabs.forEach(function (o) {
+        var sel = o === t;
+        o.setAttribute('aria-selected', sel ? 'true' : 'false');
+        document.getElementById(o.getAttribute('aria-controls')).hidden = !sel;
+      });
+    });
+    t.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      var next = helpTabs[(helpTabs.indexOf(t) + 1) % helpTabs.length];
+      next.click();
+      next.focus();
+    });
+  });
+
   var etaMap = { fast: '약 30초', standard: '약 2분', full: '약 6분' };
   var selectedDepth = 'standard';
   document.querySelectorAll('.seg').forEach(function (s) {
@@ -647,7 +818,9 @@
   var WEB_API_BASE = 'http://localhost:8767';
   var selectedFile = null;        // 문서 탭 — PDF
   var selectedLogFile = null;     // 로그 탭 — 실행 로그(필수)
-  var selectedGoldenFile = null;  // 로그 탭 — 골든셋(선택)
+  var selectedGoldenFile = null;  // 로그 탭 — 골든셋(필수, 아래 두 조건 중 하나로만 면제)
+  var logHasInlineGolden = false; // 로그 줄에 ground_truth/gold_contexts 가 이미 있음
+  var goldenSkip = document.getElementById('goldenSkip');  // 사용자가 명시적으로 포기함
   var btnRun = document.getElementById('btnRun');
 
   function wireDropzone(zoneId, inputId, opts) {
@@ -708,6 +881,9 @@
   var LOG_REQUIRED_KEYS = ['question', 'answer'];
   var QA_QUESTION_KEYS = ['question', 'q', 'query'];
   var QA_GROUND_TRUTH_KEYS = ['ground_truth', 'gold_answer', 'answer', 'answers'];
+  // 로그 자체에 정답이 인라인으로 들어 있으면 골든셋이 "없는" 게 아니다 —
+  // replay.py 의 게이트도 이 두 필드를 보고 통과시킨다.
+  var LOG_INLINE_GOLDEN_KEYS = ['ground_truth', 'gold_contexts'];
 
   function hasAnyKey(obj, keys) {
     return !!obj && keys.some(function (k) {
@@ -722,17 +898,22 @@
     reader.onload = function () {
       var lines = String(reader.result).split(/\r?\n/).filter(function (l) { return l.trim(); });
       if (!lines.length) { done(false, '빈 파일입니다.'); return; }
-      var valid = 0, broken = 0;
+      var valid = 0, broken = 0, inlineGolden = 0;
       lines.forEach(function (line) {
         try {
           var obj = JSON.parse(line);
-          if (LOG_REQUIRED_KEYS.every(function (k) { return String((obj || {})[k] || '').trim(); })) valid++;
-          else broken++;
+          if (LOG_REQUIRED_KEYS.every(function (k) { return String((obj || {})[k] || '').trim(); })) {
+            valid++;
+            if (hasAnyKey(obj, LOG_INLINE_GOLDEN_KEYS)) inlineGolden++;
+          } else broken++;
         } catch (e) { broken++; }
       });
-      if (!valid) done(false, '필수 필드(question · answer)를 가진 줄이 없습니다.');
-      else if (broken) done(true, valid + '건 인식 · ' + broken + '건 형식 오류(건너뜀)');
-      else done(true, valid + '건 인식');
+      logHasInlineGolden = inlineGolden > 0;
+      if (!valid) { logHasInlineGolden = false; done(false, '필수 필드(question · answer)를 가진 줄이 없습니다.'); return; }
+      var msg = valid + '건 인식';
+      if (broken) msg += ' · ' + broken + '건 형식 오류(건너뜀)';
+      if (inlineGolden) msg += ' · 정답 포함 ' + inlineGolden + '건';
+      done(true, msg);
     };
     reader.readAsText(file, 'utf-8');
   }
@@ -772,10 +953,34 @@
     reader.readAsText(file, 'utf-8');
   }
 
+  /* 골든셋은 기본 입력이다 — 없으면 검색축 라벨 3종이 침묵하고 환각이 '예비'에
+     머무는데, 그걸 모른 채 얕은 진단을 받아가는 걸 막는다(replay.py 게이트와 동일).
+     면제는 둘뿐: 로그에 정답이 인라인으로 있거나, 사용자가 명시적으로 포기했거나. */
+  function goldenSatisfied() {
+    return !!selectedGoldenFile || logHasInlineGolden || goldenSkip.checked;
+  }
+
+  function refreshGoldenGate() {
+    var optout = document.getElementById('goldenOptOut');
+    var inlineNote = document.getElementById('goldenInlineNote');
+    // 파일을 이미 냈거나 로그에 정답이 들어 있으면 포기 선택지를 보여줄 이유가 없다.
+    var covered = !!selectedGoldenFile || logHasInlineGolden;
+    if (covered && goldenSkip.checked) goldenSkip.checked = false;
+    optout.hidden = covered;
+    optout.classList.toggle('is-on', goldenSkip.checked);
+    inlineNote.hidden = !(logHasInlineGolden && !selectedGoldenFile);
+  }
+
   function refreshRunButton() {
     var isLog = document.getElementById('tab-conn').getAttribute('aria-selected') === 'true';
-    btnRun.disabled = isLog && !selectedLogFile;
+    btnRun.disabled = isLog && (!selectedLogFile || !goldenSatisfied());
   }
+
+  goldenSkip.addEventListener('change', function () {
+    refreshGoldenGate();
+    updateSrcNote();
+    refreshRunButton();
+  });
 
   var dropzone = document.getElementById('dropzone');
   wireDropzone('dropzone', 'fileInput', {
@@ -786,19 +991,30 @@
   wireDropzone('logDropzone', 'logInput', {
     mainId: 'logDzMain', subId: 'logDzSub', pattern: /\.(jsonl|json)$/i,
     rejectMsg: 'JSONL 형식만 지원합니다 (확장자 .jsonl 또는 .json).', validate: validateLogFile,
-    onChange: function (f) { selectedLogFile = f; updateSrcNote(); refreshRunButton(); },
+    onChange: function (f) {
+      selectedLogFile = f;
+      if (!f) logHasInlineGolden = false;  // 거부된 파일의 인라인 정답 판정은 무효
+      refreshGoldenGate(); updateSrcNote(); refreshRunButton();
+    },
   });
   wireDropzone('goldenDropzone', 'goldenInput', {
     mainId: 'goldenDzMain', subId: 'goldenDzSub', pattern: /\.(xlsx|csv|jsonl|json)$/i,
     rejectMsg: 'XLSX · CSV · JSONL · JSON 형식만 지원합니다.', validate: validateGoldenFile,
-    onChange: function (f) { selectedGoldenFile = f; updateSrcNote(); refreshRunButton(); },
+    onChange: function (f) { selectedGoldenFile = f; refreshGoldenGate(); updateSrcNote(); refreshRunButton(); },
   });
+
+  // 브라우저가 새로고침 때 체크박스 상태를 복원하는 경우가 있어 초기 상태를 맞춰 둔다.
+  refreshGoldenGate();
+  refreshRunButton();
 
   function updateSrcNote() {
     var note = document.getElementById('srcNote');
     if (!note) return;
-    if (!selectedLogFile) note.textContent = '로그 미선택';
-    else note.innerHTML = selectedGoldenFile ? '로그 · 골든셋 준비됨' : '로그만 준비됨 (골든셋 없음)';
+    if (!selectedLogFile) { note.textContent = '실행 로그 미선택'; return; }
+    if (selectedGoldenFile) note.innerHTML = '로그 · 골든셋 <b>준비됨</b>';
+    else if (logHasInlineGolden) note.innerHTML = '로그에 정답 포함 — 골든셋 <b>불필요</b>';
+    else if (goldenSkip.checked) note.innerHTML = '골든셋 없이 진행 — <b>얕은 진단</b>';
+    else note.textContent = '골든셋 미선택';
   }
 
   /* ECG canvas — subtle oscilloscope trace */
@@ -865,6 +1081,12 @@
         document.getElementById('logDropzone').focus();
         return;
       }
+      if (!goldenSatisfied()) {
+        document.getElementById('goldenDzSub').textContent =
+          '골든셋은 진단의 기본 입력입니다 — 파일을 올리거나, 아래에서 없이 진행을 선택하세요.';
+        document.getElementById('goldenDropzone').focus();
+        return;
+      }
     } else if (!selectedFile) {
       document.getElementById('dzSub').textContent = '먼저 진단할 PDF 문서를 선택하세요.';
       dropzone.focus();
@@ -921,6 +1143,8 @@
       form.append('mode', 'replay');
       form.append('logfile', selectedLogFile);
       if (selectedGoldenFile) form.append('goldenfile', selectedGoldenFile);
+      // 로그에 정답이 인라인으로 있으면 골든셋이 없는 게 아니므로 옵트아웃을 보내지 않는다.
+      else if (goldenSkip.checked) form.append('no_golden', '1');
     } else {
       form.append('file', selectedFile);
     }
