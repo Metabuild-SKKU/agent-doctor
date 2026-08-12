@@ -785,7 +785,7 @@
   });
   wireDropzone('logDropzone', 'logInput', {
     mainId: 'logDzMain', subId: 'logDzSub', pattern: /\.(jsonl|json)$/i,
-    rejectMsg: 'JSONL(또는 JSON) 파일만 지원합니다.', validate: validateLogFile,
+    rejectMsg: 'JSONL 형식만 지원합니다 (확장자 .jsonl 또는 .json).', validate: validateLogFile,
     onChange: function (f) { selectedLogFile = f; updateSrcNote(); refreshRunButton(); },
   });
   wireDropzone('goldenDropzone', 'goldenInput', {

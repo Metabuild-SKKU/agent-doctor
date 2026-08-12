@@ -75,6 +75,12 @@ def _save_upload_as(run_id: str, upload: UploadFile, suffix: str) -> Path:
 # 업로드 시점에 바로 400 으로 알리는 게 사용자 경험이 낫기 때문이다.
 _GOLDEN_SUFFIXES = (".json", ".jsonl", ".csv", ".xlsx", ".xlsm")
 
+# 로그는 JSONL 내용만 받지만 확장자는 .json 도 허용한다 - 상대가 .json 이름으로 JSONL
+# 을 주는 실무 케이스가 흔하고(qa_merge 가 골든셋에 대해 이미 지원하는 그 케이스),
+# 내용 검증은 프론트의 validateLogFile 이 줄 단위 파싱으로 이미 한다. 여기서 .jsonl
+# 만 받으면 프론트가 통과시킨 파일이 진행 화면 전환 뒤에 400 으로 떨어진다.
+_LOG_SUFFIXES = (".jsonl", ".json")
+
 
 def _percent_for(stage: str, done: bool) -> int:
     idx = _STAGE_ORDER.index(stage) if stage in _STAGE_ORDER else 0
@@ -255,8 +261,11 @@ async def create_run(
     run_id = uuid.uuid4().hex
 
     if mode == "replay":
-        if logfile is None or not (logfile.filename or "").lower().endswith(".jsonl"):
-            raise HTTPException(status_code=400, detail="로그는 JSONL 파일만 지원합니다.")
+        if logfile is None or Path(logfile.filename or "").suffix.lower() not in _LOG_SUFFIXES:
+            raise HTTPException(
+                status_code=400,
+                detail="로그는 JSONL 형식만 지원합니다 (확장자 .jsonl 또는 .json).")
+        # 확장자와 무관하게 .jsonl 로 저장한다 - load_external_log 는 줄 단위로 읽는다.
         log_dest = _save_upload_as(run_id, logfile, suffix=".jsonl")
 
         golden_dest: Path | None = None
