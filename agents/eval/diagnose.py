@@ -925,11 +925,18 @@ def _reasoning_mode(record: EvalRecord) -> Optional[str]:
 
 
 # 분류기가 지목하는 모드 → 라벨. 'other'만 여기 없다(구체적 원인 지목이 아님).
+#
+# chronological(E15, RAGEC 택소노미)은 옆 셋과 처방이 갈려서 별도 라벨로 둔다 — 값은 다 맞고
+# 순서만 틀린 실패라 수치 검산(numerical_error)으로도, 근거 대조(contradiction)로도 안 잡힌다.
+# hop_binding 과 달리 홉이 하나여도 성립하므로(한 문장 안의 두 시점) 단일홉 흡수도 하지 않는다.
+# 반대로 멀티홉에서는 hop_binding 정의도 같이 참이 된다(시간 관계도 '관계'다). 그 갈림은
+# 프롬프트가 hop_binding 쪽에 배타 문구를 달아 정한다 — 틀린 관계가 선후뿐이면 chronological.
 _REASONING_LABELS = {
     "contradiction": "generation_contradiction",
     "numerical_error": "generation_numerical_error",
     "misinterpretation": "generation_misinterpretation",
     "hop_binding": "generation_hop_binding_error",
+    "chronological": "generation_chronological_error",
 }
 
 
@@ -1074,13 +1081,13 @@ def generation_hallucination(record: EvalRecord) -> Optional[Finding]:
 
 def generation_reasoning_failure(record: EvalRecord) -> Optional[Finding]:
     """
-    근거는 있으나 답이 틀린 네 원인(모순/수치/해석/결합)을 LLM 단일분류 1회로 가른다.
-    확정: 분류기가 넷 중 하나를 지목(tier3, DEEP+ 전용).
-    분류기 미측정이면 결합 오류만 카운트로 폴백(_hop_binding_from_counts) — 나머지 셋은
+    근거는 있으나 답이 틀린 다섯 원인(모순/수치/해석/결합/시간축)을 LLM 단일분류 1회로 가른다.
+    확정: 분류기가 다섯 중 하나를 지목(tier3, DEEP+ 전용).
+    분류기 미측정이면 결합 오류만 카운트로 폴백(_hop_binding_from_counts) — 나머지 넷은
     카운트로 구분이 안 된다. 'other'는 구체적 지목이 아니라 침묵(롤업 몫).
 
-    함수 하나에 라벨 넷을 두는 건 '라벨마다 함수 1개' 원칙의 의도적 예외다 — 측정이 하나뿐이고
-    분류기가 한 값만 돌려줘 넷이 구조적으로 배타라, 함수를 쪼개면 순서에 의미가 없는 항목만
+    함수 하나에 라벨 다섯을 두는 건 '라벨마다 함수 1개' 원칙의 의도적 예외다 — 측정이 하나뿐이고
+    분류기가 한 값만 돌려줘 다섯이 구조적으로 배타라, 함수를 쪼개면 순서에 의미가 없는 항목만
     늘고 '독립 신호 여러 개'라는 잘못된 인상을 준다.
     """
     faith = _faith_oracle(record)
@@ -1102,8 +1109,12 @@ def _hop_binding_from_counts(record: EvalRecord, faith) -> Optional[Finding]:
     """분류기 미측정 시의 안전망 — 카운트로 결합 오류만 판정한다.
 
     FN=0 이 '결합' 신호다(필요한 gold 요소가 다 있는데 답이 틀렸으면 남는 설명은 잘못 엮었다는
-    것뿐이고, 그 주장이 FP 로 잡힌다). 나머지 셋(모순/수치/해석)은 카운트로 구분할 수 없다.
-    """
+    것뿐이고, 그 주장이 FP 로 잡힌다). 나머지 넷(모순/수치/해석/시간축)은 카운트로 구분할 수 없다.
+
+    [한계] 시간축 오류(generation_chronological_error)도 같은 카운트 모양이다 — 시점은 다 있고
+    (FN=0) 뒤집힌 결론 문장만 근거 없음(FP>0)이라, 분류기 없이 이 경로로 오면 결합 오류로
+    확정된다. 카운트만으로는 '무엇을 잘못 엮었나'가 안 보여서 여기서는 가를 수 없다.
+    시간축을 별도로 판정하려면 분류기(DEEP+ · 심판 자원)가 있어야 한다."""
     if not _is_multi_hop(record):
         return None
     counts = _correctness_counts_oracle(record)
@@ -1543,8 +1554,8 @@ _RETRIEVAL_CAUSE = (
 _GENERATION_CAUSE = (
     generation_wrongful_abstention,
     generation_abstention_failure, bad_gold_answer_oracle,
-    # reasoning_failure 한 함수가 라벨 4개를 낸다
-    # (contradiction/numerical_error/misinterpretation/hop_binding_error).
+    # reasoning_failure 한 함수가 라벨 5개를 낸다 (contradiction/numerical_error/
+    # misinterpretation/hop_binding_error/chronological_error).
     generation_reasoning_failure,
     generation_hallucination, generation_partial_answer,
     generation_failure,
@@ -1764,6 +1775,10 @@ _FAILURE_LOCALIZATION = {
     "generation_hop_binding_error": {
         "failure_stage": "generation",
         "repair_scope": "decompose_or_require_hop_citation",
+    },
+    "generation_chronological_error": {
+        "failure_stage": "generation",
+        "repair_scope": "verify_event_order",
     },
     "generation_partial_answer": {
         "failure_stage": "generation",

@@ -61,6 +61,9 @@ action은 **우선순위 경쟁·후보값·적용·이력·차단**의 중심�
 > `generation_wrongful_abstention` 이 추가됐다. 수치 정본은
 > `tests/test_action_inventory.py` 의 baseline 이다.
 
+> 갱신(E15): `generation_chronological_error` 가 draft 로 들어와 라벨은 32개가 됐다.
+> action 수는 그대로다 — draft 라 catalog 에 등록되지 않는다.
+
 | action | 지지 | tier | 재색인 | backend | 비고 |
 | --- | --- | --- | --- | --- | --- |
 | `chunker.chunk_size:increase` | 3 | A | ✔ | internal | |
