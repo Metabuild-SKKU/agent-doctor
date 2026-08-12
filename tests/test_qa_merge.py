@@ -113,6 +113,37 @@ class TestLoadQaSet(unittest.TestCase):
         self.assertEqual(entry["ground_truth"], "3.1%")
         self.assertEqual(entry["gold_contexts"], ["2025년 실업률은 3.1%다."])
 
+    def test_xlsx_numeric_zero_cell_survives(self):
+        """엑셀 셀은 네이티브 타입이라 정답이 숫자 0("0원"류)이면 falsy 다.
+        `str(v or "")` 로 거르면 정답이 조용히 사라지면서 매칭만 성립한다."""
+        openpyxl = __import__("openpyxl")
+        with tempfile.TemporaryDirectory() as td:
+            qa = os.path.join(td, "qa.xlsx")
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(["question", "ground_truth"])
+            ws.append(["추가 부채는 얼마인가?", 0])
+            wb.save(qa)
+            qa_map, errors = load_qa_set(qa)
+        self.assertEqual(errors, [])
+        self.assertEqual(qa_map[normalize_question("추가 부채는 얼마인가")]["ground_truth"], "0")
+
+    def test_missing_path_reports_error_instead_of_raising(self):
+        """골든셋 경로 오타로 CLI 가 raw 트레이스백으로 죽으면 안 된다
+        (이 모듈의 폴백 철학 - (entries, errors) 계약)."""
+        with tempfile.TemporaryDirectory() as td:
+            qa_map, errors = load_qa_set(os.path.join(td, "없는파일.json"))
+        self.assertEqual(qa_map, {})
+        self.assertTrue(errors)
+
+    def test_broken_xlsx_reports_error_instead_of_raising(self):
+        """확장자만 xlsx 인 파일(엑셀에서 CSV 로 저장하고 이름만 바꾼 케이스)."""
+        with tempfile.TemporaryDirectory() as td:
+            qa = _write(td, "qa.xlsx", "question,ground_truth\nq1,a1\n")
+            qa_map, errors = load_qa_set(qa)
+        self.assertEqual(qa_map, {})
+        self.assertTrue(errors)
+
     def test_jsonl_content_with_json_extension(self):
         # 상대가 .json 확장자로 JSONL을 주는 실무 케이스 → 재시도로 살린다
         with tempfile.TemporaryDirectory() as td:

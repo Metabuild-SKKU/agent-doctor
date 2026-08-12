@@ -111,15 +111,23 @@ def _entries_from_xlsx(path: str) -> tuple[list[Any], list[str]]:
         from openpyxl import load_workbook
     except ImportError:
         return [], ["xlsx 를 읽으려면 openpyxl 이 필요합니다 (pip install openpyxl)"]
-    # read_only 는 파일 핸들을 열어둔 채라 Windows 에서 원본을 못 지운다 - 반드시 close.
-    wb = load_workbook(path, read_only=True, data_only=True)
+    # 파일이 없거나 xlsx 가 아니면(확장자만 xlsx 인 CSV·깨진 zip) openpyxl 이 예외를
+    # 던진다. 그대로 올리면 (entries, errors) 계약이 깨져 CLI 가 raw 트레이스백으로
+    # 죽는다 - 이 모듈의 폴백 철학대로 사람이 읽을 오류로 바꾼다.
+    try:
+        # read_only 는 파일 핸들을 열어둔 채라 Windows 에서 원본을 못 지운다 - 반드시 close.
+        wb = load_workbook(path, read_only=True, data_only=True)
+    except Exception as exc:
+        return [], [f"{path}: xlsx 를 열지 못했습니다({type(exc).__name__}: {exc})"]
     try:
         rows = wb.active.iter_rows(values_only=True)
         header = [str(h).strip() if h is not None else "" for h in next(rows, [])]
         entries = []
         for row in rows:
+            # `str(v or "")` 로 비우면 숫자 0·False 셀이 통째로 사라진다("0원"류 정답).
+            # 값의 유무는 None 으로만 가른다(normalize_answer_field 와 같은 규칙).
             entry = {h: v for h, v in zip(header, row)
-                     if h and str(v or "").strip()}
+                     if h and v is not None and str(v).strip()}
             if entry:
                 entries.append(entry)
     finally:
@@ -138,6 +146,9 @@ def _read_text(path: str) -> tuple[Optional[str], list[str]]:
                 return f.read(), []
         except UnicodeDecodeError:
             continue
+        # 경로 오타·권한 문제도 같은 규칙으로 - 예외를 올리면 CLI 가 트레이스백으로 죽는다.
+        except OSError as exc:
+            return None, [f"{path}: 파일을 열지 못했습니다({type(exc).__name__}: {exc})"]
     return None, [f"{path}: 인코딩을 인식하지 못했습니다(utf-8/cp949 시도 실패)"]
 
 
