@@ -90,6 +90,20 @@ def provider_name() -> str:
 _BATCH_MAX_FANOUT_DEFAULT = 256
 
 
+_warned_config: set[str] = set()
+_warned_config_lock = threading.Lock()
+
+
+def _warn_config_once(message: str) -> None:
+    """설정 경고를 메시지별로 실행당 1회만 — 임베딩 경로 안내(_notify_embed_once)와
+    저장소를 분리해, 한쪽을 초기화해도 다른 쪽이 딸려 지워지지 않게 한다."""
+    with _warned_config_lock:
+        if message in _warned_config:
+            return
+        _warned_config.add(message)
+    print(message)
+
+
 def _batch_max_fanout() -> int:
     """EVAL_ANTHROPIC_BATCH_MAX_FANOUT (기본 256). 비수치·0 이하면 기본값."""
     raw = (os.getenv("EVAL_ANTHROPIC_BATCH_MAX_FANOUT") or "").strip()
@@ -98,8 +112,10 @@ def _batch_max_fanout() -> int:
     try:
         value = int(raw)
     except ValueError:
-        # 라운드마다(judge_fanout 호출마다) 반복되지 않게 1회만 — 리뷰 지적.
-        _notify_embed_once(
+        # 라운드마다(judge_fanout 호출마다) 반복되지 않게 1회만. 임베딩 안내용
+        # one-shot(_notify_embed_once)을 빌리지 않는다 — 테스트가 임베딩 안내를
+        # 비울 때 이 경고까지 같이 비워지는 결합이 생긴다(리뷰 지적).
+        _warn_config_once(
             f"[Eval] EVAL_ANTHROPIC_BATCH_MAX_FANOUT='{raw}' 은 정수가 아닙니다 "
             f"— 기본값 {_BATCH_MAX_FANOUT_DEFAULT} 을 씁니다.")
         return _BATCH_MAX_FANOUT_DEFAULT

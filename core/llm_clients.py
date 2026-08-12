@@ -227,7 +227,7 @@ class _AnthropicBatchCollector:
 
     def __init__(self):
         self._cond = threading.Condition()
-        self._pending: list[tuple[str, dict, Future]] = []
+        self._pending: list[tuple[str, object, dict, Future]] = []  # (cid, client, params, fut)
         self._seq = 0
         self._thread: threading.Thread | None = None
         # 실행 요약용 누적(print_batch_summary). 배치는 비용을 절반으로 줄이는 대신
@@ -785,12 +785,17 @@ def anthropic_chat(
             # 호출과 같은 형태라 아래 usage/stop_reason 처리가 그대로 통한다.
             # timeout 은 수집기 스레드가 통째로 사라진 경우의 최후 방어선이다 —
             # 무인 실행에서는 예외보다 hang 이 나쁘므로 무한 대기를 두지 않는다.
+            fut = _batch_collector.submit(client, request)
             try:
-                resp = _batch_collector.submit(client, request).result(
-                    timeout=_batch_wait_timeout())
+                resp = fut.result(timeout=_batch_wait_timeout())
             except _FutureTimeout:
-                # 수집기 스레드 소실 시의 최후 방어선. builtin TimeoutError(3.11+ 동일
-                # 클래스)로 새면 재시도 계층이 transient 로 오분류한다 — 타입으로 끊는다.
+                # 두 경우가 같은 예외로 온다(3.11+ 에서 cf.TimeoutError = builtin):
+                #   (a) 대기 초과 — 수집기 스레드 소실 의심. 재시도 금지로 전환한다.
+                #   (b) Future 에 **실려 온** TimeoutError — 일시 장애일 수 있으므로
+                #       원래 예외 그대로 전파해 재시도 판정을 유지한다(리뷰 지적).
+                # fut.done() 이 둘을 가른다 — (b)는 결과가 실린 뒤 result() 가 되던진 것.
+                if fut.done():
+                    raise
                 raise BatchDeadlineExceeded(
                     "anthropic 배치 수집기가 응답하지 않습니다 — 스레드 소실 의심, "
                     "재시도하지 않고 즉시 실패합니다") from None

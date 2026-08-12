@@ -1018,6 +1018,19 @@ def _fused_embedded(judge, d: dict, question: str, answer: str, reference: str,
     return out
 
 
+_index_drop_notified = False
+
+
+def _note_index_drop_once(message: str) -> None:
+    """인덱스 제외 안내를 실행당 1회만 — probe 마다 반복되면 진단 로그를 덮는다.
+    병렬 워커의 경쟁으로 드물게 2회 찍힐 수 있으나 무해하다(락 비용을 얹지 않는다)."""
+    global _index_drop_notified
+    if _index_drop_notified:
+        return
+    _index_drop_notified = True
+    print(message)
+
+
 def _fused_correctness_counts(d: dict):
     """correctness 블록 → (TP, FP, FN) 카운트. 블록이 없거나 형식이 깨졌으면 None(=factual 결손).
 
@@ -1036,7 +1049,15 @@ def _fused_correctness_counts(d: dict):
         items = _as_list(corr, key)
         ints = [i for i in items if isinstance(i, int) and not isinstance(i, bool)]
         if items and len(ints) == len(items):      # compact — 전부 정수(인덱스 배열)
-            return len({i for i in ints if 0 <= i < universe})
+            valid = {i for i in ints if 0 <= i < universe}
+            dropped = len(ints) - len(valid)
+            if dropped:
+                # 조용히 버리면 모델이 1-based 로 답하는 상태가 신호 없이
+                # answer_correctness 만 낮춘다(리뷰 지적) — 실행당 1회 드러낸다.
+                _note_index_drop_once(
+                    f"[Eval] correctness 인덱스 {dropped}건이 중복/범위 밖이라 제외됐습니다 "
+                    f"({key}={ints}, 우주 {universe}) — 모델이 1-based 로 답하는지 확인하세요.")
+            return len(valid)
         return len(items)                          # legacy — dict 목록(빈 배열 포함)
 
     return _count("TP", n_answer), _count("FP", n_answer), _count("FN", n_reference)
