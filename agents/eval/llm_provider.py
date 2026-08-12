@@ -98,8 +98,10 @@ def _batch_max_fanout() -> int:
     try:
         value = int(raw)
     except ValueError:
-        print(f"[Eval] EVAL_ANTHROPIC_BATCH_MAX_FANOUT='{raw}' 은 정수가 아닙니다 "
-              f"— 기본값 {_BATCH_MAX_FANOUT_DEFAULT} 을 씁니다.")
+        # 라운드마다(judge_fanout 호출마다) 반복되지 않게 1회만 — 리뷰 지적.
+        _notify_embed_once(
+            f"[Eval] EVAL_ANTHROPIC_BATCH_MAX_FANOUT='{raw}' 은 정수가 아닙니다 "
+            f"— 기본값 {_BATCH_MAX_FANOUT_DEFAULT} 을 씁니다.")
         return _BATCH_MAX_FANOUT_DEFAULT
     return value if value > 0 else _BATCH_MAX_FANOUT_DEFAULT
 
@@ -116,9 +118,15 @@ def judge_batch_active() -> bool:
 
 def judge_fanout(n_items: int, default: int) -> int:
     """RAGAS 판정 fan-out 폭. anthropic 배치 모드에서는 동시성이 곧 배치 크기이므로
-    항목 수 전체로 넓힌다 — 스레드는 배치 결과를 기다리며 잠들 뿐이라 넓혀도 API 비용이
-    없고, 좁히면 EVAL_LLM_CONCURRENCY 개씩 배치가 쪼개져 배치당 대기(수 분)가 곱해진다.
-    즉 배치 모드에서는 EVAL_LLM_CONCURRENCY 가 심판 호출에 한해 무시된다.
+    항목 수 전체로 넓힌다 — 좁히면 EVAL_LLM_CONCURRENCY 개씩 배치가 쪼개져 배치당
+    대기(수 분)가 곱해진다. 즉 배치 모드에서는 EVAL_LLM_CONCURRENCY 가 트랙 전체에서
+    무시된다.
+
+    ⚠ 넓어지는 것은 심판 호출만이 아니라 **_ragas_track 전체**다(리뷰 지적) — 배치가
+    끝나는 순간 fan-out 폭의 스레드가 한꺼번에 깨어나 후처리(relevancy 임베딩, 드물게
+    _fused_repair 의 동기 보수 호출)를 같이 실행한다. 임베딩 동시 로드는 qdrant_store
+    의 로드 락이, API 429 는 재시도가 흡수하지만, 이 폭이 부담스러운 환경은
+    EVAL_ANTHROPIC_BATCH_MAX_FANOUT 으로 낮출 것.
 
     다만 이 값이 곧 로컬 스레드 수라 EVAL_ANTHROPIC_BATCH_MAX_FANOUT(기본 256)으로
     상한을 둔다. 상한을 넘으면 그 크기의 배치 여러 개로 나뉘고, 배치 수만큼 대기가
@@ -269,23 +277,26 @@ def chat_json(
 # 폴백하고, 그것도 없으면 Index 가 이미 쓰는 로컬 BGE-M3 로 계산한다.
 # 셋 다 불가할 때만 결측이 된다.
 
-# 임베딩 경로 전환/불가를 실행당 한 번만 알린다. 안 그러면 probe·트랙마다 같은 줄이 찍혀
-# 정작 봐야 할 로그를 덮는다(agents/index/graph_index.py 의 _notify_llm_extraction_once 와 같은 패턴).
-_embed_notified = False
+# 임베딩 경로 전환/불가 등의 안내를 **메시지별로** 실행당 한 번만 찍는다. 안 그러면
+# probe·트랙마다 같은 줄이 찍혀 정작 봐야 할 로그를 덮는다. 예전엔 전역 one-shot
+# 하나라 먼저 찍힌 안내(예: EVAL_EMBED_PROVIDER 오타 경고)가 나머지("로컬 임베딩 —
+# 비교 금지")를 영구히 삼켰다(리뷰 지적) — 서로 다른 안내는 각각 나가야 한다.
+_embed_notified: set[str] = set()
 _embed_notice_lock = threading.Lock()
 
 
 def _notify_embed_once(message: str) -> None:
-    global _embed_notified
     with _embed_notice_lock:
-        if _embed_notified:
+        if message in _embed_notified:
             return
-        _embed_notified = True
+        _embed_notified.add(message)
     print(message)
 
 
 def _embed_api_key_ready(provider: str) -> bool:
     """해당 provider 의 임베딩 API 키가 있는지. 키 유무만 본다(호출은 안 한다)."""
+    if provider == "local":
+        return False    # 로컬은 API 키 개념이 없다 — else(openai) 분기로 흘려 오답을 주지 않는다
     if provider == "gemini":
         return bool(os.getenv("GEMINI_API_KEY"))
     if provider == "openrouter":

@@ -325,9 +325,6 @@ class BatchGateTest(unittest.TestCase):
                              llm_provider._BATCH_MAX_FANOUT_DEFAULT)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class BatchSummaryModelTest(unittest.TestCase):
     """요약 줄의 모델 표기(리뷰 제안) — 모델이 갈리면 배치 대기·비용을 실행 간 직접
@@ -355,3 +352,41 @@ class BatchSummaryModelTest(unittest.TestCase):
                 redirect_stdout(buf):
             llm_clients.print_batch_summary()
         self.assertIn("claude-haiku-4-5", buf.getvalue())
+
+
+class BatchTimeoutContractTest(unittest.TestCase):
+    """대기 상한 초과의 계약(리뷰 지적) — 재시도로 상한이 곱해지면 안 된다.
+
+    일반 TimeoutError 는 재시도 계층(core/llm_retry.is_transient)이 이름으로 transient
+    판정해 2시간 상한이 6회 × 12시간이 된다. 전용 예외(PermanentError 계열)로 즉시
+    전파되는지, 버려진 서버측 배치가 취소되는지를 고정한다."""
+
+    def test_deadline_raises_permanent_error_and_cancels_batch(self):
+        from core.llm_retry import is_transient
+
+        class _StuckBatches(_FakeBatches):
+            def __init__(self):
+                super().__init__({})
+                self.cancelled: list[str] = []
+
+            def retrieve(self, batch_id):
+                return SimpleNamespace(id=batch_id, processing_status="in_progress",
+                                       request_counts=SimpleNamespace(succeeded=0))
+
+            def cancel(self, batch_id):
+                self.cancelled.append(batch_id)
+
+        batches = _StuckBatches()
+        client = SimpleNamespace(messages=SimpleNamespace(batches=batches))
+        env = {**_FAST_ENV, "EVAL_ANTHROPIC_BATCH_TIMEOUT": "0.05"}
+        with patch.dict(os.environ, env):
+            collector = llm_clients._AnthropicBatchCollector()
+            fut = collector.submit(client, {"model": "m"})
+            with self.assertRaises(llm_clients.BatchDeadlineExceeded) as ctx:
+                fut.result(timeout=10)
+        self.assertFalse(is_transient(ctx.exception))   # 재시도 계층이 증폭하지 않는다
+        self.assertEqual(len(batches.cancelled), 1)     # 버려진 배치는 서버에서도 취소
+
+
+if __name__ == "__main__":
+    unittest.main()

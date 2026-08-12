@@ -492,8 +492,19 @@ class CompactVariantTest(_FusedTestBase):
     def test_compact_counts_survive_index_arrays(self):
         self.assertEqual(
             metrics_ragas._fused_correctness_counts(
-                {"correctness": {"TP": [0, 2], "FP": [1], "FN": []}}),
+                {"answer_statements": ["a0", "a1", "a2"], "reference_statements": ["r0"],
+                 "correctness": {"TP": [0, 2], "FP": [1], "FN": []}}),
             (2, 1, 0))
+
+    def test_compact_counts_ignore_duplicate_and_out_of_range_indexes(self):
+        """"TP": [0, 0, 9] 같은 값이 문장 전문 중복보다 훨씬 싼 실수라 가드가 필요하다
+        (리뷰 지적) — 중복은 1개로, 범위 밖은 0개로 센다. legacy dict 목록은 불변."""
+        d = {"answer_statements": ["a0", "a1"], "reference_statements": ["r0"],
+             "correctness": {"TP": [0, 0, 9], "FP": [-1], "FN": [0, 0]}}
+        self.assertEqual(metrics_ragas._fused_correctness_counts(d), (1, 0, 1))
+        legacy = {"correctness": {"TP": [{"statement": "s"}, {"statement": "s"}],
+                                  "FP": [], "FN": [{"statement": "n"}]}}
+        self.assertEqual(metrics_ragas._fused_correctness_counts(legacy), (2, 0, 1))
 
     def test_block_and_schema_override_tables_are_in_sync(self):
         self.assertEqual(set(metrics_ragas._COMPACT_BLOCK_OVERRIDES),

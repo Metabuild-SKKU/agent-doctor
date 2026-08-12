@@ -82,6 +82,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 | `INDEX_EMBED_PROVIDER` | `openrouter` | 문서 색인 |
 | `INDEX_QUERY_EMBED_PROVIDER` | `INDEX_EMBED_PROVIDER` 따름 (없으면 `openrouter`) | 검색 질의 |
 | `INDEX_EMBED_DEVICE` | `auto` | `local`일 때 `cuda`/`cpu` |
+| `EVAL_EMBED_PROVIDER` | (미설정 = 심판 provider 따름) | Eval 축(RAGAS relevancy) — `openrouter`/`openai`/`gemini`/`local`. **명시하면 강제값**: 못 쓰면 결측이지 다른 provider 로 새지 않는다. 심판=anthropic 이면 로컬 폴백이 리랭커와 VRAM 을 다투므로 `openrouter` 권장 |
 
 실측(한국어 1,000청크 — 측정 도구 `tools/bench_embedding.py` 는 측정값을 여기와 커밋에 박제한 뒤 제거했습니다. 재검증이 필요하면 `git log --diff-filter=D -- tools/bench_embedding.py` 로 복원): 로컬 CPU 2 chunks/sec vs
 OpenRouter 동시 8에서 371 chunks/sec. 26MB 코퍼스 환산으로 **2.3시간 vs 0.7분 / $0.06**

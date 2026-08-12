@@ -1019,11 +1019,27 @@ def _fused_embedded(judge, d: dict, question: str, answer: str, reference: str,
 
 
 def _fused_correctness_counts(d: dict):
-    """correctness 블록 → (TP, FP, FN) 카운트. 블록이 없거나 형식이 깨졌으면 None(=factual 결손)."""
+    """correctness 블록 → (TP, FP, FN) 카운트. 블록이 없거나 형식이 깨졌으면 None(=factual 결손).
+
+    compact(인덱스 배열)에서는 **중복·범위 밖 인덱스를 세지 않는다** — "TP": [0, 0, 1]
+    이 문장 전문을 두 번 쓰는 것보다 훨씬 싼 실수인데, len() 만 보면 그대로 과대
+    계산된다(리뷰 지적). TP/FP 는 answer_statements, FN 은 reference_statements 의
+    0-기반 인덱스이므로 각자의 우주 크기로 걸러낸다. legacy({statement, ...} 목록)는
+    기존대로 개수만 센다."""
     corr = d.get("correctness")
     if not isinstance(corr, dict):
         return None
-    return len(_as_list(corr, "TP")), len(_as_list(corr, "FP")), len(_as_list(corr, "FN"))
+    n_answer = len(_as_list(d, "answer_statements"))
+    n_reference = len(_as_list(d, "reference_statements"))
+
+    def _count(key: str, universe: int) -> int:
+        items = _as_list(corr, key)
+        ints = [i for i in items if isinstance(i, int) and not isinstance(i, bool)]
+        if items and len(ints) == len(items):      # compact — 전부 정수(인덱스 배열)
+            return len({i for i in ints if 0 <= i < universe})
+        return len(items)                          # legacy — dict 목록(빈 배열 포함)
+
+    return _count("TP", n_answer), _count("FP", n_answer), _count("FN", n_reference)
 
 
 def _fused_repair(judge, out: dict, question: str, answer: str, contexts: list[str],

@@ -81,7 +81,7 @@ class EmbedProviderOverrideTest(unittest.TestCase):
     오타·키 부재가 조용히 새 경로를 만들지 않는지를 고정한다."""
 
     def setUp(self):
-        llm_provider._embed_notified = False
+        llm_provider._embed_notified.clear()    # 메시지별 1회 알림 — 테스트 간 격리
 
     def _run(self, env: dict, local_ok: bool = True):
         """embed_texts 1회. 어느 embed 가 불렸는지와 stdout 을 돌려준다."""

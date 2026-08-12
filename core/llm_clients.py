@@ -21,7 +21,9 @@ import os
 import threading
 import time
 from concurrent.futures import Future
+from concurrent.futures import TimeoutError as _FutureTimeout
 
+from core.llm_retry import PermanentError
 from core.llm_usage import log_usage
 
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
@@ -199,9 +201,17 @@ def _batch_wait_timeout() -> float:
             + _env_float("EVAL_ANTHROPIC_BATCH_WINDOW", 2.0) + 300.0)
 
 
+class BatchDeadlineExceeded(PermanentError):
+    """배치 대기 상한 초과 — 재시도 금지(PermanentError).
+
+    일반 TimeoutError 로 던지면 재시도 계층이 이름으로 transient 판정해 상한이
+    재시도 횟수만큼 곱해진다(EVAL_ANTHROPIC_BATCH_TIMEOUT=7200 × 6회 = 12시간).
+    무인 실행에서는 "2시간 내 실패" 가 계약이므로 타입으로 재시도를 끊는다."""
+
+
 def _item_models(items: list) -> set[str]:
-    """배치 항목들의 모델명 집합 — (custom_id, params, Future) 튜플에서 뽑는다."""
-    return {str(params.get("model", "")) for _, params, _ in items if params.get("model")}
+    """배치 항목들의 모델명 집합 — (custom_id, client, params, Future) 튜플에서 뽑는다."""
+    return {str(params.get("model", "")) for _, _, params, _ in items if params.get("model")}
 
 
 class _AnthropicBatchCollector:
@@ -220,7 +230,6 @@ class _AnthropicBatchCollector:
         self._pending: list[tuple[str, dict, Future]] = []
         self._seq = 0
         self._thread: threading.Thread | None = None
-        self._client = None
         # 실행 요약용 누적(print_batch_summary). 배치는 비용을 절반으로 줄이는 대신
         # 벽시계 시간을 늘리므로, 그 대가를 비용 표 옆에서 읽을 수 있어야 한다.
         # models: 배치에 실린 모델명 집합 — 대기 시간·비용을 실행 간 비교할 때 모델이
@@ -250,7 +259,7 @@ class _AnthropicBatchCollector:
 
     def _fail_items(self, items, exc: BaseException) -> None:
         """이 배치에 속한 항목만 예외로 깨운다(큐에 남은 다음 배치는 건드리지 않는다)."""
-        for _, _, fut in items:
+        for _, _, _, fut in items:
             self._settle(fut, exc)
 
     def _fail_all(self, items, exc: BaseException) -> None:
@@ -267,10 +276,12 @@ class _AnthropicBatchCollector:
     def submit(self, client, params: dict) -> Future:
         fut: Future = Future()
         with self._cond:
-            self._client = client
+            # client 를 항목에 함께 담는다 — 예전엔 최근 submit 의 client 를 수집기
+            # 속성으로 들고 있어서, 다음 배치의 client 로 현재 배치를 제출할 수 있었다
+            # (리뷰 지적 — 지금은 단일 client 라 무해하지만 구조적으로 막는다).
             cid = f"req-{self._seq}"
             self._seq += 1
-            self._pending.append((cid, params, fut))
+            self._pending.append((cid, client, params, fut))
             if self._thread is None or not self._thread.is_alive():
                 self._thread = threading.Thread(
                     target=self._run, name="anthropic-batch", daemon=True)
@@ -280,7 +291,7 @@ class _AnthropicBatchCollector:
 
     def _run(self):
         while True:
-            items: list[tuple[str, dict, Future]] = []
+            items: list[tuple] = []
             try:
                 items = self._drain()
                 if not items:
@@ -295,7 +306,7 @@ class _AnthropicBatchCollector:
                 self._fail_all(items, exc)
                 return
 
-    def _drain(self) -> list[tuple[str, dict, Future]]:
+    def _drain(self) -> list[tuple]:
         """수집 창이 조용해질 때까지 모은 뒤 스냅샷을 돌려준다."""
         window = _env_float("EVAL_ANTHROPIC_BATCH_WINDOW", 2.0)
         with self._cond:
@@ -319,13 +330,13 @@ class _AnthropicBatchCollector:
                     items, self._pending = self._pending, []
                     return items
 
-    def _dispatch(self, items: list[tuple[str, dict, Future]]) -> None:
-        client = self._client
+    def _dispatch(self, items: list[tuple]) -> None:
+        client = items[0][1]
         poll = _env_float("EVAL_ANTHROPIC_BATCH_POLL", 15.0)
         timeout = _env_float("EVAL_ANTHROPIC_BATCH_TIMEOUT", 7200.0)
         try:
             batch = client.messages.batches.create(
-                requests=[{"custom_id": cid, "params": params} for cid, params, _ in items])
+                requests=[{"custom_id": cid, "params": params} for cid, _, params, _ in items])
         except Exception as exc:               # 제출 실패 — 이 배치 전원에게 즉시 알린다
             self._fail_items(items, exc)
             return
@@ -347,7 +358,14 @@ class _AnthropicBatchCollector:
                 last_note = now
             if now - started > timeout:
                 self._record(len(items), now - started, _item_models(items))
-                self._fail_items(items, TimeoutError(
+                # 서버 측 배치도 취소한다 — 안 하면 버려진 배치가 끝까지 돌며 과금된다.
+                try:
+                    client.messages.batches.cancel(batch.id)
+                    print(f"[Anthropic] 배치 취소: {batch.id} (대기 상한 {timeout:.0f}s 초과)")
+                except Exception as exc:
+                    print(f"[Anthropic] 배치 취소 실패({type(exc).__name__}) — "
+                          f"{batch.id} 는 콘솔에서 수동 취소 필요")
+                self._fail_items(items, BatchDeadlineExceeded(
                     f"anthropic 배치 {batch.id} 가 {timeout:.0f}s 안에 끝나지 않았습니다 — "
                     f"EVAL_ANTHROPIC_BATCH_TIMEOUT 을 늘리거나 배치를 끄세요"))
                 return
@@ -360,7 +378,7 @@ class _AnthropicBatchCollector:
             self._fail_items(items, exc)
             return
         print(f"[Anthropic] 배치 완료: {len(items)}건 · {elapsed:.0f}s ({elapsed / 60:.1f}분)")
-        for cid, _, fut in items:
+        for cid, _, _, fut in items:
             res = by_id.get(cid)
             if res is None:
                 self._settle(fut, RuntimeError(f"배치 결과에 {cid} 누락"))
@@ -767,8 +785,15 @@ def anthropic_chat(
             # 호출과 같은 형태라 아래 usage/stop_reason 처리가 그대로 통한다.
             # timeout 은 수집기 스레드가 통째로 사라진 경우의 최후 방어선이다 —
             # 무인 실행에서는 예외보다 hang 이 나쁘므로 무한 대기를 두지 않는다.
-            resp = _batch_collector.submit(client, request).result(
-                timeout=_batch_wait_timeout())
+            try:
+                resp = _batch_collector.submit(client, request).result(
+                    timeout=_batch_wait_timeout())
+            except _FutureTimeout:
+                # 수집기 스레드 소실 시의 최후 방어선. builtin TimeoutError(3.11+ 동일
+                # 클래스)로 새면 재시도 계층이 transient 로 오분류한다 — 타입으로 끊는다.
+                raise BatchDeadlineExceeded(
+                    "anthropic 배치 수집기가 응답하지 않습니다 — 스레드 소실 의심, "
+                    "재시도하지 않고 즉시 실패합니다") from None
         else:
             resp = client.messages.create(**request)
         usage = getattr(resp, "usage", None)
