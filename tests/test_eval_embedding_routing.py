@@ -49,16 +49,56 @@ class ApiAvailabilityTests(unittest.TestCase):
             self.assertTrue(llm_provider._api_embeddings_available())
 
     def test_openrouter_key_does_not_hijack_other_providers(self):
-        """임베딩 경로는 심판 provider 를 따라간다.
+        """임베딩 경로는 기본적으로 심판 provider 를 따라간다.
 
         OPENROUTER_API_KEY 가 있다는 이유로 anthropic/github 실행을 OpenRouter 임베딩으로
         보내면, 심판 설정을 하나도 안 바꾼 사람의 실행이 OpenRouter 가용성에 새로 묶인다
-        (예전엔 로컬로 오프라인 계산하던 조합이다). 심판축/임베딩축 분리는 명시적
-        opt-in 으로 따로 올린다 — 여기서는 '자동 전환 없음' 을 핀으로 잡는다."""
+        (예전엔 로컬로 오프라인 계산하던 조합이다). 전환은 EVAL_EMBED_PROVIDER 를 적은
+        사람만 받는다 — 여기서는 '키만으로는 안 바뀐다' 를 핀으로 잡는다."""
         for provider in ("anthropic", "github"):
             with self.subTest(provider=provider), \
                  _env(EVAL_LLM_PROVIDER=provider, OPENROUTER_API_KEY="k"):
                 self.assertFalse(llm_provider._api_embeddings_available())
+
+
+class EmbedProviderOptInTests(unittest.TestCase):
+    def test_defaults_to_judge_provider(self):
+        with _env(EVAL_LLM_PROVIDER="anthropic"):
+            self.assertEqual(llm_provider._embed_provider(), "anthropic")
+
+    def test_explicit_opt_in_splits_the_axis(self):
+        """심판은 anthropic 그대로 두고 임베딩만 OpenRouter 로 — 이 PR 의 목적."""
+        with _env(EVAL_LLM_PROVIDER="anthropic", OPENROUTER_API_KEY="k",
+                  EVAL_EMBED_PROVIDER="openrouter"):
+            self.assertEqual(llm_provider._embed_provider(), "openrouter")
+            self.assertEqual(llm_provider._provider(), "anthropic")
+            self.assertTrue(llm_provider._api_embeddings_available())
+
+    def test_alias_is_normalized(self):
+        """EVAL_LLM_PROVIDER 와 같은 철자표를 쓴다(PROVIDER_ALIASES)."""
+        with _env(EVAL_LLM_PROVIDER="anthropic", OPENROUTER_API_KEY="k",
+                  EVAL_EMBED_PROVIDER="Open-Router"):
+            self.assertEqual(llm_provider._embed_provider(), "openrouter")
+
+    def test_unknown_value_falls_back_to_judge_with_warning(self):
+        """조용히 openai 로 떨어뜨리지 않는다 — 임베딩 모델이 바뀌면 코사인 분포가
+        달라져 실행 간 response_relevancy 비교가 깨진다."""
+        with _env(EVAL_LLM_PROVIDER="anthropic", EVAL_EMBED_PROVIDER="opebrouter"), \
+             patch("builtins.print") as printed:
+            self.assertEqual(llm_provider._embed_provider(), "anthropic")
+        self.assertTrue(printed.called)
+        llm_provider._warned_providers.discard("embed:opebrouter")
+
+    def test_explicit_route_reaches_the_transport(self):
+        with _env(EVAL_LLM_PROVIDER="anthropic", OPENROUTER_API_KEY="k",
+                  EVAL_EMBED_PROVIDER="openrouter"), \
+             patch.object(llm_provider, "openai_embed") as embed:
+            embed.return_value = [[1.0]]
+            llm_provider.embed_texts(["a"])
+
+        self.assertEqual(embed.call_args.args[1], "baai/bge-m3")
+        self.assertEqual(embed.call_args.kwargs["base_url"],
+                         llm_provider.OPENROUTER_BASE_URL)
 
 
 class LocalAvailabilityTests(unittest.TestCase):

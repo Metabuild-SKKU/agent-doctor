@@ -63,6 +63,19 @@ def _warn_unknown_provider_once(raw: str) -> None:
           f"(openai|gemini|github|openrouter|anthropic)")
 
 
+def _warn_unknown_embed_provider_once(raw: str) -> None:
+    """미지원 EVAL_EMBED_PROVIDER 값 경고를 값당 한 번만 출력한다.
+
+    같은 set 을 공유하면 EVAL_LLM_PROVIDER 에 같은 오타를 낸 실행이 이 경고를 삼킨다."""
+    key = f"embed:{raw}"
+    with _warned_providers_lock:
+        if key in _warned_providers:
+            return
+        _warned_providers.add(key)
+    print(f"[Eval] 알 수 없는 EVAL_EMBED_PROVIDER '{raw}' · 심판 provider 를 따릅니다 "
+          f"(openai|gemini|github|openrouter|anthropic)")
+
+
 def _provider() -> str:
     """활성 provider. 오타 등 미지원 값은 openai 로 떨어지므로 경고를 남긴다 —
     Gemini/OpenRouter 로 돌린다고 믿은 실행이 조용히 OpenAI 로 과금되는 걸 막기 위함."""
@@ -206,12 +219,15 @@ def chat_json(
 # 폴백하고, 그것도 없으면 Index 가 이미 쓰는 로컬 BGE-M3 로 계산한다.
 # 셋 다 불가할 때만 결측이 된다.
 #
-# 임베딩 경로는 **심판 provider 를 따라간다**. OPENROUTER_API_KEY 가 있다고 해서 심판이
-# anthropic/github 인 실행을 임의로 OpenRouter 임베딩으로 보내지 않는다 — 그렇게 하면
-# 심판 설정을 하나도 안 바꾼 사람의 실행이 OpenRouter 가용성에 새로 묶이고, 예전에
+# 임베딩 경로는 기본적으로 **심판 provider 를 따라간다**. OPENROUTER_API_KEY 가 있다고 해서
+# 심판이 anthropic/github 인 실행을 임의로 OpenRouter 임베딩으로 보내지는 않는다 — 그렇게
+# 하면 심판 설정을 하나도 안 바꾼 사람의 실행이 OpenRouter 가용성에 새로 묶이고, 예전에
 # 오프라인으로 돌던 조합이 남의 장애에 같이 죽는다(아래 embed_texts 독스트링이 설명하는
 # bad_gold_answer 침묵 → probe 재생성 정지가 정확히 그 대가다).
-# 심판축과 임베딩축을 분리하는 설계 자체는 유효하나, 그건 명시적 opt-in 으로 따로 올린다.
+#
+# 심판축과 임베딩축을 나누고 싶으면 EVAL_EMBED_PROVIDER 로 **명시**한다(_embed_provider).
+# Index 쪽의 INDEX_EMBED_PROVIDER 와 같은 모양이고, 기본값은 "심판을 따른다" 라 아무것도
+# 설정하지 않은 실행의 동작은 바뀌지 않는다.
 
 # 임베딩 경로 전환/불가를 실행당 한 번만 알린다. 안 그러면 probe·트랙마다 같은 줄이 찍혀
 # 정작 봐야 할 로그를 덮는다(agents/index/graph_index.py 의 _notify_llm_extraction_once 와 같은 패턴).
@@ -228,9 +244,33 @@ def _notify_embed_once(message: str) -> None:
     print(message)
 
 
+def _embed_provider() -> str:
+    """임베딩을 실제로 부를 provider. 기본은 심판 provider 와 같다.
+
+    anthropic·github 는 임베딩 엔드포인트가 없어, 그 심판을 쓰면 OPENROUTER_API_KEY 가
+    있어도 2GB 로컬 모델을 띄우게 된다(실측: 로컬 16.8s vs OpenRouter 3.1s, 벡터는
+    코사인 1.00000 으로 동일). 그 낭비를 피하려면 임베딩축만 따로 지정한다.
+
+    **키가 있다고 자동 전환하지는 않는다.** 그러면 심판 설정을 안 바꾼 사람의 실행이
+    OpenRouter 가용성에 새로 묶이고, 예전에 오프라인으로 돌던 조합이 남의 장애에 같이
+    죽는다. 전환은 EVAL_EMBED_PROVIDER 를 적은 사람만 받는다 — Index 의
+    INDEX_EMBED_PROVIDER 와 같은 계약이다.
+
+    미지원 값은 심판 provider 로 떨어뜨린다(경고 후). 임베딩만 조용히 다른 곳으로
+    가면 코사인 분포가 달라져 실행 간 response_relevancy 비교가 깨진다."""
+    raw = os.getenv("EVAL_EMBED_PROVIDER", "").strip().lower()
+    if not raw:
+        return _provider()
+    provider = normalize_provider(raw)
+    if provider not in _KNOWN_PROVIDERS:
+        _warn_unknown_embed_provider_once(raw)
+        return _provider()
+    return provider
+
+
 def _api_embeddings_available() -> bool:
-    """활성 provider 로 임베딩 API 를 부를 수 있는지. 키 유무만 본다(호출은 안 한다)."""
-    provider = _provider()
+    """활성 임베딩 provider 로 임베딩 API 를 부를 수 있는지. 키 유무만 본다(호출은 안 한다)."""
+    provider = _embed_provider()
     if provider == "gemini":
         return bool(os.getenv("GEMINI_API_KEY"))
     if provider == "openrouter":
@@ -282,7 +322,7 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
         def _do():
             # _api_embeddings_available 과 같은 해석기를 써야 한다 — 다르면
             # "쓸 수 있다"고 판정한 provider 와 실제로 부르는 곳이 어긋난다.
-            provider = _provider()
+            provider = _embed_provider()
             if provider == "gemini":
                 return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
             if provider == "openrouter":

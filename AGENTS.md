@@ -72,7 +72,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 ---
 
-### 임베딩 provider (색인·질의)
+### 임베딩 provider (색인·질의·채점)
 
 임베딩은 **어느 모델**이냐와 **어디서 계산하느냐**가 분리돼 있습니다. 모델은 `bge-m3`로
 고정이고, 계산 위치만 env로 고릅니다.
@@ -82,6 +82,15 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 | `INDEX_EMBED_PROVIDER` | `openrouter` | 문서 색인 |
 | `INDEX_QUERY_EMBED_PROVIDER` | `INDEX_EMBED_PROVIDER` 따름 (없으면 `openrouter`) | 검색 질의 |
 | `INDEX_EMBED_DEVICE` | `auto` | `local`일 때 `cuda`/`cpu` |
+| `EVAL_EMBED_PROVIDER` | `EVAL_LLM_PROVIDER` 따름 | Eval 채점 (`response_relevancy`) |
+
+Eval 축만 기본값이 다릅니다. **심판 provider 를 따라가고, 키가 있다고 자동 전환하지
+않습니다.** `anthropic`·`github` 는 임베딩 엔드포인트가 없어 `OPENROUTER_API_KEY` 가
+있으면 그쪽으로 보내고 싶어지지만(실측 로컬 16.8s vs OpenRouter 3.1s, 코사인 1.00000),
+그렇게 하면 심판 설정을 하나도 안 바꾼 실행이 OpenRouter 가용성에 새로 묶입니다 —
+임베딩이 결측되면 `response_relevancy` 하나가 아니라 `bad_gold_answer` 라벨과 그 라벨에
+걸린 probe 자동 재생성 루프까지 멈춥니다. 전환은 `EVAL_EMBED_PROVIDER` 를 적은 사람만
+받고, 임베딩 API 가 재시도 끝에 실패하면 로컬 모델이 뜨는 한 그쪽으로 이어 계산합니다.
 
 실측(한국어 1,000청크 — 측정 도구 `tools/bench_embedding.py` 는 측정값을 여기와 커밋에 박제한 뒤 제거했습니다. 재검증이 필요하면 `git log --diff-filter=D -- tools/bench_embedding.py` 로 복원): 로컬 CPU 2 chunks/sec vs
 OpenRouter 동시 8에서 371 chunks/sec. 26MB 코퍼스 환산으로 **2.3시간 vs 0.7분 / $0.06**
