@@ -663,9 +663,12 @@
     // 아니고(상단 안내도 "내부 점수와 비교 불가"라고 밝힌다), 그 문턱을 들이대면
     // 비교하지 말라고 적어놓고 비교 결과를 배지로 붙이는 셈이 된다. 아예 숨긴다 —
     // "없음"과 "할 수 없음"을 구분하는 이 진단서의 다른 자리와 같은 판단이다.
+    // display 는 양쪽 분기에서 반드시 정한다 — 한 페이지에서 run 을 바꿔 다시 렌더할 때
+    // (외부 → 내부) 숨긴 채로 남지 않게. 첫 렌더만 보면 안 드러나는 종류다.
     if (external || score.pass_threshold == null) {
       badge.style.display = 'none';
     } else {
+      badge.style.display = '';
       var pass = !!score.pass_threshold;
       badge.className = 'verdict ' + (pass ? 'pass' : 'fail');
       document.getElementById('verdictText').textContent =
@@ -992,7 +995,9 @@
     // 없음'으로 읽힌다 — 처방을 적용할 수 없어 애초에 비교 대상이 없는 것이다.
     var deltaEl = document.querySelector('.gauge-center .delta');
     var external = !!(mode && mode.kind === 'external');
-    if (external || noScore) deltaEl.style.display = 'none';
+    // 되돌리는 else 가 반드시 있어야 한다 — 한 페이지에서 run 을 바꿔 다시 렌더하면
+    // (외부 → 내부) delta 가 숨은 채 남는다. 첫 렌더만 보면 안 드러나는 종류다.
+    deltaEl.style.display = (external || noScore) ? 'none' : '';
     requestAnimationFrame(function () {
       setTimeout(function () {
         var arc = document.getElementById('gaugeArc');

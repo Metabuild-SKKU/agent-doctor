@@ -464,5 +464,55 @@ class ExtVerdictBadgeTests(unittest.TestCase):
         self.assertIn("score.pass_threshold == null", html)
 
 
+class FormatCompositeTests(unittest.TestCase):
+    """CLI·로그 한 줄도 뷰와 같은 사실을 말해야 한다.
+
+    진단서는 총점을 감췄는데 CLI 는 '종합점수 90/100' 을 그대로 찍고 있었다 — 같은
+    실행을 어느 창으로 보느냐에 따라 다른 말을 하면 둘 다 못 믿는다."""
+
+    def _fmt(self, quality, reliability):
+        from agents.eval.scoring import format_composite
+        return format_composite({
+            "total": 90,
+            "components": [{"key": "quality", "label": "품질", "score": quality},
+                           {"key": "reliability", "label": "신뢰도", "score": reliability}],
+        })
+
+    def test_partial_total_is_marked(self):
+        text = self._fmt(90, None)
+        self.assertIn("부분", text)
+        self.assertIn("신뢰도", text)
+
+    def test_full_total_is_not_marked(self):
+        self.assertNotIn("부분", self._fmt(90, 80))
+
+    def test_no_total_at_all(self):
+        from agents.eval.scoring import format_composite
+        text = format_composite({"total": None, "components": [
+            {"key": "quality", "label": "품질", "score": None}]})
+        self.assertIn("-/100", text)
+
+
+class RenderStateLeakTests(unittest.TestCase):
+    """한 페이지에서 run 을 바꿔 다시 렌더할 때 숨긴 요소가 남지 않아야 한다.
+
+    display='none' 만 하고 되돌리는 분기가 없으면 외부 → 내부 전환에서 배지·증감이
+    사라진 채로 남는다. 첫 렌더만 보면 안 드러나는 종류라 핀으로 잡는다."""
+
+    def _html(self):
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        return REPORT_TEMPLATE.read_text(encoding="utf-8")
+
+    def test_badge_display_is_restored(self):
+        self.assertIn("badge.style.display = ''", self._html())
+
+    def test_delta_display_is_assigned_both_ways(self):
+        # 삼항으로 양쪽을 다 정한다(= 'none' 아니면 '').
+        self.assertIn("deltaEl.style.display = (external || noScore) ? 'none' : ''",
+                      self._html())
+
+
 if __name__ == "__main__":
     unittest.main()

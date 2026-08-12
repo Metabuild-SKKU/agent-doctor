@@ -161,13 +161,26 @@ def compute_composite(records: list[EvalRecord]) -> CompositeScore:
 
 def format_composite(d: Optional[dict]) -> str:
     """composite_score dict → '68/100 (품질 79 / 신뢰도 60)' 로그·표시용 한 줄.
-    (dict 에서 복원하므로 CompositeScore 객체 없이도 리포트만 있으면 출력 가능.)"""
+    (dict 에서 복원하므로 CompositeScore 객체 없이도 리포트만 있으면 출력 가능.)
+
+    성분이 빠진 총점에는 '부분' 표시를 붙인다. compute_composite 는 측정된 성분만으로
+    결합하므로(우아한 저하) 성분이 하나 없어도 숫자는 나오는데, 그 값은 남은 축의
+    점수이지 종합점수가 아니다 - 골든셋 없는 외부 로그가 그 경우이고, 검색을 통째로
+    실패한 로그가 '종합점수 90' 으로 찍혔다. 계산은 그대로 두고 표기만 사실에 맞춘다."""
     if not d:
         return "-"
     total = d.get("total")
-    head = f"{total}/100" if total is not None else "-/100"
+    components = d.get("components", [])
+    missing = [str(c.get("label") or c.get("key")) for c in components
+               if c.get("score") is None]
+    if total is None:
+        head = "-/100"
+    elif missing:
+        head = f"{total}/100 [부분 - {' · '.join(missing)} 미측정]"
+    else:
+        head = f"{total}/100"
     parts = " / ".join(
         f"{c['label']} {c['score']}" if c.get("score") is not None else f"{c['label']} -"
-        for c in d.get("components", [])
+        for c in components
     )
     return f"{head} ({parts})" if parts else head
