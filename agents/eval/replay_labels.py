@@ -157,7 +157,7 @@ def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool, reason
     )
 
 
-def _retrieval_axis(record: EvalRecord) -> Optional[tuple[bool, str]]:
+def _axis_signal(record: EvalRecord, *, prefer_worst: bool) -> Optional[tuple[bool, str]]:
     """검색이 질문의 근거를 가져왔나 — (찾았나, 근거 문구). 미측정이면 None.
 
     두 재료 중 있는 것을 쓴다. 둘 다 정답지(골드셋) 계열이라, 골드셋 없는 로그에서는
@@ -168,23 +168,31 @@ def _retrieval_axis(record: EvalRecord) -> Optional[tuple[bool, str]]:
       2) context_precision — ground_truth 가 있을 때 RAGAS 가 실측하는 값
          (metrics_ragas 의 want_prec = ... and has_ref).
 
-    둘 다 있고 판정이 엇갈리면 **나쁜 쪽**을 믿는다. 겹침은 "gold 문단이 컨텍스트
-    안에 있나"만 보므로, top_k 를 넉넉히 잡아 무관한 청크가 잔뜩 섞여도 gold 하나만
-    걸리면 1.00 이 된다(실측 offtopic: 겹침 1.00 인데 precision 0.20 — 검색이
-    엉뚱한 걸 가져왔는데 겹침만 보면 정상으로 읽혔다). 검색 품질을 묻는 자리에서는
-    '근거가 섞여 있다'보다 '쓸모없는 것이 대부분이다'가 더 정확한 신호다.
-    """
-    signals: list[tuple[bool, str]] = []
+    prefer_worst 로 두 재료가 다 있을 때의 선택 규칙이 갈린다(_retrieval_axis 와
+    _evidence_reached 가 서로 다른 질문을 묻기 때문 - 각 함수 독스트링 참고)."""
     overlap = gold_context_recall(record)
-    if overlap is not None:
-        signals.append((overlap >= GOLD_OVERLAP_FOUND, f"gold 근거 겹침 {overlap:.2f}"))
+    overlap_signal = ((overlap >= GOLD_OVERLAP_FOUND, f"gold 근거 겹침 {overlap:.2f}")
+                       if overlap is not None else None)
     prec = record.ragas.get("context_precision")
-    if prec is not None:
-        signals.append((prec >= EXT_CTX_PRECISION_LOW, f"context precision {prec:.2f}"))
+    prec_signal = ((prec >= EXT_CTX_PRECISION_LOW, f"context precision {prec:.2f}")
+                    if prec is not None else None)
+    if not prefer_worst:
+        return overlap_signal if overlap_signal is not None else prec_signal
+    signals = [s for s in (overlap_signal, prec_signal) if s is not None]
     if not signals:
         return None
     failed = [s for s in signals if not s[0]]
     return failed[0] if failed else signals[0]
+
+
+def _retrieval_axis(record: EvalRecord) -> Optional[tuple[bool, str]]:
+    """검색이 질문의 근거를 가져왔나 전반의 품질 — 둘 다 있고 판정이 엇갈리면
+    **나쁜 쪽**을 믿는다. 겹침은 "gold 문단이 컨텍스트 안에 있나"만 보므로,
+    top_k 를 넉넉히 잡아 무관한 청크가 잔뜩 섞여도 gold 하나만 걸리면 1.00 이
+    된다(실측 offtopic: 겹침 1.00 인데 precision 0.20 — 검색이 엉뚱한 걸
+    가져왔는데 겹침만 보면 정상으로 읽혔다). 검색 품질을 묻는 자리에서는
+    '근거가 섞여 있다'보다 '쓸모없는 것이 대부분이다'가 더 정확한 신호다."""
+    return _axis_signal(record, prefer_worst=True)
 
 
 def _evidence_reached(record: EvalRecord) -> Optional[tuple[bool, str]]:
@@ -195,13 +203,7 @@ def _evidence_reached(record: EvalRecord) -> Optional[tuple[bool, str]]:
     여기서 묻는 건 다르다 — "gold 문단이 컨텍스트 안에 있긴 했나"이므로, 있었다면
     주변에 무관한 청크가 얼마나 섞였든 기권의 정오는 이미 정해진다(있는데 기권 = wrongful).
     그래서 겹침이 실측되면 겹침을 믿고, 겹침이 없을 때만 precision 으로 폴백한다."""
-    overlap = gold_context_recall(record)
-    if overlap is not None:
-        return overlap >= GOLD_OVERLAP_FOUND, f"gold 근거 겹침 {overlap:.2f}"
-    prec = record.ragas.get("context_precision")
-    if prec is not None:
-        return prec >= EXT_CTX_PRECISION_LOW, f"context precision {prec:.2f}"
-    return None
+    return _axis_signal(record, prefer_worst=False)
 
 
 def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
