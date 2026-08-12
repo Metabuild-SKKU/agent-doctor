@@ -80,12 +80,14 @@ http://localhost:8766/answer?query=재택근무  # 검색 + LLM 답변 생성
 # 골든셋(질문·정답·정답 근거) 없이는 검색축 라벨 3종이 침묵합니다 — 골든셋이 진단의 기본 입력입니다.
 python -m agents.eval.replay <log.jsonl> --golden=<golden.xlsx|csv|jsonl|json>
 
-# 정답지가 아예 없으면 명시적으로 옵트인(얕은 진단만 가능)
+# 정답지가 아예 없으면 명시적으로 옵트인(얕은 진단만 가능 — CLI 전용 통로)
 python -m agents.eval.replay <log.jsonl> --no-golden
 
 # 브라우저로 바로 여는 진단서 HTML을 원하면
 python tools/run_replay_report.py <log.jsonl>
 ```
+
+`--no-golden`은 **CLI에만 있습니다.** 웹 UI는 골든셋을 면제하지 않습니다 — 정답이 없으면 답변이 맞았는지 대조할 수 없어 신뢰도 축을 못 재고, 그러면 종합점수 자체가 나오지 않습니다(진단서가 총점 대신 사유를 표시합니다). 원인도 7종 중 3종(환각·동문서답·컨텍스트 과다)까지만 나오는데, 그런 진단서를 상대 팀에 넘기면 오해만 만든다고 보고 화면에서는 막았습니다. 로그 줄에 `ground_truth`가 들어 있으면 골든셋 파일 없이도 통과합니다.
 
 로그 스키마(JSON Lines, 한 줄 = 요청 1건)와 골든셋 병합 규칙은 [`docs/external_rag_log_intake.md`](docs/external_rag_log_intake.md)에 정리돼 있습니다.
 

@@ -528,16 +528,11 @@
             </div>
           </div>
 
-          <!-- 골든셋 옵트아웃 — CLI 의 --no-golden 과 같은 구조다(agents/eval/replay.py).
-               기본은 막고, 무엇을 잃는지 읽힌 뒤에만 통과시킨다. 로그에 정답이
-               인라인으로 들어 있으면 골든셋이 없는 게 아니므로 이 줄 대신 확인 문구를 띄운다. -->
-          <div class="optout" id="goldenOptOut">
-            <label class="optout-check">
-              <input type="checkbox" id="goldenSkip">
-              <span>골든셋 없이 진행할게요</span>
-            </label>
-            <p class="optout-why">정답지를 아직 만들지 못한 경우에만 선택하세요 — <b>검색축 원인 3종이 침묵하고 환각 판정은 ‘예비’에 머뭅니다.</b> 원인 7종 중 3종까지만 확정됩니다.</p>
-          </div>
+          <!-- 골든셋 옵트아웃은 두지 않는다. 정답지가 없으면 신뢰도 축을 못 재고, 그러면
+               종합점수 자체가 안 나온다(report_view 가 총점을 감춘다) — 원인 7종 중 3종만
+               나오는 진단서를 "점수 없음" 상태로 받아가는 건 오해만 만든다. 정답지를 아직
+               못 만든 경우는 CLI 의 --no-golden 이 개발용 통로로 남아 있다.
+               로그에 정답이 인라인으로 들어 있으면 골든셋이 없는 게 아니므로 통과시킨다. -->
           <div class="optout optout-inline" id="goldenInlineNote" hidden>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>
             <span>실행 로그 안에 정답(<code>ground_truth</code>)이 들어 있어 골든셋 파일 없이도 전체 진단이 가능합니다.</span>
@@ -649,8 +644,9 @@
                     <div class="fl-desc">그 질문의 옳은 답. 문장이면 충분합니다.</div>
                     <div class="fl-gain"><b>켜지는 진단 ·</b> 정답 일치도와 검색 정밀도·재현율이 측정되면서 환각 판정이 <b>‘예비’에서 ‘확정’으로</b> 올라갑니다.
                       또 <b>“근거엔 충실한데 답이 틀린”</b> 경우 — 설정이 아니라 문서 자체가 낡거나 빠진 상황 — 를 따로 잡아냅니다.</div>
-                    <div class="fl-lack">골든셋 없이 진행하면 <b>검색축 원인 3종이 침묵하고 환각은 ‘예비’에 고정</b>됩니다 — 원인 7종 중 3종까지만 확정되고,
-                      임베딩·청킹 처방은 나오지 않습니다. 그래서 기본은 필수로 두고, 정답지가 없는 경우만 <b>‘골든셋 없이 진행’</b>으로 옵트인하게 합니다.</div>
+                    <div class="fl-lack">정답이 없으면 <b>검색축 원인 3종이 침묵하고 환각은 ‘예비’에 고정</b>됩니다 — 원인 7종 중 3종까지만 나오고,
+                      임베딩·청킹 처방도 없습니다. 무엇보다 <b>종합점수 자체가 나오지 않습니다</b>(답이 맞았는지 대조할 수 없어 신뢰도 축을 못 잽니다).
+                      그래서 이 화면에서는 정답을 면제하지 않습니다.</div>
                   </li>
                 </ul>
 
@@ -849,9 +845,8 @@
   var WEB_API_BASE = 'http://localhost:8767';
   var selectedFile = null;        // 문서 탭 — PDF
   var selectedLogFile = null;     // 로그 탭 — 실행 로그(필수)
-  var selectedGoldenFile = null;  // 로그 탭 — 골든셋(필수, 아래 두 조건 중 하나로만 면제)
+  var selectedGoldenFile = null;  // 로그 탭 — 골든셋(필수, 면제는 인라인 정답뿐)
   var logHasInlineGolden = false; // 로그 줄에 ground_truth/gold_contexts 가 이미 있음
-  var goldenSkip = document.getElementById('goldenSkip');  // 사용자가 명시적으로 포기함
   var btnRun = document.getElementById('btnRun');
 
   function wireDropzone(zoneId, inputId, opts) {
@@ -984,21 +979,16 @@
     reader.readAsText(file, 'utf-8');
   }
 
-  /* 골든셋은 기본 입력이다 — 없으면 검색축 라벨 3종이 침묵하고 환각이 '예비'에
-     머무는데, 그걸 모른 채 얕은 진단을 받아가는 걸 막는다(replay.py 게이트와 동일).
-     면제는 둘뿐: 로그에 정답이 인라인으로 있거나, 사용자가 명시적으로 포기했거나. */
+  /* 골든셋은 이 화면에서 면제가 없다. 정답지가 없으면 신뢰도 축을 못 재고, 그러면
+     종합점수 자체가 안 나온다 — 원인 7종 중 3종만 담긴 "점수 없는 진단서"를 받아가는 건
+     오해만 만든다. 면제는 하나뿐: 로그에 정답이 인라인으로 들어 있는 경우(그건 골든셋이
+     없는 게 아니다). 정답지를 아직 못 만든 경우는 CLI 의 --no-golden 이 개발용 통로다. */
   function goldenSatisfied() {
-    return !!selectedGoldenFile || logHasInlineGolden || goldenSkip.checked;
+    return !!selectedGoldenFile || logHasInlineGolden;
   }
 
   function refreshGoldenGate() {
-    var optout = document.getElementById('goldenOptOut');
     var inlineNote = document.getElementById('goldenInlineNote');
-    // 파일을 이미 냈거나 로그에 정답이 들어 있으면 포기 선택지를 보여줄 이유가 없다.
-    var covered = !!selectedGoldenFile || logHasInlineGolden;
-    if (covered && goldenSkip.checked) goldenSkip.checked = false;
-    optout.hidden = covered;
-    optout.classList.toggle('is-on', goldenSkip.checked);
     inlineNote.hidden = !(logHasInlineGolden && !selectedGoldenFile);
   }
 
@@ -1006,12 +996,6 @@
     var isLog = document.getElementById('tab-conn').getAttribute('aria-selected') === 'true';
     btnRun.disabled = isLog && (!selectedLogFile || !goldenSatisfied());
   }
-
-  goldenSkip.addEventListener('change', function () {
-    refreshGoldenGate();
-    updateSrcNote();
-    refreshRunButton();
-  });
 
   var dropzone = document.getElementById('dropzone');
   wireDropzone('dropzone', 'fileInput', {
@@ -1044,8 +1028,7 @@
     if (!selectedLogFile) { note.textContent = '실행 로그 미선택'; return; }
     if (selectedGoldenFile) note.innerHTML = '로그 · 골든셋 <b>준비됨</b>';
     else if (logHasInlineGolden) note.innerHTML = '로그에 정답 포함 — 골든셋 <b>불필요</b>';
-    else if (goldenSkip.checked) note.innerHTML = '골든셋 없이 진행 — <b>얕은 진단</b>';
-    else note.textContent = '골든셋 미선택';
+    else note.innerHTML = '골든셋 <b>필요</b> — 정답지가 없으면 종합점수를 낼 수 없습니다';
   }
 
   /* ECG canvas — subtle oscilloscope trace */
@@ -1173,9 +1156,9 @@
     if (isLog) {
       form.append('mode', 'replay');
       form.append('logfile', selectedLogFile);
+      // 골든셋 옵트아웃은 이 경로에 없다 — 파일이 없으면 로그에 정답이 인라인으로
+      // 들어 있는 경우뿐이고, 그건 서버가 로그를 읽어 직접 판정한다.
       if (selectedGoldenFile) form.append('goldenfile', selectedGoldenFile);
-      // 로그에 정답이 인라인으로 있으면 골든셋이 없는 게 아니므로 옵트아웃을 보내지 않는다.
-      else if (goldenSkip.checked) form.append('no_golden', '1');
     } else {
       form.append('file', selectedFile);
     }

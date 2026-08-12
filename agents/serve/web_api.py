@@ -272,9 +272,6 @@ async def create_run(
     goldenfile: UploadFile | None = File(None),
     depth: str = Form("standard"),
     mode: str = Form("pipeline"),
-    # 프론트가 이미 보내던 필드다(index.html 의 goldenSkip 체크박스). 서버가 안 읽어서
-    # 골든셋 필수 정책이 UI 에서만 걸려 있었다 - API 로는 그냥 통과했다.
-    no_golden: bool = Form(False),
 ) -> dict:
     run_id = uuid.uuid4().hex
 
@@ -316,21 +313,35 @@ async def create_run(
                     detail=f"골든셋은 {', '.join(_GOLDEN_SUFFIXES)} 형식만 지원합니다.",
                 )
             golden_dest = _save_upload_as(run_id, goldenfile, suffix=golden_suffix)
-            from agents.eval.qa_merge import load_qa_set
+            from agents.eval.qa_merge import load_qa_set, normalize_question
             qa_map, qa_errors = load_qa_set(str(golden_dest))
             oversize = golden_size_error(len(qa_map))
             if oversize:
                 raise HTTPException(status_code=400, detail=oversize)
+            # 매칭 0건이면 지금 끊는다. 병합은 질문 텍스트 매칭이라 표기가 다르면 한 건도
+            # 안 붙는데, 그대로 두면 레코드 전량 RAGAS 를 돌린 뒤에야 "정답 0건" 리포트가
+            # 나온다 - 비싸고, 사용자는 골든셋을 줬으니 대조된 줄 안다. 같은 정규화를
+            # 쓰므로 여기서 세는 값이 실제 병합 결과와 같다.
+            log_questions = {normalize_question(r.question) for r in logs}
+            if not (log_questions & set(qa_map)):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"골든셋 {len(qa_map)}건이 로그의 질문과 한 건도 매칭되지 "
+                           "않았습니다. 골든셋 질문과 로그 질문의 표기를 확인해 주세요 "
+                           "(공백·문장부호·대소문자는 자동 정규화됩니다).",
+                )
             qa = (qa_map, qa_errors)
-        elif not no_golden and not any(r.ground_truth or r.gold_contexts for r in logs):
-            # 골든셋은 CLI 와 프론트 양쪽에서 기본 필수인데(--no-golden / goldenSatisfied),
-            # API 는 goldenfile=None 을 그대로 받아 그 정책이 여기서만 열려 있었다.
+        elif not any(r.ground_truth or r.gold_contexts for r in logs):
+            # 이 화면에는 골든셋 면제가 없다. 정답지가 없으면 신뢰도 축을 못 재고 종합점수
+            # 자체가 안 나오는데(report_view 가 총점을 감춘다), 원인 7종 중 3종만 담긴
+            # "점수 없는 진단서"를 받아가는 건 오해만 만든다. 정답지를 아직 못 만든 경우는
+            # CLI 의 --no-golden 이 개발용 통로로 남아 있다.
             # 로그에 정답이 인라인으로 들어 있으면 골든셋이 없는 게 아니다(CLI 와 같은 판정).
             raise HTTPException(
                 status_code=400,
-                detail="골든셋(질문·정답)이 필요합니다. 정답 없이 진행하려면 "
-                       "no_golden=1 을 보내세요 - 검색축 소견 3종이 침묵하고 "
-                       "환각은 '예비'에 머뭅니다(7종 중 3종만 확정).",
+                detail="골든셋(질문·정답)이 필요합니다. 정답이 없으면 답변이 맞았는지 "
+                       "대조할 수 없어 종합점수를 낼 수 없고, 원인도 7종 중 3종만 "
+                       "나옵니다. 로그 줄에 ground_truth 를 넣어 주셔도 됩니다.",
             )
 
         # 리플레이는 깊이 선택이 없다(항상 LLM 심층) — depth 폼 값이 와도 무시한다.

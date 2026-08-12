@@ -26,13 +26,22 @@ from agents.serve.web_api import app
 from core import run_registry
 
 
-def _log_lines(n: int) -> str:
-    """유효한 triad 로그 n줄."""
-    return "\n".join(json.dumps({
-        "question": f"질문 {i}",
-        "contexts": [f"근거 문단 {i} — 연금저축 세액공제 한도는 연 700만원이다."],
-        "answer": f"답변 {i}",
-    }, ensure_ascii=False) for i in range(n))
+def _log_lines(n: int, *, inline_golden: bool = True) -> str:
+    """유효한 triad 로그 n줄.
+
+    기본으로 정답을 인라인에 넣는다 - 웹 경로는 골든셋 면제가 없어서(옵트아웃 없음),
+    정답 없는 로그는 업로드 게이트에서 막힌다. 게이트 자체를 보는 테스트만 False 로 준다.
+    """
+    def line(i):
+        obj = {
+            "question": f"질문 {i}",
+            "contexts": [f"근거 문단 {i} — 연금저축 세액공제 한도는 연 700만원이다."],
+            "answer": f"답변 {i}",
+        }
+        if inline_golden:
+            obj["ground_truth"] = f"정답 {i}"
+        return json.dumps(obj, ensure_ascii=False)
+    return "\n".join(line(i) for i in range(n))
 
 
 class _ReplayClient(unittest.TestCase):
@@ -45,17 +54,12 @@ class _ReplayClient(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.client = TestClient(app)
 
-    def _post(self, log_body: str, *, filename="log.jsonl", golden=None, no_golden=True):
+    def _post(self, log_body: str, *, filename="log.jsonl", golden=None):
         files = {"logfile": (filename, log_body.encode("utf-8"), "application/json")}
         if golden is not None:
             gname, gbody = golden
             files["goldenfile"] = (gname, gbody.encode("utf-8"), "application/json")
-        # 대부분의 테스트는 게이트가 아니라 그 뒤를 본다 - 골든셋 없이 진행한다고
-        # 명시해 둔다(골든셋 게이트 자체는 GoldenGateTests 가 따로 본다).
-        data = {"mode": "replay"}
-        if no_golden:
-            data["no_golden"] = "1"
-        return self.client.post("/runs", data=data, files=files)
+        return self.client.post("/runs", data={"mode": "replay"}, files=files)
 
 
 class UploadGateTests(_ReplayClient):
@@ -101,31 +105,55 @@ class UploadGateTests(_ReplayClient):
 
 
 class GoldenGateTests(_ReplayClient):
-    """골든셋 필수 정책이 UI 에서만 걸려 있었다 — API 는 goldenfile=None 을 그냥 받았다."""
+    """웹 경로에는 골든셋 면제가 없다.
+
+    정답지가 없으면 신뢰도 축을 못 재 종합점수 자체가 안 나오는데, 원인 7종 중 3종만
+    담긴 '점수 없는 진단서'를 받아가는 건 오해만 만든다. 정답지를 아직 못 만든 경우는
+    CLI 의 --no-golden 이 개발용 통로다(그쪽은 그대로 둔다)."""
 
     def test_rejects_when_no_golden_anywhere(self):
-        res = self._post(_log_lines(2), no_golden=False)
+        res = self._post(_log_lines(2, inline_golden=False))
         self.assertEqual(res.status_code, 400)
         self.assertIn("골든셋", res.json()["detail"])
 
-    def test_explicit_opt_out_passes(self):
-        """CLI 의 --no-golden 과 같은 구조 — 기본은 막고, 명시하면 통과."""
-        with patch.object(web_api, "_run_replay_background"):
-            res = self._post(_log_lines(2), no_golden=True)
-        self.assertEqual(res.status_code, 200)
+    def test_no_opt_out_parameter_is_honored(self):
+        """예전에는 no_golden=1 로 빠져나갈 수 있었다. 그 통로를 없앤 것이 이 변경이다."""
+        files = {"logfile": ("log.jsonl",
+                             _log_lines(2, inline_golden=False).encode("utf-8"),
+                             "application/json")}
+        res = self.client.post("/runs", data={"mode": "replay", "no_golden": "1"},
+                               files=files)
+        self.assertEqual(res.status_code, 400)
 
     def test_inline_ground_truth_counts_as_golden(self):
         """로그에 정답이 인라인으로 있으면 골든셋이 없는 게 아니다(CLI 와 같은 판정)."""
-        body = json.dumps({"question": "q", "contexts": ["c"], "answer": "a",
-                           "ground_truth": "정답"}, ensure_ascii=False)
         with patch.object(web_api, "_run_replay_background"):
-            res = self._post(body, no_golden=False)
+            res = self._post(_log_lines(2))
         self.assertEqual(res.status_code, 200)
 
     def test_golden_file_satisfies_the_gate(self):
         golden = json.dumps({"question": "질문 0", "ground_truth": "정답"}, ensure_ascii=False)
         with patch.object(web_api, "_run_replay_background"):
-            res = self._post(_log_lines(2), golden=("golden.jsonl", golden), no_golden=False)
+            res = self._post(_log_lines(2, inline_golden=False),
+                             golden=("golden.jsonl", golden))
+        self.assertEqual(res.status_code, 200)
+
+    def test_rejects_golden_that_matches_nothing(self):
+        """표기가 달라 한 건도 안 붙는 골든셋. 그대로 두면 전량 RAGAS 를 돌린 뒤에야
+        '정답 0건' 리포트가 나온다 - 비싸고, 사용자는 대조된 줄 안다."""
+        golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
+                            ensure_ascii=False)
+        res = self._post(_log_lines(2, inline_golden=False),
+                         golden=("golden.jsonl", golden))
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("매칭", res.json()["detail"])
+
+    def test_partial_match_is_allowed(self):
+        """부분 매칭은 막지 않는다 - 0건만 막는다. 매칭률은 진단서가 밝힌다."""
+        golden = json.dumps({"question": "질문 0", "ground_truth": "정답"}, ensure_ascii=False)
+        with patch.object(web_api, "_run_replay_background"):
+            res = self._post(_log_lines(5, inline_golden=False),
+                             golden=("golden.jsonl", golden))
         self.assertEqual(res.status_code, 200)
 
 
