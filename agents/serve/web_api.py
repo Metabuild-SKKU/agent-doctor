@@ -272,6 +272,18 @@ async def create_run(
         # 확장자와 무관하게 .jsonl 로 저장한다 - load_external_log 는 줄 단위로 읽는다.
         log_dest = _save_upload_as(run_id, logfile, suffix=".jsonl")
 
+        # 크기 정책은 CLI 와 같은 함수를 쓴다(agents/eval/replay.py). 예전에는 그 검사가
+        # CLI 의 _main 안에만 있어서 웹으로 올리면 상한 없이 통과했다 - 진단이 끝날 때까지
+        # _PIPELINE_LOCK 이 잡혀 있으므로 큰 로그 하나가 서버를 통째로 점유했다.
+        # 백그라운드 스레드를 띄우기 **전에** 400 으로 돌려준다.
+        from agents.eval.replay import golden_size_error, log_size_error
+        from agents.eval.log_intake import load_external_log
+
+        logs, _log_errors = load_external_log(str(log_dest))
+        oversize = log_size_error(len(logs))
+        if oversize:
+            raise HTTPException(status_code=400, detail=oversize)
+
         golden_dest: Path | None = None
         if goldenfile is not None and goldenfile.filename:
             golden_suffix = Path(goldenfile.filename).suffix.lower()
@@ -281,6 +293,11 @@ async def create_run(
                     detail=f"골든셋은 {', '.join(_GOLDEN_SUFFIXES)} 형식만 지원합니다.",
                 )
             golden_dest = _save_upload_as(run_id, goldenfile, suffix=golden_suffix)
+            from agents.eval.qa_merge import load_qa_set
+            qa_map, _qa_errors = load_qa_set(str(golden_dest))
+            oversize = golden_size_error(len(qa_map))
+            if oversize:
+                raise HTTPException(status_code=400, detail=oversize)
 
         # 리플레이는 깊이 선택이 없다(항상 LLM 심층) — depth 폼 값이 와도 무시한다.
         run_registry.create(

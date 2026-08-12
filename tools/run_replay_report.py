@@ -118,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     from agents.eval.replay import diagnose_external_log
     from agents.serve.report_view import build_ext_report_view
 
-    from tests.report_html import write_report_files
+    from tools.report_html import write_report_files
 
     # 파이프라인 로그와 같은 STEP 구획을 쓴다(core.llm_usage.step) — 구간별
     # LLM 호출수·토큰·비용·소요가 자동으로 붙어, 나중에 "왜 저 점수였나"를

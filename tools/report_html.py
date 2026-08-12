@@ -1,11 +1,15 @@
 """
-tests/report_html.py
+tools/report_html.py
 진단서 뷰(dict) → 단독 실행 가능한 report.html 로 심는 공용 유틸.
 
-run_corpus.py(내부 파이프라인)와 tools/run_replay_report.py(외부 로그 리플레이)가
+tests/run_corpus.py(내부 파이프라인)와 tools/run_replay_report.py(외부 로그 리플레이)가
 같은 템플릿에 각자의 뷰를 심는다. 심는 방법은 템플릿 구조에 의존하므로 —
 fetch 분기를 통째로 들어내고 데이터 블록을 렌더 스크립트 앞에 끼운다 — 두 벌로
 복사하면 템플릿이 바뀔 때 한쪽만 고쳐져 조용히 빈 리포트를 그리게 된다.
+
+tests/ 가 아니라 tools/ 에 둔다: 진입점 스크립트(tools/run_replay_report.py)가 쓰는
+모듈이라, tests/ 에 두면 배포/실행 경로가 개발용 디렉터리에 의존하게 된다. 반대 방향
+(tests 가 tools 를 쓰는 것)은 문제가 없다.
 """
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REPORT_TEMPLATE = REPO_ROOT / "web" / "prototype" / "report.html"
 
-INJECT_MARKER = "/* injected by tests/report_html.py */"
+INJECT_MARKER = "/* injected by tools/report_html.py */"
 
 
 def inject_view(view: dict[str, Any], template_html: str) -> str:
@@ -33,7 +37,7 @@ def inject_view(view: dict[str, Any], template_html: str) -> str:
     if s_at == -1 or e_at == -1:
         raise SystemExit(
             "report.html 의 데이터 로딩 분기를 찾지 못했습니다 — 템플릿이 바뀌었으면 "
-            "tests/report_html.py 의 inject_view() 도 같이 고쳐야 합니다."
+            "tools/report_html.py 의 inject_view() 도 같이 고쳐야 합니다."
         )
     html = (
         template_html[:s_at]

@@ -652,12 +652,21 @@
 
   /* ── hero summary/stats ── */
   function renderHero(score, meta, mode) {
-    var pass = !!score.pass_threshold;
-    document.getElementById('verdictBadge').className = 'verdict ' + (pass ? 'pass' : 'fail');
-    // 외부 모드에는 '처방 후'가 없다 — 처방을 적용할 수 없으므로 1회 진단 결과다.
     var external = !!(mode && mode.kind === 'external');
-    document.getElementById('verdictText').textContent =
-      pass ? (external ? '기준선 통과' : '처방 후 기준선 통과') : '기준선 미달';
+    var badge = document.getElementById('verdictBadge');
+    // 통과/미달 배지는 내부 문턱(composite >= 90)으로 그린다. 외부 진단은 검색축이
+    // gold 청크 recall 이 아니라 faithfulness/겹침 대역이라 같은 자로 잰 점수가
+    // 아니고(상단 안내도 "내부 점수와 비교 불가"라고 밝힌다), 그 문턱을 들이대면
+    // 비교하지 말라고 적어놓고 비교 결과를 배지로 붙이는 셈이 된다. 아예 숨긴다 —
+    // "없음"과 "할 수 없음"을 구분하는 이 진단서의 다른 자리와 같은 판단이다.
+    if (external || score.pass_threshold == null) {
+      badge.style.display = 'none';
+    } else {
+      var pass = !!score.pass_threshold;
+      badge.className = 'verdict ' + (pass ? 'pass' : 'fail');
+      document.getElementById('verdictText').textContent =
+        pass ? '처방 후 기준선 통과' : '기준선 미달';
+    }
     if (external) { renderHeroExternal(score, meta); return; }
     var before = score.before != null ? score.before : 0;
     var after = score.after != null ? score.after : 0;

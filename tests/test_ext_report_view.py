@@ -138,7 +138,7 @@ class ReportHtmlInjectionTests(unittest.TestCase):
     """뷰를 템플릿에 심는 공용 유틸 — run_corpus 와 run_replay_report 가 공유한다."""
 
     def test_injection_removes_fetch_branch(self):
-        from tests.report_html import REPORT_TEMPLATE, inject_view
+        from tools.report_html import REPORT_TEMPLATE, inject_view
         if not REPORT_TEMPLATE.exists():
             self.skipTest("report.html 템플릿 없음")
         html = inject_view({"score": {"after": 1}},
@@ -149,7 +149,7 @@ class ReportHtmlInjectionTests(unittest.TestCase):
 
     def test_data_block_precedes_render(self):
         """데이터가 렌더 스크립트보다 뒤에 오면 undefined 라 빈 리포트가 그려진다."""
-        from tests.report_html import REPORT_TEMPLATE, inject_view
+        from tools.report_html import REPORT_TEMPLATE, inject_view
         if not REPORT_TEMPLATE.exists():
             self.skipTest("report.html 템플릿 없음")
         html = inject_view({"score": {"after": 1}},
@@ -159,7 +159,7 @@ class ReportHtmlInjectionTests(unittest.TestCase):
 
     def test_script_close_is_escaped(self):
         """</script> 가 payload 에 들어가면 HTML 파싱이 깨진다."""
-        from tests.report_html import REPORT_TEMPLATE, inject_view
+        from tools.report_html import REPORT_TEMPLATE, inject_view
         if not REPORT_TEMPLATE.exists():
             self.skipTest("report.html 템플릿 없음")
         html = inject_view({"meta": {"corpus": "</script><b>x"}},
@@ -198,7 +198,7 @@ class ExtModeSectionTests(unittest.TestCase):
     def test_template_has_hooks_for_mode(self):
         """템플릿이 hidden_sections 를 실제로 숨길 수 있어야 한다 —
         뷰만 고치고 마크업이 없으면 빈 섹션이 그대로 남는다."""
-        from tests.report_html import REPORT_TEMPLATE
+        from tools.report_html import REPORT_TEMPLATE
         if not REPORT_TEMPLATE.exists():
             self.skipTest("report.html 템플릿 없음")
         html = REPORT_TEMPLATE.read_text(encoding="utf-8")
@@ -242,7 +242,7 @@ class ExtSectionLayoutTests(unittest.TestCase):
     def test_template_has_section_hooks(self):
         """뷰가 가리키는 섹션 이름표가 마크업에 실제로 있어야 한다 —
         없으면 제목 교체·이동이 조용히 no-op 이 된다."""
-        from tests.report_html import REPORT_TEMPLATE
+        from tools.report_html import REPORT_TEMPLATE
         if not REPORT_TEMPLATE.exists():
             self.skipTest("report.html 템플릿 없음")
         html = REPORT_TEMPLATE.read_text(encoding="utf-8")
@@ -259,7 +259,7 @@ class TransparencyRenderTests(unittest.TestCase):
     """진단 내역 — 하드코딩 목업이 실제 진단서에 나가던 것을 데이터 렌더로 바꿨다."""
 
     def test_mockup_numbers_are_gone_from_markup(self):
-        from tests.report_html import REPORT_TEMPLATE
+        from tools.report_html import REPORT_TEMPLATE
         if not REPORT_TEMPLATE.exists():
             self.skipTest("report.html 템플릿 없음")
         html = REPORT_TEMPLATE.read_text(encoding="utf-8")
@@ -346,10 +346,34 @@ class ExtMetricsSingleTests(unittest.TestCase):
 
     def test_template_handles_single_metrics(self):
         """템플릿이 single 을 모르면 m.before.toFixed 에서 죽는다."""
-        from tests.report_html import REPORT_TEMPLATE
+        from tools.report_html import REPORT_TEMPLATE
         if not REPORT_TEMPLATE.exists():
             self.skipTest("report.html 템플릿 없음")
         self.assertIn("m.single", REPORT_TEMPLATE.read_text(encoding="utf-8"))
+
+
+class ExtVerdictBadgeTests(unittest.TestCase):
+    """통과/미달 배지 — 외부 진단은 내부 문턱으로 판정하지 않는다."""
+
+    def test_pass_threshold_is_none(self):
+        """상단 안내가 '내부 점수와 비교 불가'라고 밝히면서 내부 문턱(composite >= 90)으로
+        배지를 그리면 스스로 모순이다. 판정을 아예 싣지 않는다."""
+        view = build_ext_report_view(_report(), {})
+        self.assertIsNone(view["score"]["pass_threshold"])
+
+    def test_gate_detail_is_still_carried(self):
+        """판정만 빼고 근거는 남긴다 — 진단 범위 섹션이 composite 구성을 보여준다."""
+        view = build_ext_report_view(_report(), {})
+        self.assertIn("gate", view["score"])
+        self.assertIn("composite_total", view["score"]["gate"])
+
+    def test_template_hides_badge_without_verdict(self):
+        """템플릿이 None 을 모르면 !!undefined 로 '미달' 배지를 그린다."""
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        html = REPORT_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn("score.pass_threshold == null", html)
 
 
 if __name__ == "__main__":

@@ -67,7 +67,7 @@ def label_short(label: str) -> str:
 
 # 처방 id → 사람이 읽는 조치 문구. rules.py 의 manual 처방은 action/detail 을
 # 이미 갖고 있지만 ready 처방은 기계용 patch 뿐이라, 그 빈자리를 여기서 메운다.
-# ext_ 4라벨이 참조하는 10개만 담는다 — 전체 45개를 미리 채우면 쓰이지 않는
+# ext_ 7라벨이 참조하는 16개만 담는다 — 전체 45개를 미리 채우면 쓰이지 않는
 # 문구가 rules 변경과 어긋난 채 남는다.
 _PRESCRIPTION_TEXT: dict[str, dict[str, str]] = {
     "lower_temperature": {

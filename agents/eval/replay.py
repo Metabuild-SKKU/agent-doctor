@@ -4,17 +4,18 @@ agents/eval/replay.py
 
 다른 팀이 만든 RAG의 실행 로그(triad: 질문·검색 컨텍스트·답변)를 EvalRecord로
 변환해, 우리 STEP2(자체 검색·생성)를 건너뛰고 STEP3~5(지표·점수·리포트)를
-그대로 재사용한다(docs/external_rag_log_intake.md §6-1). 산출물 수준은 (a)
-점수 리포트 - faithfulness(환각)·answer relevancy(동문서답) + overall/composite.
-원인 라벨(ext_ 세트, 문서 §5)은 후속 PR.
+그대로 재사용한다(docs/external_rag_log_intake.md §6-1). 산출물은 (a) 점수 리포트 -
+faithfulness(환각)·answer relevancy(동문서답) + overall/composite, (b) 원인 소견 -
+ext_ 라벨 7종(replay_labels.py, 문서 §5 전량), (c) 권고 카드(agents/optimize/ext_advisor.py).
 
 정직성 규약:
 - gold 청크가 없으므로 recall_at_k는 -1(미측정 센티널)로 명시한다. EvalRecord
   기본값 0.0을 그대로 두면 report._rule_means가 "진짜 0점"으로 집계한다.
 - 로그에 ground_truth(정답 텍스트)가 있으면 규칙 char F1과 RAGAS의
   correctness/context_precision/recall까지 실측된다(없으면 faithfulness/relevancy만).
-- 검색축 신뢰도 seam(retrieval_axis)은 gold_contexts 겹침(gold_context_recall,
-  결정적·LLM 불필요)을 우선으로, 없으면 faithfulness를 채운다. 둘 다 없으면
+- 검색축 신뢰도 seam(retrieval_axis)은 라벨 판정과 같은 재료·같은 규칙을 쓴다
+  (retrieval_axis_score → gold_contexts 겹침·context_precision 중 나쁜 쪽).
+  재료가 하나도 없으면 faithfulness를 채운다. 둘 다 없으면
   None으로 남기고 reliability_score(scoring.py)가 그 레코드를 평균에서
   제외한다(recall 센티널을 0점으로 클램프해 신뢰도를 오염시키던 문제 수정).
 
@@ -40,7 +41,7 @@ from agents.eval.log_intake import (
 )
 from agents.eval.metrics_basic import answer_match
 from agents.eval.metrics_ragas import _judge, evaluate_real_track
-from agents.eval.replay_labels import apply_ext_labels, gold_context_recall
+from agents.eval.replay_labels import apply_ext_labels, retrieval_axis_score
 from agents.eval.report import build_report
 from agents.eval.types import EvalRecord, llm_eval_enabled, resolve_llm_concurrency
 from core.parallel import parallel_map
@@ -121,13 +122,16 @@ def run_replay(records: list[EvalRecord], *, iteration: int = 1) -> DiagnosticRe
             rec.ragas, rec.ragas_done = score, True
 
     for rec in records:
-        # 검색축 신뢰도: gold 겹침(결정적, LLM 불필요)을 우선한다 - "질문의 근거를
-        # 가져왔나"에 faithfulness("가져온 걸 충실히 썼나")보다 직접 답한다.
-        # GT 있고 LLM 없는 실행에서도 이 경로로 실측된다.
-        overlap = gold_context_recall(rec)
+        # 검색축 신뢰도: 골드셋 계열 재료(gold 겹침 · context_precision)를 쓰고,
+        # 둘이 엇갈리면 나쁜 쪽을 믿는다 - 라벨 판정(_retrieval_axis)과 같은 규칙을
+        # 쓰는 게 핵심이다. 겹침만 보면 top_k 를 넉넉히 잡아 무관한 청크가 잔뜩 섞여도
+        # gold 하나만 걸리면 1.00 이라, 소견은 "검색 무관"인데 신뢰도는 검색축 만점이
+        # 되는 리포트가 나간다(실측 offtopic: 겹침 1.00 / precision 0.20).
+        # 재료가 하나도 없을 때만 faithfulness("가져온 걸 충실히 썼나")로 대신한다.
+        axis = retrieval_axis_score(rec)
         faith = rec.ragas.get("faithfulness")
-        if overlap is not None:
-            rec.retrieval_axis = overlap
+        if axis is not None:
+            rec.retrieval_axis = axis
         elif faith is not None:
             rec.retrieval_axis = float(faith)
     apply_ext_labels(records)
@@ -243,6 +247,34 @@ def _print_golden_summary(cap: dict) -> None:
 GOLDEN_RECOMMENDED_MAX = 150
 GOLDEN_HARD_CAP = 300
 
+# 로그 레코드 상한. CLI 는 --limit 으로 사용자가 표본을 줄일 수 있지만 웹 업로드에는
+# 그 손잡이가 없고, _PIPELINE_LOCK 을 쥔 채 전 레코드 RAGAS 를 돌기 때문에 큰 로그
+# 하나가 서버를 통째로 점유한다. 조용히 앞 N건만 자르지 않고 거부한다 - 잘라놓고
+# "진단했다"고 하면 무엇이 빠졌는지 리포트만 봐서는 알 수 없다(docs 의 파일 게이트와
+# 같은 판단: 줄 단위 결손은 관용하되 파일 단위로는 성립 여부를 먼저 말한다).
+LOG_HARD_CAP = 500
+
+
+def golden_size_error(count: int) -> Optional[str]:
+    """골든셋 크기가 정책을 넘으면 사람이 읽을 사유, 아니면 None. CLI·웹 공용.
+
+    한 곳에 두는 이유: 예전에는 이 검사가 _main 안에만 있어서 웹 업로드는 상한 없이
+    통과했다 - 같은 정책을 두 진입점이 다르게 적용하고 있었다."""
+    if count <= GOLDEN_HARD_CAP:
+        return None
+    return (f"골든셋이 {GOLDEN_HARD_CAP}건을 넘습니다(현재 {count}건). 매칭된 레코드마다 "
+            f"검색축 지표(context precision/recall/correctness)를 추가로 측정해 비용이 "
+            f"함께 늡니다. {GOLDEN_HARD_CAP}건 이하로 나눠서 실행해 주세요.")
+
+
+def log_size_error(count: int) -> Optional[str]:
+    """로그 레코드 수가 상한을 넘으면 사유, 아니면 None."""
+    if count <= LOG_HARD_CAP:
+        return None
+    return (f"로그가 {LOG_HARD_CAP}건을 넘습니다(현재 {count}건). 레코드마다 RAGAS 채점이 "
+            f"들어가고 진단이 끝날 때까지 다른 실행이 대기합니다. "
+            f"{LOG_HARD_CAP}건 이하로 나눠서 올려 주세요.")
+
 
 def _main(argv: list[str]) -> int:
     # graph.py와 같은 규약: CLI로 직접 부를 때만 .env를 읽는다(라이브러리 사용 시엔
@@ -308,11 +340,10 @@ def _main(argv: list[str]) -> int:
         preloaded_qa = (qa_map, qa_errors)
         n = len(qa_map)
         print(f"골든셋 권장 크기: 50~{GOLDEN_RECOMMENDED_MAX}건 (현재 {n}건)")
-        if n > GOLDEN_HARD_CAP:
-            print(f"골든셋이 {GOLDEN_HARD_CAP}건을 넘습니다 — 매칭된 레코드마다 검색축 지표"
-                  "(context precision/recall/correctness)를 추가로 측정해 비용이 함께 늡니다.")
-            print(f"  {GOLDEN_HARD_CAP}건 이하로 나눠서 실행해 주세요"
-                  " (--limit 은 로그 표본만 줄일 뿐 골든셋 크기는 줄이지 못합니다).")
+        oversize = golden_size_error(n)
+        if oversize:
+            print(oversize)
+            print("  (--limit 은 로그 표본만 줄일 뿐 골든셋 크기는 줄이지 못합니다.)")
             return 2
 
     report, cap, errors = diagnose_external_log(

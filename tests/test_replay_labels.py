@@ -302,5 +302,67 @@ class RetrievalAxisLabelTests(unittest.TestCase):
         self.assertNotIn("ext_retrieval_starved_abstention", labels)
 
 
+class RetrievalAxisSeamTests(unittest.TestCase):
+    """소견(라벨)과 신뢰도(연속값)가 같은 신호를 읽는지 고정한다."""
+
+    def test_score_follows_the_worse_signal(self):
+        """실측 offtopic 재현: 겹침 1.00 인데 precision 0.20.
+
+        예전에는 seam 이 겹침만 봐서 소견은 '검색 무관' 인데 검색축 신뢰도는 1.00 이었다.
+        라벨이 나쁜 쪽을 믿는다면 점수도 같은 쪽을 믿어야 한다."""
+        rec = _record(contexts=[f"머리말 {GOLD} 꼬리말"], gold_contexts=[GOLD],
+                      ragas={"context_precision": 0.2})
+        self.assertAlmostEqual(gold_context_recall(rec), 1.0, places=2)
+        self.assertAlmostEqual(replay_labels.retrieval_axis_score(rec), 0.2, places=6)
+
+    def test_score_is_none_without_golden_material(self):
+        """골든셋 없는 로그는 검색축이 통째로 침묵한다 - 0 으로 클램프하지 않는다."""
+        rec = _record(contexts=["무관한 문서"])
+        self.assertIsNone(replay_labels.retrieval_axis_score(rec))
+
+    def test_replay_seam_uses_the_same_score(self):
+        """diagnose_external_log 가 채우는 EvalRecord.retrieval_axis 와 같은 값인지."""
+        rec = _record(contexts=[f"머리말 {GOLD} 꼬리말"], gold_contexts=[GOLD],
+                      ragas={"context_precision": 0.2})
+        self.assertEqual(replay_labels.retrieval_axis_score(rec), 0.2)
+
+    def test_overlap_wins_when_nothing_failed(self):
+        """둘 다 통과면 결정적인 겹침 쪽 값을 쓴다(LLM 판정보다 재현 가능하다)."""
+        rec = _record(contexts=[f"머리말 {GOLD} 꼬리말"], gold_contexts=[GOLD],
+                      ragas={"context_precision": 0.9})
+        self.assertAlmostEqual(replay_labels.retrieval_axis_score(rec), 1.0, places=2)
+
+
+class GoldOverlapCacheTests(unittest.TestCase):
+    def test_computed_once_per_record(self):
+        """SequenceMatcher 는 컨텍스트가 크면 레코드당 1.5s 까지 간다. 호출부가 셋이라
+        캐시가 없으면 그대로 3배가 된다."""
+        rec = _record(contexts=[f"머리말 {GOLD} 꼬리말"], gold_contexts=[GOLD])
+        calls = []
+        real = replay_labels._compute_gold_context_recall
+
+        def counting(record):
+            calls.append(record)
+            return real(record)
+
+        replay_labels._compute_gold_context_recall = counting
+        try:
+            first = gold_context_recall(rec)
+            for _ in range(4):
+                gold_context_recall(rec)
+        finally:
+            replay_labels._compute_gold_context_recall = real
+
+        self.assertEqual(len(calls), 1)
+        self.assertAlmostEqual(first, 1.0, places=2)
+
+    def test_none_result_is_cached_too(self):
+        """None(재료 없음)도 유효한 결과다 - sentinel 로 구분하지 않으면 매번 다시 잰다."""
+        rec = _record(contexts=["무관한 문서"])
+        self.assertIsNone(gold_context_recall(rec))
+        self.assertIn(replay_labels._GOLD_OVERLAP_KEY, rec.signals)
+        self.assertIsNone(rec.signals[replay_labels._GOLD_OVERLAP_KEY])
+
+
 if __name__ == "__main__":
     unittest.main()

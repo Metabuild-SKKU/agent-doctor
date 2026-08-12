@@ -2,11 +2,11 @@
 agents/eval/log_intake.py
 외부 RAG 실행 로그(JSONL) 적재 + 진단 가능 수준 판정
 
-"다른 RAG 실행 로그 연결" 조사(docs/external_rag_log_intake.md)의 1차 구현물.
+"다른 RAG 실행 로그 연결"(docs/external_rag_log_intake.md)의 적재 단계.
 다른 팀이 만든 RAG가 남긴 실행 로그를 표준 스키마로 읽어들여, 그 로그만으로
-어느 깊이의 진단이 가능한지 판정한다. Eval 본체 연결(로그 리플레이 모드)은
-후속 PR - 이 모듈은 적재·검증·판정까지만 담당하고 core/agents 어디에도
-의존하지 않는다(순수 stdlib).
+어느 깊이의 진단이 가능한지 판정한다. 여기서 나온 레코드를 Eval 본체에 잇는 건
+agents/eval/replay.py 가 한다 - 이 모듈은 적재·검증·판정까지만 담당하고
+core/agents 어디에도 의존하지 않는다(순수 stdlib).
 
 스키마 v1 (한 줄 = 요청 1건, JSON Lines. 상세 규칙: docs/external_rag_log_intake.md §3):
     {"question": str,                                   # 필수

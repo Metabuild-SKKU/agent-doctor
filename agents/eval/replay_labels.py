@@ -1,6 +1,6 @@
 """
 agents/eval/replay_labels.py
-리플레이 모드 전용 ext_ 라벨 - 외부 RAG 로그에 대한 원인 '소견' (미니 세트 4개)
+리플레이 모드 전용 ext_ 라벨 - 외부 RAG 로그에 대한 원인 '소견' (7종, docs §5 전량)
 
 기존 diagnose.py 의 30개 라벨은 gold 청크·우리 인덱스 재검색을 전제해 외부
 로그에서 전부 침묵한다(docs/external_rag_log_intake.md §4). 이 모듈은 리플레이
@@ -124,11 +124,30 @@ def _coverage(gold: str, haystack: str) -> float:
 _MIN_GOLD_CHARS = 10
 
 
+# SequenceMatcher 는 gold x 컨텍스트 길이에 붙는다 - 실측 63ms(gold 300자/ctx 4k) ·
+# 436ms(600/12k) · 1.5s(1500/30k). 레코드 1건에 대해 replay 의 신뢰도 seam, 라벨 판정,
+# 기권 분기가 각각 부르므로 3배가 되고, apply_ext_labels 는 순차 루프라 컨텍스트가 큰
+# 로그에서 그대로 체감된다. EvalRecord.signals(비싼 판별 신호 memoize 자리)에 담는다 -
+# 리플레이 레코드는 로그 스냅샷이라 retrieved_context 가 실행 중에 바뀌지 않는다.
+_GOLD_OVERLAP_KEY = "ext_gold_context_recall"
+_UNSET = object()
+
+
 def gold_context_recall(record: EvalRecord) -> Optional[float]:
     """정답 근거 문단이 검색 결과에 얼마나 덮였나(0~1). 재료 없으면 None.
 
     gold_contexts 는 build_replay_records 가 probe.metadata 에 실어둔다 -
-    Probe/EvalRecord 스키마를 바꾸지 않기 위해서다(공유 계약 무변경)."""
+    Probe/EvalRecord 스키마를 바꾸지 않기 위해서다(공유 계약 무변경).
+
+    레코드당 1회만 계산한다(위 주석). None 도 유효한 결과라 sentinel 로 구분한다."""
+    cached = record.signals.get(_GOLD_OVERLAP_KEY, _UNSET)
+    if cached is not _UNSET:
+        return cached
+    record.signals[_GOLD_OVERLAP_KEY] = value = _compute_gold_context_recall(record)
+    return value
+
+
+def _compute_gold_context_recall(record: EvalRecord) -> Optional[float]:
     golds = [_squash(g) for g in record.probe.metadata.get("gold_contexts", [])]
     golds = [g for g in golds if len(g) >= _MIN_GOLD_CHARS]
     if not golds or not record.retrieved_context:
@@ -157,32 +176,62 @@ def _finding(record: EvalRecord, label: str, ftype: str, confirmed: bool, reason
     )
 
 
-def _axis_signal(record: EvalRecord, *, prefer_worst: bool) -> Optional[tuple[bool, str]]:
-    """검색이 질문의 근거를 가져왔나 — (찾았나, 근거 문구). 미측정이면 None.
+def _axis_candidates(record: EvalRecord) -> list[tuple[float, bool, str]]:
+    """검색축 재료 — (값, 통과, 근거 문구). 실측된 것만, 겹침 우선 순서로.
 
-    두 재료 중 있는 것을 쓴다. 둘 다 정답지(골드셋) 계열이라, 골드셋 없는 로그에서는
-    None 이 되어 검색축 라벨 세 개가 통째로 침묵한다(docs §5 - 이 경우를 열려면
-    reference-free context relevance judge 가 필요하다. 미구현).
+    둘 다 정답지(골드셋) 계열이라, 골드셋 없는 로그에서는 빈 리스트가 되어 검색축
+    라벨 세 개가 통째로 침묵한다(docs §5 - 이 경우를 열려면 reference-free context
+    relevance judge 가 필요하다. 미구현).
 
       1) gold_contexts 텍스트 겹침 — 결정적. 청크 ID 정합이 필요 없고 LLM 도 안 쓴다.
       2) context_precision — ground_truth 가 있을 때 RAGAS 가 실측하는 값
          (metrics_ragas 의 want_prec = ... and has_ref).
 
+    값까지 함께 돌려주는 이유: 라벨(불리언)과 신뢰도 seam(연속값)이 **같은 재료에서
+    같은 규칙으로** 갈라져 나가야 하기 때문이다. 예전에는 seam 이 겹침만 보고 라벨은
+    나쁜 쪽을 봐서, offtopic 실측(겹침 1.00 / precision 0.20)에서 소견은 "검색 무관"인데
+    신뢰도는 검색축 1.00 으로 계산됐다."""
+    out: list[tuple[float, bool, str]] = []
+    overlap = gold_context_recall(record)
+    if overlap is not None:
+        out.append((float(overlap), overlap >= GOLD_OVERLAP_FOUND,
+                    f"gold 근거 겹침 {overlap:.2f}"))
+    prec = record.ragas.get("context_precision")
+    if prec is not None:
+        out.append((float(prec), prec >= EXT_CTX_PRECISION_LOW,
+                    f"context precision {prec:.2f}"))
+    return out
+
+
+def _axis_pick(record: EvalRecord, *, prefer_worst: bool
+               ) -> Optional[tuple[float, bool, str]]:
+    """검색축 재료 중 하나를 고른다. 미측정이면 None.
+
     prefer_worst 로 두 재료가 다 있을 때의 선택 규칙이 갈린다(_retrieval_axis 와
     _evidence_reached 가 서로 다른 질문을 묻기 때문 - 각 함수 독스트링 참고)."""
-    overlap = gold_context_recall(record)
-    overlap_signal = ((overlap >= GOLD_OVERLAP_FOUND, f"gold 근거 겹침 {overlap:.2f}")
-                       if overlap is not None else None)
-    prec = record.ragas.get("context_precision")
-    prec_signal = ((prec >= EXT_CTX_PRECISION_LOW, f"context precision {prec:.2f}")
-                    if prec is not None else None)
-    if not prefer_worst:
-        return overlap_signal if overlap_signal is not None else prec_signal
-    signals = [s for s in (overlap_signal, prec_signal) if s is not None]
-    if not signals:
+    candidates = _axis_candidates(record)
+    if not candidates:
         return None
-    failed = [s for s in signals if not s[0]]
-    return failed[0] if failed else signals[0]
+    if not prefer_worst:
+        return candidates[0]        # 겹침이 있으면 겹침, 없으면 precision
+    failed = [c for c in candidates if not c[1]]
+    return failed[0] if failed else candidates[0]
+
+
+def _axis_signal(record: EvalRecord, *, prefer_worst: bool) -> Optional[tuple[bool, str]]:
+    """검색이 질문의 근거를 가져왔나 — (찾았나, 근거 문구). 미측정이면 None."""
+    pick = _axis_pick(record, prefer_worst=prefer_worst)
+    return None if pick is None else (pick[1], pick[2])
+
+
+def retrieval_axis_score(record: EvalRecord) -> Optional[float]:
+    """검색축 신뢰도로 쓸 연속값(0~1). 미측정이면 None.
+
+    _retrieval_axis(라벨)와 **같은 재료·같은 선택 규칙**을 쓴다 - 소견과 점수가 서로
+    다른 신호를 읽으면 "검색이 무관하다"고 적어놓고 검색축 만점을 주는 리포트가 나간다.
+    replay 의 seam(EvalRecord.retrieval_axis)이 이 값을 쓴다."""
+    pick = _axis_pick(record, prefer_worst=True)
+    return None if pick is None else pick[0]
 
 
 def _retrieval_axis(record: EvalRecord) -> Optional[tuple[bool, str]]:
@@ -232,15 +281,21 @@ def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
     """외부 로그 레코드 1건의 ext_ 소견. 실측된 지표만 근거로 쓴다.
 
     LLM 미실행(ragas 비어 있음)이면 빈 리스트 - "판정 불가 = 침묵"이
-    기존 폴백 철학이다. 켜지는 라벨:
+    기존 폴백 철학이다. 켜지는 라벨 7종:
+
+    답변한 경우
       ext_answer_off_topic          relevancy 낮음 (동문서답)
       ext_generation_hallucination  faithfulness 낮음 + 질문엔 답함.
                                     gold 문단 겹침이 높으면 확정(근거를 줬는데 안 씀),
                                     겹침 미측정/낮음이면 예비(검색 탓일 수 있음)
       ext_context_overflow          컨텍스트 총길이 과다 + faithfulness 낮음
       ext_grounded_but_wrong        근거엔 충실한데 정답과 불일치 (GT 필요)
+      ext_retrieval_irrelevant      검색축 낮음인데 답을 냄 (골든셋 필요)
 
-    기권한 답변은 소견을 내지 않는다(아래 주석 참고).
+    기권한 경우 - 기권 자체는 실패가 아니라서 검색축을 보고 정오를 가른다
+    (아래 주석 참고. 둘 다 골든셋 필요)
+      ext_wrongful_abstention           근거가 있었는데 기권 (겁먹음)
+      ext_retrieval_starved_abstention  근거가 없어서 기권 (검색/코퍼스 탓)
     """
     findings: list[Finding] = []
     faith = record.ragas.get("faithfulness")
@@ -325,7 +380,7 @@ def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
             f"faithfulness {faith:.2f} - 과다 컨텍스트가 근거 사용을 방해"))
 
     # rel 게이트: 동문서답(rel 낮음)이면 correctness 가 낮은 건 그 결과이지, 근거
-    # 자체(코퍼스)가 틀렸다는 뜻이 아니다 - 환각(244행)과 같은 게이트.
+    # 자체(코퍼스)가 틀렸다는 뜻이 아니다 - ext_generation_hallucination 과 같은 게이트.
     if (corr is not None and corr < EXT_CORRECTNESS_LOW
             and faith is not None and faith >= EXT_FAITH_LOW
             and (rel is None or rel >= EXT_REL_LOW)):

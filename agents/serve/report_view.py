@@ -760,7 +760,13 @@ def build_ext_report_view(
             "before": headline,
             "after": headline,
             "delta": 0.0,
-            "pass_threshold": gate_summary["pass"],
+            # 통과/미달 판정을 싣지 않는다(None). 게이트 문턱(composite >= 90)은 우리
+            # 인덱스를 우리 gold 로 잰 값에 맞춘 것인데, 외부 진단은 검색축이 gold 청크
+            # recall 이 아니라 겹침/faithfulness 대역이라 같은 자가 아니다. 아래 notice 가
+            # "내부 점수와 직접 비교할 수 없다"고 밝히면서 그 문턱으로 배지를 그리면
+            # 스스로 모순이다. 화면은 None 을 받으면 배지를 숨긴다(report.html renderHero).
+            "pass_threshold": None,
+            # gate 자체는 남긴다 — 진단 범위 섹션이 composite 구성(품질·신뢰도)을 보여준다.
             "gate": gate_summary,
             "findings_count": len(findings),
             # 외부 모드 hero 는 처방 수 대신 증거 수준을 보여준다 — 소견이 확정인지

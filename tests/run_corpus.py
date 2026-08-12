@@ -194,12 +194,12 @@ def _run_with_loop(state):
 def write_report(state, corpus_dir: Path) -> tuple[Path, dict]:
     """build_report_view 결과를 report.html 템플릿에 심어 단독 실행 가능한 진단서로 저장.
 
-    심는 방법 자체는 tests/report_html.py 가 갖는다 — 외부 로그 리플레이
+    심는 방법 자체는 tools/report_html.py 가 갖는다 — 외부 로그 리플레이
     (tools/run_replay_report.py)도 같은 템플릿에 심으므로, 두 벌로 복사하면 템플릿이
     바뀔 때 한쪽만 고쳐져 조용히 빈 리포트를 그린다."""
     from agents.serve.report_view import build_report_view
 
-    from tests.report_html import write_report_files
+    from tools.report_html import write_report_files
 
     return write_report_files(build_report_view(state), corpus_dir / "out")
 
