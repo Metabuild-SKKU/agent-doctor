@@ -227,7 +227,7 @@ def diagnose_replay_record(record: EvalRecord) -> list[Finding]:
     #   근거가 있었는데 기권  → ext_wrongful_abstention (겁먹음 - 답할 수 있었다)
     #   근거가 없어서 기권    → ext_retrieval_starved_abstention (검색/코퍼스 탓)
     #   검색축 미측정         → 소견 없음 (놓치는 것이 오진보다 낫다)
-    if is_abstention(record.generated_answer):
+    if is_abstention(record.generated_answer, extended=True):
         axis = _evidence_reached(record)
         if axis is None:
             return findings

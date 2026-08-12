@@ -189,7 +189,9 @@ class AbstentionIsNotAFailureTests(unittest.TestCase):
                      "답변드리기 어렵습니다.",
                      "관련 정보가 부족합니다.",
                      "해당 내용은 문서에서 다루지 않습니다."):
-            self.assertTrue(is_abstention(text), text)
+            # 이 확장 마커는 replay 전용(extended=True) - 메인 파이프라인 기본값은 좁은
+            # 세트를 쓴다(근거 있는 정상 부정 답변을 기권으로 오진하지 않도록).
+            self.assertTrue(is_abstention(text, extended=True), text)
 
     def test_normal_answers_are_not_abstention(self):
         """과검출 방지 — 정상 답변을 기권으로 보면 진단이 통째로 침묵한다."""
