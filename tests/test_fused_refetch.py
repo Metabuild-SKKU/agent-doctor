@@ -49,8 +49,10 @@ class RefetchTest(unittest.TestCase):
     def _run(self, first: dict, retry: dict | None = None):
         calls = []
 
-        def fake_chat(judge, prompt, max_output_tokens=None, label=""):
+        def fake_chat(judge, prompt, max_output_tokens=None, label="", **kwargs):
             # 여기 오는 호출은 전부 재요청이다 — 첫 응답(first)은 인자로 이미 넘어온다.
+            # **kwargs: _chat 이 provider 별 옵션(cache_prefix/json_schema)을 늘려도
+            # 이 스텁이 TypeError 로 죽지 않게. 재요청 여부·프롬프트만 보는 테스트다.
             calls.append(prompt)
             return {} if retry is None else retry
 
