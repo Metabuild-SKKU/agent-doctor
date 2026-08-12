@@ -98,8 +98,8 @@ _tokenizers: dict[str, Any | None] = {}
 # 이미 안내한 임베딩 경로(색인은 스레드로 병렬 호출한다). 경로별로 한 번씩 찍는다 —
 # 하나로 묶으면 먼저 찍힌 경로가 나머지를 삼켜, API 로 시작한 실행이 도중에
 # 해시 fallback 으로 열화돼도 그 안내가 나오지 않는다.
-_embed_routes_notified: set[str] = set()
-_embed_route_lock = threading.Lock()
+_routes_notified: set[str] = set()
+_route_notify_lock = threading.Lock()
 _FAILED_MODEL_RETRY_SEC = _env_float("INDEX_EMBED_MODEL_RETRY_SEC", 300.0)
 # reranker_model → 마지막 로드 실패 시각(monotonic). embedding 모델과 같은 쿨다운
 # 정책을 따른다 — 영구 캐시하면 일시적 실패 후에도 프로세스 내내 리랭킹이 죽는다.
@@ -251,8 +251,14 @@ def resolve_reranker_device(device: str | None = None) -> str:
 
     torch 를 import 할 수 있다(auto 판정). 실행 머리의 경로 요약(describe_embedding_route)
     용이고, 리랭커 로드 경로는 이 함수가 아니라 _reranker_soft_device 를 쓴다 — 그쪽은
-    torch 를 새로 import 하면 안 되는 제약이 있다(함수 주석 참고)."""
-    raw = device if device is not None else os.getenv("INDEX_RERANKER_DEVICE")
+    torch 를 새로 import 하면 안 되는 제약이 있다(함수 주석 참고).
+
+    **두 함수는 env 해석이 같아야 한다.** 특히 빈 문자열: `.env` 의
+    `# INDEX_RERANKER_DEVICE=` 주석만 풀면 값이 `""` 가 되는데, 이걸 "지정됨" 으로 읽으면
+    상속이 끊겨 여기서는 auto(=cuda), 실제 로드는 INDEX_EMBED_DEVICE(=cpu) 가 된다.
+    실행 머리에는 local:cuda 라 찍히고 실제로는 CPU 로 도는 정확한 형태의 거짓말이다.
+    그래서 빈 값은 미지정으로 접어 아래 축을 그대로 물려받는다."""
+    raw = device if device is not None else (os.getenv("INDEX_RERANKER_DEVICE") or None)
     return resolve_embedding_device(raw, purpose="리랭커")
 
 
@@ -285,7 +291,7 @@ def _reranker_soft_device(model_name: str) -> str | None:
     if raw.startswith("cuda") and torch is not None:
         try:
             if not torch.cuda.is_available():
-                _notify_embed_route_once(
+                _notify_route_once(
                     f"device_downgrade:리랭커:{raw}",
                     f"[Index] CUDA 를 사용할 수 없어 리랭커 계산을 CPU 로 내립니다"
                     f"(요청: {raw}).",
@@ -355,12 +361,22 @@ class _OpenRouterReranker:
         # rerank_with_status 의 타이머는 predict 전체를 감싸므로 429 대기가 그대로
         # 쌍당 비용(ms_per_pair)에 실린다 — 그 계측이 리랭커 존폐를 가리는 심판이라,
         # 순수 호출 시간을 따로 보고해 타이머가 이 값을 우선하게 한다.
-        self.last_predict_seconds: float | None = None
+        #
+        # **스레드별로 따로 둔다.** 이 객체는 모델 캐시(_rerankers)에 들어가 프로세스
+        # 전체가 공유하는데, Serve 의 /search 는 동기 엔드포인트라 동시 질의가 각자
+        # 스레드에서 같은 객체의 predict 를 부른다. 인스턴스 속성 하나면 A 질의의
+        # 시간이 B 질의의 리포트에 실린다(Eval 은 순차라 안 드러난다).
+        self._timing = threading.local()
+
+    @property
+    def last_predict_seconds(self) -> float | None:
+        """이 스레드의 마지막 predict 가 순수 호출에 쓴 시간. 아직 없으면 None."""
+        return getattr(self._timing, "seconds", None)
 
     def predict(self, pairs):
         pairs = [(query, text) for query, text in pairs]
         if not pairs:
-            self.last_predict_seconds = 0.0
+            self._timing.seconds = 0.0
             return []
         queries = {query for query, _ in pairs}
         if len(queries) != 1:
@@ -371,7 +387,10 @@ class _OpenRouterReranker:
             )
         # 빈 문서는 API 가 400 으로 거절한다. 자리를 비우면 인덱스가 밀려 점수가 엉뚱한
         # 청크에 붙으므로, 공백 한 칸으로 채워 자리만 지킨다(점수는 바닥에 깔린다).
-        documents = [text if text.strip() else " " for _query, text in pairs]
+        # text 가 None 인 결과도 같은 이유로 자리를 지킨다(로컬 CrossEncoder 는 여기서
+        # AttributeError 로 죽는다 — API 경로만 더 관대할 이유는 없지만, 죽는 자리가
+        # 검색 한복판이라 자리만 지키고 넘어가는 편이 낫다).
+        documents = [(text or " ") if (text or "").strip() else " " for _q, text in pairs]
 
         def _call():
             attempt_started = time.monotonic()
@@ -383,10 +402,10 @@ class _OpenRouterReranker:
                 tag="Index",
             )
             # 성공한 시도 안에서 기록해야 재시도 대기·실패한 시도의 시간이 안 섞인다.
-            self.last_predict_seconds = time.monotonic() - attempt_started
+            self._timing.seconds = time.monotonic() - attempt_started
             return result
 
-        self.last_predict_seconds = None
+        self._timing.seconds = None
         scored = run_with_retry(_call, label="리랭크", tag="Index")
 
         scores: list[float | None] = [None] * len(documents)
@@ -418,7 +437,7 @@ def _load_openrouter_reranker(model_name: str) -> tuple[Any | None, str]:
     if not api_key:
         # 쿨다운 없이 매 질의 이 경로로 들어오므로(아래 _load_reranker 주석 참고)
         # 경고는 실행당 한 번만 찍는다 — 질의마다 찍으면 정작 봐야 할 로그를 덮는다.
-        _notify_embed_route_once(
+        _notify_route_once(
             "reranker:openrouter:api_key_missing",
             "[Index] INDEX_RERANKER_PROVIDER=openrouter 인데 OPENROUTER_API_KEY 가 "
             "없습니다. 리랭크를 건너뛰고 기존 순위를 유지합니다 "
@@ -427,9 +446,9 @@ def _load_openrouter_reranker(model_name: str) -> tuple[Any | None, str]:
         return None, "api_key_missing"
 
     model = openrouter_reranker_model(model_name)
-    _notify_embed_route_once(
+    _notify_route_once(
         f"reranker:openrouter:{model}",
-        f"[Index] 리랭크를 OpenRouter({model})로 계산합니다 — 질의마다 과금됩니다"
+        f"[Index] 리랭크를 OpenRouter({model})로 계산합니다 - 질의마다 과금됩니다"
         f"(로컬 계산은 INDEX_RERANKER_PROVIDER=local).",
     )
     # 입력 길이 상한은 로컬 전용 장치다(토크나이저가 여기 없다). 상한 없이 도는 실행으로
@@ -467,7 +486,7 @@ def _load_local_reranker(model_name: str) -> tuple[Any | None, str]:
             )
             return None, "model_load_failed"
 
-    print(f"[Index] reranker 를 {device} 로 못 올렸습니다(GPU 메모리 부족) — CPU 로 내립니다.")
+    print(f"[Index] reranker 를 {device} 로 못 올렸습니다(GPU 메모리 부족) - CPU 로 내립니다.")
     _reranker_device_overrides[model_name] = "cpu"
     try:
         model = _new_cross_encoder(CrossEncoder, model_name, "cpu")
@@ -557,7 +576,7 @@ def _demote_reranker_to_cpu(model_name: str, exc: Exception) -> bool:
         return False
     _reranker_device_overrides[model_name] = "cpu"
     _reranker_routes.pop(model_name, None)
-    print("[Index] reranker 추론 중 GPU 메모리 부족 — 이 실행에서는 CPU 로 내립니다.")
+    print("[Index] reranker 추론 중 GPU 메모리 부족 - 이 실행에서는 CPU 로 내립니다.")
     return True
 
 
@@ -1410,7 +1429,7 @@ def _openrouter_embed_model(model_name: str) -> str:
     return model_name.lower()
 
 
-def _notify_embed_route_once(route: str, message: str) -> None:
+def _notify_route_once(route: str, message: str) -> None:
     """계산 경로(임베딩·리랭커·장치 폴백)를 경로마다 실행당 한 번씩 알린다.
 
     청크마다 찍으면 정작 봐야 할 로그를 덮는다(graph_index 의
@@ -1421,10 +1440,10 @@ def _notify_embed_route_once(route: str, message: str) -> None:
     플래그를 경로별로 나누는 이유: 하나로 묶으면 먼저 찍힌 경로가 나머지를 삼킨다.
     특히 API 로 시작한 실행이 도중에 해시 fallback 으로 열화됐을 때 그 안내가
     억제되는데, 그건 "어디서 계산됐는지 기록한다" 는 목적과 정확히 반대다."""
-    with _embed_route_lock:
-        if route in _embed_routes_notified:
+    with _route_notify_lock:
+        if route in _routes_notified:
             return
-        _embed_routes_notified.add(route)
+        _routes_notified.add(route)
     print(message)
 
 
@@ -1452,9 +1471,9 @@ def _embed_via_openrouter(texts: list[str], model_name: str) -> list[list[float]
     batch_size = max(1, _env_int("INDEX_EMBED_API_BATCH", 64))
     concurrency = max(1, _env_int("INDEX_EMBED_CONCURRENCY", 8))
     groups = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
-    _notify_embed_route_once(
+    _notify_route_once(
         "openrouter",
-        f"[Index] 임베딩을 OpenRouter({model})로 계산합니다 — 요청당 {batch_size}건, "
+        f"[Index] 임베딩을 OpenRouter({model})로 계산합니다 - 요청당 {batch_size}건, "
         f"동시 {concurrency}. 로컬로 돌리려면 INDEX_EMBED_PROVIDER=local."
     )
 
@@ -1525,7 +1544,7 @@ def resolve_embedding_device(
             pass
         # 리랭커는 이 함수를 질의마다 부른다(모델 캐시 조회 전에 경로를 계산한다).
         # 매번 찍으면 정작 봐야 할 로그를 덮으므로 용도·요청값 조합당 한 번만 남긴다.
-        _notify_embed_route_once(
+        _notify_route_once(
             f"device_downgrade:{purpose}:{requested}",
             f"[Index] CUDA 를 사용할 수 없어 {purpose} 계산을 CPU 로 내립니다"
             f"(요청: {requested}).",
@@ -1744,16 +1763,16 @@ def embed_batch(
 
     model, actual_device = _load_embedding_model(model_name, device)
     if model is None:
-        _notify_embed_route_once(
+        _notify_route_once(
             "hash_fallback",
             f"[Index] 임베딩 모델 '{model_name}' 을 못 써 해시 fallback 벡터로 "
-            f"색인합니다 — 의미 검색이 되지 않습니다."
+            f"색인합니다 - 의미 검색이 되지 않습니다."
         )
         return [_fallback_embedding(text, dimension) for text in texts]
-    _notify_embed_route_once(
+    _notify_route_once(
         f"local:{actual_device}",
         f"[Index] 임베딩을 로컬 {actual_device.upper()}({model_name})로 계산합니다 "
-        f"— 비용 0, 외부 호출 없음."
+        f"- 비용 0, 외부 호출 없음."
     )
 
     # 진행률 라벨. 단건(질의 임베딩)은 셀 것이 없어 안 붙인다 — 색인의 수천 건짜리

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -28,7 +29,7 @@ def _clear_reranker_state() -> None:
     qdrant_store._reranker_routes.clear()
     qdrant_store._reranker_device_overrides.clear()
     qdrant_store._reranker_applied_devices.clear()
-    qdrant_store._embed_routes_notified.clear()
+    qdrant_store._routes_notified.clear()
 
 
 class RerankerRouteResolutionTest(unittest.TestCase):
@@ -74,6 +75,37 @@ class RerankerRouteResolutionTest(unittest.TestCase):
         # 임베딩 축도 같은 어휘를 쓴다(`--embed gpu`).
         with patch.dict(os.environ, {"INDEX_EMBED_DEVICE": "gpu"}):
             self.assertNotEqual(qdrant_store.resolve_embedding_device(), "gpu")
+
+    def test_empty_device_env_still_inherits_embedding_axis(self):
+        """`.env` 의 `# INDEX_RERANKER_DEVICE=` 주석만 풀면 값이 "" 가 된다. 이걸
+        "지정됨" 으로 읽으면 상속이 끊겨, 실행 머리 요약은 auto(=cuda)인데 실제 로드는
+        INDEX_EMBED_DEVICE(=cpu) 로 도는 어긋남이 생긴다 — 정확히 거짓말하는 로그다."""
+        with patch.dict(
+            os.environ,
+            {"INDEX_RERANKER_DEVICE": "", "INDEX_EMBED_DEVICE": "cpu"},
+        ):
+            self.assertEqual(qdrant_store.resolve_reranker_device(), "cpu")
+            self.assertEqual(qdrant_store._reranker_soft_device("test/empty"), "cpu")
+
+    def test_two_device_resolvers_agree(self):
+        """머리 요약(resolve_reranker_device)과 실제 로드(_reranker_soft_device)가
+        env 를 다르게 읽으면, 요약이 실제 경로를 못 맞힌다."""
+        cases = [
+            {"INDEX_RERANKER_DEVICE": "cpu"},
+            {"INDEX_RERANKER_DEVICE": "", "INDEX_EMBED_DEVICE": "cpu"},
+            {"INDEX_EMBED_DEVICE": "cpu"},
+            {"INDEX_RERANKER_DEVICE": "gpu", "INDEX_EMBED_DEVICE": "cpu"},
+        ]
+        for env in cases:
+            with self.subTest(env=env):
+                full = {"INDEX_RERANKER_DEVICE": "", "INDEX_EMBED_DEVICE": "", **env}
+                with patch.dict(os.environ, full):
+                    for name in [k for k, v in full.items() if not v]:
+                        os.environ.pop(name, None)
+                    soft = qdrant_store._reranker_soft_device("test/agree")
+                    # soft 쪽은 torch 가 없으면 None(라이브러리 기본)으로 물러난다.
+                    if soft is not None:
+                        self.assertEqual(qdrant_store.resolve_reranker_device(), soft)
 
     def test_openrouter_model_is_not_derived_from_local_name(self):
         """로컬 이름 소문자화(임베딩 규칙)를 쓰면 404 다 — 카탈로그에 bge 계열이 없다."""
@@ -420,6 +452,34 @@ class RerankTimingTest(unittest.TestCase):
         self.assertEqual(status, "applied")
         self.assertEqual(seconds, 0.2)
 
+    def test_concurrent_predicts_do_not_mix_timings(self):
+        """이 객체는 모델 캐시에 들어가 프로세스 전체가 공유한다. Serve 의 /search 는
+        동기 엔드포인트라 동시 질의가 각자 스레드에서 같은 객체를 부르는데, 계측을
+        인스턴스 속성 하나로 두면 A 질의의 시간이 B 질의 리포트에 실린다."""
+        import threading
+
+        reranker = qdrant_store._OpenRouterReranker("test/model", "key")
+        seen: dict[str, float | None] = {}
+        started = threading.Barrier(2)
+
+        def _run(name, delay):
+            def _fake(_q, _d, _m, *, api_key, tag):
+                time.sleep(delay)
+                return [(0, 0.5)]
+
+            with patch.object(qdrant_store, "openrouter_rerank", side_effect=_fake):
+                started.wait()
+                reranker.predict([("질문", "본문")])
+                seen[name] = reranker.last_predict_seconds
+
+        slow = threading.Thread(target=_run, args=("slow", 0.25))
+        fast = threading.Thread(target=_run, args=("fast", 0.0))
+        slow.start(); fast.start()
+        slow.join(); fast.join()
+
+        self.assertGreaterEqual(seen["slow"], 0.2)
+        self.assertLess(seen["fast"], 0.2)
+
     def test_openrouter_predict_excludes_retry_wait(self):
         """429 재시도의 대기·실패한 시도 시간은 last_predict_seconds 에서 빠진다 —
         성공한 시도의 HTTP 호출 시간만 남는다."""
@@ -481,6 +541,31 @@ class RerankerPreflightCostTest(unittest.TestCase):
     def test_local_path_always_smokes(self):
         """로컬 smoke 는 이미 올린 모델을 한 번 돌리는 것이라 공짜다."""
         self.assertTrue(self._smoke(False, "local"))
+
+    def test_unprobed_capability_still_names_the_scoring_model(self):
+        """preflight 를 껐어도 어느 모델을 쓸 실행인지는 안다. 요청 이름을 그대로 두면
+        openrouter + preflight=disabled 에서 로컬 실행과 API 실행의 capability 가
+        똑같아져, Optimize 가 둘을 한 baseline 으로 묶는다."""
+        from agents.index.agent import _refresh_runtime_capabilities, IndexTools
+        from core.state import AgentDoctorState
+
+        state = AgentDoctorState()
+        tools = IndexTools(
+            get_retriever=Mock(), embed=Mock(), count_tokens=Mock(),
+            build_sparse_vector=Mock(), build_graph_artifacts=Mock(),
+        )
+
+        with patch.dict(os.environ, {"INDEX_RERANKER_PROVIDER": "openrouter"}):
+            _refresh_runtime_capabilities(
+                state, {"reranker_preflight": "disabled"}, tools
+            )
+
+        capability = state.runtime_capabilities["reranker"]
+        self.assertEqual(capability["reason"], "preflight_disabled")
+        self.assertEqual(capability["model"], "voyageai/rerank-2.5-lite")
+        # 스키마도 probe 를 돈 경우와 같아야 소비처가 키 유무로 갈리지 않는다.
+        self.assertIn("route", capability)
+        self.assertIn("max_length", capability)
 
 
 class RerankerRouteSwitchTest(unittest.TestCase):

@@ -657,7 +657,11 @@ def openrouter_rerank(
         cost_usd = None
     # 과금 단위가 모델마다 다르다(Cohere 계열 search 1건 / Voyage 계열 토큰). 단가표로
     # 추정하지 않고 응답 usage 의 실비를 그대로 기록한다 — 응답이 토큰 수를 줄 때만 싣고,
-    # cost 를 못 읽으면 None 으로 "단가 미등록"이 된다. $0 으로 뭉개져 조용히 사라지지 않는다.
+    # cost 를 못 읽으면 None 으로 넘겨 $0 으로 뭉개지 않는다.
+    #
+    # None 이 "단가 미등록"으로 집계되는 건 core/llm_usage.py 의 단가표에 리랭크 모델이
+    # 없는 동안만이다. 거기에 리랭크 모델을 넣으면 토큰 0 짜리 추정이 $0 을 내며 조용히
+    # "과금됨 $0" 으로 바뀌므로, 넣을 때 이 호출도 같이 봐야 한다.
     prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
     log_usage(model, prompt_tokens or 0, 0, tag=tag, cost_usd=cost_usd)
 
@@ -668,7 +672,21 @@ def openrouter_rerank(
         score = item.get("relevance_score")
         if score is None:
             score = item.get("score")
-        scored.append((int(item.get("index", -1)), float(score)))
+        # 점수 키 이름은 provider 마다 다를 수 있다. 둘 다 없으면 float(None) 의 맨
+        # TypeError 대신 무엇이 왔는지 보여준다 — 이 예외는 호출부에서 "리랭크 실패,
+        # 원순위 유지" 로 흡수되므로, 메시지가 유일한 단서다.
+        if score is None:
+            raise RuntimeError(
+                f"OpenRouter rerank 응답에 점수 필드가 없습니다"
+                f"(relevance_score/score, model={model}): {str(item)[:120]}"
+            )
+        try:
+            scored.append((int(item.get("index", -1)), float(score)))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"OpenRouter rerank 응답의 index/score 를 읽을 수 없습니다"
+                f"(model={model}): {str(item)[:120]}"
+            ) from exc
     return scored
 
 
