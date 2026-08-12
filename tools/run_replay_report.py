@@ -169,7 +169,11 @@ def main(argv: list[str] | None = None) -> int:
     # 단위를 붙인다. 소견 수와 카드 수가 다른 것도(라벨 단위로 묶으므로) 함께 밝힌다.
     n_find = score["findings_count"]
     n_card = len(view["recommendations"])
-    print(f"진단한 질문   : {cap['records']}건  (진단 수준: {view['meta']['tier']})")
+    # records 는 적재 건수라 --limit 이 걸리면 "진단한" 건수와 어긋난다.
+    n_diag = cap.get("diagnosed", cap["records"])
+    print(f"진단한 질문   : {n_diag}건"
+          + (f" (적재 {cap['records']}건 중 --limit 적용)" if n_diag != cap["records"] else "")
+          + f"  (진단 수준: {view['meta']['tier']})")
     print(f"발견한 문제   : {n_find}건"
           + (f" → 원인 {n_card}종으로 묶임" if n_card and n_card != n_find else ""))
     print(f"종합 점수     : {score['after']}점 / 100  "

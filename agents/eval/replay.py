@@ -200,6 +200,10 @@ def diagnose_external_log(path: str, *, limit: int | None = None,
         return None, cap, errors
     if limit is not None:
         logs = logs[:limit]
+    # tier 판정은 파일 전체(위)에서 하고, 표시용 "질문 수"는 실제로 진단한 건수를 쓴다 -
+    # cap["records"] 는 적재 건수라 --limit 이 걸리면 "10건만 진단했는데 500건"으로
+    # 읽힌다. 게이트 의미(파일 단위)를 바꾸지 않으려고 필드를 나눈다.
+    cap["diagnosed"] = len(logs)
     report = run_replay(build_replay_records(logs))
     return report, cap, errors
 
@@ -300,7 +304,12 @@ def _main(argv: list[str]) -> int:
     report, cap, errors = diagnose_external_log(
         args[0], limit=limit, allow_qa_only=allow_qa_only, golden_path=golden,
         logs=preloaded_logs, errors=preloaded_errors, qa=preloaded_qa)
-    print(f"적재: 정상 {cap['records']}건 / 오류 {len(errors)}건 / 진단 수준 {cap['tier']}")
+    # "적재" 는 파일에서 읽은 건수라 cap['records'] 가 맞다. --limit 으로 그중 일부만
+    # 진단했으면 그 사실을 함께 밝힌다(리포트의 질문 수는 diagnosed 를 쓴다).
+    diagnosed = cap.get("diagnosed")
+    limited = diagnosed is not None and diagnosed != cap["records"]
+    print(f"적재: 정상 {cap['records']}건 / 오류 {len(errors)}건 / 진단 수준 {cap['tier']}"
+          + (f" · --limit 으로 {diagnosed}건만 진단" if limited else ""))
     for err in errors[:10]:
         print(f"  ! {err}")
     if len(errors) > 10:

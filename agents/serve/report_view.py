@@ -748,7 +748,9 @@ def build_ext_report_view(
         "meta": {
             "corpus": "외부 RAG 실행 로그",
             "depth": _EXT_TIER_LABELS.get(tier, "외부 로그 진단"),
-            "question_count": capability.get("records", 0),
+            # diagnosed = 실제로 진단한 건수(--limit 반영). records 는 적재 건수라
+            # limit 이 걸리면 부풀려 보인다. 구버전 payload 는 records 로 폴백.
+            "question_count": capability.get("diagnosed", capability.get("records", 0)),
             "created_at": report.created_at.isoformat() if report else "",
             "tier": _EXT_TIER_SHORT.get(tier, tier or "-"),
         },
@@ -803,7 +805,9 @@ def build_ext_report_view(
         },
         "transparency": {
             "duration_label": "",
-            "question_count": capability.get("records", 0),
+            # diagnosed = 실제로 진단한 건수(--limit 반영). records 는 적재 건수라
+            # limit 이 걸리면 부풀려 보인다. 구버전 payload 는 records 로 폴백.
+            "question_count": capability.get("diagnosed", capability.get("records", 0)),
             "rx_count": 0, "rx_kept": 0, "rx_rolled": 0, "rx_errors": 0,
             "chunk_count": 0,
             # 외부 모드에서만 있는 사실 — 어디까지 잰 진단인지 화면이 밝힐 수 있게 남긴다.

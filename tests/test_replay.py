@@ -192,6 +192,19 @@ class TestDiagnoseExternalLog(unittest.TestCase):
         self.assertEqual(cap["records"], 5)          # 적재 판정은 전체 기준
         self.assertEqual(
             report.ragas_scores["outcome_distribution"]["ok"], 2)  # 진단은 2건
+        # 리포트의 "질문 수"가 적재 건수(5)로 부풀지 않게 진단 건수를 따로 싣는다.
+        self.assertEqual(cap["diagnosed"], 2)
+
+    @patch.dict(os.environ, NO_LLM)
+    def test_diagnosed_equals_records_without_limit(self):
+        lines = [json.dumps({"question": f"q{i}", "answer": "a",
+                             "contexts": ["c"]}) for i in range(3)]
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "log.jsonl")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            _, cap, _ = replay.diagnose_external_log(path)
+        self.assertEqual(cap["diagnosed"], cap["records"])
 
 
 if __name__ == "__main__":
