@@ -79,10 +79,19 @@ def _normalize_context(entry: Any) -> Optional[dict]:
         if not text:
             return None
         score = entry.get("score")
+        if isinstance(score, (int, float)):
+            score_val = float(score)
+        elif isinstance(score, str):
+            try:
+                score_val = float(score)
+            except ValueError:
+                score_val = None
+        else:
+            score_val = None
         return {
             "text": text,
             "chunk_id": entry.get("chunk_id"),
-            "score": float(score) if isinstance(score, (int, float)) else None,
+            "score": score_val,
             "rank": entry.get("rank"),
             "source_doc": entry.get("source_doc"),
         }
@@ -127,13 +136,14 @@ def parse_record(obj: Any) -> ExternalLogRecord:
     # KorQuAD 원본 포맷 answers=[{"text":...,"answer_start":...}] - dict 를 str() 하면
     # "{'text': ..., 'answer_start': ...}" 가 정답이 돼 채점을 조용히 오염시킨다.
     if isinstance(gt_raw, dict):
-        gt_raw = gt_raw.get("text") or gt_raw.get("answer")
+        gt_raw = gt_raw["text"] if gt_raw.get("text") is not None else gt_raw.get("answer")
 
     return ExternalLogRecord(
         question=str(obj["question"]).strip(),
         answer=str(obj["answer"]).strip(),
         contexts=contexts,
-        ground_truth=str(gt_raw or "").strip() or None,
+        # `or` 로 비면(falsy) 정답이 숫자 0("0원"류)일 때 통째로 사라진다 - None 여부로 분기.
+        ground_truth=None if gt_raw is None else (str(gt_raw).strip() or None),
         gold_contexts=gold_contexts,
         config=config if isinstance(config, dict) else {},
         feedback=str(feedback) if feedback not in (None, "") else None,

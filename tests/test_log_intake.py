@@ -50,6 +50,20 @@ class ParseRecordTest(unittest.TestCase):
         self.assertEqual(rec.feedback, "thumbs_down")
         self.assertEqual(rec.latency_ms, 1840)
 
+    def test_context_score_as_numeric_string_is_parsed(self):
+        rec = parse_record({
+            "question": "q", "answer": "a",
+            "contexts": [{"text": "청크", "score": "0.83"}],
+        })
+        self.assertAlmostEqual(rec.contexts[0]["score"], 0.83)
+
+    def test_context_score_as_invalid_string_is_none(self):
+        rec = parse_record({
+            "question": "q", "answer": "a",
+            "contexts": [{"text": "청크", "score": "n/a"}],
+        })
+        self.assertIsNone(rec.contexts[0]["score"])
+
     def test_missing_required_fields_raise(self):
         with self.assertRaises(ValueError):
             parse_record({"question": "질문만 있음", "contexts": []})
@@ -176,6 +190,16 @@ class SchemaV1FieldsTest(unittest.TestCase):
         rec = parse_record({"question": "q", "answer": "a",
                             "ground_truth": [{"text": "700만원", "answer_start": 10}]})
         self.assertEqual(rec.ground_truth, "700만원")
+
+    def test_ground_truth_numeric_zero_is_not_dropped(self):
+        """숫자 0 정답("0원"류) 은 falsy 지만 유효한 값 - `x or ""` 로 지우면 안 된다."""
+        rec = parse_record({"question": "q", "answer": "a", "ground_truth": 0})
+        self.assertEqual(rec.ground_truth, "0")
+
+    def test_ground_truth_dict_item_numeric_zero_text(self):
+        rec = parse_record({"question": "q", "answer": "a",
+                            "ground_truth": [{"text": 0, "answer_start": 10}]})
+        self.assertEqual(rec.ground_truth, "0")
 
     def test_capability_counts_exam_fields(self):
         records = [

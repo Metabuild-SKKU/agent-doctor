@@ -87,6 +87,17 @@ class TestLoadQaSet(unittest.TestCase):
         entry = qa_map[normalize_question("공제 한도는?")]
         self.assertEqual(entry["ground_truth"], "700만원")
 
+    def test_ground_truth_numeric_zero_is_not_dropped(self):
+        """숫자 0 정답("추가 부채는 0원"류) 은 falsy 지만 유효한 값 -
+        `x or ""` 로 지우면 골든셋 병합이 조용히 무시된다."""
+        with tempfile.TemporaryDirectory() as td:
+            qa = _write(td, "qa.json", json.dumps([
+                {"question": "추가 부채는", "ground_truth": 0},
+            ], ensure_ascii=False))
+            qa_map, errors = load_qa_set(qa)
+        entry = qa_map[normalize_question("추가 부채는?")]
+        self.assertEqual(entry["ground_truth"], "0")
+
     def test_xlsx_format(self):
         openpyxl = __import__("openpyxl")
         with tempfile.TemporaryDirectory() as td:

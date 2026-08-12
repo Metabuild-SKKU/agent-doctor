@@ -193,9 +193,10 @@ def run(questions: list[dict], engine, cfg: dict, defect: str) -> list[dict]:
             "latency_ms": latency,
         }
         # 골든셋 계열은 있을 때만 싣는다(시험지 필드 — 로그엔 원래 없는 값).
-        if q.get("ground_truth"):
+        # `if q.get(...)` 는 falsy(정답이 숫자 0 인 "0원"류)를 "없음"으로 오인하므로 is not None.
+        if q.get("ground_truth") is not None:
             rec["ground_truth"] = q["ground_truth"]
-        if q.get("gold_contexts"):
+        if q.get("gold_contexts") is not None:
             rec["gold_contexts"] = q["gold_contexts"]
 
         records.append(rec)

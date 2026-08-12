@@ -65,8 +65,11 @@ def _as_text(value: Any) -> Optional[str]:
     if isinstance(value, list):
         value = value[0] if value else None
     if isinstance(value, dict):
-        value = value.get("text") or value.get("answer")
-    text = str(value or "").strip()
+        value = value["text"] if value.get("text") is not None else value.get("answer")
+    # `or` 로 비면(falsy) 정답이 숫자 0("0원"류)일 때 통째로 사라진다 - None 여부로 분기.
+    if value is None:
+        return None
+    text = str(value).strip()
     return text or None
 
 
