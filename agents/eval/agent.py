@@ -53,7 +53,11 @@ from agents.eval.probe_store import (
     corpus_version,
 )
 from agents.index.qdrant_store import keyword_search
-from agents.rag.generator import generate_answer
+from agents.rag.generator import (
+    detect_text_language,
+    generate_answer,
+    resolve_answer_language,
+)
 from agents.rag.retriever import Retriever, get_retriever
 from agents.eval.metrics_ragas import (
     evaluate_real_track, evaluate_oracle_track, evaluate_abstention,
@@ -582,6 +586,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                 records, concurrency, label="  [Eval] STEP2 답변 생성")
             for rec, answer in zip(records, answers):
                 rec.generated_answer = answer
+                rec.target_answer_language = resolve_answer_language(rec.probe.question, gen_config)
+                rec.generated_answer_language = detect_text_language(answer)
 
         # ── STEP3: 지표 · 오라클 트랙 · RAGAS 진단 ─────────────
         # Phase B2(병렬): 실패 판정을 먼저 세우고, 그 판정으로 오라클 트랙(답변 생성 + RAGAS)을
@@ -624,6 +630,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
                     oracle_targets, concurrency, label="  [Eval] STEP3 오라클 답변 생성")
                 for rec, answer in zip(oracle_targets, oracle_answers):
                     rec.oracle_answer = answer
+                    rec.oracle_answer_language = detect_text_language(answer)
                     _compute_metrics(rec)       # 방금 생긴 오라클 답으로 oracle_f1 채우기
 
             # B2-4: 오라클 트랙 RAGAS — 같은 실패 집합. gold context 없는 probe 는
@@ -889,6 +896,19 @@ def _log_probe(idx: int, total: int, rec: EvalRecord) -> None:
     print(f"    Q: {_full_log_text(p.question)}")
     print(f"    A: {_full_log_text(p.ground_truth)}")
     print(f"    R: {_full_log_text(rec.generated_answer)}")
+    if rec.question_language != "unknown" or rec.generated_answer_language != "unknown":
+        language_line = (
+            f"    언어: Q={rec.question_language}, "
+            f"target={rec.target_answer_language}, R={rec.generated_answer_language}"
+        )
+        if rec.oracle_answer is not None:
+            language_line += f", oracle={rec.oracle_answer_language}"
+        if (
+            rec.target_answer_language in {"ko", "en"}
+            and rec.generated_answer_language not in {rec.target_answer_language, "unknown", "mixed"}
+        ):
+            language_line += "  language_mismatch=true"
+        print(language_line)
     print(f"    검색 [{retrieved}] / 골드 [{gold}]")
     if rec.retrieval_details:
         print(
@@ -969,6 +989,7 @@ def _prepare_record(
     Phase C 에서 순차로 이어진다 — record 는 raw I/O(검색·생성 결과)만 담는다.
     sig_cache 는 state.diagnosis_cache[probe_id] 뷰 — 진단 신호 memoize 가 여기(=state)에 누적된다."""
     rec = EvalRecord(probe=probe, signals=sig_cache)
+    rec.question_language = detect_text_language(probe.question)
 
     # STEP2: 공통 RAG retriever로 검색
     detailed_search = getattr(retriever, "search_with_details", None)

@@ -21,7 +21,9 @@ from agents.rag.retriever import (
 from agents.rag.generator import (
     answer_question,
     answer_text,
+    detect_text_language,
     generate_answer,
+    resolve_answer_language,
     _build_prompt,
     _generation_temperature,
 )
@@ -399,6 +401,75 @@ class RetrieverTests(unittest.TestCase):
 
 
 class RagGeneratorTests(unittest.TestCase):
+    def test_detect_text_language_classifies_korean_english_and_mixed(self):
+        self.assertEqual(detect_text_language("재택근무는 며칠인가요?"), "ko")
+        self.assertEqual(detect_text_language("How many remote work days are allowed?"), "en")
+        self.assertEqual(detect_text_language("API policy 정책 변경"), "mixed")
+        self.assertEqual(detect_text_language("12345"), "unknown")
+
+    def test_build_prompt_answers_english_question_in_english_by_default(self):
+        system, _ = _build_prompt(
+            "How many remote work days are allowed?",
+            ["Remote work is allowed two days per week."],
+            max_context_chars=500,
+        )
+
+        self.assertIn("Answer in English", system)
+        self.assertIn("I don't know from the provided information", system)
+        self.assertNotIn("한국어로 답하라", system)
+
+    def test_build_prompt_answers_korean_question_in_korean_by_default(self):
+        system, _ = _build_prompt(
+            "재택근무는 며칠까지 가능한가요?",
+            ["재택근무는 주 2일까지 가능합니다."],
+            max_context_chars=500,
+        )
+
+        self.assertIn("한국어로 답하라", system)
+
+    def test_answer_language_can_be_overridden_by_config(self):
+        system, _ = _build_prompt(
+            "How many remote work days are allowed?",
+            ["Remote work is allowed two days per week."],
+            max_context_chars=500,
+            config={"answer_language": "ko"},
+        )
+
+        self.assertIn("한국어로 답하라", system)
+        self.assertEqual(
+            resolve_answer_language(
+                "How many remote work days are allowed?",
+                {"answer_language": "ko"},
+            ),
+            "ko",
+        )
+
+    def test_answer_question_reports_language_metadata(self):
+        retriever = build_retriever(
+            [
+                Chunk(
+                    chunk_id="remote",
+                    doc_id="policy",
+                    text="Remote work is allowed two days per week.",
+                    metadata={"title": "Remote Policy"},
+                )
+            ]
+        )
+
+        with patch(
+            "agents.rag.generator._llm_generate",
+            return_value="Remote work is allowed two days per week. [1]",
+        ):
+            response = answer_question(
+                "How many remote work days are allowed?",
+                retriever,
+                top_k=1,
+            )
+
+        self.assertEqual(response["question_language"], "en")
+        self.assertEqual(response["target_answer_language"], "en")
+        self.assertEqual(response["actual_answer_language"], "en")
+
     def test_generate_answer_falls_back_to_top_context(self):
         with patch("agents.rag.generator._llm_generate", return_value=None):
             answer = generate_answer("재택근무 며칠?", ["재택근무는 주 2일까지 가능합니다."])

@@ -282,6 +282,10 @@ class EvalRecord:
     generated_answer: str = ""
     oracle_answer: Optional[str] = None                          # gold context로 생성한 답
     oracle_context: list[str] = field(default_factory=list)      # gold context 텍스트 (oracle 트랙 RAGAS용)
+    question_language: str = "unknown"                           # probe 질문 언어
+    target_answer_language: str = "unknown"                      # RAG 생성 프롬프트가 요구한 답변 언어
+    generated_answer_language: str = "unknown"                   # 실제 트랙 답변 언어
+    oracle_answer_language: str = "unknown"                      # oracle 트랙 답변 언어
 
     # STEP3-1: 규칙 지표 (diagnose 가 진입 시 계산·저장)
     recall_at_k: float = 0.0

@@ -31,12 +31,109 @@ class GeneratedAnswer:
     citations: list[dict]
     generation_mode: str
     retrieval: dict
+    question_language: str
+    target_answer_language: str
+    actual_answer_language: str
 
 
 @dataclass(frozen=True)
 class PromptContext:
     citation_index: int
     text: str
+
+
+_HANGUL_RE = re.compile(r"[가-힣]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+_ANSWER_LANGUAGE_AUTO = {"", "auto", "same", "same_as_question", "question", "question_language"}
+_ANSWER_LANGUAGE_ALIASES = {
+    "ko": "ko",
+    "kor": "ko",
+    "korean": "ko",
+    "한국어": "ko",
+    "kr": "ko",
+    "en": "en",
+    "eng": "en",
+    "english": "en",
+    "영어": "en",
+    "mixed": "mixed",
+    "bilingual": "mixed",
+    "multi": "mixed",
+}
+
+
+# 질문/답변의 주된 문자권을 가볍게 판별한다.
+def detect_text_language(text: str) -> str:
+    """Return ``ko``, ``en``, ``mixed`` or ``unknown`` from visible script counts."""
+    hangul = len(_HANGUL_RE.findall(text or ""))
+    latin = len(_LATIN_RE.findall(text or ""))
+    total = hangul + latin
+    if total == 0:
+        return "unknown"
+    if hangul and latin:
+        hangul_ratio = hangul / total
+        latin_ratio = latin / total
+        if hangul_ratio >= 0.3 and latin_ratio >= 0.3:
+            return "mixed"
+    return "ko" if hangul >= latin else "en"
+
+
+# RAG 답변 언어를 정한다. 기본은 질문 언어, 필요하면 config/env 로 고정한다.
+def resolve_answer_language(question: str, config: dict | None = None) -> str:
+    """Resolve the target answer language for RAG generation."""
+    raw = _answer_language_config(config)
+    normalized = str(raw or "").strip().lower()
+    if normalized in _ANSWER_LANGUAGE_AUTO:
+        detected = detect_text_language(question)
+        return detected if detected != "unknown" else "ko"
+    detected = detect_text_language(question)
+    return _ANSWER_LANGUAGE_ALIASES.get(normalized, detected if detected != "unknown" else "ko")
+
+
+# answer_language 는 top-level, generation_config, env 어느 쪽에 둬도 같은 의미로 본다.
+def _answer_language_config(config: dict | None) -> Any:
+    names = (
+        "answer_language",
+        "rag_answer_language",
+        "response_language",
+        "generation_answer_language",
+        "generation_config.answer_language",
+        "generation_config.response_language",
+    )
+    value = _config_value(config, *names)
+    if value is not None:
+        return value
+    generation_config = config.get("generation_config") if isinstance(config, dict) else None
+    if isinstance(generation_config, dict):
+        for name in ("answer_language", "rag_answer_language", "response_language"):
+            nested = generation_config.get(name)
+            if nested is not None and nested != "":
+                return nested
+    return os.getenv("RAG_ANSWER_LANGUAGE")
+
+
+# system prompt 에 들어갈 언어 지시문만 따로 둬서 한국어 고정을 피한다.
+def _answer_language_instruction(language: str) -> str:
+    if language == "en":
+        return (
+            "Answer in English. Preserve proper nouns, numbers, dates, equations, "
+            "citations, and source terms exactly as written."
+        )
+    if language == "mixed":
+        return (
+            "질문의 주된 언어를 따라 답하라. 원문에 있는 영어/한국어 전문 용어, "
+            "고유명사, 숫자, 날짜, 수식, 인용 표기는 그대로 유지하라."
+        )
+    return "한국어로 답하라. 단, 고유명사·숫자·날짜·수식·인용 표기는 원문 그대로 유지하라."
+
+
+# 언어별 기권 문구. 영어 질문을 평가할 때 한국어 기권 답변이 lexical 점수를 흔들지 않게 한다.
+def _abstention_answer(language: str) -> str:
+    if language == "en":
+        return "'I don't know from the provided information'"
+    if language == "mixed":
+        return "'제공된 정보로는 알 수 없습니다' 또는 'I don't know from the provided information'"
+    return "'제공된 정보로는 알 수 없습니다'"
+
 
 # 1) LLM 답변 2) 관련 있는 context 그대로 반환
 # context 없으면 빈 문자열 반환
@@ -112,6 +209,9 @@ def answer_question(
         citations=_citations(retrieval["results"]),
         generation_mode=generation_mode,
         retrieval=retrieval,
+        question_language=detect_text_language(question),
+        target_answer_language=resolve_answer_language(question, config),
+        actual_answer_language=detect_text_language(answer),
     )
     return asdict(result)
 
@@ -601,16 +701,18 @@ def _build_prompt(
 
     # generation_config 플래그로 시스템 프롬프트를 조립한다. rules.py 처방은 플래그만
     # 넘기고 실제 문구는 여기서 소유한다(use_hybrid/use_reranker와 같은 패턴).
-    # 기본값(grounding_strict·require_citation=True, 나머지 False)은 과거 하드코딩
-    # 프롬프트를 그대로 재현하므로, Optimize가 손대기 전엔 동작이 바뀌지 않는다.
+    # 기본값은 grounding/citation 정책을 유지하되 답변 언어만 질문에 맞춘다.
+    answer_language = resolve_answer_language(question, config)
+    language_instruction = _answer_language_instruction(answer_language)
+    abstention_answer = _abstention_answer(answer_language)
     clauses = ["너는 사내 문서 QA 어시스턴트다."]
     if _gen_flag(config, "grounding_strict", True):
         clauses.append(
-            "반드시 제공된 컨텍스트만 근거로 한국어로 답하라. "
-            "컨텍스트에 근거가 없으면 '제공된 정보로는 알 수 없습니다'라고 답하라."
+            f"반드시 제공된 컨텍스트만 근거로 답하라. {language_instruction} "
+            f"컨텍스트에 근거가 없으면 {abstention_answer}라고 답하라."
         )
     else:
-        clauses.append("한국어로 답하라.")
+        clauses.append(language_instruction)
     # 기권 성향은 한 축의 양방향이라 둘을 동시에 싣지 않는다.
     #
     # 어느 쪽이 이길지는 여기서 정하지 않는다 — 처방 적용 시점에 config_mapper 의
@@ -621,12 +723,12 @@ def _build_prompt(
     if _gen_flag(config, "abstention_relaxed", False):
         clauses.append(
             "컨텍스트에 질문과 관련된 근거가 조금이라도 있으면 그것을 바탕으로 최대한 답하라. "
-            "명백히 근거가 전혀 없을 때에만 '제공된 정보로는 알 수 없습니다'라고 답하라."
+            f"명백히 근거가 전혀 없을 때에만 {abstention_answer}라고 답하라."
         )
     elif _gen_flag(config, "abstention_strict", False):
         clauses.append(
             "조금이라도 확신이 없으면 지어내지 말고 반드시 "
-            "'제공된 정보로는 알 수 없습니다'라고 답하라."
+            f"{abstention_answer}라고 답하라."
         )
     if _gen_flag(config, "completeness_mode", False):
         clauses.append("질문에 여러 항목이나 하위 질문이 있으면 빠짐없이 모두 답하라.")
