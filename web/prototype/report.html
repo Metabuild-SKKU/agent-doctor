@@ -563,12 +563,16 @@
   function transCells(t) {
     var ext = t.external;
     if (ext) {
-      return [
+      var cells = [
         [t.question_count || 0, '로그 레코드'],
         [ext.tier || '-', '진단 수준'],
         [ext.with_ground_truth || 0, '정답 텍스트'],
         [ext.with_gold_contexts || 0, '정답 근거 문단'],
       ];
+      // 골든셋 병합은 퍼지 질문 매칭이라 부분 매칭이 흔하다. "골든셋 줬으니 전부
+      // 대조됐다"고 읽히면 미매칭 레코드의 검색 실패가 점수에서 빠진 걸 못 본다.
+      if (ext.golden) cells.push([ext.golden.matched + '/' + ext.golden.entries, '골든셋 매칭']);
+      return cells;
     }
     var rxLabel = '처방 시도';
     if (t.rx_count) {
@@ -690,15 +694,25 @@
   function renderHeroExternal(score, meta, mode) {
     var n = score.findings_count || 0;
     var label = (mode && mode.score_label) || '로그 진단 점수';
-    document.getElementById('heroHeadline').innerHTML =
-      '실행 로그 ' + (meta.question_count || 0) + '건에서 문제 ' + n + '건을 찾았습니다. ' +
-      esc(label) + ' <span style="color:var(--good)">' +
-      (score.after != null ? score.after : 0) + '</span>/100.';
+    var head = '실행 로그 ' + (meta.question_count || 0) + '건에서 문제 ' + n + '건을 찾았습니다. ';
+    if (score.after == null) {
+      // 총점을 못 낸 실행 — 남은 성분을 그 자리에 대신 적는다. 숫자를 통째로 비우면
+      // "아무것도 못 쟀다"로 읽히는데, 실제로는 한 축을 못 잰 것이고 나머지는 유효하다.
+      var parts = (score.components || []).filter(function (c) { return c.score != null; })
+        .map(function (c) { return esc(c.label || c.key) + ' ' + c.score; });
+      head += parts.length
+        ? ('<span style="color:var(--muted)">' + parts.join(' · ') + '</span> — 종합점수는 내지 않습니다.')
+        : '<span style="color:var(--muted)">종합점수는 내지 않습니다.</span>';
+    } else {
+      head += esc(label) + ' <span style="color:var(--good)">' + score.after + '</span>/100.';
+    }
+    document.getElementById('heroHeadline').innerHTML = head;
     // 점수가 있으면 사람은 비교하려 든다. 어느 축이 다른지를 점수 바로 옆에 붙인다 —
     // 상단 안내에만 적어두면 숫자를 먼저 보고 안내는 안 읽는다.
     document.getElementById('heroSummary').textContent =
-      '외부 RAG 실행 로그를 진단한 결과입니다. 처방은 상대 팀이 직접 적용합니다.'
-      + ((mode && mode.score_note) ? ' ' + mode.score_note : '');
+      (score.score_unavailable_reason ? score.score_unavailable_reason + ' '
+        : '외부 RAG 실행 로그를 진단한 결과입니다. 처방은 상대 팀이 직접 적용합니다. ')
+      + ((mode && mode.score_note && score.after != null) ? mode.score_note : '');
     var cells = [['', n, '발견된 문제']];
     if (score.confirmed != null) cells.push(['up', score.confirmed, '확정 소견']);
     if (score.tentative != null) cells.push(['warn', score.tentative, '예비 소견']);
@@ -969,20 +983,24 @@
     // "종합 점수"라고 쓰면 내부 실행의 종합점수와 같은 값으로 읽힌다 — 검색축이
     // 다른 재료로 계산되므로 나란히 놓고 비교할 수 있는 값이 아니다.
     var label = (mode && mode.score_label) || '종합 점수';
-    document.getElementById('scoreCap').textContent = label + ' · 100점';
+    // 총점을 못 낸 실행(성분 미측정)은 0 이 아니라 '-' 를 그린다. 0 은 "재봤더니
+    // 바닥"이라는 뜻인데, 여기서는 아예 재지 못한 것이다. 게이지 호(arc)도 비운다.
+    var noScore = score.after == null;
+    document.getElementById('scoreCap').textContent =
+      noScore ? (label + ' · 측정 불가') : (label + ' · 100점');
     // 처방 전후 증감은 외부 모드에 없다. 0 을 그대로 그리면 '+0 = 처방했는데 변화
     // 없음'으로 읽힌다 — 처방을 적용할 수 없어 애초에 비교 대상이 없는 것이다.
     var deltaEl = document.querySelector('.gauge-center .delta');
     var external = !!(mode && mode.kind === 'external');
-    if (external) deltaEl.style.display = 'none';
+    if (external || noScore) deltaEl.style.display = 'none';
     requestAnimationFrame(function () {
       setTimeout(function () {
         var arc = document.getElementById('gaugeArc');
         var ARC = 452.4;            // length of the 270° usable sweep
-        var frac = (score.after || 0) / 100;
+        var frac = noScore ? 0 : (score.after || 0) / 100;
         arc.setAttribute('stroke-dashoffset', ARC * (1 - frac));
-        document.getElementById('scoreNum').textContent = Math.round(score.after || 0);
-        if (external) return;
+        document.getElementById('scoreNum').textContent = noScore ? '–' : Math.round(score.after || 0);
+        if (external || noScore) return;
         var delta = Math.round((score.after || 0) - (score.before || 0));
         deltaEl.lastChild.textContent = ' ' + (delta >= 0 ? '+' : '') + delta;
       }, 120);

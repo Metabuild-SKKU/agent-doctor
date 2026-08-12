@@ -374,6 +374,72 @@ class ExtMetricsSingleTests(unittest.TestCase):
         self.assertIn("m.single", REPORT_TEMPLATE.read_text(encoding="utf-8"))
 
 
+class ExtScoreWithheldTests(unittest.TestCase):
+    """성분 하나가 미측정이면 총점을 내지 않는다.
+
+    composite 는 측정된 성분만으로 결합하므로 신뢰도가 빠지면 '품질 점수'가 '종합점수'
+    이름을 달고 나간다 — 검색이 통째로 실패한 로그(gold 겹침 0.00)가 90점을 받고
+    게이트까지 통과했다. 골든셋 필수화로는 안 막힌다: ground_truth 없이 gold_contexts
+    만 준 로그가 같은 구멍에 빠지고, 퍼지 질문 매칭이라 부분 매칭도 흔하다."""
+
+    def _view(self, reliability, golden=None):
+        report = _report()
+        report.composite_score = {
+            "total": 90,
+            "components": [{"key": "quality", "label": "품질", "score": 90},
+                           {"key": "reliability", "label": "신뢰도", "score": reliability}],
+        }
+        return build_ext_report_view(report, {"tier": "triad", "golden": golden})
+
+    def test_total_is_withheld_when_a_component_is_unmeasured(self):
+        view = self._view(None)
+        self.assertIsNone(view["score"]["after"])
+        self.assertIsNone(view["score"]["before"])
+        self.assertEqual(view["score"]["unmeasured"], ["신뢰도"])
+
+    def test_measured_components_survive(self):
+        """총점만 뺀다 — 잰 축까지 감추면 '아무것도 못 쟀다'로 읽힌다."""
+        scores = {c["key"]: c["score"] for c in self._view(None)["score"]["components"]}
+        self.assertEqual(scores["quality"], 90)
+        self.assertIsNone(scores["reliability"])
+
+    def test_total_survives_when_everything_is_measured(self):
+        self.assertEqual(self._view(0.8)["score"]["after"], 90)
+        self.assertEqual(self._view(0.8)["score"]["unmeasured"], [])
+
+    def test_reason_names_the_missing_material(self):
+        """'측정 불가'만 적으면 도구가 고장 난 줄 안다. 무엇이 없어서인지까지 말한다."""
+        self.assertIn("골든셋(정답)이 없어", self._view(None)["score"]["score_unavailable_reason"])
+
+    def test_zero_match_reason_beats_no_ground_truth_reason(self):
+        """매칭 0건이면 filled_ground_truth 도 0이라, 순서를 안 지키면 '골든셋에 정답이
+        없다'는 엉뚱한 사유가 나간다 — 실제로는 정답이 있는데 질문이 안 붙은 것이고
+        고치는 방법이 완전히 다르다."""
+        reason = self._view(None, golden={"qa_entries": 5, "matched": 0,
+                                          "filled_ground_truth": 0})["score"]["score_unavailable_reason"]
+        self.assertIn("한 건도 매칭되지", reason)
+
+    def test_gold_contexts_only_reason(self):
+        reason = self._view(None, golden={"qa_entries": 3, "matched": 3,
+                                          "filled_ground_truth": 0})["score"]["score_unavailable_reason"]
+        self.assertIn("gold_contexts", reason)
+
+    def test_transparency_shows_golden_match_rate(self):
+        """병합은 퍼지 질문 매칭이라 부분 매칭이 흔한데 CLI 만 그 사실을 찍고 있었다."""
+        g = self._view(0.8, golden={"qa_entries": 5, "matched": 2,
+                                    "filled_ground_truth": 2})["transparency"]["external"]["golden"]
+        self.assertEqual((g["entries"], g["matched"]), (5, 2))
+        self.assertIn("2건 매칭", g["text"])
+
+    def test_template_handles_missing_total(self):
+        """템플릿이 None 을 모르면 (score.after || 0) 으로 0점을 그린다 — '재봤더니
+        바닥'과 '재지 못함'은 다르다."""
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        self.assertIn("score.after == null", REPORT_TEMPLATE.read_text(encoding="utf-8"))
+
+
 class ExtVerdictBadgeTests(unittest.TestCase):
     """통과/미달 배지 — 외부 진단은 내부 문턱으로 판정하지 않는다."""
 

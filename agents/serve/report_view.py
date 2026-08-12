@@ -198,6 +198,68 @@ def _headline_score(report) -> float:
     return _to_100(overall)
 
 
+def _unmeasured_components(report) -> list[dict[str, Any]]:
+    """composite 성분 중 재료가 없어 못 잰 것들. 전부 측정됐으면 빈 리스트.
+
+    composite 는 측정된 성분만으로 결합하므로(scoring.combine), 성분이 빠져도 total 은
+    나온다. 그 값은 남은 축의 점수이지 종합점수가 아니다 - 외부 진단서가 그걸 종합점수
+    이름으로 내보내면 검색을 통째로 실패한 로그가 높은 점수를 받는다."""
+    composite = getattr(report, "composite_score", None) if report else None
+    if not isinstance(composite, dict):
+        return []
+    return [c for c in composite.get("components", []) if c.get("score") is None]
+
+
+def _score_unavailable_reason(unmeasured: list[dict[str, Any]], capability: dict) -> str:
+    """총점을 못 낸 사유 — 무엇이 없어서 무엇을 못 쟀는지까지 말한다.
+
+    "측정 불가" 만 적으면 상대 팀은 도구가 고장 난 줄 안다. 신뢰도 축이 빠지는 이유는
+    거의 항상 정답(ground_truth)이 없어서이고, 그건 상대가 채워 줄 수 있는 것이다."""
+    if not unmeasured:
+        return ""
+    names = " · ".join(str(c.get("label") or c.get("key")) for c in unmeasured)
+    golden = capability.get("golden")
+    # 순서가 중요하다 - 매칭이 0건이면 filled_ground_truth 도 0 이라, 매칭을 먼저
+    # 보지 않으면 "골든셋에 정답이 없다"는 엉뚱한 사유가 나간다(실제로는 정답이 있는데
+    # 질문 표기가 달라 안 붙은 것이고, 고치는 방법이 완전히 다르다).
+    if golden is None:
+        how = "골든셋(정답)이 없어 답변이 맞았는지 대조할 수 없습니다"
+    elif golden.get("qa_entries") and not golden.get("matched"):
+        how = ("골든셋이 로그의 질문과 한 건도 매칭되지 않았습니다"
+               " - 골든셋 질문과 로그 질문의 표기를 확인하세요")
+    elif not golden.get("filled_ground_truth"):
+        how = ("골든셋에 정답(ground_truth)이 없어 답변이 맞았는지 대조할 수 없습니다"
+               " - 정답 근거(gold_contexts)만으로는 검색축까지만 잽니다")
+    else:
+        how = "정답 대조가 가능한 레코드가 없습니다"
+    return (f"{names} 축을 재지 못해 종합점수를 내지 않습니다 - {how}. "
+            f"아래 소견과 권고는 잰 지표만으로 낸 것이라 그대로 유효합니다.")
+
+
+def _golden_summary(golden: Optional[dict]) -> Optional[dict[str, Any]]:
+    """골든셋 병합 결과를 화면용 한 줄로. 골든셋을 안 준 실행이면 None.
+
+    replay._print_golden_summary 가 CLI 에 찍는 것과 같은 사실을 진단서에도 남긴다."""
+    if not isinstance(golden, dict):
+        return None
+    entries = int(golden.get("qa_entries") or 0)
+    matched = int(golden.get("matched") or 0)
+    if not entries:
+        text = "골든셋 0건"
+    elif not matched:
+        text = f"{entries}건 중 0건 매칭 - 질문 표기가 달라 한 건도 붙지 않았습니다"
+    elif matched < entries:
+        text = f"{entries}건 중 {matched}건 매칭 (나머지는 로그에서 해당 질문을 못 찾음)"
+    else:
+        text = f"{entries}건 전부 매칭"
+    return {
+        "entries": entries,
+        "matched": matched,
+        "with_ground_truth": int(golden.get("filled_ground_truth") or 0),
+        "text": text,
+    }
+
+
 def _gate_summary(report) -> dict[str, Any]:
     """Optimize gate 판정과 근거. 판정 규칙은 gate.explain_report 가 단독으로 갖고,
     여기서는 표시용 반올림과 Eval 원시 판정(비교용)만 얹는다."""
@@ -743,6 +805,20 @@ def build_ext_report_view(
     headline = _headline_score(report)
     gate_summary = _gate_summary(report)
     tier = capability.get("tier", "")
+    unmeasured = _unmeasured_components(report)
+    if unmeasured:  # noqa: SIM102 — 아래 주석이 이 분기 전체의 근거다
+        # 성분 하나가 미측정이면 총점을 내지 않는다. composite 는 측정된 성분만으로
+        # 결합하므로, 신뢰도가 빠지면 '품질 점수'가 '종합점수' 이름을 달고 나간다 -
+        # 검색이 통째로 실패한 로그(gold 겹침 0.00)가 90점을 받고 게이트까지 통과했다.
+        # 골든셋을 필수로 만들어도 막히지 않는다: ground_truth 없이 gold_contexts 만 준
+        # 로그(문서가 '권장'으로 안내하는 형태)가 같은 구멍에 빠지고, 퍼지 질문 매칭이라
+        # 부분 매칭도 흔하다.
+        #
+        # scoring.py 는 건드리지 않는다. ground_truth 가 없으면 답변축(answer_score)이
+        # 진짜로 측정 불가라(f1·correctness 둘 다 재료가 없다) 신뢰도에 어떤 수를 넣어도
+        # 절반은 지어낸 값이 된다. 잴 수 없는 것을 채우는 대신 못 잰다고 말한다 -
+        # 이 진단서의 다른 자리와 같은 규약이다.
+        headline = None
 
     return {
         "meta": {
@@ -768,6 +844,13 @@ def build_ext_report_view(
             "pass_threshold": None,
             # gate 자체는 남긴다 — 진단 범위 섹션이 composite 구성(품질·신뢰도)을 보여준다.
             "gate": gate_summary,
+            # 총점을 못 낸 사유. 화면은 total 자리를 비우고 이 문구와 성분을 대신 그린다.
+            # 숫자가 없는 것보다 "왜 없는지"가 없는 게 더 나쁘다 — 값이 비면 사람은
+            # 계산이 깨진 줄 안다.
+            "unmeasured": [c.get("label") or c.get("key") for c in unmeasured],
+            "score_unavailable_reason": _score_unavailable_reason(unmeasured, capability),
+            "components": (report.composite_score or {}).get("components", [])
+                          if report and isinstance(report.composite_score, dict) else [],
             "findings_count": len(findings),
             # 외부 모드 hero 는 처방 수 대신 증거 수준을 보여준다 — 소견이 확정인지
             # 예비인지가 상대에게 "얼마나 믿고 고칠지"를 알려주는 값이다.
@@ -833,6 +916,10 @@ def build_ext_report_view(
                 "tier": _EXT_TIER_SHORT.get(tier, tier or "-"),
                 "with_ground_truth": capability.get("with_ground_truth", 0),
                 "with_gold_contexts": capability.get("with_gold_contexts", 0),
+                # 골든셋 매칭률. 병합은 퍼지 질문 매칭이라 부분 매칭이 흔한데, CLI 만
+                # 그 사실을 찍고 진단서에는 안 나왔다 - "골든셋 줬으니 전부 대조됐다"고
+                # 읽히면 미매칭 레코드의 검색 실패가 점수에서 빠진 걸 눈치챌 수 없다.
+                "golden": _golden_summary(capability.get("golden")),
                 "notes": capability.get("notes", []),
             },
         },

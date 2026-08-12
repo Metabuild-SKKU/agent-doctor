@@ -45,12 +45,17 @@ class _ReplayClient(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.client = TestClient(app)
 
-    def _post(self, log_body: str, *, filename="log.jsonl", golden=None):
+    def _post(self, log_body: str, *, filename="log.jsonl", golden=None, no_golden=True):
         files = {"logfile": (filename, log_body.encode("utf-8"), "application/json")}
         if golden is not None:
             gname, gbody = golden
             files["goldenfile"] = (gname, gbody.encode("utf-8"), "application/json")
-        return self.client.post("/runs", data={"mode": "replay"}, files=files)
+        # 대부분의 테스트는 게이트가 아니라 그 뒤를 본다 - 골든셋 없이 진행한다고
+        # 명시해 둔다(골든셋 게이트 자체는 GoldenGateTests 가 따로 본다).
+        data = {"mode": "replay"}
+        if no_golden:
+            data["no_golden"] = "1"
+        return self.client.post("/runs", data=data, files=files)
 
 
 class UploadGateTests(_ReplayClient):
@@ -95,6 +100,35 @@ class UploadGateTests(_ReplayClient):
             self.assertEqual(len(run_registry.list_runs()), before)
 
 
+class GoldenGateTests(_ReplayClient):
+    """골든셋 필수 정책이 UI 에서만 걸려 있었다 — API 는 goldenfile=None 을 그냥 받았다."""
+
+    def test_rejects_when_no_golden_anywhere(self):
+        res = self._post(_log_lines(2), no_golden=False)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("골든셋", res.json()["detail"])
+
+    def test_explicit_opt_out_passes(self):
+        """CLI 의 --no-golden 과 같은 구조 — 기본은 막고, 명시하면 통과."""
+        with patch.object(web_api, "_run_replay_background"):
+            res = self._post(_log_lines(2), no_golden=True)
+        self.assertEqual(res.status_code, 200)
+
+    def test_inline_ground_truth_counts_as_golden(self):
+        """로그에 정답이 인라인으로 있으면 골든셋이 없는 게 아니다(CLI 와 같은 판정)."""
+        body = json.dumps({"question": "q", "contexts": ["c"], "answer": "a",
+                           "ground_truth": "정답"}, ensure_ascii=False)
+        with patch.object(web_api, "_run_replay_background"):
+            res = self._post(body, no_golden=False)
+        self.assertEqual(res.status_code, 200)
+
+    def test_golden_file_satisfies_the_gate(self):
+        golden = json.dumps({"question": "질문 0", "ground_truth": "정답"}, ensure_ascii=False)
+        with patch.object(web_api, "_run_replay_background"):
+            res = self._post(_log_lines(2), golden=("golden.jsonl", golden), no_golden=False)
+        self.assertEqual(res.status_code, 200)
+
+
 class BackgroundRunTests(_ReplayClient):
     def _run_background(self, diagnose_return):
         """_run_replay_background 를 동기로 한 번 돌리고 run 상태를 돌려준다."""
@@ -129,6 +163,25 @@ class BackgroundRunTests(_ReplayClient):
         self.assertEqual(run.percent, 100)
         self.assertIs(run.ext_report, report)
         self.assertEqual(run.ext_cap, cap)
+
+    def test_preloaded_parse_is_reused(self):
+        """create_run 이 게이트 검사로 이미 파싱한 것을 백그라운드가 다시 읽지 않는다 —
+        diagnose_external_log 의 logs=/qa= 파라미터가 그 용도다."""
+        seen = {}
+
+        def fake_diagnose(path, **kwargs):
+            seen.update(kwargs)
+            return (None, {"tier": "none"}, [])
+
+        with patch.object(web_api, "diagnose_external_log", side_effect=fake_diagnose), \
+             patch.object(web_api, "_run_replay_background",
+                          wraps=web_api._run_replay_background), \
+             patch("core.run_logger.setup_run_logging"):
+            res = self._post(_log_lines(3))
+
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNotNone(seen.get("logs"))
+        self.assertEqual(len(seen["logs"]), 3)
 
     def test_forces_deep_llm_regardless_of_form_depth(self):
         """리플레이는 깊이 선택이 없다 — LLM 을 끄면 생성축 라벨 4종이 통째로 죽어

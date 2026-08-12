@@ -95,9 +95,11 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         pass
 
-    # 지표가 없으면 소견이 0건이라 진단서에 볼 것이 없다. 사용자가 명시적으로
-    # 꺼둔 경우는 존중하고, 미설정일 때만 켠다.
-    os.environ.setdefault("EVAL_ENABLE_LLM", "1")
+    # 지표가 없으면 소견이 0건이라 진단서에 볼 것이 없다. .env 에 EVAL_ENABLE_LLM=0
+    # 이 있어도 켠다 - setdefault 였을 때는 같은 로그가 CLI(agents.eval.replay)·웹과
+    # 다른 결과를 냈다. "진입점마다 결과가 달라지지 않게" 가 이 셋의 공통 규약이다.
+    # 얕게 보고 싶으면 진단서가 아니라 CLI 의 --no-llm 을 쓰면 된다.
+    os.environ["EVAL_ENABLE_LLM"] = "1"
     if os.getenv("EVAL_MODE", "").strip().lower() not in ("deep", "full", "3", "4"):
         os.environ["EVAL_MODE"] = "deep"
 

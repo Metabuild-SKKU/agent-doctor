@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Optional
 
 from core.schema import DiagnosticReport, Probe
 
@@ -274,6 +275,22 @@ def log_size_error(count: int) -> Optional[str]:
     return (f"로그가 {LOG_HARD_CAP}건을 넘습니다(현재 {count}건). 레코드마다 RAGAS 채점이 "
             f"들어가고 진단이 끝날 때까지 다른 실행이 대기합니다. "
             f"{LOG_HARD_CAP}건 이하로 나눠서 올려 주세요.")
+
+
+# 레코드 하나가 컨텍스트까지 담아 넉넉히 8KB 라고 보고, 상한 건수의 4배를 여유로 둔다.
+# 줄 수를 세려면 파싱이 필요한데 파싱 자체가 비싼 크기가 있어서, 파서를 태우기 전에
+# 바이트로 먼저 자른다. 느슨하게 잡는 건 의도적이다 - 이 게이트는 "말도 안 되는 크기"만
+# 막고, 정확한 판정은 log_size_error 가 한다.
+LOG_HARD_CAP_BYTES = LOG_HARD_CAP * 8 * 1024 * 4
+
+
+def log_bytes_error(size_bytes: int) -> Optional[str]:
+    """로그 파일이 파싱을 시도할 가치도 없이 크면 사유, 아니면 None."""
+    if size_bytes <= LOG_HARD_CAP_BYTES:
+        return None
+    mb = LOG_HARD_CAP_BYTES / (1024 * 1024)
+    return (f"로그 파일이 너무 큽니다({size_bytes / (1024 * 1024):.0f}MB · 상한 {mb:.0f}MB). "
+            f"진단은 {LOG_HARD_CAP}건까지 받습니다 - 그만큼만 잘라서 올려 주세요.")
 
 
 def _main(argv: list[str]) -> int:

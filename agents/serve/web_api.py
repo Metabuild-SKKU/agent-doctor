@@ -198,9 +198,13 @@ def _run_pipeline_background(run_id: str, file_path: Path, depth: str) -> None:
 
 def _run_replay_background(
     run_id: str, log_path: Path, golden_path: Path | None,
+    preloaded: tuple | None = None,
 ) -> None:
     """로그 리플레이 모드 — Ingest/Index/Optimize 없이 Eval STEP3~5 만 돈다
     (agents/eval/replay.py 가 이미 하는 일을 웹 실행 단위로 감쌀 뿐).
+
+    preloaded 는 create_run 이 게이트 검사로 이미 파싱한 (logs, errors, qa) 다.
+    없으면 여기서 다시 읽는다(테스트·직접 호출 경로).
 
     파이프라인 모드와 같은 run_registry/이벤트 계약을 쓰므로 프론트엔드
     폴링·진행률 UI 는 그대로 재사용된다 — stage="eval" 로 찍어 STAGE_UI_MAP
@@ -226,8 +230,15 @@ def _run_replay_background(
             run_registry.add_event(
                 run_id, stage="eval", tag="적재", text="로그 파일을 읽는 중", ts=time.time(),
             )
+            # create_run 이 게이트 검사로 이미 파싱해 둔 것을 그대로 넘긴다.
+            # diagnose_external_log 의 logs=/qa= 파라미터가 정확히 이 이중 파싱을
+            # 없애려고 있는 것인데(CLI 프리플라이트가 같은 이유로 쓴다), 웹 경로만
+            # 안 쓰고 있었다.
             report, cap, errors = diagnose_external_log(
                 str(log_path), golden_path=str(golden_path) if golden_path else None,
+                logs=preloaded[0] if preloaded else None,
+                errors=preloaded[1] if preloaded else None,
+                qa=preloaded[2] if preloaded else None,
             )
 
         if report is None:
@@ -261,6 +272,9 @@ async def create_run(
     goldenfile: UploadFile | None = File(None),
     depth: str = Form("standard"),
     mode: str = Form("pipeline"),
+    # 프론트가 이미 보내던 필드다(index.html 의 goldenSkip 체크박스). 서버가 안 읽어서
+    # 골든셋 필수 정책이 UI 에서만 걸려 있었다 - API 로는 그냥 통과했다.
+    no_golden: bool = Form(False),
 ) -> dict:
     run_id = uuid.uuid4().hex
 
@@ -276,8 +290,16 @@ async def create_run(
         # CLI 의 _main 안에만 있어서 웹으로 올리면 상한 없이 통과했다 - 진단이 끝날 때까지
         # _PIPELINE_LOCK 이 잡혀 있으므로 큰 로그 하나가 서버를 통째로 점유했다.
         # 백그라운드 스레드를 띄우기 **전에** 400 으로 돌려준다.
-        from agents.eval.replay import golden_size_error, log_size_error
+        from agents.eval.replay import (
+            LOG_HARD_CAP, golden_size_error, log_size_error, log_bytes_error,
+        )
         from agents.eval.log_intake import load_external_log
+
+        # 줄 수를 세려면 파싱이 필요하지만, 파싱 자체가 비싼 크기가 있다. 바이트로
+        # 먼저 자른 뒤 줄 수를 본다 - 상한의 몇 배짜리 파일에 파서를 태우지 않는다.
+        oversize = log_bytes_error(log_dest.stat().st_size)
+        if oversize:
+            raise HTTPException(status_code=400, detail=oversize)
 
         logs, _log_errors = load_external_log(str(log_dest))
         oversize = log_size_error(len(logs))
@@ -285,6 +307,7 @@ async def create_run(
             raise HTTPException(status_code=400, detail=oversize)
 
         golden_dest: Path | None = None
+        qa: tuple | None = None
         if goldenfile is not None and goldenfile.filename:
             golden_suffix = Path(goldenfile.filename).suffix.lower()
             if golden_suffix not in _GOLDEN_SUFFIXES:
@@ -294,17 +317,29 @@ async def create_run(
                 )
             golden_dest = _save_upload_as(run_id, goldenfile, suffix=golden_suffix)
             from agents.eval.qa_merge import load_qa_set
-            qa_map, _qa_errors = load_qa_set(str(golden_dest))
+            qa_map, qa_errors = load_qa_set(str(golden_dest))
             oversize = golden_size_error(len(qa_map))
             if oversize:
                 raise HTTPException(status_code=400, detail=oversize)
+            qa = (qa_map, qa_errors)
+        elif not no_golden and not any(r.ground_truth or r.gold_contexts for r in logs):
+            # 골든셋은 CLI 와 프론트 양쪽에서 기본 필수인데(--no-golden / goldenSatisfied),
+            # API 는 goldenfile=None 을 그대로 받아 그 정책이 여기서만 열려 있었다.
+            # 로그에 정답이 인라인으로 들어 있으면 골든셋이 없는 게 아니다(CLI 와 같은 판정).
+            raise HTTPException(
+                status_code=400,
+                detail="골든셋(질문·정답)이 필요합니다. 정답 없이 진행하려면 "
+                       "no_golden=1 을 보내세요 - 검색축 소견 3종이 침묵하고 "
+                       "환각은 '예비'에 머뭅니다(7종 중 3종만 확정).",
+            )
 
         # 리플레이는 깊이 선택이 없다(항상 LLM 심층) — depth 폼 값이 와도 무시한다.
         run_registry.create(
             run_id, depth="full", upload_path=str(log_dest), created_at=time.time(), mode="replay",
         )
         thread = threading.Thread(
-            target=_run_replay_background, args=(run_id, log_dest, golden_dest), daemon=True,
+            target=_run_replay_background,
+            args=(run_id, log_dest, golden_dest, (logs, _log_errors, qa)), daemon=True,
         )
         thread.start()
         return {"run_id": run_id}
