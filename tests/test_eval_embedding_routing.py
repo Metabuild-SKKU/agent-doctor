@@ -48,6 +48,18 @@ class ApiAvailabilityTests(unittest.TestCase):
         with _env(EVAL_LLM_PROVIDER="github", GITHUB_TOKEN="t", OPENAI_API_KEY="k"):
             self.assertTrue(llm_provider._api_embeddings_available())
 
+    def test_openrouter_key_does_not_hijack_other_providers(self):
+        """임베딩 경로는 심판 provider 를 따라간다.
+
+        OPENROUTER_API_KEY 가 있다는 이유로 anthropic/github 실행을 OpenRouter 임베딩으로
+        보내면, 심판 설정을 하나도 안 바꾼 사람의 실행이 OpenRouter 가용성에 새로 묶인다
+        (예전엔 로컬로 오프라인 계산하던 조합이다). 심판축/임베딩축 분리는 명시적
+        opt-in 으로 따로 올린다 — 여기서는 '자동 전환 없음' 을 핀으로 잡는다."""
+        for provider in ("anthropic", "github"):
+            with self.subTest(provider=provider), \
+                 _env(EVAL_LLM_PROVIDER=provider, OPENROUTER_API_KEY="k"):
+                self.assertFalse(llm_provider._api_embeddings_available())
+
 
 class LocalAvailabilityTests(unittest.TestCase):
     def test_asks_index_about_the_local_path_specifically(self):
@@ -97,6 +109,35 @@ class RoutingTests(_NoticeReset):
             llm_provider.embed_texts(["a"])
 
         self.assertEqual(embed_batch.call_args.kwargs.get("provider"), "local")
+
+    def test_api_failure_falls_back_to_local(self):
+        """임베딩 API 장애가 진단 기능까지 끌고 내려가면 안 된다.
+
+        결측이 되면 response_relevancy 뿐 아니라 bad_gold_answer 라벨과 probe 자동
+        재생성까지 멈춘다(embed_texts 독스트링). 로컬 모델이 뜨는 환경이면 그쪽으로 계속한다."""
+        with _env(EVAL_LLM_PROVIDER="openrouter", OPENROUTER_API_KEY="k"), \
+             patch.object(llm_provider, "openai_embed",
+                          side_effect=RuntimeError("503")), \
+             patch("agents.index.qdrant_store.embedding_is_fallback",
+                   return_value=False), \
+             patch("agents.index.qdrant_store.embed_batch") as embed_batch, \
+             patch("builtins.print"):
+            embed_batch.return_value = [[1.0]]
+            self.assertEqual(llm_provider.embed_texts(["a"]), [[1.0]])
+
+        self.assertEqual(embed_batch.call_args.kwargs.get("provider"), "local")
+
+    def test_api_failure_propagates_when_local_unusable(self):
+        """로컬도 못 쓰면 조용히 넘기지 않는다 — 해시 벡터로 메우면 무의미한 코사인이
+        정상 점수처럼 리포트에 박힌다(_local_embeddings_available 참고)."""
+        with _env(EVAL_LLM_PROVIDER="openrouter", OPENROUTER_API_KEY="k"), \
+             patch.object(llm_provider, "openai_embed",
+                          side_effect=RuntimeError("503")), \
+             patch("agents.index.qdrant_store.embedding_is_fallback",
+                   return_value=True), \
+             patch("builtins.print"):
+            with self.assertRaises(RuntimeError):
+                llm_provider.embed_texts(["a"])
 
     def test_missing_everything_returns_empty(self):
         # 결측이면 response_relevancy 뿐 아니라 bad_gold_answer 라벨과

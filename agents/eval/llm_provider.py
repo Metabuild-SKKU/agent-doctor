@@ -202,9 +202,16 @@ def chat_json(
 # bge-m3 는 $0.01/1M 이라 사실상 공짜다. Index 가 쓰는 로컬 모델과 같은 모델이고
 # 벡터도 코사인 0.99997 로 사실상 동일하다(실측 — AGENTS.md "임베딩 provider" 절 참고).
 #
-# GitHub Models 는 여전히 임베딩 엔드포인트가 없다. 그 조합에서는 OPENAI_API_KEY 로
+# GitHub Models·Anthropic 은 임베딩 엔드포인트가 없다. 그 조합에서는 OPENAI_API_KEY 로
 # 폴백하고, 그것도 없으면 Index 가 이미 쓰는 로컬 BGE-M3 로 계산한다.
 # 셋 다 불가할 때만 결측이 된다.
+#
+# 임베딩 경로는 **심판 provider 를 따라간다**. OPENROUTER_API_KEY 가 있다고 해서 심판이
+# anthropic/github 인 실행을 임의로 OpenRouter 임베딩으로 보내지 않는다 — 그렇게 하면
+# 심판 설정을 하나도 안 바꾼 사람의 실행이 OpenRouter 가용성에 새로 묶이고, 예전에
+# 오프라인으로 돌던 조합이 남의 장애에 같이 죽는다(아래 embed_texts 독스트링이 설명하는
+# bad_gold_answer 침묵 → probe 재생성 정지가 정확히 그 대가다).
+# 심판축과 임베딩축을 분리하는 설계 자체는 유효하나, 그건 명시적 opt-in 으로 따로 올린다.
 
 # 임베딩 경로 전환/불가를 실행당 한 번만 알린다. 안 그러면 probe·트랙마다 같은 줄이 찍혀
 # 정작 봐야 할 로그를 덮는다(agents/index/graph_index.py 의 _notify_llm_extraction_once 와 같은 패턴).
@@ -221,23 +228,9 @@ def _notify_embed_once(message: str) -> None:
     print(message)
 
 
-def _embed_provider() -> str:
-    """임베딩을 실제로 부를 provider. 심판 provider 와 다를 수 있다.
-
-    anthropic·github 는 임베딩 엔드포인트가 없다. 그 조합에서 곧장 로컬로
-    떨어지면 OPENROUTER_API_KEY 가 있어도 안 쓰고 2GB 모델을 띄우게 된다
-    (실측: 로컬 16.8s vs OpenRouter 3.1s, 벡터는 코사인 1.00000 으로 동일).
-    심판축은 그대로 두고 임베딩만 쓸 수 있는 곳으로 보낸다."""
-    provider = _provider()
-    if provider in ("gemini", "openrouter") or os.getenv("OPENAI_API_KEY"):
-        return provider
-    # 임베딩 없는 provider(anthropic/github) + OpenAI 키도 없음 → OpenRouter 로.
-    return "openrouter" if os.getenv("OPENROUTER_API_KEY") else provider
-
-
 def _api_embeddings_available() -> bool:
     """활성 provider 로 임베딩 API 를 부를 수 있는지. 키 유무만 본다(호출은 안 한다)."""
-    provider = _embed_provider()
+    provider = _provider()
     if provider == "gemini":
         return bool(os.getenv("GEMINI_API_KEY"))
     if provider == "openrouter":
@@ -268,10 +261,12 @@ def embeddings_available() -> bool:
 
 
 def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
-    """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파; rate limit 은 재시도)
+    """텍스트 리스트 → 임베딩 벡터 리스트. (rate limit 은 재시도)
 
     우선순위: 활성 provider 의 임베딩 API > 로컬 BGE-M3 > 결측(빈 리스트).
-    로컬은 임베딩 API 가 없는 조합(GitHub Models 등)이나 키가 없을 때만 쓰인다.
+    로컬은 임베딩 API 가 없는 조합(GitHub Models·Anthropic 등)이나 키가 없을 때,
+    그리고 **API 호출이 재시도 끝에 실패했을 때** 쓰인다. 로컬마저 쓸 수 없으면
+    그때만 API 예외가 호출부로 전파된다.
 
     주의: provider 를 바꾸면 임베딩 모델이 바뀌고 코사인 분포도 달라진다.
     response_relevancy 를 실행 간에 비교하려면 한 번 정한 뒤 고정할 것.
@@ -287,7 +282,7 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
         def _do():
             # _api_embeddings_available 과 같은 해석기를 써야 한다 — 다르면
             # "쓸 수 있다"고 판정한 provider 와 실제로 부르는 곳이 어긋난다.
-            provider = _embed_provider()
+            provider = _provider()
             if provider == "gemini":
                 return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
             if provider == "openrouter":
@@ -297,13 +292,26 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
                 )
             return _openai_embed(texts, model or os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small"))
 
-        return _run_with_retry(_do, "임베딩")
+        try:
+            return _run_with_retry(_do, "임베딩")
+        except Exception as exc:      # noqa: BLE001 — 폴백 판단만 하고 못 메우면 되던진다
+            # 임베딩 API 가 죽었다고 진단 기능까지 같이 죽을 이유는 없다. 재시도를 다
+            # 쓴 뒤에도 실패하면, 쓸 수 있는 로컬 모델이 있는 한 그쪽으로 계속한다 —
+            # 아래 "로컬 폴백이 필요한 이유" 의 침묵 연쇄가 외부 장애로 열리는 것을 막는다.
+            # 로컬도 못 쓰면 전파한다(무의미한 값으로 메우지 않는다 — _local_embeddings_available 참고).
+            if not _local_embeddings_available():
+                raise
+            api_failure = exc
+    else:
+        api_failure = None
 
     if _local_embeddings_available():
         # AGENTS.md 규약대로 공통 모듈을 통해서만 임베딩한다(직접 모델 로드 금지).
         from agents.index.qdrant_store import embed_batch
         _notify_embed_once(
-            f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없어 "
+            (f"[Eval] 임베딩 API 호출이 실패해({api_failure}) "
+             if api_failure is not None else
+             f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없어 ") +
             f"로컬 임베딩(BGE-M3)으로 계산합니다 · 비용 0, 외부 호출 없음. "
             f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
             f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요.")
