@@ -304,7 +304,7 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
         from agents.index.qdrant_store import embed_batch
         _notify_embed_once(
             f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없어 "
-            f"로컬 임베딩(BGE-M3)으로 계산합니다 — 비용 0, 외부 호출 없음. "
+            f"로컬 임베딩(BGE-M3)으로 계산합니다 · 비용 0, 외부 호출 없음. "
             f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
             f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요.")
         # provider 를 못 박는다 — Index 의 기본값은 openrouter 라 그냥 부르면
@@ -314,7 +314,7 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
     _notify_embed_once(
         f"[Eval] EVAL_LLM_PROVIDER={_provider()} 의 임베딩 키도, OPENAI_API_KEY 도, "
         f"로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표(response_relevancy)를 "
-        f"건너뜁니다 — bad_gold_answer 라벨도 함께 침묵합니다.")
+        f"건너뜁니다 · bad_gold_answer 라벨도 함께 침묵합니다.")
     return []
 
 

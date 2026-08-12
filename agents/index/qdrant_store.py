@@ -1073,7 +1073,7 @@ def _embed_via_openrouter(texts: list[str], model_name: str) -> list[list[float]
     groups = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
     _notify_embed_route_once(
         "openrouter",
-        f"[Index] 임베딩을 OpenRouter({model})로 계산합니다 — 요청당 {batch_size}건, "
+        f"[Index] 임베딩을 OpenRouter({model})로 계산합니다 · 요청당 {batch_size}건, "
         f"동시 {concurrency}. 로컬로 돌리려면 INDEX_EMBED_PROVIDER=local."
     )
 
@@ -1306,13 +1306,13 @@ def embed_batch(
         _notify_embed_route_once(
             "hash_fallback",
             f"[Index] 임베딩 모델 '{model_name}' 을 못 써 해시 fallback 벡터로 "
-            f"색인합니다 — 의미 검색이 되지 않습니다."
+            f"색인합니다 · 의미 검색이 되지 않습니다."
         )
         return [_fallback_embedding(text, dimension) for text in texts]
     _notify_embed_route_once(
         f"local:{actual_device}",
         f"[Index] 임베딩을 로컬 {actual_device.upper()}({model_name})로 계산합니다 "
-        f"— 비용 0, 외부 호출 없음."
+        f"· 비용 0, 외부 호출 없음."
     )
 
     try:
