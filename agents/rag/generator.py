@@ -578,29 +578,84 @@ def _gen_flag(config: dict | None, name: str, default: bool) -> bool:
     return bool(value)
 
 
-# 답변 언어 지시. 기본은 한국어 — 기존 KorQuAD 실행이 그대로 돌아야 한다.
+# 답변 언어. 기본은 한국어 — 기존 KorQuAD 실행이 그대로 돌아야 한다.
 #
 # **왜 손잡이가 필요한가.** 언어가 프롬프트에 박혀 있으면 영어 코퍼스에서 질문은 영어인데
 # 답변만 한국어로 나오고, char-F1(문자 겹침)이 **구조적으로 0** 이 된다. 그러면 _is_success
 # 의 lexical 축이 항상 실패라 **검색이 완벽해도 실패로 집계된다**(실측: DragonBall probe 에서
 # recall=1.00·gold 2/2 검색인데 f1=0.00 → generation_hallucination 오진).
 #
-# "질문과 같은 언어" 는 모델에 맡긴다 — 언어를 코드가 판별하려면 감지기가 필요하고,
-# 그 오판이 다시 같은 문제를 만든다. 지시만 바꾸면 모델이 알아서 맞춘다.
-_ANSWER_LANGUAGE = {
-    "ko": "한국어로",
-    "en": "in English",
-    "match": "질문과 같은 언어로",     # 다국어 코퍼스용
+# **한 문장만 바꾸는 걸론 안 된다 — 실측으로 확인했다.** 처음엔 지시문 한 조각만
+# ("질문과 같은 언어로") 갈아끼우고 "언어는 모델이 알아서 맞춘다" 고 뒀는데, 나머지 프롬프트
+# (역할 문장·기권 지시·근거 표시 지시·[컨텍스트]/[질문] 머리말)가 전부 한국어라 모델이
+# 프롬프트 언어를 따라갔다. DragonBall 10건 재실행에서 영어 질문 10건이 **전부 한국어로**
+# 답했고, 기권 답변은 예시 문구('제공된 정보로는 알 수 없습니다')를 글자 그대로 복사했다.
+# 그래서 조각이 아니라 **프롬프트 전체를 언어별로** 둔다.
+#
+# "match" 는 질문의 문자 구성으로 고른다. 처음엔 감지기를 피하려고 모델에 맡겼지만 위처럼
+# 실패했고, 판정은 '한글이 있나' 하나라 오판 여지가 거의 없다(정답 채점 단위를 고르는
+# metrics_basic.scoring_unit 과 같은 방식이다).
+
+_PROMPT_KO = {
+    "role": "너는 사내 문서 QA 어시스턴트다.",
+    "grounded": ("반드시 제공된 컨텍스트만 근거로 한국어로 답하라. "
+                 "컨텍스트에 근거가 없으면 '제공된 정보로는 알 수 없습니다'라고 답하라."),
+    "loose": "한국어로 답하라.",
+    "abstention_relaxed": ("컨텍스트에 질문과 관련된 근거가 조금이라도 있으면 그것을 바탕으로 "
+                           "최대한 답하라. 명백히 근거가 전혀 없을 때에만 "
+                           "'제공된 정보로는 알 수 없습니다'라고 답하라."),
+    "abstention_strict": ("조금이라도 확신이 없으면 지어내지 말고 반드시 "
+                          "'제공된 정보로는 알 수 없습니다'라고 답하라."),
+    "completeness": "질문에 여러 항목이나 하위 질문이 있으면 빠짐없이 모두 답하라.",
+    "restate": "답변을 시작하기 전에 질문을 한 문장으로 재진술하라.",
+    "citation": "답변 끝에는 근거 번호를 대괄호로 표시하라.",
+    "context_header": "[컨텍스트]",
+    "question_header": "[질문]",
 }
 
+# 기권 문구는 metrics_basic._ABSTENTION_MARKERS 에 등록된 표현이어야 한다 — 아니면 모델이
+# 기권했는데 파이프라인이 '답했다' 로 읽어 generation_* 라벨이 통째로 어긋난다.
+# "cannot answer" 가 등록돼 있어 아래 문구가 그대로 잡힌다(테스트가 이 계약을 고정한다).
+_PROMPT_EN = {
+    "role": "You are a QA assistant for internal company documents.",
+    "grounded": ("Answer in English using only the provided context. "
+                 "If the context does not support an answer, reply "
+                 "'I cannot answer based on the provided information.'"),
+    "loose": "Answer in English.",
+    "abstention_relaxed": ("If the context contains any evidence related to the question, "
+                           "answer as fully as you can from it. Only when there is clearly "
+                           "no evidence at all, reply "
+                           "'I cannot answer based on the provided information.'"),
+    "abstention_strict": ("If you are not fully certain, do not make anything up; reply "
+                          "'I cannot answer based on the provided information.'"),
+    "completeness": ("If the question has several parts or sub-questions, "
+                     "answer every one of them."),
+    "restate": "Restate the question in one sentence before you begin your answer.",
+    "citation": "End your answer with the supporting source numbers in square brackets.",
+    "context_header": "[Context]",
+    "question_header": "[Question]",
+}
 
-def _answer_language(config: dict | None) -> str:
-    """답변 언어 지시문. config > env(RAG_ANSWER_LANGUAGE) > 기본(한국어)."""
+_PROMPTS = {"ko": _PROMPT_KO, "en": _PROMPT_EN}
+
+
+def _answer_language(question: str, config: dict | None) -> str:
+    """답변 언어 키("ko"|"en"). config > env(RAG_ANSWER_LANGUAGE) > 기본(한국어).
+
+    "match" 는 질문에 한글이 있는지로 고른다 — 한글이 하나라도 있으면 한국어다.
+    """
     raw = _config_value(config, "answer_language")
     if raw is None:
         raw = os.getenv("RAG_ANSWER_LANGUAGE", "")
     key = str(raw or "").strip().lower()
-    return _ANSWER_LANGUAGE.get(key, _ANSWER_LANGUAGE["ko"])
+    if key == "match":
+        return "ko" if _has_hangul(question or "") else "en"
+    return key if key in _PROMPTS else "ko"
+
+
+def _has_hangul(text: str) -> bool:
+    return any("가" <= c <= "힣" or "ᄀ" <= c <= "ᇿ"
+               or "㄰" <= c <= "㆏" for c in text)
 
 
 def _build_prompt(
@@ -628,15 +683,12 @@ def _build_prompt(
     # 넘기고 실제 문구는 여기서 소유한다(use_hybrid/use_reranker와 같은 패턴).
     # 기본값(grounding_strict·require_citation=True, 나머지 False)은 과거 하드코딩
     # 프롬프트를 그대로 재현하므로, Optimize가 손대기 전엔 동작이 바뀌지 않는다.
-    language = _answer_language(config)
-    clauses = ["너는 사내 문서 QA 어시스턴트다."]
+    text = _PROMPTS[_answer_language(question, config)]
+    clauses = [text["role"]]
     if _gen_flag(config, "grounding_strict", True):
-        clauses.append(
-            f"반드시 제공된 컨텍스트만 근거로 {language} 답하라. "
-            "컨텍스트에 근거가 없으면 '제공된 정보로는 알 수 없습니다'라고 답하라."
-        )
+        clauses.append(text["grounded"])
     else:
-        clauses.append(f"{language} 답하라.")
+        clauses.append(text["loose"])
     # 기권 성향은 한 축의 양방향이라 둘을 동시에 싣지 않는다.
     #
     # 어느 쪽이 이길지는 여기서 정하지 않는다 — 처방 적용 시점에 config_mapper 의
@@ -645,23 +697,20 @@ def _build_prompt(
     # 입력에 대한 백스톱일 뿐이다. 여기서 우선순위로 푸는 건 안 된다: 진 쪽 처방이 영구히
     # no-op 이 되어 롤백 + blacklist 로 사라지고, 그 라벨의 레버가 죽는다.
     if _gen_flag(config, "abstention_relaxed", False):
-        clauses.append(
-            "컨텍스트에 질문과 관련된 근거가 조금이라도 있으면 그것을 바탕으로 최대한 답하라. "
-            "명백히 근거가 전혀 없을 때에만 '제공된 정보로는 알 수 없습니다'라고 답하라."
-        )
+        clauses.append(text["abstention_relaxed"])
     elif _gen_flag(config, "abstention_strict", False):
-        clauses.append(
-            "조금이라도 확신이 없으면 지어내지 말고 반드시 "
-            "'제공된 정보로는 알 수 없습니다'라고 답하라."
-        )
+        clauses.append(text["abstention_strict"])
     if _gen_flag(config, "completeness_mode", False):
-        clauses.append("질문에 여러 항목이나 하위 질문이 있으면 빠짐없이 모두 답하라.")
+        clauses.append(text["completeness"])
     if _gen_flag(config, "restate_question", False):
-        clauses.append("답변을 시작하기 전에 질문을 한 문장으로 재진술하라.")
+        clauses.append(text["restate"])
     if _gen_flag(config, "require_citation", True):
-        clauses.append("답변 끝에는 근거 번호를 대괄호로 표시하라.")
+        clauses.append(text["citation"])
     system = " ".join(clauses)
-    user = f"[컨텍스트]\n{context_block.strip()}\n\n[질문]\n{question.strip()}"
+    # 머리말도 함께 바꾼다 — 지시문만 영어로 두고 사용자 메시지가 한국어면 모델이 다시
+    # 프롬프트 언어를 따라간다(실측에서 그렇게 무너졌다).
+    user = (f"{text['context_header']}\n{context_block.strip()}\n\n"
+            f"{text['question_header']}\n{question.strip()}")
     return system, user
 
 

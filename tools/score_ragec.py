@@ -44,6 +44,7 @@ import json
 import pathlib
 import sys
 import textwrap
+import unicodedata
 
 # ── 대조표 (docs/ragec_label_mapping.md 의 구현) ──────────────────
 #
@@ -191,6 +192,26 @@ def _read_jsonl(path: str) -> list[dict]:
     return [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
 
 
+# ── 표 정렬 (한글은 터미널에서 두 칸을 먹는다) ────────────────────
+#
+# f"{'카테고리':<32}" 는 **글자 수**로 채운다. 한글 4글자는 8칸을 차지하는데 4칸으로 세니
+# 그 줄만 4칸씩 밀린다. 헤더에만 한글이 있으면 헤더와 본문이 어긋나 표가 무너진다.
+
+def _width(text: str) -> int:
+    """터미널 표시 폭. 동아시아 W/F 문자는 2칸."""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
+
+
+def _pad(text: str, width: int) -> str:
+    """표시 폭 기준 좌측 정렬. 이미 넘치면 최소 한 칸을 띄워 열이 붙지 않게 한다."""
+    return text + " " * max(1, width - _width(text))
+
+
+def _rpad(text: str, width: int) -> str:
+    """표시 폭 기준 우측 정렬."""
+    return " " * max(1, width - _width(text)) + text
+
+
 def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
     ours = {str(r["qa_id"]): set(r.get("labels") or []) for r in findings_rows}
     # "failed" 가 없는 덤프(구버전)는 라벨 유무로 추론한다 — 그 경우 '우리는 성공' 과
@@ -277,9 +298,11 @@ def format_report(result: dict) -> str:
         sh, st = result["stage_hit"], result["stage_total"]
         lines.append(f"  단계 정확도       {sh}/{st}  ({sh / st * 100:.1f}%)")
     lines.append("")
-    lines.append(f"  {'카테고리':<32}{'맞음':>8}{'전체':>8}{'정확도':>9}")
+    lines.append("  " + _pad("카테고리", 32) + _rpad("맞음", 8)
+                 + _rpad("전체", 8) + _rpad("정확도", 9))
     for category, (ok, n) in result["per_category"].items():
-        lines.append(f"  {category:<32}{ok:>8}{n:>8}{ok / n * 100:>8.0f}%")
+        lines.append("  " + _pad(category, 32) + _rpad(str(ok), 8)
+                     + _rpad(str(n), 8) + _rpad(f"{ok / n * 100:.0f}%", 9))
 
     lines.append("")
     if result.get("we_passed"):
@@ -317,12 +340,37 @@ def _verdict(row: dict, category: str) -> str:
 
 
 def _wrap(label: str, text: str, width: int = 88) -> list[str]:
-    """`  Q  본문…` 꼴로 접어 쓴다. 이어지는 줄은 본문 열에 맞춰 들여쓴다."""
+    """`  Q   본문…` 꼴로 접어 쓴다. 이어지는 줄은 본문 열에 맞춰 들여쓴다.
+
+    textwrap 은 **글자 수**로 접어서, 한국어 답변이 폭 88 을 넘어 176칸까지 늘어난다
+    (실측 로그에서 답변 줄만 화면 밖으로 나갔다). 표시 폭으로 접는다.
+    """
     body = " ".join((text or "").split()) or "(없음)"
-    head = f"  {label:<4}"
+    head = "  " + _pad(label, 6)
     indent = " " * len(head)
-    wrapped = textwrap.wrap(body, width=width) or [""]
-    return [head + wrapped[0]] + [indent + line for line in wrapped[1:]]
+
+    lines: list[str] = []
+    current = ""
+    for word in body.split(" "):
+        if not current:
+            current = word
+        elif _width(current) + 1 + _width(word) <= width:
+            current += " " + word
+        else:
+            lines.append(current)
+            current = word
+    # 공백 없는 긴 토큰(한국어 문장은 어절이 길다)은 위에서 안 잘리므로 폭으로 다시 자른다.
+    out: list[str] = []
+    for line in lines + [current]:
+        while _width(line) > width:
+            cut = len(line)
+            while cut > 1 and _width(line[:cut]) > width:
+                cut -= 1
+            out.append(line[:cut])
+            line = line[cut:]
+        out.append(line)
+
+    return [head + out[0]] + [indent + line for line in out[1:]]
 
 
 def format_detail(findings_rows: list[dict], key_rows: list[dict]) -> str:
@@ -368,15 +416,16 @@ def format_detail(findings_rows: list[dict], key_rows: list[dict]) -> str:
         return "\n".join(lines)
 
     lines += ["", "=" * 92, "  요약 표", "=" * 92,
-              f"  {'qa_id':<8}{'판정':<6}{'RAGEC 정답':<30}우리 진단"]
+              "  " + _pad("qa_id", 8) + _pad("판정", 6) + _pad("RAGEC 정답", 30) + "우리 진단"]
     for key in key_rows:
         qa_id = str(key["qa_id"])
         row = ours.get(qa_id)
         if row is None:
             continue
-        lines.append(f"  {qa_id:<8}{_verdict(row, key['ragec_category'].strip()):<6}"
-                     f"{key['ragec_category']:<30}"
-                     f"{', '.join(row.get('labels') or []) or '(라벨 없음)'}")
+        lines.append("  " + _pad(qa_id, 8)
+                     + _pad(_verdict(row, key["ragec_category"].strip()), 6)
+                     + _pad(key["ragec_category"], 30)
+                     + (", ".join(row.get("labels") or []) or "(라벨 없음)"))
     lines.append("")
     lines.append(_MARK_LEGEND + " · gold=정답지 오류 주장(제외)")
     return "\n".join(lines)

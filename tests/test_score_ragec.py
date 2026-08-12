@@ -17,7 +17,8 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from tools.score_ragec import (
-    RAGEC_TO_OURS, findings_from_report, format_detail, score, stage_of,
+    RAGEC_TO_OURS, _width, findings_from_report, format_detail, format_report,
+    score, stage_of,
 )
 
 
@@ -294,6 +295,45 @@ class DetailReportTest(unittest.TestCase):
 
     def test_probe_absent_from_the_dump_is_skipped(self):
         self.assertIn("공통으로 있는 probe 가 없습니다", format_detail([], self.KEY))
+
+
+class TableAlignmentTest(unittest.TestCase):
+    """한글은 터미널에서 두 칸을 먹는다 — 글자 수로 채우면 그 줄만 밀린다.
+
+    헤더에만 한글이 있어(카테고리/맞음/전체/정확도) 헤더와 본문이 어긋났다. 표가
+    밀리면 결과를 눈으로 훑을 수 없으니 표시 폭으로 고정한다.
+    """
+
+    KEY = [_key("1", "E4 Missed Retrieval", "Retrieval"),
+           _key("2", "E13 Misinterpretation", "Generation")]
+    ROWS = [_found("1", "retrieval_missing_gold"), _found("2", "generation_hallucination")]
+
+    def test_category_table_columns_line_up(self):
+        out = format_report(score(self.ROWS, self.KEY))
+        rows = [line for line in out.splitlines()
+                if "카테고리" in line or line.startswith("  E")]
+        self.assertGreaterEqual(len(rows), 3)          # 헤더 + 카테고리 2줄
+        self.assertEqual(len({_width(line) for line in rows}), 1,
+                         "\n".join(f"{_width(l):>4}  {l}" for l in rows))
+
+    def test_summary_table_columns_line_up(self):
+        """'성공'(2글자=4칸)과 'O'(1칸)가 같은 열에 온다 — 판정 열이 특히 잘 밀린다."""
+        rows = [{**r, "failed": i == 0} for i, r in enumerate(self.ROWS)]
+        out = format_detail(rows, self.KEY).splitlines()
+        # 각 줄에서 'RAGEC 정답' 열이 시작하는 표시 폭을 잰다(헤더 + 데이터 2줄).
+        # 제목 줄에도 'RAGEC 정답' 이 들어 있어 헤더는 '  qa_id' 로 집는다.
+        anchors = [("  qa_id", "RAGEC 정답"),
+                   ("  1 ", "E4 Missed Retrieval"),
+                   ("  2 ", "E13 Misinterpretation")]
+        starts = set()
+        for prefix, column in anchors:
+            line = next(l for l in out if l.startswith(prefix))
+            starts.add(_width(line[:line.index(column)]))
+        self.assertEqual(len(starts), 1, f"{starts}\n" + "\n".join(out[-6:]))
+
+    def test_width_counts_hangul_as_two_columns(self):
+        self.assertEqual(_width("카테고리"), 8)
+        self.assertEqual(_width("qa_id"), 5)
 
 
 class MappingIntegrityTest(unittest.TestCase):
