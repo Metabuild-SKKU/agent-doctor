@@ -82,7 +82,7 @@ def _probe_reliability(record: EvalRecord) -> Optional[float]:
     if record.retrieval_axis is not None:
         retrieval = _clamp01(record.retrieval_axis)
     elif record.recall_at_k >= 0:
-        retrieval = record.recall_at_k
+        retrieval = _clamp01(record.recall_at_k)
     else:
         return None
     return retrieval * _clamp01(record.answer_score)
