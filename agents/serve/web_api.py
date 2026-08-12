@@ -197,7 +197,7 @@ def _run_pipeline_background(run_id: str, file_path: Path, depth: str) -> None:
 
 
 def _run_replay_background(
-    run_id: str, log_path: Path, golden_path: Path | None, depth: str,
+    run_id: str, log_path: Path, golden_path: Path | None,
 ) -> None:
     """로그 리플레이 모드 — Ingest/Index/Optimize 없이 Eval STEP3~5 만 돈다
     (agents/eval/replay.py 가 이미 하는 일을 웹 실행 단위로 감쌀 뿐).
@@ -215,9 +215,13 @@ def _run_replay_background(
 
     try:
         with _PIPELINE_LOCK:
-            eval_mode = _DEPTH_TO_EVAL_MODE.get(depth, "standard")
-            os.environ["EVAL_MODE"] = eval_mode
-            os.environ["EVAL_ENABLE_LLM"] = "1" if eval_mode in ("deep", "full") else "0"
+            # 리플레이는 depth 를 받지 않는다 — 항상 LLM 심층으로 돈다(tools/run_replay_report.py
+            # 와 같은 처리). 리플레이엔 색인·검색·답변생성이 없어 실제 작업이 RAGAS 채점 하나뿐이라
+            # LLM 을 꺼도 아끼는 시간이 거의 없는 반면(실측 6건: 0.03초 vs 13.8초), 끄면 생성축
+            # 라벨 4종이 통째로 죽고 검색축도 gold 겹침이 낮을 때만 남아 "점수는 낮은데 소견 0건"
+            # 인 진단서가 나간다. 프론트가 무엇을 보내든 여기서 고정해 그 경로를 막는다.
+            os.environ["EVAL_MODE"] = "deep"
+            os.environ["EVAL_ENABLE_LLM"] = "1"
 
             run_registry.add_event(
                 run_id, stage="eval", tag="적재", text="로그 파일을 읽는 중", ts=time.time(),
@@ -278,11 +282,12 @@ async def create_run(
                 )
             golden_dest = _save_upload_as(run_id, goldenfile, suffix=golden_suffix)
 
+        # 리플레이는 깊이 선택이 없다(항상 LLM 심층) — depth 폼 값이 와도 무시한다.
         run_registry.create(
-            run_id, depth=depth, upload_path=str(log_dest), created_at=time.time(), mode="replay",
+            run_id, depth="full", upload_path=str(log_dest), created_at=time.time(), mode="replay",
         )
         thread = threading.Thread(
-            target=_run_replay_background, args=(run_id, log_dest, golden_dest, depth), daemon=True,
+            target=_run_replay_background, args=(run_id, log_dest, golden_dest), daemon=True,
         )
         thread.start()
         return {"run_id": run_id}

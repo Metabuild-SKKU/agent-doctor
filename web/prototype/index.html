@@ -656,7 +656,10 @@
           </details>
         </div>
 
-        <div class="depth">
+        <!-- 로그 리플레이 모드에서는 통째로 숨긴다(updateModeCopy) — 리플레이는 색인·검색·
+             답변생성이 없어 RAGAS 채점이 유일한 작업이라 깊이를 낮춰도 시간이 거의 안 줄고,
+             대신 생성축 라벨 4종이 통째로 죽는다. 선택지가 될 수 없어 고정한다. -->
+        <div class="depth" id="depthBlock">
           <span class="field-label">진단 깊이</span>
           <div class="segmented" role="group" aria-label="진단 깊이">
             <button class="seg" aria-pressed="false" data-depth="fast">
@@ -764,22 +767,14 @@
 
   /* 리플레이(로그) 모드는 남의 인덱스라 재검색이 없다 — 진단 깊이가
      규칙·골든셋 대조 vs LLM 심층 두 단계뿐이므로 문구·선택지를 바꾼다. */
-  var depthCopy = {
-    doc: { fast: '규칙 기반 · ~30초', standard: '재검색 분석 · ~2분', full: 'LLM 심층 · ~6분' },
-    log: { fast: '규칙 · 골든셋 대조 · ~30초', full: 'LLM 심층 (환각·동문서답) · ~6분' },
-  };
   function updateModeCopy(isLog) {
-    var copy = isLog ? depthCopy.log : depthCopy.doc;
-    var segStd = document.querySelector('.seg[data-depth="standard"]');
-    segStd.style.display = isLog ? 'none' : '';
-    document.querySelector('.segmented').style.gridTemplateColumns =
-      isLog ? 'repeat(2, 1fr)' : 'repeat(3, 1fr)';
-    ['fast', 'standard', 'full'].forEach(function (d) {
-      if (copy[d]) document.querySelector('.seg[data-depth="' + d + '"] .seg-meta').textContent = copy[d];
-    });
-    if (isLog && selectedDepth === 'standard') document.querySelector('.seg[data-depth="full"]').click();
+    // 리플레이는 깊이 선택 자체가 없다 — 블록을 통째로 숨기고 서버도 deep 으로 고정한다.
+    // (선택지를 남겨두면 '빠른 검진'을 고른 채 로그 탭으로 넘어와 생성축 라벨 4종이
+    //  죽은 진단서를 받게 된다. 실측: 6건 기준 0.03초 vs 13.8초 — 아끼는 시간도 없다.)
+    document.getElementById('depthBlock').hidden = isLog;
     if (isLog) updateSrcNote();
     else document.getElementById('srcNote').innerHTML = '코퍼스 <b>1</b>개 준비됨';
+    updateEta(isLog);
   }
 
   /* 파일 형식 안내 안쪽 탭(실행 로그 / 골든셋). details 안에 있어서 접힌 상태에선
@@ -804,12 +799,21 @@
 
   var etaMap = { fast: '약 30초', standard: '약 2분', full: '약 6분' };
   var selectedDepth = 'standard';
+
+  /* 리플레이는 깊이 선택이 없어 seg 클릭이 안 일어나므로 ETA 를 따로 세운다.
+     문서 모드의 '약 6분'은 색인·임베딩까지 포함한 값이라 리플레이엔 안 맞는다
+     (리플레이는 RAGAS 채점만 — 실측 6건 13.8초, 레코드 단위 병렬). */
+  function updateEta(isLog) {
+    document.getElementById('etaNote').textContent =
+      isLog ? '약 1분 이내' : etaMap[selectedDepth];
+  }
+
   document.querySelectorAll('.seg').forEach(function (s) {
     s.addEventListener('click', function () {
       document.querySelectorAll('.seg').forEach(function (o) { o.setAttribute('aria-pressed', 'false'); });
       s.setAttribute('aria-pressed', 'true');
-      document.getElementById('etaNote').textContent = etaMap[s.dataset.depth];
       selectedDepth = s.dataset.depth;
+      updateEta(false);      // seg 는 문서 모드에서만 보인다
     });
   });
 
@@ -1148,7 +1152,9 @@
     } else {
       form.append('file', selectedFile);
     }
-    form.append('depth', selectedDepth);
+    // 리플레이는 깊이 선택이 없다 — 서버도 무시하고 deep 으로 고정하지만, 보내는 값도
+    // 맞춰 둔다(구버전 서버로 붙어도 얕은 진단이 안 나가게).
+    form.append('depth', isLog ? 'full' : selectedDepth);
 
     fetch(WEB_API_BASE + '/runs', { method: 'POST', body: form })
       .then(function (res) {

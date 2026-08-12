@@ -22,11 +22,15 @@ CLI: python -m agents.eval.replay <log.jsonl> --golden=<golden.xlsx> [--limit N]
      골든셋(시험지)은 진단의 기본 입력이다 - 없으면 검색축 라벨 3종이 침묵하고
      환각도 예비에 머문다(7종 중 3종만). 그래서 CLI 는 기본적으로 거부하고,
      정답지가 아예 없는 상황만 --no-golden 으로 옵트인시킨다.
-     RAGAS 실측에는 EVAL_ENABLE_LLM=1 과 LLM 키가 필요하다(없으면 규칙 지표만).
+     RAGAS(LLM 심층)는 기본 켜짐이다 - 리플레이는 색인·검색·답변생성이 없어 RAGAS 가
+     유일한 작업이라 꺼도 시간을 못 아끼면서(실측 6건: 0.03초 vs 13.8초) 생성축 라벨
+     4종을 통째로 잃는다. 적재만 빠르게 확인할 때는 --no-llm 으로 끈다.
+     (LLM 키가 없으면 켜져 있어도 규칙 지표로 폴백한다.)
 """
 
 from __future__ import annotations
 
+import os
 import sys
 
 from core.schema import DiagnosticReport, Probe
@@ -262,8 +266,18 @@ def _main(argv: list[str]) -> int:
     allow_qa_only = "--allow-qa-only" in argv
     if len(args) != 1:
         print("사용법: python -m agents.eval.replay <log.jsonl> --golden=<golden.xlsx>"
-              " [--limit=N] [--allow-qa-only] [--no-golden]")
+              " [--limit=N] [--allow-qa-only] [--no-golden] [--no-llm]")
         return 2
+
+    # 리플레이는 RAGAS 채점이 유일한 작업이라(색인·검색·답변생성이 없다) LLM 을 꺼도
+    # 아끼는 시간이 거의 없는 반면(실측 6건: 0.03초 vs 13.8초), 끄면 생성축 라벨 4종이
+    # 통째로 죽고 검색축도 gold 겹침이 낮을 때만 남는다. 그래서 기본을 켬으로 둔다
+    # (웹 UI·tools/run_replay_report.py 와 같은 판단 — 진입점마다 결과가 달라지지 않게).
+    # 다만 CLI 는 개발자 도구라 "적재만 빨리 확인" 같은 정당한 용도가 있어 옵트아웃을 남긴다.
+    if "--no-llm" not in argv:
+        os.environ["EVAL_ENABLE_LLM"] = "1"
+        if os.getenv("EVAL_MODE", "").strip().lower() not in ("deep", "full", "3", "4"):
+            os.environ["EVAL_MODE"] = "deep"
 
     # 골든셋은 진단의 기본 입력이다(멘토 피드백 2026-08-07 §1). 빼먹으면 검색축
     # 라벨 3종이 침묵하고 환각도 예비에 머무는데, 그 사실을 모른 채 얕은 진단을
@@ -370,7 +384,9 @@ def _main(argv: list[str]) -> int:
     else:
         print("소견: 없음 (지표 미측정이거나 문턱 이상)")
     if not llm_eval_enabled():
-        print("(참고: EVAL_ENABLE_LLM=1 이 아니어서 RAGAS 지표는 미측정)")
+        print("(참고: --no-llm 으로 RAGAS 지표가 미측정입니다 - 생성축 라벨 4종"
+              "(환각·동문서답·컨텍스트 과다·근거 부족)이 침묵하고, 검색축도 gold 근거"
+              " 겹침이 낮을 때만 잡힙니다. 온전한 진단은 --no-llm 없이 실행하세요.)")
         if scores.get("mean_f1") is not None and not cap.get("with_gold_contexts"):
             print("(주의: 정답 텍스트는 있는데 근거문단(gold_contexts)이 없어 검색축이 "
                   "미측정이다 - 해당 probe는 신뢰도 평균에서 제외된다. 근거문단을 "
