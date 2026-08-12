@@ -80,6 +80,20 @@ class EmbedProviderOptInTests(unittest.TestCase):
                   EVAL_EMBED_PROVIDER="Open-Router"):
             self.assertEqual(llm_provider._embed_provider(), "openrouter")
 
+    def test_provider_without_embeddings_is_rejected(self):
+        """anthropic·github 를 명시하면 아래 분기가 openai 로 떨어져, 'anthropic 으로
+        임베딩한다'고 적어둔 실행이 실제로는 OpenAI 에 과금 호출을 한다.
+        심판축의 폴백 사슬과 달리 여기서는 사용자가 직접 고른 값이라 조용히 바꾸면 안 된다."""
+        for bad in ("anthropic", "github"):
+            with self.subTest(provider=bad), \
+                 _env(EVAL_LLM_PROVIDER="openai", OPENAI_API_KEY="k",
+                      EVAL_EMBED_PROVIDER=bad), \
+                 patch("builtins.print") as printed:
+                self.assertEqual(llm_provider._embed_provider(), "openai")
+                self.assertTrue(printed.called)
+                self.assertIn("임베딩 엔드포인트가 없습니다", printed.call_args.args[0])
+            llm_provider._warned_providers.discard(f"embed:{bad}")
+
     def test_unknown_value_falls_back_to_judge_with_warning(self):
         """조용히 openai 로 떨어뜨리지 않는다 — 임베딩 모델이 바뀌면 코사인 분포가
         달라져 실행 간 response_relevancy 비교가 깨진다."""

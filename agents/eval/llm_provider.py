@@ -63,8 +63,13 @@ def _warn_unknown_provider_once(raw: str) -> None:
           f"(openai|gemini|github|openrouter|anthropic)")
 
 
+# 임베딩 엔드포인트가 없는 provider. 심판으로는 쓸 수 있지만 EVAL_EMBED_PROVIDER 로
+# 지정하면 안 된다(아래 _embed_provider 참고).
+_NO_EMBEDDING_PROVIDERS = {"anthropic", "github"}
+
+
 def _warn_unknown_embed_provider_once(raw: str) -> None:
-    """미지원 EVAL_EMBED_PROVIDER 값 경고를 값당 한 번만 출력한다.
+    """쓸 수 없는 EVAL_EMBED_PROVIDER 값 경고를 값당 한 번만 출력한다.
 
     같은 set 을 공유하면 EVAL_LLM_PROVIDER 에 같은 오타를 낸 실행이 이 경고를 삼킨다."""
     key = f"embed:{raw}"
@@ -72,8 +77,10 @@ def _warn_unknown_embed_provider_once(raw: str) -> None:
         if key in _warned_providers:
             return
         _warned_providers.add(key)
-    print(f"[Eval] 알 수 없는 EVAL_EMBED_PROVIDER '{raw}' · 심판 provider 를 따릅니다 "
-          f"(openai|gemini|github|openrouter|anthropic)")
+    why = ("는 임베딩 엔드포인트가 없습니다"
+           if normalize_provider(raw) in _NO_EMBEDDING_PROVIDERS else "는 지원하지 않는 값입니다")
+    print(f"[Eval] EVAL_EMBED_PROVIDER '{raw}'{why} · 심판 provider 를 따릅니다 "
+          f"(openai|gemini|openrouter)")
 
 
 def _provider() -> str:
@@ -257,12 +264,20 @@ def _embed_provider() -> str:
     INDEX_EMBED_PROVIDER 와 같은 계약이다.
 
     미지원 값은 심판 provider 로 떨어뜨린다(경고 후). 임베딩만 조용히 다른 곳으로
-    가면 코사인 분포가 달라져 실행 간 response_relevancy 비교가 깨진다."""
+    가면 코사인 분포가 달라져 실행 간 response_relevancy 비교가 깨진다.
+
+    임베딩 엔드포인트가 없는 provider(anthropic·github)를 **명시**한 경우도 같이
+    거부한다. 그대로 두면 아래 분기가 openai 로 떨어져, 'anthropic 으로 임베딩한다'고
+    적어둔 실행이 실제로는 OpenAI 에 과금 호출을 한다 - 심판축의 폴백 사슬과 달리
+    여기서는 사용자가 직접 고른 값이라 조용히 바꾸면 안 된다."""
     raw = os.getenv("EVAL_EMBED_PROVIDER", "").strip().lower()
     if not raw:
         return _provider()
     provider = normalize_provider(raw)
     if provider not in _KNOWN_PROVIDERS:
+        _warn_unknown_embed_provider_once(raw)
+        return _provider()
+    if provider in _NO_EMBEDDING_PROVIDERS:
         _warn_unknown_embed_provider_once(raw)
         return _provider()
     return provider

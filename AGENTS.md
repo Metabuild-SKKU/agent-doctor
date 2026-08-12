@@ -141,7 +141,10 @@ python graph.py --embed openrouter --query-embed cpu   # 색인만 API
 19%라 단건 질의가 재시도에 걸리면 `/search` 한 건이 수십 초 블로킹될 수 있고,
 그때 `INDEX_QUERY_EMBED_PROVIDER=local`만 내리면 됩니다.
 
-Eval의 RAGAS `response_relevancy` 임베딩은 `EVAL_LLM_PROVIDER`를 따릅니다(별도 축).
+Eval의 RAGAS `response_relevancy` 임베딩은 기본적으로 `EVAL_LLM_PROVIDER`를 따르고,
+`EVAL_EMBED_PROVIDER`로 따로 지정할 수 있습니다(위 표). `anthropic`·`github`는 임베딩
+엔드포인트가 없어 이 값으로는 받지 않습니다 — 그대로 두면 OpenAI로 떨어져 "anthropic으로
+임베딩한다"고 적어둔 실행이 실제로는 OpenAI에 과금 호출을 하기 때문입니다.
 **provider를 바꾸면 코사인 분포가 달라지므로 실행 간 비교를 하려면 한 번 정한 뒤
 고정하세요.**
 
