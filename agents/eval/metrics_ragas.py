@@ -71,7 +71,12 @@ def _inner_concurrency() -> int:
     """트랙 1개 내부(지표/청크/strictness) 동시성. 기본 1(=off) — 바깥 probe×track
     병렬(EVAL_LLM_CONCURRENCY)과 곱해지면 429 폭풍이 나므로, probe 가 적어 바깥
     병렬이 놀 때만 명시적으로 켠다. 1이면 parallel_map 이 기존 순차와 동일.
-    (fused 경로에선 트랙당 호출이 1건이라 이 값이 아무 일도 하지 않는다.)"""
+    (fused 경로에선 트랙당 호출이 1건이라 이 값이 아무 일도 하지 않는다.)
+
+    이 모듈의 parallel_map 호출에는 진행률 label 을 일부러 안 붙인다 — 여기는 바깥
+    트랙 병렬(agents/eval/agent.py 의 STEP3)의 **워커 스레드 안**이라, 라벨을 붙이면
+    probe 수만큼의 리포터가 동시에 제 진행률을 찍어 줄이 뒤섞인다. 진행률은 바깥
+    한 곳(트랙 단위)에서만 세는 것이 맞다."""
     return _env_int("EVAL_RAGAS_INNER_CONCURRENCY", 1)
 
 
@@ -97,8 +102,30 @@ def _fused_repair_enabled() -> bool:
 
 def _fused_max_tokens() -> int:
     """fused 응답 출력 상한. 7개 블록이 한 JSON 에 들어가므로 기본 2048 로는 잘린다
-    (잘리면 파싱 실패 → {} → 보수 경로). top_k·답변이 길면 더 올릴 것."""
-    return _env_int("EVAL_RAGAS_FUSED_MAX_TOKENS", 4096)
+    (잘리면 파싱 실패 → {} → 보수 경로). top_k·답변이 길면 더 올릴 것.
+
+    기본 8192 인 이유(실측 2026-08-11, KorQuAD 100 probe · haiku · compact): 4096 에서는
+    100건 중 3~4건이 잘려 상한 승급 재시도가 도는데, 배치 모드에서 그 재시도가 1~3건짜리
+    미니 배치를 만들어 **배치 대기(건수 무관 ~2분)를 통째로 다시 지불**했다 — STEP3 배치
+    대기 8분 중 4분이 이 재시도 몫이었다. 상한은 실사용분만 과금되므로 올려서 잃는 비용은
+    없고, 정상 응답(~1.1K)의 7배라 폭주 차단선 역할도 유지된다."""
+    return _env_int("EVAL_RAGAS_FUSED_MAX_TOKENS", 8192)
+
+
+def _compact_enabled() -> bool:
+    """anthropic 심판 전용 압축 변형(correctness 인덱스화 + faithfulness reason 제거 +
+    프롬프트 내 스키마 문자열 생략) 사용 여부. 기본 켬 — EVAL_RAGAS_COMPACT=0 으로 끈다.
+
+    anthropic 으로 한정하는 이유는 cache_prefix 와 같다(chat_json 주석 참고) — 다른
+    provider 의 프롬프트를 바꾸지 않는다. deepseek 등 반복 실행용 심판의 판정 분포가
+    이 절감 때문에 움직이면 실행 간 비교가 깨지고, 스키마 강제(output_config)가 없는
+    provider 에서 인덱스 배열 형식은 비준수 → 파싱 실패 위험이 있다.
+
+    실측 근거(2026-08-11, haiku-4-5 · 20 probe A/B ×2): reason 은 faithfulness ·
+    correctness 판정을 바꾸지 않는다(자기일치 바닥선 이내). context_precision/recall
+    은 reason 제거 시 +0.05 관대해지므로 그 두 블록(context_verdicts ·
+    recall_classifications)의 reason 은 유지한다."""
+    return llm_provider.provider_name() == "anthropic" and _env_flag("EVAL_RAGAS_COMPACT", True)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -234,7 +261,7 @@ _ASPECT_ABSTENTION = ("Does the response decline to answer — stating that it d
                       "that the information is unavailable, or that the question cannot be "
                       "answered from the given context — instead of asserting a substantive answer?")
 
-# ── 추론 실패 모드 다중분류 (모순/수치/해석/결합) ───────────────────
+# ── 추론 실패 모드 다중분류 (모순/수치/해석/결합/시간축) ─────────────
 #   셋 이상이 같은 실패를 두고 경쟁하는 설명이라, 이진 판정 여러 번 대신 단일 분류로 배타성을
 #   측정 자체에 넣는다(이진 판정을 나눠 물으면 여러 개가 동시에 참이 되어 순서가 원인을 정한다).
 _REASONING_MODE_INSTRUCTION = (
@@ -242,10 +269,15 @@ _REASONING_MODE_INSTRUCTION = (
     "Identify the single most likely failure mode and return it in 'mode'. "
     "Use exactly one of these values:\n"
     "- 'contradiction': the response asserts something that conflicts with the context.\n"
-    "- 'numerical_error': a number, unit, date, or calculation is wrong.\n"
+    "- 'numerical_error': a number, unit, date, or a computed value such as a duration or an "
+    "interval between two dates is itself wrong — the value, not the order of events.\n"
     "- 'misinterpretation': the context was read but its meaning, or a condition of the question, "
     "was misunderstood.\n"
-    "- 'hop_binding': the individual facts are each correct but were combined or related incorrectly.\n"
+    "- 'hop_binding': the individual facts are each correct but were combined or related "
+    "incorrectly — if the only incorrect relation is the time order between events, use "
+    "'chronological' instead.\n"
+    "- 'chronological': every date or event is quoted correctly, but the order or sequence "
+    "between them — which one came before or after — is stated wrongly.\n"
     "- 'other': none of the above."
 )
 _SCHEMA_REASONING_MODE = ('{"properties": {"reason": {"type": "string"}, "mode": {"type": "string"}}, '
@@ -269,9 +301,20 @@ _REASONING_MODE_EXAMPLES = [
       "reference": "No, it is only recommended."},
      {"reason": "The context says recommended, the response asserts it is required.",
       "mode": "contradiction"}),
+    # 시간축 예시는 연도를 '맞게' 인용한 상태로 순서만 뒤집는다 — numerical_error 와 갈리는
+    # 지점이 값의 정확성이라, 예시가 값까지 틀리면 두 모드가 다시 겹친다.
+    # 기간·간격이 틀린 경우는 numerical_error 다(계산값이라 처방이 계산 검산 쪽).
+    ({"user_input": "Which came first, the pilot program or the policy revision?",
+      "response": "The policy revision came first in 2021, and the pilot program followed in 2019.",
+      "retrieved_contexts": ["The pilot program started in 2019.",
+                             "The policy was revised in 2021."],
+      "reference": "The pilot program came first."},
+     {"reason": "Both years are quoted correctly but the order of the two events is reversed.",
+      "mode": "chronological"}),
 ]
 _REASONING_MODES = frozenset(
-    {"contradiction", "numerical_error", "misinterpretation", "hop_binding", "other"}
+    {"contradiction", "numerical_error", "misinterpretation", "hop_binding",
+     "chronological", "other"}
 )
 
 # ── Answer Correctness: TP/FP/FN 분류 (CorrectnessClassifierPrompt) ──
@@ -465,6 +508,44 @@ _FUSED_BLOCKS: dict[str, tuple[str, str, Any]] = {
     ),
 }
 
+# ── 압축 변형 (_compact_enabled 일 때만 위 표를 부분 교체) ─────────
+#
+# 바꾸는 블록은 딱 둘이다. 실측(2026-08-11)이 근거다:
+#   faithfulness_verdicts — reason 제거. 판정(verdict)만 소비되고, reason 유무는 판정을
+#     바꾸지 않았다(자기일치 바닥선 이내). statement 는 남긴다 — 인덱스 참조 전환(A-3)은
+#     아직 검증 실험이 없다.
+#   correctness — {statement, reason} 목록 → 인덱스 배열. 소비처(_fused_correctness_counts)
+#     가 len() 만 읽으므로 정보 손실이 없다. TP/FP 는 answer_statements, FN 은
+#     reference_statements 의 0-기반 인덱스다.
+# context_verdicts · recall_classifications 는 손대지 않는다 — reason 을 빼면 판정이
+# +0.05 관대해지는 것이 두 쌍의 A/B 에서 일관되게 관측됐다.
+_COMPACT_BLOCK_OVERRIDES: dict[str, tuple[str, str, Any]] = {
+    "faithfulness_verdicts": (
+        f"{_FAITH_NLI_INSTRUCTION} The statements are the \"answer_statements\" you produced above, "
+        f"and the context is the concatenation of every entry in `contexts`. Return one entry per "
+        f"statement, in the same order, in \"faithfulness_verdicts\".",
+        '"faithfulness_verdicts": {"items": {"properties": {"statement": {"type": "string"}, '
+        '"verdict": {"type": "integer"}}, '
+        '"required": ["statement", "verdict"], "type": "object"}, "type": "array"}',
+        [{"statement": "Albert Einstein was a German-born theoretical physicist.", "verdict": 1},
+         {"statement": "Albert Einstein is best known for the theory of relativity.", "verdict": 1}],
+    ),
+    "correctness": (
+        "Given ground truth statements and answer statements, classify each answer statement as "
+        "TP (true positive: directly supported by one or more ground truth statements) or FP "
+        "(false positive: not directly supported), and classify each ground truth statement that "
+        "is missing from the answer as FN (false negative). Each answer statement belongs to "
+        "exactly one of TP or FP. Refer to statements by INDEX only: \"TP\" and \"FP\" are arrays "
+        "of 0-based indexes into your \"answer_statements\", and \"FN\" is an array of 0-based "
+        "indexes into your \"reference_statements\". Return the classification in \"correctness\".",
+        '"correctness": {"properties": {"TP": {"items": {"type": "integer"}, "type": "array"}, '
+        '"FP": {"items": {"type": "integer"}, "type": "array"}, '
+        '"FN": {"items": {"type": "integer"}, "type": "array"}}, '
+        '"required": ["TP", "FP", "FN"], "type": "object"}',
+        {"TP": [0, 1], "FP": [], "FN": [2]},
+    ),
+}
+
 # ── fused 응답의 JSON Schema (anthropic output_config.format 전용) ─
 #
 # 위 _FUSED_BLOCKS 의 스키마 조각은 **프롬프트에 글자로 박히는 문자열**이라 모델이 지키든
@@ -511,18 +592,33 @@ _FUSED_SCHEMA_PROPS: dict[str, dict] = {
             {"statement": _STR, "reason": _STR, "attributed": _INT01}))},
 }
 
+# 압축 변형의 스키마 몫 — _COMPACT_BLOCK_OVERRIDES 와 키 집합이 같아야 한다
+# (tests/test_ragas_fused.py 가 두 표의 대칭을 핀으로 잡는다).
+_INT_ARR = _arr({"type": "integer"})
+_COMPACT_SCHEMA_OVERRIDES: dict[str, dict] = {
+    "faithfulness_verdicts": {
+        "faithfulness_verdicts": _arr(_obj({"statement": _STR, "verdict": _INT01}))},
+    "correctness": {
+        "correctness": _obj({"TP": _INT_ARR, "FP": _INT_ARR, "FN": _INT_ARR})},
+}
 
-def _fused_json_schema(blocks: list[str]) -> dict | None:
+
+def _fused_json_schema(blocks: list[str], *, compact: bool = False) -> dict | None:
     """선택된 블록만으로 응답 JSON Schema 를 만든다. 블록이 없으면 None.
 
     프로퍼티 순서 = 블록 순서 = 모델이 답을 만들어야 하는 순서(분해 → 판정)다.
     스키마 강제는 순서를 요구하지 않지만, 순서를 맞춰두면 프롬프트와 스키마가 같은
-    이야기를 해서 모델이 헷갈릴 여지가 줄어든다."""
+    이야기를 해서 모델이 헷갈릴 여지가 줄어든다.
+
+    compact 는 anthropic 전용 압축 변형(_compact_enabled)의 스키마 몫이다."""
     if not blocks:
         return None
     props: dict = {}
     for name in blocks:
-        props.update(_FUSED_SCHEMA_PROPS[name])
+        if compact and name in _COMPACT_SCHEMA_OVERRIDES:
+            props.update(_COMPACT_SCHEMA_OVERRIDES[name])
+        else:
+            props.update(_FUSED_SCHEMA_PROPS[name])
     return _obj(props)
 
 
@@ -557,8 +653,16 @@ def _fused_prompt(blocks: list[str], question: str, answer: str,
     return prefix + suffix
 
 
+def _fused_block_table(compact: bool) -> dict[str, tuple[str, str, Any]]:
+    """조립에 쓸 블록 표. compact 면 검증된 두 블록만 압축판으로 교체한다."""
+    if not compact:
+        return _FUSED_BLOCKS
+    return {**_FUSED_BLOCKS, **_COMPACT_BLOCK_OVERRIDES}
+
+
 def _fused_prompt_parts(blocks: list[str], question: str, answer: str,
-                        contexts: list[str], reference: str) -> tuple[str, str]:
+                        contexts: list[str], reference: str,
+                        *, compact: bool = False) -> tuple[str, str]:
     """fused 프롬프트를 (안정 프리픽스, 가변 입력) 두 부분으로 조립한다.
 
     나누는 이유는 **프롬프트 캐싱**이다. 프리픽스(헤더·지시문·스키마·few-shot)는 블록
@@ -578,9 +682,10 @@ def _fused_prompt_parts(blocks: list[str], question: str, answer: str,
     블록 순서 = 모델이 답을 만들어야 하는 순서(분해 → 판정)이므로 호출부 순서를 지킨다.
     (anthropic 이 아닌 provider 는 두 부분이 이어붙어 예전과 같은 한 덩어리가 된다 —
     _fused_prompt 참고. 캐싱만 못 쓸 뿐 프롬프트 내용은 동일하다.)"""
+    table = _fused_block_table(compact)
     instructions, schema_parts, example_out = [], [], {}
     for i, name in enumerate(blocks, start=1):
-        instr, schema, example = _FUSED_BLOCKS[name]
+        instr, schema, example = table[name]
         instructions.append(f"({i}) " + instr.replace("{n}", str(RELEVANCY_STRICTNESS)))
         schema_parts.append(schema)
         if name == "relevancy":
@@ -604,16 +709,24 @@ def _fused_prompt_parts(blocks: list[str], question: str, answer: str,
         f"Input: {json.dumps(_FUSED_EXAMPLE_INPUT, indent=4, ensure_ascii=False)}\n"
         f"Output: {json.dumps(example_out, indent=4, ensure_ascii=False)}"
     )
+    # 프롬프트 속 스키마 문자열은 강제력이 없는 안내문이다(위 _FUSED_SCHEMA_PROPS 주석).
+    # compact(anthropic)에서는 output_config 가 디코딩 단계에서 같은 스키마를 강제하므로
+    # 이 문단은 이중 전송(호출당 ~600토큰)이라 생략한다. 다른 provider 는 이 문단이
+    # 유일한 스키마 안내라 유지한다.
+    schema_str = (
+        "" if compact else
+        "\n\nPlease return the output in a JSON format that complies with the following schema "
+        "as specified in JSON Schema:\n"
+        + f"{schema}Do not use single quotes in your response but double quotes, "
+          "properly escaped with a backslash."
+    )
     # 캐시 지점 앞 — 블록 구성이 같으면 매 호출 바이트가 동일해야 한다.
     # 여기에 질문·컨텍스트가 섞여 들어가면 캐시가 probe 마다 무효화된다.
     prefix = (
         f"{_FUSED_HEADER}\n\n"
         + "\n\n".join(instructions)
-        + "\n\nPlease return the output in a JSON format that complies with the following schema "
-          "as specified in JSON Schema:\n"
-        + f"{schema}Do not use single quotes in your response but double quotes, "
-          "properly escaped with a backslash.\n\n"
-        + f"{example_str}\n"
+        + schema_str
+        + f"\n\n{example_str}\n"
         + "-----------------------------\n\n"
           "Now perform the same with the following input\n"
     )
@@ -807,10 +920,16 @@ def _fused_track(judge, question: str, answer: str, contexts: list[str], referen
     # 프리픽스(지시문·스키마·few-shot)와 입력을 나눠 보낸다 — 앞부분이 anthropic 의
     # 캐시 지점이 된다. 블록 구성이 같으면 프리픽스 바이트가 동일하므로, 실제/오라클
     # 두 모양에 대해 각각 1회만 캐시를 쓰고 나머지는 전부 읽기(입력가의 0.1배)다.
-    prefix, user_input = _fused_prompt_parts(blocks, question, answer, contexts, reference)
-    schema = _fused_json_schema(blocks)
+    compact = _compact_enabled()
+    prefix, user_input = _fused_prompt_parts(blocks, question, answer, contexts, reference,
+                                             compact=compact)
+    schema = _fused_json_schema(blocks, compact=compact)
+    # batchable=True 는 여기 하나뿐이다 — 이 호출만 STEP3 의 parallel_map 팬아웃 안에서
+    # 트랙 전체가 동시에 날아가, 배치 하나로 묶여 50% 할인을 받는다. 아래 refetch·보수와
+    # 진단 Phase C 의 순차 판정은 켜지 않는다(1건 배치 = 건마다 폴링 대기).
     d = _chat(judge, user_input, max_output_tokens=_fused_max_tokens(),
-              label="fused", cache_prefix=prefix, json_schema=schema) if blocks else {}
+              label="fused", cache_prefix=prefix, json_schema=schema,
+              batchable=True) if blocks else {}
     d = _refetch_fused_if_incomplete(judge, d, user_input, blocks,
                                      cache_prefix=prefix, json_schema=schema)
 
@@ -915,12 +1034,49 @@ def _fused_embedded(judge, d: dict, question: str, answer: str, reference: str,
     return out
 
 
+_index_drop_notified = False
+
+
+def _note_index_drop_once(message: str) -> None:
+    """인덱스 제외 안내를 실행당 1회만 — probe 마다 반복되면 진단 로그를 덮는다.
+    병렬 워커의 경쟁으로 드물게 2회 찍힐 수 있으나 무해하다(락 비용을 얹지 않는다)."""
+    global _index_drop_notified
+    if _index_drop_notified:
+        return
+    _index_drop_notified = True
+    print(message)
+
+
 def _fused_correctness_counts(d: dict):
-    """correctness 블록 → (TP, FP, FN) 카운트. 블록이 없거나 형식이 깨졌으면 None(=factual 결손)."""
+    """correctness 블록 → (TP, FP, FN) 카운트. 블록이 없거나 형식이 깨졌으면 None(=factual 결손).
+
+    compact(인덱스 배열)에서는 **중복·범위 밖 인덱스를 세지 않는다** — "TP": [0, 0, 1]
+    이 문장 전문을 두 번 쓰는 것보다 훨씬 싼 실수인데, len() 만 보면 그대로 과대
+    계산된다(리뷰 지적). TP/FP 는 answer_statements, FN 은 reference_statements 의
+    0-기반 인덱스이므로 각자의 우주 크기로 걸러낸다. legacy({statement, ...} 목록)는
+    기존대로 개수만 센다."""
     corr = d.get("correctness")
     if not isinstance(corr, dict):
         return None
-    return len(_as_list(corr, "TP")), len(_as_list(corr, "FP")), len(_as_list(corr, "FN"))
+    n_answer = len(_as_list(d, "answer_statements"))
+    n_reference = len(_as_list(d, "reference_statements"))
+
+    def _count(key: str, universe: int) -> int:
+        items = _as_list(corr, key)
+        ints = [i for i in items if isinstance(i, int) and not isinstance(i, bool)]
+        if items and len(ints) == len(items):      # compact — 전부 정수(인덱스 배열)
+            valid = {i for i in ints if 0 <= i < universe}
+            dropped = len(ints) - len(valid)
+            if dropped:
+                # 조용히 버리면 모델이 1-based 로 답하는 상태가 신호 없이
+                # answer_correctness 만 낮춘다(리뷰 지적) — 실행당 1회 드러낸다.
+                _note_index_drop_once(
+                    f"[Eval] correctness 인덱스 {dropped}건이 중복/범위 밖이라 제외됐습니다 "
+                    f"({key}={ints}, 우주 {universe}) — 모델이 1-based 로 답하는지 확인하세요.")
+            return len(valid)
+        return len(items)                          # legacy — dict 목록(빈 배열 포함)
+
+    return _count("TP", n_answer), _count("FP", n_answer), _count("FN", n_reference)
 
 
 def _fused_repair(judge, out: dict, question: str, answer: str, contexts: list[str],
@@ -982,6 +1138,18 @@ def answer_similarity(record: EvalRecord, track: str):
         return None
     return _cosine(vecs[0], vecs[1])
 
+
+# ── fused 밖에 남은 판정 둘 (evaluate_abstention / evaluate_reasoning_mode) ────────
+# 이 둘만 fused 를 안 타고 _chat 을 직접 부른다. 그래서 이번 절감 셋 중 어느 것도 안 걸린다:
+#   · compact 변형 없음 — 압축 표(_COMPACT_*_OVERRIDES)는 fused 블록만 교체한다.
+#   · cache_prefix 없음 — 프리픽스가 짧아(수백~2천 토큰) 심판 모델 haiku 의 캐시 최소
+#     4096 토큰에 못 미친다. 걸어도 조용히 무시되므로 지금은 걸지 않는다.
+#   · 배치 없음(batchable=False) — 호출 자리가 STEP4 diagnose(Phase C, 순차)라 묶일
+#     상대가 없다. 켜면 probe 하나당 1건짜리 배치가 되어 폴링 대기(수 분)가 probe 수만큼
+#     직렬로 붙는다(30건이면 수십 분). 배치 모드에서도 이 둘은 동기 호출로 남는다.
+# 실측 입력(리뷰 지적): abstention 2,612 / reasoning_mode 3,289 토큰. #128 F 표의
+# "probe당 호출 수"와 기준선 $11 은 이 둘을 빼고 센 값이라 그만큼 과소집계돼 있다.
+# 이 둘을 fused 로 접는 것은 응답 스키마와 호출 시점(진단 분기 뒤)이 달라 별건이다.
 
 def evaluate_reasoning_mode(record: EvalRecord, judge) -> dict:
     """오라클 답변의 추론 실패 모드 단일 분류(모순/수치/해석/결합/기타)."""
@@ -1273,7 +1441,8 @@ def _average_precision(verdicts: list[int]) -> float:
     return numerator / denominator
 
 def _chat(judge, prompt: str, max_output_tokens: int | None = None, label: str = "",
-          cache_prefix: str = "", json_schema: dict | None = None) -> dict:
+          cache_prefix: str = "", json_schema: dict | None = None,
+          batchable: bool = False) -> dict:
     """RAGAS 형식 프롬프트를 JSON 강제로 호출 → dict. 실패 시 {}.
 
     max_output_tokens 는 fused 처럼 응답 구조가 큰 호출만 명시한다(미지정=provider 기본).
@@ -1286,7 +1455,12 @@ def _chat(judge, prompt: str, max_output_tokens: int | None = None, label: str =
     provider 의 프롬프트를 바꾸지 않기 위해서다. 기본값 "" 은 기존 호출부(지표별 legacy
     경로)가 한 덩어리 프롬프트를 그대로 쓰게 둔다.
 
-    json_schema 도 anthropic 전용이다(output_config.format). 나머지 provider 는 무시한다."""
+    json_schema 도 anthropic 전용이다(output_config.format). 나머지 provider 는 무시한다.
+
+    batchable 은 "이 호출이 parallel_map 팬아웃 안에서 다른 호출들과 동시에 날아간다"는
+    뜻이다. anthropic 배치 모드에서만 의미가 있고(50% 할인), 켜는 곳은 fused 판정
+    하나뿐이다 — 순차 구간(진단 Phase C)의 호출을 켜면 1건짜리 배치가 되어 건마다
+    폴링 대기(수 분)를 그대로 지불한다. 기본 False 를 유지할 것."""
     kwargs: dict = {"label": label}
     if max_output_tokens is not None:
         kwargs["max_output_tokens"] = max_output_tokens
@@ -1294,6 +1468,8 @@ def _chat(judge, prompt: str, max_output_tokens: int | None = None, label: str =
         kwargs["json_schema"] = json_schema
     if cache_prefix:
         kwargs["cache_prefix"] = cache_prefix
+    if batchable:
+        kwargs["batchable"] = True
     return llm_provider.chat_json("", prompt, **kwargs)
 
 

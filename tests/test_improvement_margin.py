@@ -75,7 +75,10 @@ class JudgeMarginTest(unittest.TestCase):
         self.assertTrue(verdict.margin_rejected)
         self.assertIn("상승폭 부족", verdict.reason)
         # 사용자가 "얼마나 모자랐는지" 알 수 있어야 사후 조정이 가능하다.
-        self.assertIn(f"필요 +{MARGIN:.3f}", verdict.reason)
+        # reason 은 사용자에게 노출되므로 리포트 헤드라인과 같은 0~100 스케일로 쓴다
+        # (판정 자체는 아래처럼 0~1 탐색 신호로 한다).
+        self.assertIn(f"필요 +{MARGIN * 100:.1f}", verdict.reason)
+        self.assertAlmostEqual(verdict.before_score, 0.80)
 
     def test_gain_exactly_at_margin_is_kept(self):
         # 경계 포함. internal_adapter 의 math.isclose 판정과 같아야 한다.
@@ -330,6 +333,20 @@ class RerankerFloorRelaxationMarginTest(unittest.TestCase):
         self.assertTrue(relaxed.keep)
         self.assertEqual(relaxed.floor_violations, [])
         self.assertIn("retrieval_low_rank 감소 3→1", relaxed.reason)
+
+    def test_relaxed_reason_uses_display_scale(self):
+        """이 reason 도 "종합점수"라고 이름을 대므로 judge 와 같은 0~100 이어야 한다.
+
+        keep=True 판정이라 이력·로그에 그대로 남는다 — 여기만 0~1 이면 같은 실행의
+        다른 판정 사유와 스케일이 갈린다.
+        """
+        relaxed = self._relax(0.800, 0.800 + MARGIN)
+
+        self.assertIn("80.0→82.0", relaxed.reason)
+        self.assertIn("마진 2.0", relaxed.reason)
+        self.assertNotIn("0.800", relaxed.reason)
+        # 판정에 쓰는 값 자체는 그대로 0~1 탐색 신호다.
+        self.assertAlmostEqual(relaxed.before_score, 0.800)
 
 
 class PassThresholdMarginTest(unittest.TestCase):

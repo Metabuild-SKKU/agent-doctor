@@ -47,11 +47,41 @@ def is_bad_gold_probe(record: EvalRecord) -> bool:
 # 점수에 넣으면 고칠 수 없는 페널티가 되고 Optimize 가 헛처방을 쫓는다.
 _GOLD_ERROR_LABELS = ("bad_gold_answer", "bad_gold_chunk")
 
+# 그중 **예비(confirmed=False)여도** 제외하는 라벨. 지금은 bad_gold_chunk 하나다.
+#
+# 2026-08-07 변경이 confirmed 요구를 _GOLD_ERROR_LABELS 전체에서 뺐는데, 실제로 검토한 건
+# bad_gold_chunk 뿐이었다(리뷰 지적). bad_gold_answer 는 현재 생산자 둘 다 confirmed=True 라
+# 무해하지만, 나중에 예비 bad_gold_answer 를 만드는 코드가 붙으면 **아무 논의 없이** 그 probe
+# 들도 채점에서 빠진다. 검토한 범위만 넓혀 둔다.
+_PRELIMINARY_EXCLUDED_LABELS = ("bad_gold_chunk",)
+
 
 def is_gold_labeling_error(record: EvalRecord) -> bool:
-    """골드 라벨 오류(정답 텍스트 또는 근거 청크)로 확정된 probe 인가 — 점수 제외용.
-    재생성 대상(is_bad_gold_probe)보다 넓다: 청크 오라벨은 점수만 빼고 답은 안 건드린다."""
-    return any(f.label in _GOLD_ERROR_LABELS and f.confirmed for f in record.findings)
+    """골드 라벨 오류(정답 텍스트 또는 근거 청크)로 판정된 probe 인가 — 점수 제외용.
+    재생성 대상(is_bad_gold_probe)보다 넓다: 청크 오라벨은 점수만 빼고 답은 안 건드린다.
+
+    **예비(confirmed=False)도 제외한다(2026-08-07).** 확정만 제외하면 제외 여부가
+    심판 LLM 의 흔들림을 그대로 탄다 — 같은 probe 가 회차마다 빠졌다 들어왔다 하면서
+    종합점수를 흔든다. 실측(output/logs/corpus_20260804_103059.txt)에서 probe_qa_4195 가
+    5회 중 4회는 확정 bad_gold_chunk 라 제외됐고, faithfulness 가 1.000→0.000 으로 튄
+    1회만 다른 라벨이 붙어 실패로 집계됐다.
+
+    제외의 근거는 결정론적인 쪽에 있다 — `_f1_ok`(답이 맞았다) 와 `not _oracle_ok`
+    (골드만으로는 못 맞힌다)는 글자 비교라 재실행해도 같다. 그 둘로 "이 골드로는 이 답이
+    안 나온다" 가 이미 성립하므로, 파이프라인이 아니라 평가셋 결함이라는 판단은 서 있다.
+    faithfulness 는 **왜** 그런지(골드 오라벨 vs 파라미터 기억)만 가르고, 그건 라벨의
+    확정/예비로 표시된다.
+
+    예비 제외는 **검토한 라벨에만** 적용한다(_PRELIMINARY_EXCLUDED_LABELS) — bad_gold_answer
+    는 예비가 생기면 그때 따로 판단할 일이지, 이 변경에 묻어가면 안 된다.
+
+    ⚠️ 확정만 보던 시절보다 제외 범위가 넓어지므로 점수가 올라간다 — 이 변경 이전
+    실행과 직접 비교하지 말 것(agents/eval/README.md 재베이스라인 절)."""
+    return any(
+        f.label in _GOLD_ERROR_LABELS
+        and (f.confirmed or f.label in _PRELIMINARY_EXCLUDED_LABELS)
+        for f in record.findings
+    )
 
 
 # 하위호환 별칭(내부 호출부).
@@ -67,16 +97,37 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     if mode is None:
         mode = resolve_mode()
 
-    findings = [f for r in records for f in r.findings]
-    # Optimize 소비 편의: 확정 우선. 동률은 원래 순서 유지(stable sort — probe별 D→A→C→B).
-    findings.sort(key=lambda f: not f.confirmed)
-
     # 골드 라벨 오류(bad_gold_answer=정답 텍스트, bad_gold_chunk=근거 청크)로 판정된 probe 는
     # '거짓 실패'다 — RAG 결함이 아니라 평가셋이 틀린 것이라, 점수에 넣으면 파이프라인이 고칠 수
-    # 없는 문제로 페널티를 받고 Optimize 가 존재하지 않는 결함을 쫓게 된다. 따라서 점수 집계
-    # (품질/신뢰도/overall/composite)에서만 제외하고, 진단·리포트(findings/summary/outcome)에는
-    # 그대로 남긴다. (전부 제외되면 scorable 이 비어 overall=None → 기존 '판정 보류' 통과 경로.)
+    # 없는 문제로 페널티를 받고 Optimize 가 존재하지 않는 결함을 쫓게 된다.
+    # (전부 제외되면 scorable 이 비어 overall=None → 기존 '판정 보류' 통과 경로.)
     scorable = [r for r in records if not is_gold_labeling_error(r)]
+
+    # **채점에서 뺀 probe 는 처방도 만들지 않는다**(2026-08-10, 리뷰 지적).
+    #
+    # 예전에는 findings 를 records 전체로 만들었다. 그러면 골드가 의심스러워 채점에서 뺀
+    # probe 의 확정 라벨(generation_hallucination 등)이 planner 로 넘어가 처방을 만드는데,
+    # 정작 그 probe 는 composite 에 없어 **KEEP/ROLLBACK 게이트가 효과를 볼 수 없다.**
+    # 처방은 하는데 측정은 못 하는 상태였다. 실측 재현:
+    #
+    #     recall=1.0, real faith=0.0, oracle faith=0.0
+    #       예비 bad_gold_chunk · 확정 generation_hallucination
+    #                           · 확정 generation_parametric_overreliance
+    #       → is_gold_labeling_error=True 라 채점 제외, 그런데 처방은 나감
+    #
+    # 그래서 점수와 처방을 **같은 집합**에서 낸다. 제외 판정은 결정론적 신호만 쓰므로
+    # (오라클 있음 ∧ 오라클 실패 ∧ f1 통과) 회차마다 흔들리지 않는다.
+    #
+    # 골드 오류 라벨 자체는 남긴다 — 그게 이 probe 를 사람 검수로 보내는 통로이고
+    # (report_view 의 "골드 청크 재지정 필요"), D그룹이라 자동 처방 대상도 아니다.
+    # 같이 섰던 파이프라인 라벨은 findings_summary 에 집계로 남아 관측은 가능하다.
+    gold_probe_ids = {r.probe.probe_id for r in records if is_gold_labeling_error(r)}
+    findings = [
+        f for r in records for f in r.findings
+        if r.probe.probe_id not in gold_probe_ids or f.label in _GOLD_ERROR_LABELS
+    ]
+    # Optimize 소비 편의: 확정 우선. 동률은 원래 순서 유지(stable sort — probe별 D→A→C→B).
+    findings.sort(key=lambda f: not f.confirmed)
 
     ragas_means = _ragas_means(scorable)
     rule_means = _rule_means(scorable)
@@ -217,17 +268,20 @@ def _findings_summary(records: list[EvalRecord], mode: int) -> dict:
 
 
 def _embedding_source() -> str:
-    """임베딩 출처 — "api" | "local" | "none".
+    """임베딩 출처 — "openrouter" | "openai" | "gemini" | "local" | "none".
 
     같은 지표라도 벡터 공간이 다르면 코사인 분포가 달라 실행 간 비교가 성립하지 않는다.
-    성적표만 보고 구분할 수 있게 리포트에 남긴다(agents/eval/llm_provider.embed_texts
-    의 폴백 사슬과 같은 판정)."""
+    성적표만 보고 구분할 수 있게 리포트에 남긴다.
+
+    판정은 llm_provider.embedding_route() **하나만** 쓴다 — 예전엔 여기서
+    _api_embeddings_available(심판 provider 기준)로 따로 판정해서, EVAL_EMBED_PROVIDER
+    override 가 걸린 실행에서 실제 임베딩 경로(openrouter)와 리포트 기록(local)이
+    갈릴 수 있었다(리뷰 지적). 값도 "api" 로 뭉개지 않고 provider 명을 그대로 남긴다 —
+    api 끼리도(openai ↔ openrouter/bge-m3) 벡터 공간이 다르다."""
     try:
         from agents.eval import llm_provider
 
-        if llm_provider._api_embeddings_available():
-            return "api"
-        return "local" if llm_provider._local_embeddings_available() else "none"
+        return llm_provider.embedding_route()
     except Exception:
         return "none"
 
@@ -298,6 +352,14 @@ def _reranker_runtime(records: list[EvalRecord]) -> dict:
     # 실행 여부만 남기면 chunk_size 처방이 쌍당 비용을 몇 배로 올려도 아무 신호가 안 남는다.
     seconds = sum(_num(r.retrieval_details.get("rerank_seconds")) for r in records)
     pairs = int(sum(_num(r.retrieval_details.get("rerank_pairs")) for r in records))
+    applied_routes = sorted(
+        {
+            str(r.retrieval_details.get("rerank_route"))
+            for r in records
+            if r.retrieval_details.get("rerank_pairs")
+            and r.retrieval_details.get("rerank_route")
+        }
+    )
     return {
         "enabled": enabled_probes > 0,
         "enabled_probes": enabled_probes,
@@ -318,7 +380,39 @@ def _reranker_runtime(records: list[EvalRecord]) -> dict:
             },
             key=lambda v: (v is None, v),
         ),
+        # 어디서 계산했나("local:cuda" / "openrouter:<model>"). max_lengths 와 같은 이유로
+        # 남긴다 — 경로가 바뀌면 리랭커 **모델 자체**가 바뀌므로(로컬 bge ↔ Voyage), 두
+        # 실행의 점수 차이를 처방 효과로 읽으면 안 된다. 실제로 리랭크가 돈 건만 센다.
+        "routes": applied_routes,
+        # 시도했지만 못 돈 경로까지 포함한다. 켠 provider 와 실패 사유(status_counts)를
+        # 맞춰 봐야 "OpenRouter 를 켰는데 왜 리랭크가 안 됐지" 가 한 번에 잡힌다 —
+        # routes 만 있으면 실패한 실행은 경로가 통째로 사라져 흔적이 없다.
+        "attempted_routes": sorted(
+            {
+                str(r.retrieval_details.get("rerank_route"))
+                for r in records
+                if r.retrieval_details.get("reranker_attempted")
+                and r.retrieval_details.get("rerank_route")
+            }
+        ),
+        # 한 리포트 안에서 **서로 다른 모델**이 채점했나. 이러면 점수 분포가 섞여 있어
+        # 처방 전후 비교가 성립하지 않는다.
+        #
+        # routes 가 여럿인 것과는 구분한다 — local:cuda + local:cpu 는 CUDA OOM 강등이라
+        # 경로는 둘이어도 모델이 같아 점수가 같다. 경고할 값은 "경로가 섞였다" 가 아니라
+        # "모델이 섞였다" 다(Optimize baseline 이 장치를 제외하는 것과 같은 기준 —
+        # agents/optimize/history.py 의 _capability_identity 참고).
+        "mixed_models": len({_route_model(route) for route in applied_routes}) > 1,
     }
+
+
+def _route_model(route: str) -> str:
+    """경로 문자열에서 채점 모델 정체성만. local 경로는 장치가 달라도 같은 모델이다.
+
+    로컬 모델명은 경로에 안 들어간다(한 실행에서 index_config 로 고정이라 뺄 필요가
+    없다). 그래서 local 은 전부 "local" 한 값으로 접고, openrouter 만 모델명을 쓴다."""
+    provider, _, rest = route.partition(":")
+    return rest if provider == "openrouter" else provider
 
 
 def _search_runtime(records: list[EvalRecord]) -> dict:
@@ -380,6 +474,12 @@ def _rule_means(records: list[EvalRecord]) -> dict:
     out = {}
     if recalls:
         out["mean_recall_at_k"] = sum(recalls) / len(recalls)
+    # 근거 밀도 — recall 의 짝(관측용, 게이트 미적용). recall 은 많이 퍼올수록 오르는데
+    # 그 비용을 재는 축이 없어 top_k 부풀리기·거대 청크가 개선처럼 보였다.
+    # span 좌표로만 계산되므로 chunk 폴백 record 는 None 이라 평균에서 빠진다.
+    precisions = [r.span_precision for r in records if r.span_precision is not None]
+    if precisions:
+        out["mean_span_precision"] = sum(precisions) / len(precisions)
     if f1s:
         out["mean_f1"] = sum(f1s) / len(f1s)
     if ems:

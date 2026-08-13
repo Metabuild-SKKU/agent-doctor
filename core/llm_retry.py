@@ -42,6 +42,16 @@ def _env_float(name: str, default: float) -> float:
 # RESOURCE_EXHAUSTED 에는 이 코드가 없어 재시도 동작이 그대로다.
 _NON_RETRYABLE_MARKERS = ("insufficient_quota",)
 
+
+class PermanentError(RuntimeError):
+    """재시도가 무의미함을 **타입으로** 선언하는 마커 예외.
+
+    is_transient 의 이름·메시지 휴리스틱("timeout" 등)을 우회한다. 배치 대기 상한처럼
+    "이미 상한까지 기다렸다" 는 실패는 메시지에 'TIMEOUT'(env 변수명)이 들어가는 순간
+    transient 로 오분류돼 재시도 횟수만큼 상한이 곱해진다(2시간 × 6 = 12시간, 리뷰 지적).
+    던지는 쪽이 이 클래스를 (상속해서) 쓰면 문구와 무관하게 즉시 전파된다."""
+
+
 # "code: 503", "status 502", "http 500" 처럼 상태 코드를 뜻하는 문맥의 5xx 만 잡는다.
 _HTTP_5XX_RE = re.compile(r"(?:code|status|http)[^0-9]{0,3}5[0-9]{2}(?![0-9])")
 
@@ -71,6 +81,8 @@ def is_transient(exc: Exception) -> bool:
 
     영구 실패(401/403/404/400)는 여기서 False 다. 다시 불러도 같은 결과라 재시도는
     실패를 수십 초 늦출 뿐이고, 그동안 원인(키 오타 등)이 로그에 안 드러난다."""
+    if isinstance(exc, PermanentError):
+        return False                     # 타입이 곧 계약 — 이름·메시지 휴리스틱보다 먼저 본다
     if is_rate_limit(exc):
         return True
     if any(m in str(exc).lower() or m == str(getattr(exc, "code", "") or "").lower()

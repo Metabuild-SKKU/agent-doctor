@@ -75,6 +75,137 @@ Eval은 인덱스 fingerprint, 검색 설정, Probe 입력, 진단 모드, 모�
 판정 기준은 **recall + 정답 혼합 점수**다. recall 은 정답셋이 있는 경로에서만
 본다 — 무응답 기대 probe 는 gold 가 없어 `recall_at_k = -1` 이라, 앞에서 보면 올바른 기권까지 실패가 된다.
 
+#### 검색 판정 — 골드 커버리지를 부분점수로 (2026-08-07)
+
+`span_recall_at_k` 가 골드 구간을 **빈틈없이 다 덮어야 1, 아니면 0** 인 이진 판정이었다.
+그 판정이 "정답을 맞혔는데 검색 실패로 집계되는" 오탐을 대량으로 만들었다 —
+실측(`output/logs/corpus_20260804_103059.txt`) 30문항 중 **14건(47%)** 이 `recall=0` 이었다.
+
+이제 **덮은 문자 수 / 골드 전체 문자 수**를 쓴다. LLM 은 쓰지 않는다 — 좌표 산수라
+결정론적이고 비용이 0이다.
+
+> **지표가 1점을 못 주는 게 아니다**(리뷰 지적). 골드와 가장 많이 겹치는 청크를 주면
+> 이진 판정으로도 `1.000` 이 나온다 — 위 14건이 0점인 건 검색기가 그 청크를 top-k 에 못
+> 넣었기 때문이다. 부분점수의 값어치는 "불가능을 가능하게" 가 아니라 **부분적으로 잘한
+> 검색에 기울기를 주는 것**이다. 이진일 땐 골드 청크가 6위든 100위든 똑같이 0 이라
+> optimize 가 어느 방향으로 움직여야 나아지는지 알 수 없다.
+
+**span 이 여럿이면 길이로 가중해 합친다(micro average).** span 별 비율을 단순 평균하면
+점수가 **청킹 경계에 의존한다** — 같은 골드 500자 중 앞 100자만 검색했을 때, 청커가
+100/400 으로 잘랐으면 0.5, 250/250 으로 잘랐으면 0.2 가 된다. 검색 성과는 같은데 값이
+갈리는 것이다. `gold_spans` 는 원자적 근거 단위가 아니라 `positive_chunk_ids` 를 좌표로
+환산한 값이라 그 경계 자체가 청킹 산물이고, optimize 가 처방으로 바꾸는 축이 바로 청크
+전략이다. 가중 평균은 자르는 방식과 무관하게 같은 값을 낸다.
+
+같은 코퍼스(문서 20개)에서 "검색기가 골드와 가장 많이 겹치는 청크 하나를 가져왔다"고
+가정하고 채점 방식만 대조한 결과다.
+
+| 골든 QA | 골드 폭(중앙값) | 옛 판정 | 새 판정 | 0점→부분점수 |
+|---|---|---|---|---|
+| `qa_pairs.jsonl`(원본) | 499자 | **0.105** | **0.725** | 38건 중 **34건(89%)** |
+| `qa_pairs_clean.jsonl`(정제본) | 5자 | 1.000 | 1.000 | 0건 |
+
+**정제본에서는 아무것도 바뀌지 않는다.** 골드가 이미 좁아 청크 하나에 들어가기 때문이다.
+즉 이 변경은 정제본을 대체하는 게 아니라, 정제가 **버려야 했던 QA**(정답이 여러 곳이라
+모호해 제외된 1,169건)를 되살리는 쪽으로 값을 한다. 둘은 상보적이다.
+
+**라벨 배정은 바뀌지 않는다.** 전부 덮으면 정확히 `1.0`, 하나도 못 덮으면 `0.0` 이라
+`_recall_ok`(`>= 1`)와 A슬롯 진입(`0 <= recall < 1`)의 참거짓이 뒤집히지 않는다.
+
+#### 근거 밀도 — recall 의 짝 (2026-08-10)
+
+`mean_recall_at_k` 는 **가져올수록 무조건 오르는** 숫자다. 5지선다에 다섯 개를 다 체크하면
+정답률이 100% 인 것과 같아서, 비용을 재는 축이 없으면 "많이 퍼오기"가 개선으로 보인다.
+그래서 `span_precision_at_k` 를 나란히 잰다.
+
+    근거 밀도 = 덮은 골드 문자 / 검색해서 컨텍스트에 넣은 글자 총합
+
+**`context_precision`(RAGAS)과 다른 축이다.** 그쪽은 순위 가중 average precision 이라
+"쓸모없는 청크가 쓸모있는 청크보다 **앞에** 왔나"만 본다 — 정답 청크 **뒤**는 계산에 안
+들어가고, 판정 단위가 **청크 개수**라 청크 크기를 보지 못한다.
+
+| 상황 | `context_precision` | 근거 밀도 |
+|---|---|---|
+| 정직: top-5, 1등이 정답 청크 | 1.000 | 기준 |
+| `top_k` 를 20 으로 늘림(뒤에 쓰레기) | **1.000** 안 떨어짐 | 1/4 로 떨어짐 |
+| 문서 전체가 청크 1개 | **1.000** 안 떨어짐 | 바닥 |
+| 쓰레기가 정답보다 앞에 옴 | 0.200 잡음 | — |
+
+즉 `context_precision` 은 **순서 품질**(리랭커), 이쪽은 **부피 낭비**(top_k·청크 크기)를 잰다.
+실측(문서 30개, 원본 골드, 오라클 top-1):
+
+| 전략 | 문서당 청크 | recall | 검색 글자 | 근거 밀도 |
+|---|---|---|---|---|
+| `fixed` | 20개 | 0.745 | 500자 | 0.710 |
+| `recursive` | 22개 | 0.799 | 476자 | 0.791 |
+| `markdown_recursive` | 22개 | 0.799 | 476자 | 0.791 |
+| `markdown` | **1개** | **1.000** | 9,498자 | **0.089** |
+
+`markdown` 은 이 코퍼스(KorQuAD HTML 에서 태그를 벗긴 평문)에 헤딩이 없어 "섹션 = 문서
+전체" 로 퇴화한다. 문서를 통째로 주면 어떤 근거든 덮이므로 recall 이 1등이 되는데, 19배를
+퍼와서 산 점수라는 건 밀도에서만 보인다. 초대형 청크는 `markdown` 의 **의도된 동작**이므로
+(`tests/test_index_unit.py` 가 못을 박아 뒀다) 청커 쪽에서 막을 문제가 아니다.
+
+> 지금은 **관측용**이다(게이트 미적용). 절대값이 골드 폭에 크게 좌우되므로 — 원본 골드
+> 497자 vs 정제본 6자 — 고정 문턱을 걸지 않고 **같은 골드 안에서 설정 간 비교**로 읽는다.
+> optimize 가 처방으로 `chunker.strategy` 를 바꾸는 이상, 분포가 쌓이면 후보 선택 단계에서
+> "recall 은 올랐는데 밀도가 무너진 후보"를 거르는 데 쓸 수 있다.
+
+> ⚠️ **재베이스라인 필요.** `scoring.reliability_score` 가 recall 을 그대로 곱하므로 부분
+> 커버리지 probe 의 신뢰도가 0 에서 부분점수로 오른다. `composite`·`reliability`·
+> `mean_recall_at_k` 를 **이 변경 이전 실행과 직접 비교하면 개선으로 오독된다**
+> (optimize history 의 before/after 포함). optimize gate 의 `RECALL_FLOOR` 를 통과하는
+> 실행도 늘어난다.
+#### 흔들리는 심판 신호가 라벨을 뒤집지 못하게 (2026-08-07)
+
+`bad_gold_chunk` 는 조건 넷을 요구한다. 셋은 글자 비교라 재실행해도 같고, 하나만 심판 LLM 이다.
+
+| 조건 | 신호 | 재실행하면 같은 값? |
+|---|---|---|
+| 골드 컨텍스트가 있다 | `oracle_answer` | ✅ |
+| 골드만으론 못 맞힌다 | `oracle_f1` | ✅ |
+| 실제 답은 맞았다 | `f1_score` | ✅ |
+| 답이 검색 근거에 붙었다 | **`faithfulness`** | ❌ |
+
+실측(`output/logs/corpus_20260804_103059.txt`)에서 `probe_qa_4195` 는 답도 검색 결과도 5회
+내내 같았는데 **반복 3 에서만** `faithfulness` 가 1.000 → 0.000 으로 튀었다. 예전 코드는
+거기서 `return None` 이라 라벨이 통째로 사라졌고, 그 자리를 `retrieval_rerank_candidate_miss`
+가 차지해 처방(`rerank_candidates 20→22`)까지 만들어 최종 config 에 남았다.
+
+반복 평균으로는 못 막는다 — 같은 모델의 배심원단은 에러 상관 ρ=0.944~0.972 라 같은 곳에서
+같이 틀린다([arXiv 2607.08535](https://arxiv.org/html/2607.08535v1)). 그래서 판정 구조를 고쳤다.
+
+**앞의 세 조건만으로 "이 골드로는 이 답이 안 나온다" 가 이미 선다.** `faithfulness` 는 남은
+갈림길(골드 오라벨 vs 파라미터 기억) 하나만 가르므로, 라벨의 **존재**가 아니라 **확정/예비**를
+정하게 바꿨다.
+
+| `faithfulness` | 라벨 | 억제 범위 | 점수 |
+|---|---|---|---|
+| 문턱 이상 | `bad_gold_chunk` **확정** | 검색·생성·컨텍스트 전부 | 제외 |
+| 측정됐고 미달 | `[예비] bad_gold_chunk` | **검색만** | 제외 |
+| **미측정**(DEEP 미만) | 라벨 없음 | — | — |
+
+- **미측정은 예비로도 세우지 않는다.** 측정 없이 주장하면 RAGAS 를 안 켠 실행 전체가 검색
+  진단을 잃는다(예비가 검색 슬롯을 닫으므로).
+- **예비는 검색만 막는다.** 오라클이 실패했다는 건 그 골드에 답이 없다는 뜻이라 "왜 안
+  가져왔나" 는 `faithfulness` 와 무관하게 거짓이다. 반면 오라클 트랙이 스스로 근거 없이
+  답한 경우(`generation_hallucination`)는 골드가 아니라 **생성기**에 대한 증거라 살려 둔다.
+- **예비도 점수에서 뺀다.** 확정만 빼면 제외 여부가 심판 노이즈를 그대로 타서, 같은 probe 가
+  회차마다 빠졌다 들어왔다 하며 종합점수를 흔든다.
+
+**그래서 비대칭이 하나 생긴다 — 생성 라벨은 남는데 점수에는 안 들어간다.** 의도된 동작이라
+회귀 테스트로 못박아 뒀다(`test_generation_label_survives_but_the_probe_still_leaves_scoring`).
+
+| 단계 | 예비 `bad_gold_chunk` + `generation_hallucination` |
+|---|---|
+| 진단 | 생성 라벨 **살아남는다** — 오라클 트랙이 근거 없이 답한 건 골드가 아니라 생성기에 대한 측정된 증거다 |
+| 채점 | probe 가 **통째로 빠진다** — 결정론적 신호 둘이 이미 "이 골드로는 이 답이 안 나온다"를 세웠고, 그런 probe 를 넣으면 고칠 수 없는 페널티가 된다 |
+
+진단은 "무엇이 일어났나", 채점은 "누구 책임인가" 라 답이 갈리는 게 맞다.
+
+> ⚠️ **재베이스라인 필요.** 제외 범위가 넓어져 점수가 올라간다. `composite`·`reliability` 를
+> 이 변경 이전 실행과 직접 비교하면 개선으로 오독된다.
+
 #### 정답 판정 — lexical 단독 문턱을 버리고 RAGAS 와 섞는다 (2026-07-30)
 
 lexical char-F1(`answer_match`)은 KorQuAD 추출형 짧은 정답용 지표다. 생성 답변에 쓰면 두 방향으로
@@ -214,6 +345,15 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, confirmed
 `confirmed=False`(예비)는 *더 깊은 모드에서 확정 가능한 의심 원인*이며, `overall_score`/`pass_threshold` 를
 바꾸지 않는다(지표 기반). Optimize 는 `findings_summary.confirmed_labels` 로 확정 원인부터 처방한다.
 
+> **예외 하나 — 예비 `bad_gold_chunk`**(2026-08-07). 이건 점수를 바꾼다. 그 probe 를
+> `scorable` 에서 빼기 때문이다. 위 계약이 "예비는 점수를 안 건드린다" 인 이유는 *확신 없는
+> 진단으로 파이프라인에 페널티를 주지 않는다* 인데, 골드 오류는 **파이프라인이 아니라
+> 평가셋의 결함**이라 방향이 반대다 — 남겨 두는 쪽이 고칠 수 없는 페널티가 된다. 게다가
+> 제외의 근거(`_f1_ok` ∧ `not _oracle_ok`)는 글자 비교라 예비/확정과 무관하게 결정론적이다.
+> 자세한 배경은 위 "흔들리는 심판 신호가 라벨을 뒤집지 못하게" 절.
+>
+> 이 예외는 `report._PRELIMINARY_EXCLUDED_LABELS` 에 명시된 라벨에만 적용된다.
+
 ---
 
 ## 환경 변수
@@ -222,13 +362,15 @@ findings_summary: dict         # {mode, total, confirmed, preliminary, confirmed
 |------|------|------|
 | `EVAL_MODE` | `fast` | **진단 깊이(비용 tier)**: `fast`/`standard`/`deep` 또는 `1`~`3`. `full`/`4` 는 `deep` 으로 접힌다. 아래 표 참고 |
 | `EVAL_ENABLE_LLM` | off | `1/true` 면 RAGAS(LLM-as-Judge) 진단 허용 (**+ `EVAL_MODE≥deep` 이어야 실제 실행**) |
-| `EVAL_LLM_PROVIDER` | `openai` | LLM 호출 provider 선택: `openai` / `gemini` / `github` / `openrouter` (아래 참고) |
+| `EVAL_LLM_PROVIDER` | `openai` | LLM 호출 provider 선택: `openai` / `gemini` / `github` / `openrouter` / `anthropic` (아래 참고) |
 | `OPENAI_API_KEY` | — | provider=openai 일 때 필요 |
 | `GEMINI_API_KEY` | — | provider=gemini 일 때 필요(Google AI Studio 무료 티어) |
 | `GITHUB_TOKEN` | — | provider=github 일 때 필요(`models:read` 권한 포함된 PAT) |
 | `OPENROUTER_API_KEY` | — | provider=openrouter 일 때 필요(유료) |
-| `EVAL_JUDGE_MODEL` / `..._GEMINI` / `..._GITHUB` / `..._OPENROUTER` | `gpt-4o` / `gemini-flash-latest` / `openai/gpt-4o` / `openai/gpt-4o` | Probe 질문 생성 + RAGAS 평가(심판) 모델(설계 원칙: 응답≠평가). 답변 생성 모델은 `RAG_*`(→ `agents/rag/generator.py`)가 담당 |
-| `EVAL_EMBED_MODEL` / `EVAL_EMBED_MODEL_GEMINI` | `text-embedding-3-small` / `gemini-embedding-001` | Response Relevancy 코사인용 임베딩. github·openrouter 는 임베딩 엔드포인트가 없어 OpenAI 키로 폴백하고, 그것도 없으면 **로컬 BGE-M3**(Index 와 같은 모델, 비용 0)로 계산한다 |
+| `ANTHROPIC_API_KEY` | — | provider=anthropic 일 때 필요(유료). 모델명은 접두사 없는 정식 ID(`claude-haiku-4-5`) |
+| `EVAL_JUDGE_MODEL` / `..._GEMINI` / `..._GITHUB` / `..._OPENROUTER` / `..._ANTHROPIC` | `gpt-4o` / `gemini-flash-latest` / `openai/gpt-4o` / `openai/gpt-4o` / `claude-sonnet-5` | Probe 질문 생성 + RAGAS 평가(심판) 모델(설계 원칙: 응답≠평가). 답변 생성 모델은 `RAG_*`(→ `agents/rag/generator.py`)가 담당 |
+| `EVAL_EMBED_MODEL` / `..._GEMINI` / `..._OPENROUTER` | `text-embedding-3-small` / `gemini-embedding-001` / `baai/bge-m3` | Response Relevancy 코사인용 임베딩 모델(경로별). 실제 경로는 아래 `EVAL_EMBED_PROVIDER` 와 폴백 사슬이 정한다 |
+| `EVAL_EMBED_PROVIDER` | — | **임베딩 provider 를 심판에서 분리**: `openrouter` / `openai` / `gemini` / `local`. 미설정이면 폴백 사슬(심판 provider 의 임베딩 API → 로컬 BGE-M3 → 결측). **명시하면 강제값** — 그 경로를 못 쓰면(키 없음 등) 다른 provider 로 새지 않고 임베딩 의존 지표가 결측된다. anthropic 심판은 임베딩 엔드포인트가 없어 로컬로 폴백하는데, GPU 가 좁으면 리랭커와 VRAM 경합이 나므로(실측: 검색 192초→31분) `openrouter` 명시 권장 |
 | `QDRANT_URL` / `QDRANT_API_KEY` | `:memory:` | 검색 인덱스 대상 |
 
 > 기본값만으로도(위 키 전부 미설정) **외부 API 없이** 규칙 지표 기반 진단이 동작합니다(폴백 설계).
@@ -257,15 +399,28 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
   - 모델명은 반드시 `publisher/model` 형식. 형식이 틀리면 404 → 폴백으로 조용히 강등된다.
   - **심판 모델은 `response_format=json_object` 지원 모델로 고를 것.** 미지원이면 `chat_json`
     파싱이 실패해 `{}` 로 폴백하고, 해당 점수가 결측 처리된다.
-  - 임베딩 엔드포인트가 없어(카탈로그 337개 중 임베딩 모델 0개) `embed_texts` 는 github 와
-    마찬가지로 OpenAI 키로 폴백하고, 키가 없으면 **로컬 BGE-M3** 로 계산한다(비용 0, 외부 호출 없음).
-    결측이 되면 지표 하나가 비는 데서 끝나지 않는다 — `diagnose` 의 `bad_gold_answer` /
-    `bad_gold_answer_oracle` 이 `rel` 을 AND 조건으로 요구해 두 라벨이 영구히 침묵하고,
-    그 라벨에 걸린 probe 자동 재생성 루프까지 멈춘다.
-    임베딩 모델이 바뀌면 코사인 분포도 달라지므로 **API 임베딩 실행과 값을 직접 비교하지 말 것**
-    (실행당 1회 안내가 나온다). 모델 로드에 실패해 해시 폴백 상태면 채점에 쓰지 않고 결측으로 둔다.
+  - **임베딩 엔드포인트가 있다**(`baai/bge-m3`, $0.01/1M — 사실상 공짜). provider=openrouter 면
+    `embed_texts` 가 이걸 쓴다. 벡터는 로컬 BGE-M3 와 코사인 0.99997 로 사실상 동일하다.
   - 비용은 단가표 추정이 아니라 **응답이 알려준 실제 과금액**으로 집계된다
     (`core/llm_clients.py` 가 요청에 `usage.include` 를 붙인다).
+- **anthropic**: Anthropic 직통(Messages API). 심판 전용으로 추가된 provider 다 —
+  `output_config.format` 으로 JSON **스키마를 API 단에서 강제**해 fused 판정의 키 누락·보수
+  경로가 발화하지 않고, compact 프롬프트(`EVAL_RAGAS_COMPACT`)·Message Batches
+  (`EVAL_ANTHROPIC_BATCH`, 50% 할인) 절감이 이 provider 에서만 걸린다.
+  - 모델명은 접두사 없는 정식 ID(`claude-haiku-4-5`). OpenRouter 의 `anthropic/claude-…` 와
+    형식이 다르다.
+  - **임베딩 엔드포인트가 없다** — `EVAL_EMBED_PROVIDER` 를 명시하지 않으면 로컬 BGE-M3 로
+    폴백한다. GPU 가 좁으면(8GB) 리랭커와 VRAM 경합이 나므로 `EVAL_EMBED_PROVIDER=openrouter`
+    를 권장한다(위 표 참고).
+
+임베딩 경로가 어디로 갔는지는 리포트의 `embedding_source`
+(`openrouter`/`openai`/`gemini`/`local`/`none`)에 남는다 — 실제 전송 경로와 같은 판정
+(`llm_provider.embedding_route`)을 쓰므로, 실행 간 코사인 비교 전에 이 값부터 대조할 것.
+결측(`none`)이 되면 지표 하나가 비는 데서 끝나지 않는다 — `diagnose` 의 `bad_gold_answer` /
+`bad_gold_answer_oracle` 이 `rel` 을 AND 조건으로 요구해 두 라벨이 영구히 침묵하고,
+그 라벨에 걸린 probe 자동 재생성 루프까지 멈춘다. 임베딩 모델이 바뀌면 코사인 분포도
+달라지므로 **다른 경로의 실행과 값을 직접 비교하지 말 것**(실행당 1회 안내가 나온다).
+로컬 모델 로드에 실패해 해시 폴백 상태면 채점에 쓰지 않고 결측으로 둔다.
 
 모델명·무료 티어 한도는 시점에 따라 바뀔 수 있다 — 401/403/404 가 나면 해당 콘솔에서 현재
 사용 가능한 모델명을 다시 확인할 것.
@@ -338,8 +493,7 @@ OpenAI 유료 토큰이 없어도 무료 대체 provider로 STEP1(질문 생성)
 | `retrieval_missing_bridge_dependency` | A 검색 | — | 예비만 (decompose 재검색 회복 미측정) |
 | `generation_hallucination` | B 생성 | 3 | RAGAS faithfulness |
 | `generation_partial_answer` | B 생성 | 3 | RAGAS relevancy |
-| `generation_hop_binding_error` | B 생성 | 3 | RAGAS faithfulness(+추론검증) |
-| `generation_contradiction` / `numerical_error` / `misinterpretation` | B 생성 | 3 | 추론 실패 모드 단일분류(LLM 1회) |
+| `generation_contradiction` / `generation_numerical_error` / `generation_misinterpretation` / `generation_hop_binding_error` / `generation_chronological_error` | B 생성 | 3 | 추론 실패 모드 단일분류(LLM 1회). 다섯 다 `faithfulness ≥ 0.7`(근거는 있는데 잘못 썼다)이 전제다 — 근거 자체가 없으면 `generation_hallucination` 이 가져간다. `generation_chronological_error` 는 그래서 "시간 순서가 틀린 경우 전체"가 아니라 "근거는 인용했는데 선후만 뒤집은 경우"를 잡는다. `generation_hop_binding_error` 만 분류기 미측정 시 correctness 카운트(FN=0·FP>0)로 폴백하는데, 그 경로는 시간축 오류와 카운트 모양이 같아 구분하지 못한다 |
 | `generation_abstention_failure` | B 생성 | 2~3 | 기권했어야 하는데 지어냄(두 갈래는 `metadata.trigger`로 구분 — `no_answer_expected` / `corpus_gap`) |
 | `generation_wrongful_abstention` | B 생성 | 1~3 | 근거는 검색됐는데(recall=1) 기권 — C 전제를 닫고 자리를 가져간다. 처방 `relax_abstention` |
 | `generation_parametric_overreliance` | B 생성 | 3 | 정답이지만 real faithfulness 낮음 |

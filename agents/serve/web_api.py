@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from agents.optimize.score_display import display_scores_from_metadata
 from core import run_registry
 from core.state import AgentDoctorState
 from graph import build_graph
@@ -110,18 +111,28 @@ def _summarize_stage_event(stage: str, snapshot: AgentDoctorState) -> tuple[str,
         history = snapshot.optimization_history or []
         if history:
             last = history[-1]
-            before = last.metadata.get("before_score")
-            after = last.metadata.get("after_score")
-            if before is not None and after is not None:
-                verdict = "유지" if (last.status == "applied" and not last.metadata.get("pending")) else "롤백"
-                # 무엇을 바꿨는지는 action 이 말한다. 구버전 이력에는 없으므로
-                # 처방 id 로 폴백한다(이전 실행의 저장 상태도 계속 읽혀야 한다).
-                subject = (
-                    getattr(last, "action_key", None)
-                    or last.selected_prescription_id
-                    or ""
+            # 표시 점수 변환 규약은 score_display 가 단독으로 갖는다. 여기서 직접
+            # 폴백하면 한쪽만 composite 인 이력에서 축이 섞인다(prescreener 경로).
+            scores = display_scores_from_metadata(last.metadata)
+            verdict = "유지" if (last.status == "applied" and not last.metadata.get("pending")) else "롤백"
+            # 무엇을 바꿨는지는 action 이 말한다. 구버전 이력에는 없으므로
+            # 처방 id 로 폴백한다(이전 실행의 저장 상태도 계속 읽혀야 한다).
+            subject = (
+                getattr(last, "action_key", None)
+                or last.selected_prescription_id
+                or ""
+            )
+            tone = "ok" if verdict == "유지" else "find"
+            if scores.available:
+                return (
+                    "처방",
+                    f"{subject} · 종합 {scores.before:.0f}→{scores.after:.0f} {verdict}",
+                    tone,
                 )
-                return ("처방", f"{subject} · 종합 {before:.0f}→{after:.0f} {verdict}", "ok" if verdict == "유지" else "find")
+            # 점수를 못 만드는 경우에도 무엇을 했고 어떻게 판정됐는지는 말해준다.
+            # 숫자만 뺀다 — 없는 종합점수를 지어내지 않는다.
+            if subject:
+                return ("처방", f"{subject} · {verdict}", tone)
         return ("처방", "설정 조정 시도", "")
     if stage == "serve":
         return ("완료", "리포트 준비 완료", "ok")

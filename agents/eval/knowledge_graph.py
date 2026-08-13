@@ -26,7 +26,9 @@ RAGAS TestsetGenerator 방식의 멀티홉 질문 생성은 "관련 있는 청�
 from __future__ import annotations
 
 import math
+import os
 import re
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -61,6 +63,15 @@ class KGraph:
 
 # ── 그래프 구축 ───────────────────────────────────────────────────
 
+
+def _env_int(name: str, default: int) -> int:
+    """환경변수 int 파싱 - 비정수/오타면 기본값(core, index 와 같은 규약)."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def build_graph(chunks: list[Chunk], top_k: int = KG_TOP_K_NEIGHBORS) -> KGraph:
     """
     청크 리스트로 KG를 만든다. 전량 휴리스틱(무료) — LLM 호출 없음.
@@ -90,15 +101,26 @@ def build_graph(chunks: list[Chunk], top_k: int = KG_TOP_K_NEIGHBORS) -> KGraph:
 
     ids = list(nodes.keys())
     # 1) 바닥 가드를 통과하는 모든 쌍의 가중치를 계산해 각 노드의 후보 이웃을 모은다.
-    candidates: dict[str, list[tuple[str, float]]] = {cid: [] for cid in nodes}
-    for i in range(len(ids)):
-        for j in range(i + 1, len(ids)):
-            a_id, b_id = ids[i], ids[j]
-            weight = _edge_weight(nodes[a_id], nodes[b_id], embeddings[a_id], embeddings[b_id])
-            if weight is None:
-                continue
-            candidates[a_id].append((b_id, weight))
-            candidates[b_id].append((a_id, weight))
+    #    쌍 수가 O(n^2) 라 청크가 늘면 순수 파이썬 루프로는 감당이 안 된다 — 실측으로
+    #    6,584청크(2,167만 쌍)에 약 16분이고, 그동안 진행률 로그가 없어 "멈춤" 과
+    #    구분되지 않는다. numpy 가 있으면 행렬곱 두 번으로 같은 값을 1초에 낸다.
+    started_at = time.monotonic()
+    # 폴백 사유는 반환값이 아니라 out 파라미터로 받는다 — 반환 타입을 튜플로 바꾸면
+    # 이 함수를 None 으로 패치해 루프 경로를 강제하는 파리티 테스트가 전부 깨진다.
+    reasons: list[str] = []
+    candidates = _candidate_edges_vectorized(ids, nodes, embeddings, top_k, reasons)
+    fallback_reason = None
+    if candidates is None:
+        fallback_reason = reasons[0] if reasons else "unknown"
+        candidates = {cid: [] for cid in nodes}
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                a_id, b_id = ids[i], ids[j]
+                weight = _edge_weight(nodes[a_id], nodes[b_id], embeddings[a_id], embeddings[b_id])
+                if weight is None:
+                    continue
+                candidates[a_id].append((b_id, weight))
+                candidates[b_id].append((a_id, weight))
 
     # 2) 각 노드에서 상위 k개만 엣지로 승격한다(top-k). a→b 또는 b→a 어느 방향이든
     #    상위에 들면 엣지를 남긴다(상호 최근접이 아니어도 연결 — 후보가 지나치게
@@ -115,7 +137,156 @@ def build_graph(chunks: list[Chunk], top_k: int = KG_TOP_K_NEIGHBORS) -> KGraph:
         edges[b_id].append((a_id, w))
     for cid in edges:
         edges[cid].sort(key=lambda pair: pair[1], reverse=True)
+
+    # 어느 경로로 돌았는지 한 줄 남긴다. 이 모듈이 고쳐진 계기가 "16분 동안 아무 출력이
+    # 없어 멈춘 줄 알았다" 였는데, 벡터화가 빨라져도 폴백으로 빠지면 그 증상이 그대로
+    # 재발한다 — 그때 "왜 느린지" 를 로그만 보고 알 수 있어야 한다.
+    # cp949 콘솔에서 죽지 않게 ASCII 와 안전한 문자만 쓴다(호출부가 try 안이라,
+    # 여기서 UnicodeEncodeError 가 나면 STEP1 전체가 실패로 기록된다).
+    print(f"  kg_build_mode={'loop_fallback' if fallback_reason else 'vectorized'} "
+          f"chunks={len(nodes)} block_rows={_env_int('EVAL_KG_BLOCK_ROWS', 512)} "
+          f"edges={len(kept)} elapsed={time.monotonic() - started_at:.1f}s"
+          + (f" reason={fallback_reason}" if fallback_reason else ""))
     return KGraph(nodes=nodes, edges=edges)
+
+
+def _candidate_edges_vectorized(
+    ids: list[str],
+    nodes: dict[str, KGNode],
+    embeddings: dict[str, list[float] | None],
+    top_k: int,
+    reasons: list[str] | None = None,
+) -> dict[str, list[tuple[str, float]]] | None:
+    """_edge_weight 를 모든 쌍에 대해 계산한다. numpy 가 없거나 노드가 2개 미만이면 None.
+
+    같은 값을 다른 방법으로 낸다:
+      코사인  = 행 정규화 후 E @ E.T          (영벡터·임베딩 없음은 0 행 → 코사인 0)
+      자카드  = 역색인으로 교집합을 세고,
+                합집합 = |a| + |b| - 교집합    (한쪽이 비면 0 — cosine() 규약과 같음)
+      가중치  = 0.6*jaccard + 0.4*cosine, 단 둘 다 임계값 미만이면 엣지 없음
+
+    **행 블록 단위로 돈다.** 전체 n x n 행렬을 한 번에 만들면 6,584청크에서 실측 peak
+    2.76GB 였다(sim/jac/weight/argsort 출력이 각각 n^2). 블록으로 끊으면 n^2 짜리
+    중간산물이 O(블록 x n) 으로 떨어진다 — 시간은 여전히 O(n^2) 지만 그쪽은 행렬곱이라
+    감당할 수 있다.
+
+    블록에 안 걸리는 상주 메모리는 두 가지뿐이고 둘 다 O(n)이다: 임베딩 행렬
+    (n x 차원, 6,584청크면 54MB)과 키워드 역색인(실측 0.4MB). 키워드를 이진행렬로
+    세웠다면 여기가 n x |어휘| 밀집이라 969MB 로 블록의 노력을 무의미하게 만들었다 —
+    역색인을 쓰는 이유가 그거다(아래 주석).
+
+    호출부가 노드당 상위 top_k 만 쓰므로 그 절단도 블록 안에서 끝낸다. 통과한 쌍을
+    전부 파이썬으로 옮기면 다시 O(n^2) 가 되는데, 임베딩이 서로 비슷한 코퍼스에서는
+    대부분의 쌍이 바닥 가드를 통과해 수천만 건이 된다.
+
+    float64 로 계산한다. float32 면 메모리가 절반이지만 가중치가 ~1e-7 어긋나,
+    임계값(0.2/0.5) 바로 위아래 쌍에서 엣지 포함 여부가 뒤집힐 수 있다. 그러면 이
+    최적화가 '같은 결과를 빠르게' 가 아니라 '결과가 조금 다름' 이 되어, 나중에 회귀를
+    의심하게 만든다.
+
+    [파리티의 유일한 한계] 가중치가 ULP 수준(~1e-16)으로 같은 후보 여럿이 top_k 경계에
+    정확히 걸치면, 그중 누가 뽑히는지는 루프 경로와 갈릴 수 있다. 행렬곱과 파이썬 루프는
+    덧셈 순서가 달라 같은 쌍의 마지막 자리가 다르게 떨어지기 때문이고(루프 경로끼리도
+    쌍마다 0.64 / 0.6400000000000001 로 갈린다), 어느 쪽으로도 고칠 수 없다. 실제로
+    걸리려면 임베딩이 정확히 같은 청크(반복되는 머리말·상용구 등)가 있어야 하고, 그때
+    탈락하는 후보는 가중치가 같은 동률이라 어느 쪽을 남겨도 등가다. 임베딩이 아예 없어
+    자카드만으로 판정하는 코퍼스에서는 이 문제가 없다 — 이진행렬 곱은 float64 에서
+    정확해서 동률이 동률로 유지된다(테스트로 고정).
+    """
+    def bail(reason: str) -> None:
+        """폴백 사유를 호출부(build_graph 의 로그)로 흘린다."""
+        if reasons is not None:
+            reasons.append(reason)
+        return None
+
+    n = len(ids)
+    if n < 2:
+        return bail("too_few_chunks")
+    try:
+        import numpy as np
+    except ImportError:
+        return bail("numpy_missing")
+
+    dim = next((len(embeddings[cid]) for cid in ids if embeddings.get(cid)), 0)
+    if dim:
+        # 차원이 섞인 코퍼스는 행렬로 담을 수 없다. 짧은 쪽을 0 으로 패딩하면 코사인이
+        # 달라지는데(루프 경로의 cosine() 은 zip 이라 긴 쪽을 잘라 계산한다) 그 차이가
+        # 임계값을 넘나들어 엣지가 통째로 바뀐다 — 실측으로 60청크에서 엣지 절반이
+        # 갈렸다. 어느 쪽 셈이 옳은지는 이 커밋이 정할 문제가 아니므로(여기서 정하면
+        # 최적화가 아니라 동작 변경이다) 루프 경로로 넘긴다. 정상 코퍼스는 한 모델로
+        # 임베딩하므로 이 분기를 타지 않는다.
+        if any(len(v) != dim for v in embeddings.values() if v):
+            return bail("mixed_embedding_dim")
+        emb = np.zeros((n, dim), dtype=np.float64)
+        for row, cid in enumerate(ids):
+            vec = embeddings.get(cid)
+            if vec:
+                emb[row] = vec
+        norms = np.linalg.norm(emb, axis=1, keepdims=True)
+        # 영벡터·임베딩 없음은 0 행으로 남긴다 → 그 행의 코사인이 전부 0.
+        np.divide(emb, norms, out=emb, where=norms > 0)
+    else:
+        emb = None
+
+    # 키워드 교집합은 역색인(키워드 → 그 키워드를 가진 행 번호)으로 센다. 이진행렬 B 를
+    # 세워 B @ B.T 로 내도 값은 같지만, 그 행렬이 n x |어휘| 밀집이라 블록 스킴 밖에서
+    # 통째로 상주한다 — 어휘는 청크 수에 비례해 늘어서(실측 3,880청크 11,284어휘 /
+    # 6,584청크 18,391어휘) 메모리가 사실상 n^2 로 자란다. 실측 6,584청크에서 밀집은
+    # 969MB·17.7s 인데 역색인은 0.4MB·1.5s 이고 교집합 행렬은 비트 단위로 같다.
+    # 밀집이 이렇게 손해인 이유: 청크당 키워드가 _TOP_K_KEYWORDS(8)개로 묶여 있어
+    # 실제 밀도가 0.04% 라, 행렬의 99.96% 가 0 이다.
+    keyword_rows = [sorted(set(nodes[cid].keywords)) for cid in ids]
+    rows_by_keyword: dict[str, list[int]] = {}
+    for row, kws in enumerate(keyword_rows):
+        for kw in kws:
+            rows_by_keyword.setdefault(kw, []).append(row)
+    # 누적할 때 fancy index 로 한 번에 더하려고 배열로 굳힌다.
+    postings = {kw: np.array(rws) for kw, rws in rows_by_keyword.items()}
+    kw_sizes = np.array([len(kws) for kws in keyword_rows], dtype=np.float64)
+
+    limit = n if top_k <= 0 else min(top_k, n)
+    # 기본 512(실측: 6,584청크 x 1024차원, 실제 코퍼스 어휘 18,391, 3회 중앙값).
+    # 블록별 시간/이 루프가 더 쓰는 메모리:
+    #   128=10.3s/126MB   256=10.1s/198MB   512=9.7s/329MB   1024=11.0s/546MB   2048=11.5s/1025MB
+    # 시간은 128~512 구간이 6% 안이라 사실상 평평하다 — 키워드 교집합이 밀집 행렬곱이
+    # 아니게 되면서(위 역색인) 블록이 좌우하는 건 코사인 행렬곱과 argsort 뿐이라 그렇다.
+    # 그래서 이 값은 '시간을 사는 손잡이' 가 아니라 거의 순수한 메모리 손잡이다. 중앙값이
+    # 가장 낮은 512 를 기본으로 두되, 메모리가 빠듯하면 128 까지 낮춰도 시간 손해가
+    # 6% 안이다(-203MB). 2048 이상은 시간·메모리가 같이 나빠져 올릴 이유가 없다.
+    block = max(1, _env_int("EVAL_KG_BLOCK_ROWS", 512))
+    candidates: dict[str, list[tuple[str, float]]] = {cid: [] for cid in ids}
+
+    for begin in range(0, n, block):
+        stop = min(begin + block, n)
+        rows = stop - begin
+
+        sim = emb[begin:stop] @ emb.T if emb is not None else np.zeros((rows, n))
+        if postings:
+            inter = np.zeros((rows, n))
+            for local, kws in enumerate(keyword_rows[begin:stop]):
+                for kw in kws:
+                    inter[local, postings[kw]] += 1.0
+            union = kw_sizes[begin:stop, None] + kw_sizes[None, :] - inter
+            jac = np.divide(inter, union, out=np.zeros_like(inter), where=union > 0)
+        else:
+            jac = np.zeros((rows, n))
+
+        weight = 0.6 * jac + 0.4 * sim
+        keep = (jac >= KG_ENTITY_OVERLAP_MIN) | (sim >= KG_EMBEDDING_SIM_MIN)
+        keep[np.arange(rows), np.arange(begin, stop)] = False   # 자기 자신 제외
+        weight[~keep] = -np.inf
+
+        # 내림차순 안정 정렬 — 가중치가 같으면 열 인덱스가 작은 쪽이 먼저다(결정적).
+        order = np.argsort(-weight, axis=1, kind="stable")[:, :limit]
+        for local, cid in enumerate(ids[begin:stop]):
+            row_w = weight[local]
+            for col in order[local].tolist():
+                w = row_w[col]
+                if w == -np.inf:
+                    break            # 정렬돼 있으므로 뒤는 전부 탈락
+                candidates[cid].append((ids[col], float(w)))
+
+    return candidates
 
 
 def neighbors(graph: KGraph, chunk_id: str, min_weight: float = 0.0) -> list[str]:

@@ -49,17 +49,30 @@ class RefetchTest(unittest.TestCase):
     def _run(self, first: dict, retry: dict | None = None):
         calls = []
 
-        def fake_chat(judge, prompt, max_output_tokens=None, label="", **kwargs):
+        # 시그니처는 _chat 을 그대로 따라간다 — **kwargs 로 뭉개면 재요청이 캐시 프리픽스·
+        # 스키마를 안 실어 보내도 테스트가 통과한다(그건 fused 가 아니라 맨 프롬프트 호출이다).
+        def fake_chat(judge, prompt, max_output_tokens=None, label="",
+                      cache_prefix="", json_schema=None, batchable=False):
             # 여기 오는 호출은 전부 재요청이다 — 첫 응답(first)은 인자로 이미 넘어온다.
-            # **kwargs: _chat 이 provider 별 옵션(cache_prefix/json_schema)을 늘려도
-            # 이 스텁이 TypeError 로 죽지 않게. 재요청 여부·프롬프트만 보는 테스트다.
-            calls.append(prompt)
+            calls.append((prompt, cache_prefix, json_schema, batchable))
             return {} if retry is None else retry
 
         buf = io.StringIO()
         with patch.object(R, "_chat", fake_chat), redirect_stdout(buf):
-            out = R._refetch_fused_if_incomplete(None, first, "PROMPT", BLOCKS)
+            out = R._refetch_fused_if_incomplete(None, first, "PROMPT", BLOCKS,
+                                                 cache_prefix="PREFIX", json_schema={"s": 1})
+        self._calls = calls
         return out, len(calls), buf.getvalue()
+
+    def test_refetch_reuses_prefix_and_schema_but_not_batch(self):
+        partial = _full()
+        del partial["correctness"]
+        self._run(partial, _full())
+        prompt, prefix, schema, batchable = self._calls[0]
+        self.assertEqual((prompt, prefix, schema), ("PROMPT", "PREFIX", {"s": 1}))
+        # 재요청은 fused 팬아웃이 끝난 뒤 그 스레드에서 홀로 나간다. 배치로 보내면
+        # 1건짜리 배치가 되어 폴링 대기(수 분)를 통째로 문다.
+        self.assertFalse(batchable)
 
     def test_complete_response_does_not_refetch(self):
         out, n, log = self._run(_full())
