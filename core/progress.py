@@ -91,10 +91,12 @@ class Progress:
     출력 시점은 전적으로 tick() 호출에 달려 있다 — 아무도 tick() 을 안 부르는 동안은
     시간이 아무리 지나도 조용하다(모듈 docstring 의 '완료 이벤트 기반' 참고)."""
 
-    def __init__(self, label: str, total: int, min_interval_sec: float):
+    def __init__(self, label: str, total: int, min_interval_sec: float,
+                 eta: bool = True):
         self._label = label
         self._total = total
         self._min_interval = min_interval_sec
+        self._eta = eta
         self._done = 0
         self._started_at = time.monotonic()
         self._last_print_at = self._started_at
@@ -153,7 +155,10 @@ class Progress:
             line += f" · 경과 {_fmt_duration(elapsed)}"
             # 남은 시간은 지금까지의 평균 속도로 민 추정치다. 병렬 구간에서는 초반
             # 완료가 몰려 낙관적으로 나왔다가 수렴하므로 '약' 을 붙여 둔다.
-            if self._done > 0 and self._done < self._total:
+            # eta=False 는 이 외삽 자체가 성립하지 않는 구간용 — anthropic 배치처럼
+            # 전 항목이 한꺼번에 끝나는 곳에서는 첫 완료 기준 외삽이 실측 대비 60배까지
+            # 부풀었다(1/100 시점 '남은 약 285m' → 실제 4.7분).
+            if self._eta and self._done > 0 and self._done < self._total:
                 remaining = elapsed / self._done * (self._total - self._done)
                 line += f" · 남은 약 {_fmt_duration(remaining)}"
         # flush: _Tee 는 줄 버퍼라 대개 바로 나가지만, 진행률은 "살아 있다" 를 보여주는
@@ -167,15 +172,18 @@ class Progress:
         return self._printed
 
 
-def start(label: str | None, total: int) -> Progress | None:
+def start(label: str | None, total: int, *, eta: bool = True) -> Progress | None:
     """진행률 리포터를 만든다. 끈 상태·라벨 없음·항목 없음이면 None(= 호출부는 아무것도 안 함).
 
     라벨은 호출부가 준다 — 'STEP3 RAGAS 실제 트랙' 처럼 어느 단계인지 알아야
     진행률이 의미를 갖는데, 그건 parallel_map 이나 encode 가 알 수 없는 정보다.
-    라벨을 안 주면 지금까지처럼 조용히 돈다(기본이 침묵이라 새 소음이 생기지 않는다)."""
+    라벨을 안 주면 지금까지처럼 조용히 돈다(기본이 침묵이라 새 소음이 생기지 않는다).
+
+    eta=False 는 '남은 약 …' 추정을 끈다 — 완료가 한꺼번에 몰리는 구간(배치)에서는
+    평균 속도 외삽이 수십 배로 틀리므로, 잘못된 숫자보다 없는 숫자가 낫다."""
     if not label or total <= 0 or not _enabled():
         return None
-    return Progress(label, total, _min_interval_sec())
+    return Progress(label, total, _min_interval_sec(), eta=eta)
 
 
 def tick(reporter: Progress | None, count: int = 1) -> None:
