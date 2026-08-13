@@ -606,17 +606,40 @@ data/
 SOURCE_TYPE=korquad
 SOURCE_URL=data/corpus.jsonl
 # EVAL_PROBE_SOURCE 는 korquad 면 스크립트가 taxonomy 로 자동 세팅(명시해도 됨)
-EVAL_TAXONOMY_QA=data/qa_pairs.jsonl
+EVAL_TAXONOMY_QA=data/qa_pairs_clean.jsonl   # 정제본 권장(아래 표 참고)
 KORQUAD_MAX_DOCS=20        # 스모크: 앞 20문서만. 전체는 비우거나 0
 KORQUAD_QA_LIMIT=50        # 스모크: qa 50개. 전체는 비우거나 0
 EVAL_MODE=1               # 1=fast(무비용) … 3=deep(생성·RAGAS, API 비용). full/4 → deep
 # EVAL_ENABLE_LLM=1       # RAGAS 켜기(EVAL_MODE>=deep 과 AND). 켜면 API 비용
 ```
 
-> ⚠️ **`.env` 값이 안 먹으면 shell 환경변수를 의심하라.** `load_dotenv()` 는 `override=False`
-> 라 **이미 export 된 환경변수를 .env 로 덮지 않는다**. 예: 셸에 `EVAL_MODE=4` 가 남아 있으면
-> `.env` 에 `EVAL_MODE=1` 을 써도 4 로 돈다. → `echo $EVAL_MODE` 로 확인하고 `unset EVAL_MODE`,
-> 또는 `EVAL_MODE=1 python …` 처럼 인라인으로 넘긴다.
+##### 스모크 vs 비교 실행 — 규모를 나눠 쓴다
+
+| | 문서 | QA | 쓰임 |
+|---|---|---|---|
+| **스모크** | 20 | 20~50 | 파이프라인이 도는지 확인. 빠르고 쌈 |
+| **비교 실행** | **267** | **150** | 설정 A/B 를 점수로 비교. 논문 권장 구간 |
+
+**비교에 스모크 규모를 쓰면 안 된다.** 문항이 적으면 같은 config 를 다시 재도 점수가
+흔들려 "개선"과 노이즈가 구분되지 않는다. 실측(`output/logs/corpus_20260804_103059.txt`,
+30문항)에서 **기능적으로 같은 config 가 75점 / 73점**으로 갈렸고, 이는 Optimize 의 개선
+마진(`MIN_IMPROVEMENT_MARGIN=0.02` = 2점)과 **같은 크기**다.
+
+RAISE([arXiv 2605.30029](https://arxiv.org/html/2605.30029))가 같은 실험을 하고 **100~200
+예제에서 측정이 안정된다**고 보고한다(그 아래는 시드마다 튐). 267 은 정제본에서 QA 150 건을
+채우는 데 필요한 문서 수의 실측값이다 — `KORQUAD_MAX_DOCS` 가 먼저 문서를 자르고 그 안에서
+QA 를 세므로 **둘을 같이 올려야 한다.**
+
+노이즈를 직접 재려면 → `python tools/measure_eval_noise.py -n 3`
+
+> ⚠️ **`.env` 값이 안 먹으면 shell 환경변수를 의심하라.** `load_dotenv()` 의 기본값은
+> `override=False` 라 **이미 export 된 환경변수를 .env 로 덮지 않는다**. 예: 셸에
+> `EVAL_MODE=4` 가 남아 있으면 `.env` 에 `EVAL_MODE=1` 을 써도 4 로 돈다.
+> → `echo $EVAL_MODE` 로 확인하고 `unset EVAL_MODE`, 또는 `EVAL_MODE=1 python …` 처럼 인라인.
+>
+> 단 **주 실행 경로 셋은 `override=True` 라 이 함정이 없다** — `run_local_pipeline.py`,
+> `graph.py`, `tools/measure_eval_noise.py` 는 `.env` 가 셸을 이긴다. 함정이 남는 쪽은
+> `load_dotenv()` 를 기본값으로 부르는 `agents/serve/web_api.py` 와 `tests/check_*.py` 다.
 
 #### 3) 실행
 
@@ -645,9 +668,9 @@ EVAL_MODE=deep EVAL_ENABLE_LLM=1 python run_local_pipeline.py  # 생성·RAGAS �
 |----------|------|------|
 | `SOURCE_TYPE` / `SOURCE_URL` | `korquad` / `data/corpus.jsonl` | 파이프라인 소스(Ingest·Eval 공용). `run_local_pipeline.py`·`graph.py` 둘 다 읽음 |
 | `EVAL_PROBE_SOURCE` | (korquad 면 `taxonomy` 자동) | qa 소스. taxonomy = 외부 골든 QA |
-| `EVAL_TAXONOMY_QA` | `data/qa_pairs.jsonl` | taxonomy qa 파일 경로 |
-| `KORQUAD_MAX_DOCS` | (스모크 20) | 앞 N개 문서만. 0/미설정=전체. corpus·qa 동일 규칙 |
-| `KORQUAD_QA_LIMIT` | (스모크 50) | qa 개수 상한. 0/미설정=전체 |
+| `EVAL_TAXONOMY_QA` | `data/qa_pairs.jsonl` | taxonomy qa 파일 경로. **정제본(`qa_pairs_clean.jsonl`) 권장** — 원본은 골드가 청크 통째(중앙값 497자)라 정답을 맞혀도 recall=0 이 된다 |
+| `KORQUAD_MAX_DOCS` | (스모크 20) | 앞 N개 문서만. 0/미설정=전체. corpus·qa 동일 규칙. **비교 실행은 267** |
+| `KORQUAD_QA_LIMIT` | (스모크 50) | qa 개수 상한. 0/미설정=전체. **비교 실행은 150**(그 아래는 노이즈가 마진을 삼킴) |
 | `EVAL_MODE` / `EVAL_ENABLE_LLM` | `fast` / off | 진단 깊이·RAGAS. deep 이상+LLM 이면 생성·RAGAS 채점(**API 비용**) |
 
 > 생성 채점(token F1)은 LLM 답변 생성이 있어야 의미가 있다 — LLM을 끄면 추출식 폴백이
