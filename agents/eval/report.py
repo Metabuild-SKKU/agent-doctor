@@ -230,10 +230,52 @@ def _failed_questions(records: list[EvalRecord]) -> list[dict]:
             "actual_answer": record.generated_answer or "",
             "recall_at_k": record.recall_at_k,
             "recall_basis": record.recall_basis,
+            "observations": _observations(record),
         }
         for record in records
         if record.findings and not is_gold_labeling_error(record)
     ]
+
+
+def _observations(record: EvalRecord) -> dict:
+    """사람이 이 probe 를 보고 **직접 라벨을 붙일 수 있을 만큼**의 관측값.
+
+    지금까지 이 값들은 콘솔 로그(_log_probe)로만 나갔다. 그런데 진단 유효성 검증은
+    "사람이 우리 관측을 보고 라벨을 붙이고, 그걸 우리 진단과 대조"하는 절차라 관측이
+    **구조화된 형태로 남아야** 한다(로그 파싱은 포맷이 계약이 아니라 깨진다).
+
+    담는 건 **관측뿐이고 판정은 없다.** finding 라벨·근거 문구는 넣지 않는다 — 라벨러가
+    그걸 보면 우리 진단을 채점하는 게 아니라 우리 진단에 동의하는지를 재게 된다.
+
+    recall 이 여기 없고 상위에 있는 건 소비처가 달라서다: recall 은 채점기가 제외 판정에
+    쓰는 입력(계약)이고, 여기는 사람이 읽는 자료다.
+    """
+    probe = record.probe
+    gold_ids = list(probe.gold_chunk_ids or [])
+    retrieved = list(record.retrieved_chunk_ids or [])
+    details = record.retrieval_details or {}
+    obs = {
+        "f1": round(record.f1_score, 4),
+        "oracle_f1": round(record.oracle_f1, 4) if record.oracle_answer is not None else None,
+        "exact_match": record.exact_match,
+        "span_precision": record.span_precision,
+        "gold_chunk_hit": len(set(gold_ids) & set(retrieved)),
+        "gold_chunk_total": len(gold_ids),
+        "gold_chunk_ids": gold_ids,
+        "retrieved_chunk_ids": retrieved,
+        "search_mode": details.get("search_mode", "-"),
+        "reranker_status": details.get("reranker_status", "disabled"),
+        "mmr_applied": bool(details.get("mmr_applied")),
+        "answer_score": round(record.answer_score, 4) if probe.ground_truth else None,
+        "answer_semantic": record.answer_semantic,
+        "gold_coverage": record.gold_coverage,
+    }
+    for name in ("faithfulness", "context_precision", "context_recall",
+                 "response_relevancy"):
+        value = record.ragas.get(name)
+        if isinstance(value, (int, float)):
+            obs[name] = round(float(value), 4)
+    return obs
 
 
 def _findings_summary(records: list[EvalRecord], mode: int) -> dict:

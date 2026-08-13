@@ -6,6 +6,7 @@ agents/serve/report_view.build_report_view 가 리포트 헤드라인 '종합 �
 핵심 계약: 웹이 보여주는 '종합 점수'는 overall_score(품질 단일축)가 아니라
 composite_score(품질×신뢰도) 여야 한다. composite 가 없으면 overall×100 로 폴백.
 """
+import json
 import os
 import sys
 import unittest
@@ -252,21 +253,54 @@ class FailedQuestionViewTest(unittest.TestCase):
         report = build_report([record], iteration=1, mode=1)
         view = build_report_view(AgentDoctorState(report=report, probes=[probe]))
 
-        # recall 은 외부 정답지 대조(tools/score_ragec.py)가 "우리 검색은 성공했다" 를
-        # 판정하는 독립 근거라 여기 함께 보존한다 — EvalRecord 와 같이 사라지기 때문이다.
-        self.assertEqual(report.failed_questions, [{
+        # recall 과 observations 는 EvalRecord 와 함께 사라지므로 여기서 보존한다.
+        #   recall       — 외부 정답지 대조(score_ragec)가 "우리 검색은 성공했다" 를 판정하는
+        #                  독립 근거. 우리 라벨로 판정하면 순환이 된다
+        #   observations — 사람이 라벨을 붙일 라벨 시트(make_label_sheet)의 원자료.
+        #                  없으면 시트가 지표 없이 나가 검색 계열 라벨을 사람도 못 가른다
+        entry = report.failed_questions[0]
+        observations = entry.pop("observations")
+        self.assertEqual(entry, {
             "probe_id": "p1",
             "question": "무료 체험 기간은 며칠인가요?",
             "expected_answer": "14일",
             "actual_answer": "30일입니다.",
             "recall_at_k": 0.0,
             "recall_basis": "chunk",
-        }])
+        })
+        for key in ("f1", "gold_chunk_hit", "gold_chunk_total", "search_mode",
+                    "reranker_status", "retrieved_chunk_ids"):
+            self.assertIn(key, observations, key)
         self.assertEqual(len(view["qas"]), 1)
         self.assertEqual(view["qas"][0]["q"], probe.question)
         self.assertEqual(view["qas"][0]["gold"], probe.ground_truth)
         self.assertEqual(view["qas"][0]["actual"], "30일입니다.")
         self.assertEqual(view["qas"][0]["diagnosis"], finding.description)
+
+    def test_observations_never_leak_our_diagnosis(self):
+        """관측에 진단이 섞이면 라벨 시트가 답을 알려주게 되어 검증이 통째로 무의미해진다.
+
+        키 이름(`labels`)만 확인하면 **다른 키로 새는 걸 못 잡는다** — 실제로 `원인`·
+        `evidence` 로 실어보낸 뮤테이션이 그 검사를 그냥 통과했다. 그래서 키가 아니라
+        **라벨·근거 문구 자체가 직렬화 결과 어디에도 없는지**로 잠근다.
+        """
+        label, description = "generation_wrong_answer", "답변이 기대 정답과 다릅니다."
+        record = EvalRecord(
+            probe=Probe(probe_id="p1", question="질문", source="llm_generated",
+                        ground_truth="정답"),
+            generated_answer="오답",
+            findings=[Finding(finding_id="f1", type="generation_failure",
+                              severity="warning", description=description, label=label,
+                              affected_probes=["p1"], prescription="프롬프트 조정")],
+        )
+
+        observations = build_report([record], iteration=1,
+                                    mode=1).failed_questions[0]["observations"]
+
+        blob = json.dumps(observations, ensure_ascii=False, default=str)
+        self.assertNotIn(label, blob)
+        self.assertNotIn(description, blob)
+        self.assertNotIn("prescription", blob)
 
     def test_failed_question_without_answer_has_explicit_empty_value(self):
         report = make_report()

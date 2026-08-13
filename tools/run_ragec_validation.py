@@ -70,6 +70,9 @@ def main() -> int:
         description="RAGEC 정답지로 진단 유효성 측정 (실행 + 채점)")
     parser.add_argument("--limit", type=int, default=0,
                         help="probe 상한(0=전체 377). 비용을 아껴 배선만 확인할 때 쓴다")
+    parser.add_argument("--label-sample", type=int, default=60,
+                        help="사람이 채울 라벨 시트의 표본 수(0=전체). "
+                             "1건당 2~3분 소요를 감안할 것")
     add_embedding_args(parser)
     args = parser.parse_args()
 
@@ -106,6 +109,9 @@ def main() -> int:
     from agents.index.agent import run as index_run
     from agents.ingest.agent import run as ingest_run
     from core.state import AgentDoctorState
+    from tools.make_label_sheet import (
+        PRIMARY_FIELD, stratified_sample, summarize, write_sheet,
+    )
     from tools.score_ragec import (
         _read_jsonl, findings_from_report, format_detail, format_report, score,
     )
@@ -142,6 +148,19 @@ def main() -> int:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     print(f"\nfindings → {findings_path}  ({len(rows)}건)")
+
+    # 사람이 채울 라벨 시트. RAGEC 라벨은 *그들* 시스템의 관측을 보고 붙인 것이라 우리
+    # 관측에는 성립하지 않을 수 있다(실측 qa_id 2205: 그쪽은 '검색 실패' 인데 우리는
+    # recall=1.00). 그래서 **우리 관측을 보고 사람이 다시** 붙인 라벨이 따로 필요하다.
+    # 진단은 이 시트에 들어가지 않는다 — 보고 나면 '맞는지' 가 아니라 '동의하는지' 를
+    # 판단하게 되어 검증이 성립하지 않는다.
+    sheet_path = OUT_DIR / "label_sheet.json"
+    sample = stratified_sample(rows, args.label_sample)
+    if sample:
+        write_sheet(sample, sheet_path)
+        print(f"라벨 시트 → {sheet_path}  ({len(sample)}건)")
+        print(summarize(sample))
+    print(f"\n  ↳ '{PRIMARY_FIELD}' 칸을 채운 뒤: python tools/score_human_labels.py")
 
     key_rows = _read_jsonl(str(REPO_ROOT / KEY))
     print(format_detail(rows, key_rows))
