@@ -149,8 +149,10 @@ python graph.py --embed openrouter --query-embed cpu   # 색인만 API
 
 Eval의 RAGAS `response_relevancy` 임베딩은 기본적으로 `EVAL_LLM_PROVIDER`를 따르고,
 `EVAL_EMBED_PROVIDER`로 따로 지정할 수 있습니다(위 표). `anthropic`·`github`는 임베딩
-엔드포인트가 없어 이 값으로는 받지 않습니다 — 그대로 두면 OpenAI로 떨어져 "anthropic으로
-임베딩한다"고 적어둔 실행이 실제로는 OpenAI에 과금 호출을 하기 때문입니다.
+엔드포인트가 없어 이 값으로는 받지 않습니다 — 받아도 계산할 곳이 없어 위 문단의 폴백
+사슬로 되돌아오기 때문입니다. 되돌아온 실행은 심판축 사슬을 그대로 타므로
+`OPENAI_API_KEY`가 있으면 OpenAI(`text-embedding-3-small`)로 나갈 수 있습니다. 거부가
+막는 것은 그 호출이 아니라 **침묵**입니다 — 경고가 이번 실행의 귀착지를 이름으로 찍습니다.
 **provider를 바꾸면 코사인 분포가 달라지므로 실행 간 비교를 하려면 한 번 정한 뒤
 고정하세요.**
 
