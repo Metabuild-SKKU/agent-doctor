@@ -42,6 +42,7 @@
 | `generation_misinterpretation` | 질문의 관계나 조건을 잘못 읽었다 | 질문을 다시 진술하게 한다 |
 | `generation_numerical_error` | 수치를 잘못 읽거나 잘못 계산했다 | 수치 인용을 요구하고 계산을 검산한다 |
 | `generation_hop_binding_error` | 여러 근거를 다 찾았는데 서로 잘못 엮었다 (A의 값을 B에 붙이는 식) | 단계별 근거를 답에 묶어 쓰게 한다 |
+| `generation_chronological_error` | 날짜·사건은 근거대로 옮겼는데 무엇이 먼저인지를 뒤바꿔 말했다 (기간·간격 계산이 틀린 건 수치 오류 쪽) | 답에 나온 시점을 근거의 시간축과 대조시킨다 |
 | `generation_abstention_failure` | 근거가 없는 질문인데 모른다고 하지 않고 답을 지어냈다 | 근거 없을 때 기권하도록 강화하고 인용을 요구한다 |
 | `generation_wrongful_abstention` | 근거가 검색됐는데도 "알 수 없다"고 회피했다 | 기권 조건을 완화한다 |
 | `generation_parametric_overreliance` | 답은 맞았는데 검색된 근거에 기대지 않고 모델이 외워둔 지식으로 답했다 | 인용을 요구하고 온도를 낮춘다 |

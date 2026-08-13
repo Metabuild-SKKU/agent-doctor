@@ -34,8 +34,10 @@ from agents.index.qdrant_store import (
     query_embedding_config_error,
     hybrid_search,
     keyword_search,
+    intended_reranker_route,
     rerank_with_status,
     reranker_max_length,
+    reranker_route,
     search as dense_search,
     upsert_chunks,
 )
@@ -289,7 +291,7 @@ def _dedup_by_chunk_id(results: list[dict]) -> list[dict]:
     # 정상 경로에선 chunk_id 가 f"{doc_id}_chunk_{idx:03d}" 라 중복이 안 생긴다. 그래서 여기서
     # 뭔가 접혔다면 상류(Index) 쪽 중복이고, 조용히 접으면 그 원인이 로그에서 사라진다.
     if len(deduped) < len(results):
-        print(f"[Retriever] 중복 chunk_id {len(results) - len(deduped)}건 제거 — 상류 중복 의심")
+        print(f"[Retriever] 중복 chunk_id {len(results) - len(deduped)}건 제거 - 상류 중복 의심")
     return deduped
 
 
@@ -627,6 +629,23 @@ class Retriever:
             # capped/uncapped 를 같은 실행으로 묶지 않는다.
             "rerank_max_length": (
                 reranker_max_length(self.settings.reranker_model) if reranked else None
+            ),
+            # 어디서 계산했나("local:cuda" / "openrouter:<model>"). 임베딩과 달리 리랭커는
+            # provider 를 바꾸면 모델 자체가 바뀌어(로컬 bge ↔ Voyage) 점수 스케일도 순위도
+            # 달라진다 — 경로를 안 남기면 Optimize 가 그 차이를 처방 효과로 읽는다.
+            #
+            # 실패한 시도는 **시도한 경로**를 남긴다. 실패야말로 "OpenRouter 를 켰는데 왜
+            # 리랭크가 안 됐지" 를 봐야 하는 순간인데, 여기서 None 이 되면 리포트에서
+            # 경로가 통째로 사라져 status·capability 를 따로 따라가야 한다.
+            # 아예 안 켠 실행(attempted=False)만 None 이다.
+            "rerank_route": (
+                reranker_route(self.settings.reranker_model)
+                if reranked
+                else (
+                    intended_reranker_route(self.settings.reranker_model)
+                    if reranker_attempted
+                    else None
+                )
             ),
             "search_seconds": round(time.monotonic() - search_started, 3),
             "results": results,

@@ -32,6 +32,10 @@ from __future__ import annotations
 import uuid
 
 from agents.optimize import rules
+from agents.optimize.score_display import (
+    UNMEASURED_CAPTION,
+    display_scores_from_verdict,
+)
 from agents.optimize.schemas import (
     ConfigDiff,
     OptimizationHistoryItem,
@@ -83,10 +87,7 @@ def build_trial_report(
 
     if verdict.keep:
         status = "applied"
-        summary = (
-            f"{subject}(으)로 점수가 "
-            f"{verdict.before_score:.1f}→{verdict.after_score:.1f}로 올라 적용을 유지했습니다."
-        )
+        summary = _keep_summary(subject, verdict)
         # "지지받았다"와 "해결됐다"는 다른 사실이다. 유지된 경우에만 해결 여부를
         # 말할 수 있고(롤백은 설정을 되돌렸으므로 귀속 자체가 성립하지 않는다),
         # 실제로 사라진 라벨이 있을 때만 덧붙인다.
@@ -96,10 +97,7 @@ def build_trial_report(
             summary += f" 남은 문제: {', '.join(remaining)}."
     else:
         status = "failed"
-        summary = (
-            f"{subject}을(를) 시도했으나 개선되지 않아 되돌렸습니다. "
-            f"({verdict.reason})"
-        )
+        summary = _rollback_summary(subject, verdict)
 
     return OptimizationReport(
         report_id=_new_id(),
@@ -142,16 +140,10 @@ def _report_apply(
         summary = f"{_support_phrase(supporting, request)} {subject}을(를) 적용했습니다."
     elif kept:
         status = "applied"
-        summary = (
-            f"{subject}(으)로 점수가 "
-            f"{verdict.before_score:.1f}→{verdict.after_score:.1f}로 올라 적용을 유지했습니다."
-        )
+        summary = _keep_summary(subject, verdict)
     else:
         status = "failed"
-        summary = (
-            f"{subject}을(를) 시도했으나 개선되지 않아 되돌렸습니다. "
-            f"({verdict.reason})"
-        )
+        summary = _rollback_summary(subject, verdict)
 
     return OptimizationReport(
         report_id=_new_id(),
@@ -383,12 +375,45 @@ def _next_steps_apply(kept: bool | None) -> list[str]:
     return ["변경을 반영하고 서빙을 진행합니다."]
 
 
+def _keep_summary(subject: str, verdict: Verdict) -> str:
+    """유지 판정 요약 문장. 표시 점수 규약은 score_display 가 단독으로 갖는다.
+
+    점수 쌍이 같은 축으로 갖춰지지 않으면(한쪽만 composite · prescreener 프록시)
+    숫자를 지어내지 않고 문장에서 뺀다 — 틀린 종합점수를 보여주느니 안 보여준다.
+    """
+    scores = display_scores_from_verdict(verdict)
+    if not scores.available:
+        return (
+            f"{subject}(으)로 개선되어 적용을 유지했습니다. "
+            f"({scores.unavailable_reason or UNMEASURED_CAPTION})"
+        )
+    return (
+        f"{subject}(으)로 점수가 "
+        f"{scores.before:.1f}→{scores.after:.1f}로 올라 적용을 유지했습니다."
+    )
+
+
+def _rollback_summary(subject: str, verdict: Verdict) -> str:
+    """롤백 판정 요약 문장. verdict.reason 은 history 가 composite 로 쓴다."""
+    return (
+        f"{subject}을(를) 시도했으나 개선되지 않아 되돌렸습니다. "
+        f"({verdict.reason})"
+    )
+
+
 def _score_metadata(verdict: Verdict | None) -> dict:
-    """UI 표시용 점수/위반 정보."""
+    """UI 표시용 점수/위반 정보.
+
+    0~1 탐색 신호와 0~100 표시용 composite 를 이름으로 구분해 함께 싣는다. 읽는
+    쪽은 직접 폴백하지 말고 `score_display.resolve_display_scores` 를 쓸 것 —
+    한쪽만 composite 인 경우 축이 섞인다.
+    """
     if verdict is None:
         return {}
     return {
         "before_score": verdict.before_score,
         "after_score": verdict.after_score,
+        "before_composite": verdict.before_composite,
+        "after_composite": verdict.after_composite,
         "floor_violations": verdict.floor_violations,
     }
