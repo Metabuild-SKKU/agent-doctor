@@ -215,6 +215,12 @@ def _failed_questions(records: list[EvalRecord]) -> list[dict]:
     사람이 볼 실패 목록이 고칠 수 없는 항목으로 채워져 진짜 실패가 묻힌다. 이 probe 들은
     사라지지 않는다 — findings_summary 의 bad_gold_* 집계와 Serve 의 수동 권고(골드 재지정)가
     질문 목록과 조치 방법을 따로 싣는다.
+
+    recall 을 함께 남기는 이유: 이 값은 **진단과 무관하게, 진단보다 먼저** 계산된다(gold span
+    좌표를 검색 결과가 덮었나). 그래서 라벨을 반박할 수 있는 유일한 독립 증거다 — 외부
+    정답지와 대조할 때 "저쪽은 검색 실패라는데 우리 검색은 성공했다" 를 우리 라벨이 아니라
+    측정값으로 판정할 수 있다(우리 라벨로 판정하면 '다르니까 봐준다' 는 순환이 된다).
+    basis 를 함께 싣는 건 span/chunk 가 같은 1.0 이라도 강도가 달라서다.
     """
     return [
         {
@@ -222,6 +228,8 @@ def _failed_questions(records: list[EvalRecord]) -> list[dict]:
             "question": record.probe.question,
             "expected_answer": record.probe.ground_truth or "",
             "actual_answer": record.generated_answer or "",
+            "recall_at_k": record.recall_at_k,
+            "recall_basis": record.recall_basis,
         }
         for record in records
         if record.findings and not is_gold_labeling_error(record)

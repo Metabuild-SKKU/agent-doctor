@@ -128,7 +128,7 @@ retrieval_semantic_mismatch       벡터·키워드 둘 다 못 찾음
 | **E12 Incomplete Answer** | 33 | `generation_partial_answer` | 정의 일치 |
 | **E13 Misinterpretation** | 29 | `generation_misinterpretation` | 이름·정의 일치 |
 | **E14 Contextual Misalignment** | 4 | `generation_misinterpretation` (**우리는 별도 라벨을 두지 않음**) | 처방 동일이라 접었다 |
-| E15 Chronological Inconsistency | **0** | (도입 결정됨 — 대응 라벨 신설 예정) | **정답지에 사례 없음** |
+| E15 Chronological Inconsistency | **0** | `generation_chronological_error` (main #132 에서 신설) | **정답지에 사례 없음 — 대응은 있으나 이 대조로는 검증 불가** |
 | **E16 Numerical Error** | 1 | `generation_numerical_error` | 이름 일치. 표본 1건 |
 
 ---

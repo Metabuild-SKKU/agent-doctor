@@ -86,8 +86,10 @@ RAGEC_TO_OURS: dict[str, set[str]] = {
     # E14 는 우리가 별도 라벨을 두지 않기로 했다 — 처방이 restate_question 으로
     # generation_misinterpretation 과 같아서다(로드맵 3번).
     "E14 Contextual Misalignment": {"generation_misinterpretation"},
-    # E15 는 도입이 결정됐으나 라벨이 아직 없다. 신설되면 여기에 적는다.
-    "E15 Chronological Inconsistency": set(),
+    # E15 는 main(#132)에서 라벨이 신설돼 대응이 생겼다. 다만 RAGEC 정답지에 E15 가 **0건**
+    # 이라(docs/ragec_label_mapping.md) 이 대조로는 검증되지 않는다 — 대응이 있다는 것과
+    # 검증된다는 건 다르다.
+    "E15 Chronological Inconsistency": {"generation_chronological_error"},
     "E16 Numerical Error": {"generation_numerical_error"},
 }
 
@@ -113,6 +115,38 @@ def stage_of(label: str) -> str | None:
 #   · 실제로 DragonBall 정답이 틀림
 # 정확도에 섞지 않고 따로 세어 사람이 표본을 확인하게 한다.
 GOLD_ERROR_LABELS = {"bad_gold_answer", "bad_gold_chunk"}
+
+
+# ── 우리 검색이 성공하면 성립하지 않는 카테고리 ──────────────────
+#
+# RAGEC 라벨은 **그들** 시스템의 실패 원인이다. 검색기·청커·생성 모델이 다른 우리는 같은
+# 질문에서 다른 지점에서 넘어질 수 있고, 그때 우리 진단이 그들 라벨과 다른 건 **오진이
+# 아니라 시스템이 다른 것**이다. 실측 예(DragonBall 10건):
+#
+#   qa_id 2205 — RAGEC: E4 Missed Retrieval("검색이 정답 문서를 못 찾았다")
+#     우리: recall@k(span)=1.00 · gold청크 2/2 검색 → 답변에 "Bali, Paris, and New York"
+#     이 그대로 들어 있는데 "June 20 이라고 명시되진 않았다"며 기권했다.
+#     우리 진단 generation_wrongful_abstention 은 **우리 파이프라인 기준으로 정확하다**.
+#     그런데 라벨이 다르다는 이유로 오답으로 집계됐다.
+#
+# 그래서 "gold 가 생성기까지 도달하지 못했다" 고 주장하는 카테고리에 한해, recall 이 그
+# 주장을 정면으로 반박하면 채점에서 뺀다.
+#
+# **단계(stage)가 아니라 카테고리 단위인 이유.** 같은 Reranking 단계라도 E7 Low Recall 은
+# 정의상 recall 주장이라 반박되지만, E8 Low Precision 은 "쓰레기가 섞였다" 라서 gold 를 다
+# 가져와도 성립한다. Chunking(E1~E3)도 마찬가지다 — gold 조각을 전부 검색해 recall 이 1.0
+# 이어도 경계가 잘못 잘린 건 그대로다. 단계로 뭉치면 반박되지 않는 주장까지 빠져나간다.
+RECALL_REFUTES = {
+    "E4 Missed Retrieval",     # "검색 결과에 정답 문서가 없다"
+    "E5 Low Relevance",        # "검색된 문서의 관련성이 낮다"
+    "E6 Semantic Drift",       # "의미가 다른 문서를 가져왔다"
+    "E7 Low Recall",           # 정의상 recall 주장
+}
+
+# 반박으로 인정하는 값. **정확히 1.0** 만 쓴다 — gold 를 빠짐없이 덮었을 때만이다.
+# 문턱을 낮추면 "얼마나 낮춰야 하나" 라는 손잡이가 생기고, 그 손잡이로 정확도를 올릴 수
+# 있게 된다(실측에서 부분 검색은 0.16·0.58 이라 1.0 과 뚜렷이 갈린다).
+RECALL_FULL = 1.0
 
 
 def _qa_id(probe_id: str) -> str:
@@ -184,6 +218,11 @@ def findings_from_report(report, probes: list | None = None) -> list[dict]:
             row["gold_answer"] = gold
         if answer:
             row["answer"] = answer
+        # recall 은 실패 probe 에만 있다(성공 probe 는 failed_questions 에 안 남는다).
+        # 채점 대상이 실패 probe 뿐이라 그걸로 충분하다.
+        if "recall_at_k" in answer_row:
+            row["recall_at_k"] = answer_row["recall_at_k"]
+            row["recall_basis"] = answer_row.get("recall_basis", "")
         rows.append(row)
     return rows
 
@@ -222,9 +261,17 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
         for r in findings_rows
     }
 
+    recalls = {
+        str(r["qa_id"]): r["recall_at_k"]
+        for r in findings_rows
+        if isinstance(r.get("recall_at_k"), (int, float))
+    }
+    has_recall = bool(recalls)
+
     per_category: dict[str, list[bool]] = collections.defaultdict(list)
     stage_hit = stage_total = 0
     no_diagnosis = gold_error = unmappable = we_passed = not_run = 0
+    retrieval_ok = 0
 
     for key in key_rows:
         qa_id = str(key["qa_id"])
@@ -252,6 +299,13 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
             # 실패하나" 를 재게 된다.
             we_passed += 1
             continue
+        if category in RECALL_REFUTES and recalls.get(qa_id, -1.0) >= RECALL_FULL:
+            # **우리 검색은 성공했다** — 이 카테고리의 주장(gold 가 생성기에 도달하지 못했다)이
+            # 우리 실행에서는 성립하지 않는다. 우리 진단이 틀린 게 아니라 실패 지점이 다르다.
+            # 순서 주의: no_diagnosis 앞이어야 한다. 뒤로 가면 '검색은 됐는데 원인을 못 짚은'
+            # probe 가 오답으로 먼저 세어져 이 분기가 영영 안 걸린다.
+            retrieval_ok += 1
+            continue
         if not got:
             no_diagnosis += 1        # 실패했는데 원인을 못 짚었다 = 진짜 미진단
             per_category[category].append(False)
@@ -278,7 +332,9 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
         "unmappable": unmappable,
         "we_passed": we_passed,
         "not_run": not_run,
+        "retrieval_ok": retrieval_ok,
         "has_status": has_status,
+        "has_recall": has_recall,
     }
 
 
@@ -289,25 +345,33 @@ def format_report(result: dict) -> str:
         "  RAGEC 대조 — 진단 정확도 (포함 채점)",
         "=" * 62,
     ]
+    # 채점 대상이 0건이어도 **제외 내역은 반드시 찍는다.** 여기서 일찍 돌아가면 "몇 건을
+    # 왜 뺐나" 가 통째로 사라져, 제외 규칙이 정확도를 조용히 올리는 장치가 된다.
     if not total:
-        lines.append("  채점 대상이 없습니다.")
-        return "\n".join(lines)
-
-    lines.append(f"  라벨 포함 정확도  {hit}/{total}  ({hit / total * 100:.1f}%)")
-    if result["stage_total"]:
-        sh, st = result["stage_hit"], result["stage_total"]
-        lines.append(f"  단계 정확도       {sh}/{st}  ({sh / st * 100:.1f}%)")
-    lines.append("")
-    lines.append("  " + _pad("카테고리", 32) + _rpad("맞음", 8)
-                 + _rpad("전체", 8) + _rpad("정확도", 9))
-    for category, (ok, n) in result["per_category"].items():
-        lines.append("  " + _pad(category, 32) + _rpad(str(ok), 8)
-                     + _rpad(str(n), 8) + _rpad(f"{ok / n * 100:.0f}%", 9))
+        lines.append("  채점 대상이 없습니다 — 아래 제외 내역을 보세요.")
+    else:
+        lines.append(f"  라벨 포함 정확도  {hit}/{total}  ({hit / total * 100:.1f}%)")
+        if result["stage_total"]:
+            sh, st = result["stage_hit"], result["stage_total"]
+            lines.append(f"  단계 정확도       {sh}/{st}  ({sh / st * 100:.1f}%)")
+        lines.append("")
+        lines.append("  " + _pad("카테고리", 32) + _rpad("맞음", 8)
+                     + _rpad("전체", 8) + _rpad("정확도", 9))
+        for category, (ok, n) in result["per_category"].items():
+            lines.append("  " + _pad(category, 32) + _rpad(str(ok), 8)
+                         + _rpad(str(n), 8) + _rpad(f"{ok / n * 100:.0f}%", 9))
 
     lines.append("")
     if result.get("we_passed"):
         lines.append(f"  · 우리 파이프라인이 성공한 질문    {result['we_passed']}건 "
                      f"(진단할 게 없어 제외 — 그들 시스템만 실패한 건이다)")
+    if result.get("retrieval_ok"):
+        lines.append(f"  · 검색 단계 라벨인데 우리 검색은 성공  {result['retrieval_ok']}건 "
+                     f"(recall=1.0 — 실패 지점이 달라 채점 불가)")
+    if not result.get("has_recall", False):
+        # 이 줄이 없으면 "이번엔 0건" 과 "애초에 못 잰다" 가 구분되지 않는다.
+        lines.append("  ⚠ 덤프에 recall 이 없어 '우리 검색은 성공' 판정을 하지 못했습니다")
+        lines.append("    — 그만큼 정확도가 실제보다 낮게 나올 수 있습니다(파이프라인 재실행 필요).")
     if result["no_diagnosis"]:
         lines.append(f"  · 실패했는데 원인을 못 짚음        {result['no_diagnosis']}건 (오답으로 셈)")
     if result.get("not_run"):
@@ -323,19 +387,27 @@ def format_report(result: dict) -> str:
     return "\n".join(lines)
 
 
-_MARK_LEGEND = "  O 맞음 · X 틀림 · 성공=우리가 성공(제외) · - 대응 라벨 없음(제외)"
+_MARK_LEGEND = ("  O 맞음 · X 틀림 · 성공=우리가 성공(제외) · 검색OK=우리 검색은 성공(제외)"
+                " · - 대응 라벨 없음(제외)")
 
 
 def _verdict(row: dict, category: str) -> str:
-    """이 probe 의 채점 판정 한 글자. score() 의 분기와 같은 순서로 본다."""
+    """이 probe 의 채점 판정. score() 의 분기와 **같은 순서**로 본다.
+
+    순서가 어긋나면 표가 정확도와 다른 이야기를 해서, 표를 근거로 진단을 고칠 수 없게 된다.
+    """
     labels = set(row.get("labels") or [])
     if labels & GOLD_ERROR_LABELS:
         return "gold"         # 평가셋 결함 주장 — 정확도에서 제외
     expected = RAGEC_TO_OURS.get(category)
     if not expected:
-        return "-"            # 대응 라벨 없음(E15) 또는 대조표에 없는 카테고리 — 제외
+        return "-"            # 대응 라벨 없음 또는 대조표에 없는 카테고리 — 제외
     if not row.get("failed", bool(labels)):
         return "성공"          # 우리 파이프라인이 이 질문에 성공 — 채점 제외
+    recall = row.get("recall_at_k")
+    if (category in RECALL_REFUTES
+            and isinstance(recall, (int, float)) and recall >= RECALL_FULL):
+        return "검색OK"        # 검색 단계 주장인데 우리 검색은 성공 — 채점 제외
     return "O" if labels & expected else "X"
 
 
@@ -408,7 +480,12 @@ def format_detail(findings_rows: list[dict], key_rows: list[dict]) -> str:
                        or ("(성공 — 답변 원문은 실패 probe 만 보존됩니다)"
                            if not row.get("failed") else ""))
         lines += _wrap("R", row.get("gold_answer", ""))
-        lines += _wrap("진단", ", ".join(row.get("labels") or []) or "(라벨 없음)")
+        diagnosis = ", ".join(row.get("labels") or []) or "(라벨 없음)"
+        recall = row.get("recall_at_k")
+        if isinstance(recall, (int, float)) and recall >= 0:
+            basis = row.get("recall_basis") or "?"
+            diagnosis += f"    · recall@k({basis})={recall:.2f}"
+        lines += _wrap("진단", diagnosis)
 
     if not shown:
         lines.append("")

@@ -252,11 +252,15 @@ class FailedQuestionViewTest(unittest.TestCase):
         report = build_report([record], iteration=1, mode=1)
         view = build_report_view(AgentDoctorState(report=report, probes=[probe]))
 
+        # recall 은 외부 정답지 대조(tools/score_ragec.py)가 "우리 검색은 성공했다" 를
+        # 판정하는 독립 근거라 여기 함께 보존한다 — EvalRecord 와 같이 사라지기 때문이다.
         self.assertEqual(report.failed_questions, [{
             "probe_id": "p1",
             "question": "무료 체험 기간은 며칠인가요?",
             "expected_answer": "14일",
             "actual_answer": "30일입니다.",
+            "recall_at_k": 0.0,
+            "recall_basis": "chunk",
         }])
         self.assertEqual(len(view["qas"]), 1)
         self.assertEqual(view["qas"][0]["q"], probe.question)

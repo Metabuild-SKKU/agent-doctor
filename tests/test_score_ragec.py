@@ -7,12 +7,18 @@ RAGEC 대조 채점기(tools/score_ragec.py) 검증.
 
   · 포함 — 그들 라벨이 우리 findings 안에 있으면 맞음. 우리가 더 말한 건 오답이 아니다
   · 미진단(우리가 아무 라벨도 안 냄)은 **오답**으로 센다. 빼면 "말 안 하면 안 틀린다" 가 된다
-  · 대응 라벨이 없는 카테고리(E15)는 **제외**한다. 맞출 수단이 없는 걸 오답으로 세면 거짓이다
+  · 대응 라벨이 없는 카테고리는 **제외**한다. 맞출 수단이 없는 걸 오답으로 세면 거짓이다
   · bad_gold_* 는 제외한다 — 우리 오탐인지 정답지 오류인지 갈리지 않는다
+  · 검색 단계 주장인데 recall=1.0 이면 제외한다 — 그들 시스템의 실패 지점이라 우리에겐
+    성립하지 않는다. 판정 근거가 **우리 라벨이 아니라 recall** 인 게 핵심이다(아래 클래스)
+
+제외 규칙은 정확도를 **올리는 방향**으로만 작동하므로, 하나 늘릴 때마다 두 가지를 함께
+고정한다: (1) 빠지면 안 되는 것이 안 빠지는가, (2) 몇 건이 빠졌는지 화면에 남는가.
 """
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -100,11 +106,29 @@ class OurPipelineMayNotFailTest(unittest.TestCase):
 
 class ExclusionTest(unittest.TestCase):
     def test_category_without_our_label_is_excluded_not_failed(self):
-        """E15 는 대응 라벨이 없다 — 맞출 수단이 없는 걸 오답으로 세면 수치가 거짓이 된다."""
-        result = score([_found("1", "generation_misinterpretation")],
-                       [_key("1", "E15 Chronological Inconsistency", "Generation")])
+        """대응 라벨이 빈 카테고리는 제외한다 — 맞출 수단이 없는 걸 오답으로 세면 거짓이다.
+
+        지금은 빈 항목이 하나도 없다(E15 가 main #132 의 라벨 신설로 채워진 마지막이었다).
+        그래도 이 분기는 살아 있어야 한다 — 새 카테고리가 들어오면 라벨이 생기기 전까지
+        빈 집합으로 두는 게 정상 경로다. 그래서 가짜 항목으로 분기를 직접 태운다.
+        """
+        with mock.patch.dict(RAGEC_TO_OURS, {"E99 Not Yet Labeled": set()}):
+            result = score([_found("1", "generation_misinterpretation")],
+                           [_key("1", "E99 Not Yet Labeled", "Generation")])
         self.assertEqual(result["total"], 0)
         self.assertEqual(result["unmappable"], 1)
+
+    def test_e15_now_has_a_label(self):
+        """main #132 가 generation_chronological_error 를 신설해 대응이 생겼다.
+
+        **대응이 있다는 것과 검증된다는 건 다르다** — RAGEC 정답지에 E15 는 0건이라
+        이 대조로는 E15 진단의 유효성을 확인할 수 없다(docs/ragec_label_mapping.md).
+        """
+        self.assertEqual(RAGEC_TO_OURS["E15 Chronological Inconsistency"],
+                         {"generation_chronological_error"})
+        result = score([_found("1", "generation_chronological_error")],
+                       [_key("1", "E15 Chronological Inconsistency", "Generation")])
+        self.assertEqual((result["total_hit"], result["total"]), (1, 1))
 
     def test_gold_error_claim_is_excluded(self):
         """우리 오탐인지 DragonBall 정답지 오류인지 갈리지 않아 정확도에 섞지 않는다."""
@@ -119,6 +143,120 @@ class ExclusionTest(unittest.TestCase):
                        [_key("1", "E99 Something New", "Retrieval")])
         self.assertEqual(result["total"], 0)
         self.assertEqual(result["unmappable"], 1)
+
+
+class RetrievalSucceededExclusionTest(unittest.TestCase):
+    """RAGEC 라벨은 **그들** 시스템의 실패 원인이다.
+
+    검색기가 다른 우리는 같은 질문의 다른 지점에서 넘어질 수 있고, 그때 라벨이 다른 건
+    오진이 아니라 시스템이 다른 것이다. 실측(qa_id 2205): RAGEC 은 E4(검색 실패)인데
+    우리는 recall=1.00 으로 gold 를 다 찾아 답변에 정답을 그대로 담고도 날짜 하나 때문에
+    기권했다 — generation_wrongful_abstention 이 맞는 진단인데 오답으로 집계됐다.
+
+    **판정 근거가 recall 이어야 하는 이유가 여기 다 들어 있다.** 우리 라벨로 판정하면
+    "진단이 다르니까 봐준다" 는 순환이 되어 틀릴 수가 없는 채점이 된다. recall 은 진단보다
+    먼저·진단과 무관하게 계산되므로 우리 진단을 반박할 수도 있다.
+    """
+
+    def _row(self, recall, *labels):
+        row = _found("1", *labels)
+        if recall is not None:
+            row["recall_at_k"] = recall
+            row["recall_basis"] = "span"
+        return row
+
+    def test_full_recall_excludes_a_retrieval_claim(self):
+        result = score([self._row(1.0, "generation_wrongful_abstention")],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["retrieval_ok"], 1)
+
+    def test_partial_recall_is_still_scored(self):
+        """부분 검색은 반박이 아니다 — 실측에서 부분은 0.16·0.58 로 1.0 과 뚜렷이 갈린다."""
+        for recall in (0.0, 0.16, 0.58, 0.99):
+            result = score([self._row(recall, "generation_wrongful_abstention")],
+                           [_key("1", "E4 Missed Retrieval", "Retrieval")])
+            self.assertEqual((result["total"], result["retrieval_ok"]), (1, 0), recall)
+
+    def test_generation_category_is_never_excluded(self):
+        """생성 단계 라벨은 검색이 성공했다고 해서 성립하지 않게 되지 않는다.
+
+        오히려 recall=1.0 은 생성 실패의 **전제**다(근거는 왔는데 답을 틀렸다).
+        여기를 안 막으면 B그룹 채점이 통째로 사라진다.
+        """
+        result = score([self._row(1.0, "retrieval_low_rank")],
+                       [_key("1", "E10 Fabricated Content", "Generation")])
+        self.assertEqual((result["total"], result["retrieval_ok"]), (1, 0))
+
+    def test_low_precision_is_not_refuted_by_recall(self):
+        """E8 은 '쓰레기가 섞였다' 라 gold 를 다 가져와도 성립한다.
+
+        단계(Reranking)로 뭉치면 E7 과 함께 빠져나간다 — 그래서 카테고리 단위로 판정한다.
+        """
+        result = score([self._row(1.0, "retrieval_low_rank")],
+                       [_key("1", "E8 Low Precision", "Reranking")])
+        self.assertEqual((result["total"], result["retrieval_ok"]), (1, 0))
+
+    def test_chunking_is_not_refuted_by_recall(self):
+        """gold 조각을 전부 검색해 recall 이 1.0 이어도 경계가 잘못 잘린 건 그대로다."""
+        result = score([self._row(1.0, "retrieval_low_rank")],
+                       [_key("1", "E3 Context Mismatch", "Chunking")])
+        self.assertEqual((result["total"], result["retrieval_ok"]), (1, 0))
+
+    def test_low_recall_category_is_refuted(self):
+        """E7 은 정의상 recall 주장이라 반박된다."""
+        result = score([self._row(1.0, "generation_hallucination")],
+                       [_key("1", "E7 Low Recall", "Reranking")])
+        self.assertEqual(result["retrieval_ok"], 1)
+
+    def test_exclusion_beats_no_diagnosis(self):
+        """순서 검증 — 이 분기가 no_diagnosis 뒤로 가면 영영 안 걸린다.
+
+        '검색은 됐는데 우리가 아무 라벨도 못 낸' probe 가 먼저 오답으로 세어지기 때문이다.
+        """
+        result = score([{"qa_id": "1", "labels": [], "failed": True, "recall_at_k": 1.0}],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual((result["retrieval_ok"], result["no_diagnosis"]), (1, 0))
+
+    def test_we_passed_beats_exclusion(self):
+        """우리가 성공한 probe 는 그대로 we_passed 다 — 두 통에 겹쳐 세면 안 된다."""
+        result = score([{"qa_id": "1", "labels": [], "failed": False, "recall_at_k": 1.0}],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual((result["we_passed"], result["retrieval_ok"]), (1, 0))
+
+    def test_gold_error_beats_exclusion(self):
+        result = score([self._row(1.0, "bad_gold_chunk")],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual((result["gold_error"], result["retrieval_ok"]), (1, 0))
+
+    def test_missing_recall_never_excludes(self):
+        """구버전 덤프(recall 없음)는 조용히 빠지면 안 된다 — 전부 채점 대상이다."""
+        result = score([self._row(None, "generation_wrongful_abstention")],
+                       [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertEqual((result["total"], result["retrieval_ok"]), (1, 0))
+        self.assertFalse(result["has_recall"])
+
+    def test_report_states_when_recall_is_unavailable(self):
+        """'이번엔 0건' 과 '애초에 못 잰다' 가 구분돼야 한다."""
+        without = format_report(score([self._row(None, "generation_hallucination")],
+                                      [_key("1", "E4 Missed Retrieval", "Retrieval")]))
+        self.assertIn("덤프에 recall 이 없어", without)
+        with_recall = format_report(score([self._row(0.5, "generation_hallucination")],
+                                          [_key("1", "E4 Missed Retrieval", "Retrieval")]))
+        self.assertNotIn("덤프에 recall 이 없어", with_recall)
+
+    def test_exclusion_count_is_always_printed(self):
+        """빼는 것보다 숨기는 게 나쁘다 — 몇 건을 뺐는지 화면에 남아야 한다."""
+        out = format_report(score([self._row(1.0, "generation_wrongful_abstention")],
+                                  [_key("1", "E4 Missed Retrieval", "Retrieval")]))
+        self.assertIn("우리 검색은 성공", out)
+        self.assertIn("1건", out)
+
+    def test_detail_marks_the_excluded_probe(self):
+        out = format_detail([self._row(1.0, "generation_wrongful_abstention")],
+                            [_key("1", "E4 Missed Retrieval", "Retrieval")])
+        self.assertIn("[검색OK]", out)
+        self.assertIn("recall@k(span)=1.00", out)
 
 
 class StageScoringTest(unittest.TestCase):
@@ -271,7 +409,7 @@ class DetailReportTest(unittest.TestCase):
 
     def test_unmappable_category_is_marked_excluded_not_wrong(self):
         row = {"qa_id": "1", "labels": ["generation_misinterpretation"], "failed": True}
-        key = [_key("1", "E15 Chronological Inconsistency", "Generation")]
+        key = [_key("1", "E99 Something New", "Generation")]
         self.assertIn("[-]", format_detail([row], key))
 
     def test_passed_probe_is_marked_and_says_why_the_answer_is_missing(self):
