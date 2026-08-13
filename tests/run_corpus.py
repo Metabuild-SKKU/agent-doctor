@@ -305,6 +305,10 @@ def main():
 
     try:
         state = run_pipeline_for(CORPUS_ROOT, regen_qa=args.regen_qa, loop=args.loop)
+        # 배치 요약은 graph.py 경로에만 있었다 — 정작 벤치마크 라운드(이 러너)가 그
+        # 요약이 막으려던 오해("배치를 켰는데 왜 느리지")의 현장이라 여기도 찍는다(리뷰).
+        from core.llm_clients import print_batch_summary
+        print_batch_summary()
         html_path, view = write_report(state, CORPUS_ROOT)
         print_summary(state, view, html_path)
     except BaseException:

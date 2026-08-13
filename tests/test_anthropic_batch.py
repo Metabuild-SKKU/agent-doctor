@@ -467,7 +467,12 @@ class FailedSubmitAccountingTest(unittest.TestCase):
         with patch.object(llm_clients, "_batch_collector", collector), \
                 redirect_stdout(buf):
             llm_clients.print_batch_summary()
-        self.assertIn("제출 실패 1배치", buf.getvalue())
+        out = buf.getvalue()
+        self.assertIn("제출 실패 1배치", out)
+        # 나간 배치가 없으면 할인 문구도 없어야 한다(리뷰 지적) — "0배치 · 단가 50%
+        # 반영됨" 은 할인이 있었던 것처럼 읽힌다.
+        self.assertNotIn("반영됨", out)
+        self.assertIn("완료된 배치 없음", out)
 
 
 class FutureTimeoutDiscriminationTest(unittest.TestCase):
@@ -500,6 +505,84 @@ class FutureTimeoutDiscriminationTest(unittest.TestCase):
         fut = llm_clients.Future()                      # 영영 완료되지 않는 Future
         with self.assertRaises(llm_clients.BatchDeadlineExceeded):
             self._call(fut, wait=0.05)
+
+
+class ExpiredBatchAccountingTest(unittest.TestCase):
+    """상한 초과(취소) 배치는 정상 배치 통계와 섞이지 않는다(리뷰 지적).
+
+    _record 로 섞으면 결과 0건인 배치가 '1배치 · 평균 대기 = 상한' 으로 남아
+    평균 대기를 상한만큼 부풀린다 — 제출 실패를 따로 센 것과 같은 이유."""
+
+    def setUp(self):
+        self._patch = patch.dict(os.environ, {**_FAST_ENV,
+                                              "EVAL_ANTHROPIC_BATCH_TIMEOUT": "0.05"})
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_expired_batch_counted_separately_without_discount_phrase(self):
+        import io as _io
+        from contextlib import redirect_stdout
+
+        class _Stuck(_FakeBatches):
+            def __init__(self):
+                super().__init__({})
+                self.cancelled: list[str] = []
+
+            def retrieve(self, batch_id):
+                return SimpleNamespace(id=batch_id, processing_status="in_progress",
+                                       request_counts=SimpleNamespace(succeeded=0))
+
+            def cancel(self, batch_id):
+                self.cancelled.append(batch_id)
+
+        client = SimpleNamespace(messages=SimpleNamespace(batches=_Stuck()))
+        collector = llm_clients._AnthropicBatchCollector()
+        fut = collector.submit(client, {"model": "claude-haiku-4-5"})
+        with self.assertRaises(llm_clients.BatchDeadlineExceeded):
+            fut.result(timeout=10)
+        s = collector.stats()
+        self.assertEqual((s["batches"], s["expired_batches"]), (0, 1))
+        self.assertEqual(s["wait_s"], 0.0)              # 평균 대기가 부풀지 않는다
+
+        buf = _io.StringIO()
+        with patch.object(llm_clients, "_batch_collector", collector), \
+                redirect_stdout(buf):
+            llm_clients.print_batch_summary()
+        out = buf.getvalue()
+        self.assertIn("상한 초과(취소) 1배치", out)
+        self.assertNotIn("반영됨", out)                  # 완주 배치가 없으면 할인 문구도 없다
+        self.assertIn("claude-haiku-4-5", out)          # 모델 표기는 유지
+
+
+class RetrieveFailureNoteTest(unittest.TestCase):
+    """조회가 계속 실패하는 동안에도 주기 안내가 나간다(리뷰 지적) —
+    안 그러면 '배치 제출' 한 줄 뒤 상한(기본 2시간)까지 로그가 침묵해,
+    느린 배치와 상태를 못 읽는 배치를 구분할 수 없다."""
+
+    def test_note_appears_while_retrieve_keeps_failing(self):
+        import io as _io
+        from contextlib import redirect_stdout
+
+        class _Unreadable(_FakeBatches):
+            def retrieve(self, batch_id):
+                raise RuntimeError("읽기 불가")
+
+            def cancel(self, batch_id):
+                pass
+
+        env = {**_FAST_ENV, "EVAL_ANTHROPIC_BATCH_TIMEOUT": "0.3"}
+        client = SimpleNamespace(messages=SimpleNamespace(batches=_Unreadable({})))
+        buf = _io.StringIO()
+        with patch.dict(os.environ, env), \
+                patch.object(llm_clients, "_BATCH_NOTE_INTERVAL", 0.02), \
+                redirect_stdout(buf):
+            collector = llm_clients._AnthropicBatchCollector()
+            fut = collector.submit(client, {"model": "m"})
+            with self.assertRaises(llm_clients.BatchDeadlineExceeded):
+                fut.result(timeout=10)
+        self.assertIn("배치 상태 조회 실패", buf.getvalue())
 
 
 if __name__ == "__main__":
