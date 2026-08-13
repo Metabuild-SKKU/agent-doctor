@@ -74,7 +74,7 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 
 ---
 
-### 임베딩 provider (색인·질의)
+### 임베딩 provider (색인·질의·채점)
 
 임베딩은 **어느 모델**이냐와 **어디서 계산하느냐**가 분리돼 있습니다. 모델은 `bge-m3`로
 고정이고, 계산 위치만 env로 고릅니다.
@@ -85,6 +85,18 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 | `INDEX_QUERY_EMBED_PROVIDER` | `INDEX_EMBED_PROVIDER` 따름 (없으면 `openrouter`) | 검색 질의 |
 | `INDEX_EMBED_DEVICE` | `auto` | `local`일 때 `cuda`/`cpu` |
 | `EVAL_EMBED_PROVIDER` | (미설정 = 심판 provider 따름) | Eval 축(RAGAS relevancy) — `openrouter`/`openai`/`gemini`/`local`. **명시하면 강제값**: 못 쓰면 결측이지 다른 provider 로 새지 않는다. 심판=anthropic 이면 로컬 폴백이 리랭커와 VRAM 을 다투므로 `openrouter` 권장 |
+
+**강제값 정책은 "받는 값을 적었는데 그 경로를 못 쓸 때"의 이야기입니다.** 받는 값 밖
+(오타, 그리고 임베딩 엔드포인트가 없는 `anthropic`·`github`)은 "설정을 못 읽었다 = 안 적은
+것"으로 보고 기본 폴백 사슬을 그대로 탑니다 — 철자 하나가 진단을 통째로 끄는 것이 더
+나쁘기 때문입니다. 색인축은 같은 상황을 `local`로 떨어뜨리는데
+(`qdrant_store.resolve_embedding_provider` — "오타가 '조용히 API 과금'이 아니라 '조용히
+로컬'로"), 채점축이 방향을 달리하는 이유는 비용 구조입니다: 색인은 코퍼스 전량이라 오타
+한 번이 통째로 과금되지만, 채점 임베딩은 probe 수십 건이라 금액이 작고 대신 **경로가
+바뀌면 코사인 분포가 달라져 실행 간 비교가 깨집니다.** 색인축의 fail-safe 가 막으려는 건
+"조용히 API 과금"인데, 채점축은 방향 대신 **"조용히"를 없앱니다** — 경고가 이번 실행의
+귀착지 provider 이름을 찍으므로, `local`의 철자 오타처럼 값 목록으로 못 막는 잔여도
+로그에 남습니다.
 
 실측(한국어 1,000청크 — 측정 도구 `tools/bench_embedding.py` 는 측정값을 여기와 커밋에 박제한 뒤 제거했습니다. 재검증이 필요하면 `git log --diff-filter=D -- tools/bench_embedding.py` 로 복원): 로컬 CPU 2 chunks/sec vs
 OpenRouter 동시 8에서 371 chunks/sec. 26MB 코퍼스 환산으로 **2.3시간 vs 0.7분 / $0.06**
@@ -135,7 +147,12 @@ python graph.py --embed openrouter --query-embed cpu   # 색인만 API
 19%라 단건 질의가 재시도에 걸리면 `/search` 한 건이 수십 초 블로킹될 수 있고,
 그때 `INDEX_QUERY_EMBED_PROVIDER=local`만 내리면 됩니다.
 
-Eval의 RAGAS `response_relevancy` 임베딩은 `EVAL_LLM_PROVIDER`를 따릅니다(별도 축).
+Eval의 RAGAS `response_relevancy` 임베딩은 기본적으로 `EVAL_LLM_PROVIDER`를 따르고,
+`EVAL_EMBED_PROVIDER`로 따로 지정할 수 있습니다(위 표). `anthropic`·`github`는 임베딩
+엔드포인트가 없어 이 값으로는 받지 않습니다 — 받아도 계산할 곳이 없어 위 문단의 폴백
+사슬로 되돌아오기 때문입니다. 되돌아온 실행은 심판축 사슬을 그대로 타므로
+`OPENAI_API_KEY`가 있으면 OpenAI(`text-embedding-3-small`)로 나갈 수 있습니다. 거부가
+막는 것은 그 호출이 아니라 **침묵**입니다 — 경고가 이번 실행의 귀착지를 이름으로 찍습니다.
 **provider를 바꾸면 코사인 분포가 달라지므로 실행 간 비교를 하려면 한 번 정한 뒤
 고정하세요.**
 
