@@ -85,6 +85,10 @@ def main(argv: list[str] | None = None) -> int:
     # 기본값이 없다. 골든셋이 분리된 로그를 볼 때 이 인자를 쓴다.
     parser.add_argument("--golden", default=None,
                         help="골든셋 파일(xlsx/csv/jsonl/json) — 질문 매칭으로 병합")
+    # 산출 경로가 고정이면 로그를 여러 개 진단할 때 진단서가 서로 덮어쓴다
+    # (벤치마크처럼 두 시스템의 진단서를 나란히 놓아야 할 때 문제가 된다).
+    parser.add_argument("--out-dir", default=None,
+                        help=f"진단서 출력 폴더 (기본: {OUT_DIR})")
     args = parser.parse_args(argv)
 
     from core.console import force_utf8_stdio
@@ -159,7 +163,8 @@ def main(argv: list[str] | None = None) -> int:
 
     with step("Replay", 3, "진단서 조립"):
         view = build_ext_report_view(report, cap)
-        html_path, _ = write_report_files(view, OUT_DIR)
+        html_path, _ = write_report_files(
+            view, Path(args.out_dir) if args.out_dir else OUT_DIR)
         print(f"  섹션 {len([s for s in view['mode']['hidden_sections']])}개 숨김 "
               f"· 권고 카드 {len(view['recommendations'])}장")
 
