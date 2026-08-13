@@ -1071,7 +1071,7 @@ class GenerationLabelTest(_DiagnoseTestBase):
         judge = _FakeAbstentionJudge(1)
         self._with(ragas=judge)
         rec = _record(answer_exists=False, ground_truth=None,
-                      answer="그 부분은 문서에서 다루지 않습니다")   # 마커 미포함
+                      answer="해당 질문에는 답변을 삼가겠습니다")   # 마커 미포함
         self.assertTrue(diagnose.is_abstention(rec.generated_answer) is False)
         self.assertIsNone(diagnose.generation_abstention_failure(rec))
         self.assertIn("abstention", judge.calls)
@@ -1087,6 +1087,17 @@ class GenerationLabelTest(_DiagnoseTestBase):
         self.assertIsNotNone(finding)
         self.assertTrue(finding.confirmed)
         self.assertIn("aspect_critic", finding.metadata["reason"])
+
+    def test_main_pipeline_does_not_flag_grounded_negative_facts_as_abstention(self):
+        """replay 전용 확장 마커("포함되어 있지 않"/"다루지 않"류)는 진짜 기권뿐 아니라
+        근거 있는 정상 부정 답변에도 매치된다. 메인 파이프라인 기본 판별(extended=False)은
+        이 확장 마커를 쓰면 안 된다 — 안 그러면 오답/환각이 '부당한 기권'으로 오진된다."""
+        for text in (
+            "계약서에 위약금 조항이 포함되어 있지 않습니다.",
+            "해당 정책은 해외 근무를 다루지 않습니다.",
+            "이 문서에는 별도로 명시되어 있지 않습니다.",
+        ):
+            self.assertFalse(diagnose.is_abstention(text), text)
 
     def test_heuristic_used_and_no_llm_call_below_deep(self):
         judge = _FakeAbstentionJudge(1)

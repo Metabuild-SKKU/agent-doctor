@@ -1,0 +1,630 @@
+"""
+tests/test_ext_report_view.py
+외부 RAG 진단서 뷰(report_view.build_ext_report_view) 회귀 테스트.
+
+이 계층이 지켜야 할 것:
+  - 템플릿(web/prototype/report.html)이 읽는 키를 빠뜨리지 않는다
+    (빠지면 화면이 조용히 빈 섹션을 그린다 - 에러가 안 난다)
+  - 외부 모드에 없는 것(치료경과·처방이력)을 있는 척하지 않는다
+  - 권고 카드가 ext_ 라벨에서도 비지 않는다
+    (기존 _build_recommendations 는 get_rule(ext_...)=None 이라 조용히 사라진다)
+"""
+import unittest
+from datetime import datetime
+
+from core.schema import DiagnosticReport, Finding
+
+from agents.serve.report_view import build_ext_report_view
+
+# 템플릿이 data.<키> 로 읽는 최상위 키. 하나라도 빠지면 그 섹션이 빈 채 그려진다.
+TEMPLATE_KEYS = {
+    "meta", "score", "priority", "metrics",
+    "course", "rxs", "dxs", "qas", "recommendations",
+}
+
+
+def _report(findings=None, scores=None, composite=None):
+    return DiagnosticReport(
+        report_id="t1",
+        created_at=datetime(2026, 8, 10, 12, 0, 0),
+        iteration=1,
+        overall_score=0.5,
+        findings=findings or [],
+        ragas_scores=scores or {},
+        composite_score=composite or {"total": 16.0},
+    )
+
+
+def _finding(label, confirmed=True, severity="warning"):
+    return Finding(
+        finding_id=f"f_{label}", type="generation", severity=severity,
+        description=f"{label} 사유", label=label, confirmed=confirmed)
+
+
+class ExtReportViewTests(unittest.TestCase):
+
+    def test_template_keys_present(self):
+        view = build_ext_report_view(_report(), {})
+        self.assertTrue(TEMPLATE_KEYS <= set(view), TEMPLATE_KEYS - set(view))
+
+    def test_course_and_rxs_are_empty(self):
+        """외부 모드에는 치료경과·처방이력이 원리적으로 없다 — 남의 인덱스에는
+        처방을 적용할 수 없으므로 '아직 안 한 것'이 아니라 '할 수 없는 것'이다."""
+        view = build_ext_report_view(
+            _report([_finding("ext_answer_off_topic")]), {"records": 3})
+        self.assertEqual(view["course"], [])
+        self.assertEqual(view["rxs"], [])
+        self.assertEqual(view["score"]["kept"], 0)
+        self.assertEqual(view["score"]["rolled"], 0)
+
+    def test_before_equals_after(self):
+        """비교 대상(처방 적용 후 두 번째 로그)이 없으므로 개선폭을 지어내지 않는다."""
+        view = build_ext_report_view(_report(), {})
+        self.assertEqual(view["score"]["before"], view["score"]["after"])
+        self.assertEqual(view["score"]["delta"], 0.0)
+
+    def test_recommendations_not_empty_for_ext_labels(self):
+        """ext_ 라벨에서도 권고가 나와야 한다 — 기존 _build_recommendations 는
+        get_rule(ext_...)=None 이라 카드가 조용히 사라진다(그래서 전용 경로가 있다)."""
+        view = build_ext_report_view(
+            _report([_finding("ext_answer_off_topic", severity="critical")]), {})
+        self.assertEqual(len(view["recommendations"]), 1)
+        rec = view["recommendations"][0]
+        self.assertTrue(rec["title"].strip())
+        self.assertTrue(rec["steps"])
+        self.assertTrue(rec["steps"][0]["action"].strip())
+
+    def test_recommendation_card_shape_matches_template(self):
+        """템플릿 renderRecommendations 가 읽는 필드."""
+        view = build_ext_report_view(_report([_finding("ext_grounded_but_wrong")]), {})
+        rec = view["recommendations"][0]
+        for key in ("kind", "badge", "title", "desc", "items", "steps", "cta"):
+            self.assertIn(key, rec)
+        self.assertEqual(len(rec["badge"]), 2)      # [클래스, 라벨]
+        for step in rec["steps"]:
+            self.assertIn("action", step)
+            self.assertIn("detail", step)
+
+    def test_config_flows_into_step_action(self):
+        """로그 config 가 있으면 권고 문구에 현재값이 실린다."""
+        view = build_ext_report_view(
+            _report([_finding("ext_context_overflow")]),
+            {"config": {"top_k": 5}})
+        actions = " ".join(s["action"] for s in view["recommendations"][0]["steps"])
+        self.assertIn("top_k=5", actions)
+
+    def test_tentative_counted_in_cta(self):
+        view = build_ext_report_view(
+            _report([_finding("ext_answer_off_topic", confirmed=False)]), {})
+        self.assertIn("예비", view["recommendations"][0]["cta"])
+
+    def test_metrics_from_ragas_scores(self):
+        view = build_ext_report_view(
+            _report(scores={"faithfulness": 1.0, "response_relevancy": 0.5}), {})
+        names = {m["en"] for m in view["metrics"]}
+        self.assertIn("faithfulness", names)
+        self.assertIn("response_relevancy", names)
+
+    def test_capability_is_surfaced(self):
+        """어디까지 잰 진단인지 화면이 밝힐 수 있어야 한다."""
+        view = build_ext_report_view(_report(), {
+            "records": 6, "tier": "triad",
+            "with_ground_truth": 6, "with_gold_contexts": 6, "notes": ["n"]})
+        ext = view["transparency"]["external"]
+        # tier 코드가 아니라 사람 말로 나와야 한다("triad" 는 우리 적재기 내부 이름).
+        self.assertEqual(ext["tier"], "컨텍스트까지")
+        self.assertEqual(ext["with_ground_truth"], 6)
+        self.assertEqual(view["meta"]["question_count"], 6)
+
+    def test_qa_only_tier_is_labelled(self):
+        """제한적 진단임이 제목에 드러나야 한다."""
+        view = build_ext_report_view(_report(), {"tier": "qa_only"})
+        self.assertIn("제한적", view["meta"]["depth"])
+
+    def test_empty_report_does_not_crash(self):
+        view = build_ext_report_view(_report(), {})
+        self.assertEqual(view["recommendations"], [])
+        self.assertEqual(view["dxs"], [])
+
+    def test_json_serializable(self):
+        """HTML 에 심으려면 직렬화돼야 한다."""
+        import json
+        view = build_ext_report_view(
+            _report([_finding("ext_answer_off_topic")]), {"records": 1})
+        self.assertTrue(json.dumps(view, ensure_ascii=False))
+
+
+class ReportHtmlInjectionTests(unittest.TestCase):
+    """뷰를 템플릿에 심는 공용 유틸 — run_corpus 와 run_replay_report 가 공유한다."""
+
+    def test_injection_removes_fetch_branch(self):
+        from tools.report_html import REPORT_TEMPLATE, inject_view
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        html = inject_view({"score": {"after": 1}},
+                           REPORT_TEMPLATE.read_text(encoding="utf-8"))
+        # fetch 실패 배너를 띄우는 더미 분기가 남으면 안 된다
+        self.assertNotIn("renderReport({}, false)", html)
+        self.assertIn("__AGENT_DOCTOR_REPORT__", html)
+
+    def test_data_block_precedes_render(self):
+        """데이터가 렌더 스크립트보다 뒤에 오면 undefined 라 빈 리포트가 그려진다."""
+        from tools.report_html import REPORT_TEMPLATE, inject_view
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        html = inject_view({"score": {"after": 1}},
+                           REPORT_TEMPLATE.read_text(encoding="utf-8"))
+        self.assertLess(html.index("window.__AGENT_DOCTOR_REPORT__ ="),
+                        html.index("renderReport(window.__AGENT_DOCTOR_REPORT__"))
+
+    def test_script_close_is_escaped(self):
+        """</script> 가 payload 에 들어가면 HTML 파싱이 깨진다."""
+        from tools.report_html import REPORT_TEMPLATE, inject_view
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        html = inject_view({"meta": {"corpus": "</script><b>x"}},
+                           REPORT_TEMPLATE.read_text(encoding="utf-8"))
+        self.assertNotIn("</script><b>x", html)
+        self.assertIn("<\\/script>", html)
+
+
+class ExtModeSectionTests(unittest.TestCase):
+    """외부 모드에서 '없음'과 '할 수 없음'을 화면이 구분할 수 있어야 한다."""
+
+    def test_mode_marks_impossible_sections(self):
+        view = build_ext_report_view(_report(), {})
+        mode = view["mode"]
+        self.assertEqual(mode["kind"], "external")
+        # Rx 목록은 치료경과 섹션 안에 있으므로 course 를 숨기면 함께 사라진다.
+        self.assertIn("course", mode["hidden_sections"])
+        self.assertTrue(mode["notice"].strip())
+        self.assertEqual(view["rxs"], [])
+
+    def test_qas_filled_from_failed_questions(self):
+        """로그에도 질문·답변·정답이 있으므로 실패 질문은 채운다 —
+        '어떤 질문에서 무너졌나'가 상대에게 넘길 진단서의 핵심이다."""
+        rep = _report([_finding("ext_answer_off_topic")])
+        rep.failed_questions = [{
+            "probe_id": "ext_0000", "question": "연차는 며칠인가요?",
+            "expected_answer": "연 15일", "actual_answer": "병가는 60일입니다",
+        }]
+        view = build_ext_report_view(rep, {})
+        self.assertEqual(len(view["qas"]), 1)
+        qa = view["qas"][0]
+        self.assertEqual(qa["q"], "연차는 며칠인가요?")
+        self.assertEqual(qa["gold"], "연 15일")
+        self.assertIn("병가", qa["actual"])
+
+    def test_template_has_hooks_for_mode(self):
+        """템플릿이 hidden_sections 를 실제로 숨길 수 있어야 한다 —
+        뷰만 고치고 마크업이 없으면 빈 섹션이 그대로 남는다."""
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        html = REPORT_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn('data-section="course"', html)
+        self.assertIn("function renderMode", html)
+        self.assertIn('id="modeNotice"', html)
+
+
+class ExtSectionLayoutTests(unittest.TestCase):
+    """섹션 구성 — 내부 모드 전제가 담긴 제목·순서를 외부 뜻으로 바꾼다."""
+
+    def test_titles_replace_internal_assumptions(self):
+        """'처방 전후'는 비교 대상이 없고, '남은 권고'는 자동 처방 뒤 잔여물이란
+        뜻이라 외부 모드에서 성립하지 않는다."""
+        view = build_ext_report_view(_report(), {})
+        titles = {t["section"]: t["title"] for t in view["mode"]["section_titles"]}
+        self.assertEqual(titles["metrics"], "품질 지표")
+        self.assertEqual(titles["recommendations"], "처방 추천")
+        self.assertEqual(titles["transparency"], "진단 범위")
+
+    def test_recommendations_move_above_dxs(self):
+        """권고는 이 진단서의 결론이다 — 꼬리가 아니라 지표 다음 자리로 올린다."""
+        moves = build_ext_report_view(_report(), {})["mode"]["move_before"]
+        self.assertIn({"section": "recommendations", "before": "dxs"}, moves)
+
+    def test_notice_warns_score_is_not_comparable(self):
+        """검색축이 gold 청크 recall 이 아니라 로그 기반 근거 신호(겹침·precision,
+        재료가 없으면 faithfulness)라 내부 점수와 비교할 수 없다."""
+        notice = build_ext_report_view(_report(), {})["mode"]["notice"]
+        self.assertIn("recall", notice)
+        self.assertIn("비교", notice)
+
+    def test_notice_warns_report_carries_raw_log_text(self):
+        """진단서는 상대 팀에 넘기거나 사내에 공유하는 문서다. '실패한 검증 질문'이
+        로그 원문을 그대로 싣는다는 걸 문서 자신이 밝혀야 공유 전에 한 번 보게 된다."""
+        notice = build_ext_report_view(_report(), {})["mode"]["notice"]
+        self.assertIn("원문", notice)
+        self.assertIn("민감정보", notice)
+
+    def test_score_is_named_differently_from_internal(self):
+        """'종합점수'라는 같은 이름을 쓰면 안내에 '비교 불가'라고 적어둬도 사람은
+        내부 실행의 종합점수와 나란히 놓고 본다."""
+        mode = build_ext_report_view(_report(), {})["mode"]
+        self.assertNotIn("종합", mode["score_label"])
+        self.assertIn("recall", mode["score_note"])
+
+    def test_template_uses_the_view_supplied_score_label(self):
+        """화면이 '종합 점수'를 하드코딩하면 뷰가 이름을 바꿔도 안 따라온다."""
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        self.assertIn("mode.score_label", REPORT_TEMPLATE.read_text(encoding="utf-8"))
+
+    def test_hero_gets_evidence_counts(self):
+        """외부 hero 는 처방 수 대신 확정/예비를 보여준다."""
+        view = build_ext_report_view(_report([
+            _finding("ext_answer_off_topic"),
+            _finding("ext_generation_hallucination", confirmed=False)]), {"tier": "triad"})
+        self.assertEqual(view["score"]["confirmed"], 1)
+        self.assertEqual(view["score"]["tentative"], 1)
+        self.assertEqual(view["meta"]["tier"], "컨텍스트까지")
+
+    def test_template_has_section_hooks(self):
+        """뷰가 가리키는 섹션 이름표가 마크업에 실제로 있어야 한다 —
+        없으면 제목 교체·이동이 조용히 no-op 이 된다."""
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        html = REPORT_TEMPLATE.read_text(encoding="utf-8")
+        view = build_ext_report_view(_report(), {})
+        names = set(view["mode"]["hidden_sections"])
+        names |= {t["section"] for t in view["mode"]["section_titles"]}
+        for m in view["mode"]["move_before"]:
+            names |= {m["section"], m["before"]}
+        for name in names:
+            self.assertIn(f'data-section="{name}"', html, f"{name} 이름표 없음")
+
+
+class TransparencyRenderTests(unittest.TestCase):
+    """진단 내역 — 하드코딩 목업이 실제 진단서에 나가던 것을 데이터 렌더로 바꿨다."""
+
+    def test_mockup_numbers_are_gone_from_markup(self):
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        html = REPORT_TEMPLATE.read_text(encoding="utf-8")
+        # 마크업에 박힌 값은 어느 코퍼스든 똑같이 표시됐다.
+        self.assertNotIn('<div class="tn">2분 14초</div>', html)
+        self.assertNotIn('<div class="tn">218</div>', html)
+        self.assertIn('id="transList"', html)
+        self.assertIn("function renderTransparency", html)
+
+    def test_external_transparency_payload(self):
+        view = build_ext_report_view(_report(), {
+            "records": 6, "tier": "triad",
+            "with_ground_truth": 6, "with_gold_contexts": 5, "notes": []})
+        ext = view["transparency"]["external"]
+        self.assertEqual((ext["tier"], ext["with_ground_truth"], ext["with_gold_contexts"]),
+                         ("컨텍스트까지", 6, 5))
+
+
+class ExtLabelExposureTests(unittest.TestCase):
+    """라벨 코드는 화면에 노출되지 않는다 — 진단서는 우리 코드를 모르는 상대가 읽는다."""
+
+    def _view(self):
+        f1 = _finding("ext_answer_off_topic", severity="critical")
+        f1.metadata = {"reason": "answer relevancy 0.43 - 답이 질문을 비껴감"}
+        f1.affected_probes = ["p1"]
+        f2 = _finding("ext_grounded_but_wrong")
+        f2.metadata = {"reason": "correctness 0.12인데 faithfulness 1.00"}
+        f2.affected_probes = ["p2"]
+        rep = _report([f1, f2], scores={"faithfulness": 1.0})
+        rep.failed_questions = [
+            {"probe_id": "p1", "question": "q1", "expected_answer": "a", "actual_answer": "b"},
+            {"probe_id": "p2", "question": "q2", "expected_answer": "a", "actual_answer": "b"},
+        ]
+        return build_ext_report_view(rep, {})
+
+    def test_no_raw_label_codes_anywhere(self):
+        import json
+        blob = json.dumps(self._view(), ensure_ascii=False)
+        # mode/code 매핑 자체가 아니라 사용자에게 보이는 문구에 코드가 없어야 한다.
+        for section in ("priority", "dxs", "qas"):
+            text = json.dumps(json.loads(blob)[section], ensure_ascii=False)
+            self.assertNotIn("ext_", text, f"{section} 에 라벨 코드 노출")
+
+    def test_priority_uses_human_titles(self):
+        titles = [p["title"] for p in self._view()["priority"]]
+        self.assertTrue(any("동문서답" in t for t in titles), titles)
+        self.assertTrue(all("질문" in t for t in titles), titles)   # "— 질문 N건"
+
+    def test_dxs_groups_by_label(self):
+        """probe 마다 카드를 만들면 같은 문장이 반복된다 — 라벨 단위로 묶는다."""
+        f = [_finding("ext_grounded_but_wrong") for _ in range(6)]
+        for i, x in enumerate(f):
+            x.affected_probes = [f"p{i}"]
+        dxs = build_ext_report_view(_report(f), {})["dxs"]
+        self.assertEqual(len(dxs), 1)
+        self.assertIn("6건", dxs[0]["foot"])
+
+    def test_dxs_code_is_short_korean(self):
+        codes = [d["code"] for d in self._view()["dxs"]]
+        self.assertIn("동문서답", codes)
+        self.assertIn("근거 부족", codes)
+
+    def test_rx_points_to_recommendation_section(self):
+        """'미처방'이라고 적으면 고칠 방법이 없는 것처럼 읽힌다."""
+        for d in self._view()["dxs"]:
+            self.assertNotEqual(d["rx"], "미처방")
+
+    def test_qas_badge_uses_short_name(self):
+        labels = " ".join(q["label"] for q in self._view()["qas"])
+        self.assertNotIn("ext_", labels)
+
+
+class ExtMetricsSingleTests(unittest.TestCase):
+    """품질 지표 — 외부 모드에는 '처방 전' 값이 없다."""
+
+    def test_metrics_are_single_valued(self):
+        view = build_ext_report_view(
+            _report(scores={"faithfulness": 1.0, "response_relevancy": 0.5}), {})
+        self.assertTrue(view["metrics"])
+        for m in view["metrics"]:
+            self.assertTrue(m["single"])
+            # before 를 남기면 화면이 전후 막대 2개를 그리고 '변화 없음'으로 읽힌다.
+            self.assertNotIn("before", m)
+
+    def test_template_handles_single_metrics(self):
+        """템플릿이 single 을 모르면 m.before.toFixed 에서 죽는다."""
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        self.assertIn("m.single", REPORT_TEMPLATE.read_text(encoding="utf-8"))
+
+
+class ExtScoreWithheldTests(unittest.TestCase):
+    """성분 하나가 미측정이면 총점을 내지 않는다.
+
+    composite 는 측정된 성분만으로 결합하므로 신뢰도가 빠지면 '품질 점수'가 '종합점수'
+    이름을 달고 나간다 — 검색이 통째로 실패한 로그(gold 겹침 0.00)가 90점을 받고
+    게이트까지 통과했다. 골든셋 필수화로는 안 막힌다: ground_truth 없이 gold_contexts
+    만 준 로그가 같은 구멍에 빠지고, 질문 매칭이 정규화 후 완전 일치라 부분 매칭도 흔하다."""
+
+    def _view(self, reliability, golden=None):
+        report = _report()
+        report.composite_score = {
+            "total": 90,
+            "components": [{"key": "quality", "label": "품질", "score": 90},
+                           {"key": "reliability", "label": "신뢰도", "score": reliability}],
+        }
+        return build_ext_report_view(report, {"tier": "triad", "golden": golden})
+
+    def test_total_is_withheld_when_a_component_is_unmeasured(self):
+        view = self._view(None)
+        self.assertIsNone(view["score"]["after"])
+        self.assertIsNone(view["score"]["before"])
+        self.assertEqual(view["score"]["unmeasured"], ["신뢰도"])
+
+    def test_measured_components_survive(self):
+        """총점만 뺀다 — 잰 축까지 감추면 '아무것도 못 쟀다'로 읽힌다."""
+        scores = {c["key"]: c["score"] for c in self._view(None)["score"]["components"]}
+        self.assertEqual(scores["quality"], 90)
+        self.assertIsNone(scores["reliability"])
+
+    def test_total_survives_when_everything_is_measured(self):
+        self.assertEqual(self._view(0.8)["score"]["after"], 90)
+        self.assertEqual(self._view(0.8)["score"]["unmeasured"], [])
+
+    def test_reason_names_the_missing_material(self):
+        """'측정 불가'만 적으면 도구가 고장 난 줄 안다. 무엇이 없어서인지까지 말한다."""
+        self.assertIn("골든셋(정답)이 없어", self._view(None)["score"]["score_unavailable_reason"])
+
+    def test_zero_match_reason_beats_no_ground_truth_reason(self):
+        """매칭 0건이면 filled_ground_truth 도 0이라, 순서를 안 지키면 '골든셋에 정답이
+        없다'는 엉뚱한 사유가 나간다 — 실제로는 정답이 있는데 질문이 안 붙은 것이고
+        고치는 방법이 완전히 다르다."""
+        reason = self._view(None, golden={"qa_entries": 5, "matched": 0,
+                                          "filled_ground_truth": 0})["score"]["score_unavailable_reason"]
+        self.assertIn("한 건도 매칭되지", reason)
+
+    def test_gold_contexts_only_reason(self):
+        reason = self._view(None, golden={"qa_entries": 3, "matched": 3,
+                                          "filled_ground_truth": 0})["score"]["score_unavailable_reason"]
+        self.assertIn("gold_contexts", reason)
+
+    def test_transparency_shows_golden_match_rate(self):
+        """병합은 정규화 후 완전 일치라 부분 매칭이 흔한데 CLI 만 그 사실을 찍고 있었다."""
+        g = self._view(0.8, golden={"qa_entries": 5, "matched": 2,
+                                    "filled_ground_truth": 2})["transparency"]["external"]["golden"]
+        self.assertEqual((g["entries"], g["matched"]), (5, 2))
+        self.assertIn("2건 매칭", g["text"])
+
+    def test_template_handles_missing_total(self):
+        """템플릿이 None 을 모르면 (score.after || 0) 으로 0점을 그린다 — '재봤더니
+        바닥'과 '재지 못함'은 다르다."""
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        self.assertIn("score.after == null", REPORT_TEMPLATE.read_text(encoding="utf-8"))
+
+
+class ExtVerdictBadgeTests(unittest.TestCase):
+    """통과/미달 배지 — 외부 진단은 내부 문턱으로 판정하지 않는다."""
+
+    def test_pass_threshold_is_none(self):
+        """상단 안내가 '내부 점수와 비교 불가'라고 밝히면서 내부 문턱(composite >= 90)으로
+        배지를 그리면 스스로 모순이다. 판정을 아예 싣지 않는다."""
+        view = build_ext_report_view(_report(), {})
+        self.assertIsNone(view["score"]["pass_threshold"])
+
+    def test_gate_detail_is_still_carried(self):
+        """판정만 빼고 근거는 남긴다 — 진단 범위 섹션이 composite 구성을 보여준다."""
+        view = build_ext_report_view(_report(), {})
+        self.assertIn("gate", view["score"])
+        self.assertIn("composite_total", view["score"]["gate"])
+
+    def test_template_hides_badge_without_verdict(self):
+        """템플릿이 None 을 모르면 !!undefined 로 '미달' 배지를 그린다."""
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        html = REPORT_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn("score.pass_threshold == null", html)
+
+
+class FormatCompositeTests(unittest.TestCase):
+    """CLI·로그 한 줄도 뷰와 같은 사실을 말해야 한다.
+
+    진단서는 총점을 감췄는데 CLI 는 '종합점수 90/100' 을 그대로 찍고 있었다 — 같은
+    실행을 어느 창으로 보느냐에 따라 다른 말을 하면 둘 다 못 믿는다."""
+
+    def _fmt(self, quality, reliability):
+        from agents.eval.scoring import format_composite
+        return format_composite({
+            "total": 90,
+            "components": [{"key": "quality", "label": "품질", "score": quality},
+                           {"key": "reliability", "label": "신뢰도", "score": reliability}],
+        })
+
+    def test_partial_total_is_marked(self):
+        text = self._fmt(90, None)
+        self.assertIn("부분", text)
+        self.assertIn("신뢰도", text)
+
+    def test_full_total_is_not_marked(self):
+        self.assertNotIn("부분", self._fmt(90, 80))
+
+    def test_no_total_at_all(self):
+        from agents.eval.scoring import format_composite
+        text = format_composite({"total": None, "components": [
+            {"key": "quality", "label": "품질", "score": None}]})
+        self.assertIn("-/100", text)
+
+
+class PartialFlagTests(unittest.TestCase):
+    """'이 총점을 종합점수로 읽어도 되는가' 를 payload 자신이 답한다.
+
+    같은 로그가 CLI(90/100 [부분]) · 산출물 payload({'total': 90}) · 진단서(–) 에서
+    다른 답을 냈다. 판정을 두 곳이 각각 구현하고 있었고, 세 번째 소비자인 payload 는
+    그 구현이 없어 부분 여부를 아예 알리지 않았다."""
+
+    def _composite(self, quality, reliability):
+        from agents.eval.scoring import CompositeScore, _Component
+        return CompositeScore(
+            total=90 if quality is not None or reliability is not None else None,
+            components=[_Component("quality", "품질", quality),
+                        _Component("reliability", "신뢰도", reliability)],
+        ).as_dict()
+
+    def test_payload_carries_partial(self):
+        self.assertTrue(self._composite(0.9, None)["partial"])
+
+    def test_full_measurement_is_not_partial(self):
+        self.assertFalse(self._composite(0.9, 0.8)["partial"])
+
+    def test_no_total_is_not_partial(self):
+        """총점 자체가 없는 것은 '부분' 이 아니다 - 표기가 아니라 사유가 필요한 상태다."""
+        d = self._composite(None, None)
+        self.assertIsNone(d["total"])
+        self.assertFalse(d["partial"])
+
+    def test_three_exits_agree(self):
+        """CLI 한 줄 · payload · 진단서가 같은 판정을 낸다."""
+        from agents.eval.scoring import format_composite
+        d = self._composite(0.9, None)
+        report = _report()
+        report.composite_score = d
+        view = build_ext_report_view(report, {"tier": "triad"})
+        self.assertTrue(d["partial"])                       # payload
+        self.assertIn("부분", format_composite(d))           # CLI 한 줄
+        self.assertIsNone(view["score"]["after"])            # 진단서
+        self.assertEqual(view["score"]["unmeasured"], ["신뢰도"])
+
+    def test_legacy_payload_without_partial_key(self):
+        """구버전 리포트에는 partial 키가 없다 - components 로 같은 답이 나와야 한다."""
+        from agents.eval.scoring import is_partial
+        self.assertTrue(is_partial({"total": 90, "components": [
+            {"key": "quality", "label": "품질", "score": 90},
+            {"key": "reliability", "label": "신뢰도", "score": None}]}))
+
+
+class ScoreUnavailableReasonTests(unittest.TestCase):
+    """사유는 빠진 축마다 다르다.
+
+    골든셋 얘기를 품질 축(LLM 판정 미실행)에까지 쓰면, 정답을 이미 준 사람에게
+    정답을 더 달라고 하는 문장이 나간다."""
+
+    def _reason(self, quality, reliability, capability):
+        report = _report()
+        report.composite_score = {
+            "total": 90,
+            "components": [{"key": "quality", "label": "품질", "score": quality},
+                           {"key": "reliability", "label": "신뢰도", "score": reliability}],
+        }
+        cap = {"tier": "triad"}
+        cap.update(capability)
+        return build_ext_report_view(report, cap)["score"]["score_unavailable_reason"]
+
+    def test_quality_axis_does_not_blame_the_golden_set(self):
+        """정답 3건이 인라인이고 못 잰 축이 품질(LLM 꺼짐)인 실행."""
+        reason = self._reason(None, 80, {"with_ground_truth": 3})
+        self.assertIn("RAGAS", reason)
+        self.assertNotIn("골든셋", reason)
+
+    def test_inline_ground_truth_is_not_reported_as_missing(self):
+        """골든셋 '파일' 이 없는 것과 '정답' 이 없는 것은 다르다."""
+        reason = self._reason(90, None, {"with_ground_truth": 3})
+        self.assertNotIn("골든셋(정답)이 없어", reason)
+        self.assertIn("정답은 있으나", reason)
+
+    def test_no_golden_anywhere_still_says_so(self):
+        self.assertIn("골든셋(정답)이 없어",
+                      self._reason(90, None, {"with_ground_truth": 0}))
+
+    def test_both_axes_report_both_reasons(self):
+        reason = self._reason(None, None, {"with_ground_truth": 0})
+        self.assertIn("RAGAS", reason)
+        self.assertIn("골든셋(정답)이 없어", reason)
+
+
+class ExtNoticeTests(unittest.TestCase):
+    """상단 안내는 없는 점수를 설명하지 않는다."""
+
+    def _notice(self, reliability):
+        report = _report()
+        report.composite_score = {
+            "total": 90,
+            "components": [{"key": "quality", "label": "품질", "score": 90},
+                           {"key": "reliability", "label": "신뢰도", "score": reliability}],
+        }
+        return build_ext_report_view(report, {"tier": "triad"})["mode"]["notice"]
+
+    def test_score_sentence_is_dropped_without_a_total(self):
+        """score_note 는 score.after != null 일 때만 붙게 고쳤는데 notice 는 고정이라,
+        총점을 감춘 실행에도 점수의 성질을 설명하는 문장이 남아 있었다."""
+        self.assertNotIn("점수의 검색축", self._notice(None))
+
+    def test_score_sentence_survives_with_a_total(self):
+        self.assertIn("점수의 검색축", self._notice(0.8))
+
+    def test_sensitive_data_warning_always_survives(self):
+        """민감정보 고지는 점수와 무관하다 - 총점이 없어도 로그 원문은 실린다."""
+        for reliability in (None, 0.8):
+            self.assertIn("민감정보", self._notice(reliability))
+
+
+class RenderStateLeakTests(unittest.TestCase):
+    """한 페이지에서 run 을 바꿔 다시 렌더할 때 숨긴 요소가 남지 않아야 한다.
+
+    display='none' 만 하고 되돌리는 분기가 없으면 외부 → 내부 전환에서 배지·증감이
+    사라진 채로 남는다. 첫 렌더만 보면 안 드러나는 종류라 핀으로 잡는다."""
+
+    def _html(self):
+        from tools.report_html import REPORT_TEMPLATE
+        if not REPORT_TEMPLATE.exists():
+            self.skipTest("report.html 템플릿 없음")
+        return REPORT_TEMPLATE.read_text(encoding="utf-8")
+
+    def test_badge_display_is_restored(self):
+        self.assertIn("badge.style.display = ''", self._html())
+
+    def test_delta_display_is_assigned_both_ways(self):
+        # 삼항으로 양쪽을 다 정한다(= 'none' 아니면 '').
+        self.assertIn("deltaEl.style.display = (external || noScore) ? 'none' : ''",
+                      self._html())
+
+
+if __name__ == "__main__":
+    unittest.main()

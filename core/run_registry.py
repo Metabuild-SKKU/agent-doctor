@@ -31,19 +31,26 @@ class RunState:
     percent: int = 0
     events: list[RunEvent] = field(default_factory=list)
     error: Optional[str] = None
-    final_state: Optional[Any] = None  # 완료 시 AgentDoctorState
+    final_state: Optional[Any] = None  # 완료 시 AgentDoctorState (mode="pipeline")
     depth: str = "standard"
     upload_path: str = ""
     created_at: float = 0.0
+    mode: str = "pipeline"           # "pipeline" | "replay"
+    ext_report: Optional[Any] = None  # 완료 시 DiagnosticReport (mode="replay")
+    ext_cap: Optional[dict] = None    # 완료 시 log_intake.assess_capability 결과 (mode="replay")
 
 
 _LOCK = threading.Lock()
 _RUNS: dict[str, RunState] = {}
 
 
-def create(run_id: str, depth: str, upload_path: str, created_at: float) -> RunState:
+def create(
+    run_id: str, depth: str, upload_path: str, created_at: float, mode: str = "pipeline",
+) -> RunState:
     with _LOCK:
-        run = RunState(run_id=run_id, depth=depth, upload_path=upload_path, created_at=created_at)
+        run = RunState(
+            run_id=run_id, depth=depth, upload_path=upload_path, created_at=created_at, mode=mode,
+        )
         _RUNS[run_id] = run
         return run
 

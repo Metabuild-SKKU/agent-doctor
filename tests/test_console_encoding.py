@@ -36,9 +36,12 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 검색 경로 — 여기서 나는 인코딩 예외는 복구를 삼키거나(try 안) 검색을 죽인다(try 밖).
+# llm_provider 는 embed_texts 가 metrics_ragas._embed 로 불리는데 그 호출부 4곳이
+# 전부 try 안이라, 안내 문구가 터지면 임베딩 폴백이 통째로 삼켜진다(같은 위험).
 GUARDED_MODULES = (
     "agents/index/qdrant_store.py",
     "agents/rag/retriever.py",
+    "agents/eval/llm_provider.py",
 )
 # 문구를 받아 콘솔에 찍는 함수들. print 와 같은 위험이다.
 CONSOLE_CALLS = ("print", "_notify_route_once")
@@ -53,8 +56,32 @@ def _string_literals(node: ast.AST) -> list[str]:
     return out
 
 
+def _print_wrapper_names(tree: ast.AST) -> set[str]:
+    """이 모듈이 정의한 'print 래퍼' 함수 이름들.
+
+    CONSOLE_CALLS 는 손으로 적는 목록이라 새 헬퍼가 생기면 그만큼 늦게 따라온다.
+    문구를 print 에 직접 넘기지 않고 _notify_..._once(message) 같은 헬퍼에 넘기면,
+    print 자체는 헬퍼 본문에 있어도 **문구를 만든 호출부는 try 안**이라 인코딩 예외는
+    똑같이 바깥 except 에 삼켜진다. 실제로 이 구멍 때문에 qdrant_store 3곳·
+    llm_provider 2곳의 em-dash 가 이 테스트를 통과했다.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for child in ast.walk(node):
+            if (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                    and child.func.id == "print"):
+                names.add(node.name)
+                break
+    return names
+
+
 def _console_literals(tree: ast.AST) -> list[tuple[int, str]]:
-    """콘솔 출력 호출에 넘기는 문자열 리터럴 (줄번호, 값). try 안팎을 가리지 않는다."""
+    """콘솔 출력 호출에 넘기는 문자열 리터럴 (줄번호, 값). try 안팎을 가리지 않는다.
+
+    대상은 CONSOLE_CALLS 에 적힌 이름과, 이 모듈이 스스로 정의한 print 래퍼다."""
+    console_calls = set(CONSOLE_CALLS) | _print_wrapper_names(tree)
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -65,7 +92,7 @@ def _console_literals(tree: ast.AST) -> list[tuple[int, str]]:
             else func.attr if isinstance(func, ast.Attribute)
             else ""
         )
-        if name not in CONSOLE_CALLS:
+        if name not in console_calls:
             continue
         for text in _string_literals(node):
             found.append((node.lineno, text))

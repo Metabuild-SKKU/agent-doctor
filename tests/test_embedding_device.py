@@ -72,10 +72,17 @@ class _CacheIsolated(unittest.TestCase):
     """모델 캐시는 전역이라 테스트마다 비운다.
 
     provider 도 local 로 고정한다 — 이 파일은 로컬 경로(장치 선택·OOM)를 다루고,
-    기본값 provider 로 두면 실행 환경의 env 에 따라 API 경로로 새어 나간다."""
+    기본값 provider 로 두면 실행 환경의 env 에 따라 API 경로로 새어 나간다.
+
+    **질의축(INDEX_QUERY_EMBED_PROVIDER)도 같이 고정해야 한다.** embed() 는 색인축이
+    아니라 질의축을 읽으므로(qdrant_store.embed 독스트링), 색인축만 막으면 .env 에
+    질의축이 명시된 머신에서 embed() 만 OpenRouter 로 새어 나간다 — embed() 는 진짜
+    1024차 벡터를, embed_batch() 는 가짜 인코더 값을 돌려줘 둘을 비교하는 테스트가
+    깨진다(스위트 순서에 따라 .env 로드 시점이 갈려 단독 실행에서는 안 잡혔다)."""
 
     def setUp(self):
-        patcher = patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "local"})
+        patcher = patch.dict("os.environ", {"INDEX_EMBED_PROVIDER": "local",
+                                            "INDEX_QUERY_EMBED_PROVIDER": "local"})
         patcher.start()
         self.addCleanup(patcher.stop)
         store._models.clear()
