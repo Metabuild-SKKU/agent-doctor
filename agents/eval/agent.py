@@ -98,6 +98,22 @@ _EVAL_CACHE_ENV_KEYS = (
     # 심판 동작을 바꾸는 스위치라 EVAL_JUDGE_MODEL 과 같은 급이다 — 빠지면
     # 토글해도 캐시가 히트해 "켜서 비교" 자체가 불가능해진다.
     "OPENROUTER_REASONING",
+    # 리랭크 실행 축. 이 값들은 index_config 가 아니라 env 로 정해지는데, provider 를
+    # 바꾸면 리랭커 **모델 자체**가 바뀌어(로컬 bge ↔ OpenRouter voyage) 검색 순위가
+    # 달라진다. 빠지면 config 가 같다는 이유로 다른 리랭커의 리포트가 복원된다.
+    "INDEX_RERANKER_PROVIDER",
+    "INDEX_RERANKER_MODEL_OPENROUTER",
+    # 장치는 **의도적으로 여기만** 들어간다. Optimize 의 baseline 정체성
+    # (agents/optimize/history.py 의 _capability_identity)은 장치를 제외하는데, 두 곳의
+    # 판정 기준이 다르기 때문이다:
+    #   - baseline 은 "이 측정이 같은 조건인가" 라 장치를 넣으면 CUDA OOM 강등
+    #     (local:cuda → local:cpu)만으로 baseline 이 실행 중에 바뀌어 이미 막아 둔
+    #     action 의 차단이 풀린다. 같은 모델이라 점수는 어차피 같다.
+    #   - 캐시는 "복원해도 되는가" 라 반대로 보수적인 쪽이 안전하다. 틀리면 조용히
+    #     남의 리포트를 복원하는데, 더 재는 비용은 재실행 한 번뿐이다.
+    "INDEX_RERANKER_DEVICE",
+    # 상한이 걸리면 긴 청크의 뒤가 잘려 점수가 달라진다(장치와 달리 결과를 바꾼다).
+    "INDEX_RERANKER_MAX_LENGTH",
 )
 _EVAL_CACHE_SECRET_KEYS = (
     "OPENAI_API_KEY",

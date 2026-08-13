@@ -24,6 +24,9 @@ from core.llm_usage import log_usage
 
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# 리랭크는 OpenAI 호환 규약이 아니라 Cohere 스타일 전용 엔드포인트다(OpenAI SDK 에 대응
+# 메서드가 없어 openai_chat/openai_embed 처럼 base_url 만 갈아끼우는 방식이 안 통한다).
+OPENROUTER_RERANK_URL = f"{OPENROUTER_BASE_URL}/rerank"
 
 # provider 철자표 — 같은 값을 EVAL_LLM_PROVIDER / RAG_LLM_PROVIDER / INDEX_LLM_PROVIDER
 # 어디에 넣어도 같게 해석되도록 한 곳에서 소유한다. 예전엔 Eval·RAG 가 각자 복사본을
@@ -592,6 +595,99 @@ def openai_embed(
     # 아니라 관례이고(그래서 index 필드가 따로 있다), 이제 색인 벡터가 이 경로를 탄다.
     # 순서가 한 칸만 어긋나도 벡터가 엉뚱한 청크에 붙어 검색이 조용히 망가진다.
     return [d.embedding for d in sorted(resp.data, key=lambda d: d.index)]
+
+
+def openrouter_rerank(
+    query: str,
+    documents: list[str],
+    model: str,
+    *,
+    api_key: str,
+    timeout: float = 60.0,
+    tag: str = "LLM",
+) -> list[tuple[int, float]]:
+    """OpenRouter /rerank 1회 호출 → [(입력 인덱스, 관련도 점수)].
+
+    응답은 점수 내림차순이라 입력 순서가 아니다. 인덱스를 그대로 실어 돌려주고
+    호출부가 제자리에 꽂는다 — 여기서 정렬해 버리면 "응답이 짧게 왔다"(문서 일부가
+    빠졌다)를 호출부가 알아챌 방법이 없어진다.
+
+    top_n 은 보내지 않는다. 보내면 그 개수만 응답에 오는데, 호출부(rerank_with_status)는
+    후보 전원의 점수를 받아 정렬하는 규약이라 빠진 문서를 실패로 읽는다. 비용도 안 준다 —
+    top_n 은 응답만 자를 뿐 채점(과금) 대상 문서는 그대로다(Cohere 계열은 search 1건
+    단위, Voyage 계열은 보낸 토큰 단위 — 어느 쪽이든 top_n 과 무관하다).
+
+    재시도는 하지 않는다 — openai_embed 와 같은 규약으로, 호출부가
+    core.llm_retry.run_with_retry 로 감싼다. 상태 코드를 예외에 실어 올려야
+    is_transient 가 429/5xx 만 골라 재시도할 수 있어 status_code 를 붙인다.
+    """
+    import requests
+
+    resp = requests.post(
+        OPENROUTER_RERANK_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={"model": model, "query": query, "documents": documents},
+        timeout=timeout,
+    )
+    if resp.status_code >= 400:
+        error = RuntimeError(
+            f"OpenRouter rerank 실패(status {resp.status_code}, model={model}): "
+            f"{resp.text[:300]}"
+        )
+        # 문자열 매칭이 아니라 상태 코드로 재시도 여부가 갈리게 한다(core/llm_retry.py).
+        error.status_code = resp.status_code
+        raise error
+
+    payload = resp.json()
+    results = payload.get("results")
+    if not isinstance(results, list):
+        raise RuntimeError(
+            f"OpenRouter rerank 응답에 results 가 없습니다(model={model}): "
+            f"{str(payload)[:300]}"
+        )
+
+    usage = payload.get("usage") or {}
+    cost = usage.get("cost") if isinstance(usage, dict) else None
+    try:
+        cost_usd = float(cost) if cost is not None else None
+    except (TypeError, ValueError):
+        cost_usd = None
+    # 과금 단위가 모델마다 다르다(Cohere 계열 search 1건 / Voyage 계열 토큰). 단가표로
+    # 추정하지 않고 응답 usage 의 실비를 그대로 기록한다 — 응답이 토큰 수를 줄 때만 싣고,
+    # cost 를 못 읽으면 None 으로 넘겨 $0 으로 뭉개지 않는다.
+    #
+    # None 이 "단가 미등록"으로 집계되는 건 core/llm_usage.py 의 단가표에 리랭크 모델이
+    # 없는 동안만이다. 거기에 리랭크 모델을 넣으면 토큰 0 짜리 추정이 $0 을 내며 조용히
+    # "과금됨 $0" 으로 바뀌므로, 넣을 때 이 호출도 같이 봐야 한다.
+    prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    log_usage(model, prompt_tokens or 0, 0, tag=tag, cost_usd=cost_usd)
+
+    scored: list[tuple[int, float]] = []
+    for item in results:
+        if not isinstance(item, dict):
+            raise RuntimeError(f"OpenRouter rerank 응답 항목 형식 오류: {str(item)[:120]}")
+        score = item.get("relevance_score")
+        if score is None:
+            score = item.get("score")
+        # 점수 키 이름은 provider 마다 다를 수 있다. 둘 다 없으면 float(None) 의 맨
+        # TypeError 대신 무엇이 왔는지 보여준다 — 이 예외는 호출부에서 "리랭크 실패,
+        # 원순위 유지" 로 흡수되므로, 메시지가 유일한 단서다.
+        if score is None:
+            raise RuntimeError(
+                f"OpenRouter rerank 응답에 점수 필드가 없습니다"
+                f"(relevance_score/score, model={model}): {str(item)[:120]}"
+            )
+        try:
+            scored.append((int(item.get("index", -1)), float(score)))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"OpenRouter rerank 응답의 index/score 를 읽을 수 없습니다"
+                f"(model={model}): {str(item)[:120]}"
+            ) from exc
+    return scored
 
 
 def gemini_embed(texts: list[str], model: str, *, tag: str = "LLM") -> list[list[float]]:

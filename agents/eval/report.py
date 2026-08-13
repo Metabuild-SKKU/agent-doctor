@@ -349,6 +349,14 @@ def _reranker_runtime(records: list[EvalRecord]) -> dict:
     # 실행 여부만 남기면 chunk_size 처방이 쌍당 비용을 몇 배로 올려도 아무 신호가 안 남는다.
     seconds = sum(_num(r.retrieval_details.get("rerank_seconds")) for r in records)
     pairs = int(sum(_num(r.retrieval_details.get("rerank_pairs")) for r in records))
+    applied_routes = sorted(
+        {
+            str(r.retrieval_details.get("rerank_route"))
+            for r in records
+            if r.retrieval_details.get("rerank_pairs")
+            and r.retrieval_details.get("rerank_route")
+        }
+    )
     return {
         "enabled": enabled_probes > 0,
         "enabled_probes": enabled_probes,
@@ -369,7 +377,39 @@ def _reranker_runtime(records: list[EvalRecord]) -> dict:
             },
             key=lambda v: (v is None, v),
         ),
+        # 어디서 계산했나("local:cuda" / "openrouter:<model>"). max_lengths 와 같은 이유로
+        # 남긴다 — 경로가 바뀌면 리랭커 **모델 자체**가 바뀌므로(로컬 bge ↔ Voyage), 두
+        # 실행의 점수 차이를 처방 효과로 읽으면 안 된다. 실제로 리랭크가 돈 건만 센다.
+        "routes": applied_routes,
+        # 시도했지만 못 돈 경로까지 포함한다. 켠 provider 와 실패 사유(status_counts)를
+        # 맞춰 봐야 "OpenRouter 를 켰는데 왜 리랭크가 안 됐지" 가 한 번에 잡힌다 —
+        # routes 만 있으면 실패한 실행은 경로가 통째로 사라져 흔적이 없다.
+        "attempted_routes": sorted(
+            {
+                str(r.retrieval_details.get("rerank_route"))
+                for r in records
+                if r.retrieval_details.get("reranker_attempted")
+                and r.retrieval_details.get("rerank_route")
+            }
+        ),
+        # 한 리포트 안에서 **서로 다른 모델**이 채점했나. 이러면 점수 분포가 섞여 있어
+        # 처방 전후 비교가 성립하지 않는다.
+        #
+        # routes 가 여럿인 것과는 구분한다 — local:cuda + local:cpu 는 CUDA OOM 강등이라
+        # 경로는 둘이어도 모델이 같아 점수가 같다. 경고할 값은 "경로가 섞였다" 가 아니라
+        # "모델이 섞였다" 다(Optimize baseline 이 장치를 제외하는 것과 같은 기준 —
+        # agents/optimize/history.py 의 _capability_identity 참고).
+        "mixed_models": len({_route_model(route) for route in applied_routes}) > 1,
     }
+
+
+def _route_model(route: str) -> str:
+    """경로 문자열에서 채점 모델 정체성만. local 경로는 장치가 달라도 같은 모델이다.
+
+    로컬 모델명은 경로에 안 들어간다(한 실행에서 index_config 로 고정이라 뺄 필요가
+    없다). 그래서 local 은 전부 "local" 한 값으로 접고, openrouter 만 모델명을 쓴다."""
+    provider, _, rest = route.partition(":")
+    return rest if provider == "openrouter" else provider
 
 
 def _search_runtime(records: list[EvalRecord]) -> dict:
