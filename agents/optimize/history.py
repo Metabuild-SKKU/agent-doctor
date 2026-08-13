@@ -148,6 +148,21 @@ def _capability_identity(
     reranker 처럼 Index 가 실제 로드해 봐야 아는 optional 모델이 대상이다. 모델이
     바뀌거나 verified 로 승격되면 같은 config 전이라도 결과가 달라지므로 baseline
     정체성에 포함한다. 무관한 capability 까지 넣으면 관계없는 변화에 차단이 풀린다.
+
+    `model` 은 실행 위치까지 반영한 **실제 채점 모델**이다(qdrant_store.
+    effective_reranker_model) — 로컬 bge 와 OpenRouter 의 voyage 는 점수 스케일도 순위도
+    달라, 두 경로의 측정이 한 baseline 으로 섞이면 처방 효과 판정이 오염된다.
+    `max_length` 도 같은 이유다(뒤가 잘린 청크는 다른 점수를 낸다).
+
+    반대로 **장치(cuda/cpu)는 일부러 넣지 않는다.** 같은 모델이라 점수가 같고, CUDA OOM
+    강등(local:cuda → local:cpu)이 실행 중에 일어나는 축이라 넣으면 baseline 이 스스로
+    바뀌면서 이미 막아 둔 action 의 차단이 풀린다. 그래서 route 전체가 아니라 점수를
+    바꾸는 값만 고른다.
+
+    Eval 캐시 키(agents/eval/agent.py 의 _EVAL_CACHE_ENV_KEYS)는 반대로 장치를 포함한다 —
+    의도한 비대칭이다. 이쪽은 "같은 조건의 측정인가" 를 묻고 틀리면 차단이 풀리지만,
+    저쪽은 "복원해도 되는가" 를 묻고 틀리면 남의 리포트가 조용히 복원된다. 후자는 보수적인
+    쪽이 안전하고 대가도 재실행 한 번뿐이다.
     """
     if not action_key.startswith("reranker.") or not isinstance(
         runtime_capabilities, dict
@@ -160,6 +175,7 @@ def _capability_identity(
         "reranker": {
             "status": capability.get("status"),
             "model": capability.get("model"),
+            "max_length": capability.get("max_length"),
         }
     }
 

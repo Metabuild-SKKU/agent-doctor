@@ -24,8 +24,8 @@ def _env(**overrides):
 class _NoticeReset(unittest.TestCase):
     def setUp(self):
         # 안내는 실행당 1회라 전역 플래그를 쓴다. 테스트마다 되돌린다.
-        llm_provider._embed_notified = False
-        self.addCleanup(setattr, llm_provider, "_embed_notified", False)
+        llm_provider._embed_notified.clear()    # 메시지별 1회 알림(set) — 테스트 간 격리
+        self.addCleanup(llm_provider._embed_notified.clear)
 
 
 class ApiAvailabilityTests(unittest.TestCase):

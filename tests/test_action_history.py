@@ -112,6 +112,66 @@ class FingerprintTest(unittest.TestCase):
             history.baseline_fingerprint(config, "retriever.top_k:increase", verified),
         )
 
+    def test_reranker_baseline_separates_local_and_api_routes(self):
+        """실행 위치가 다르면 리랭커 **모델 자체**가 다르다(로컬 bge ↔ OpenRouter voyage).
+        점수 스케일도 순위도 다른 두 측정이 한 baseline 으로 묶이면, 처방 효과 판정이
+        provider 교체로 생긴 차이를 처방 덕으로 읽는다."""
+        config = {"top_k": 5, "use_reranker": True}
+        local = {
+            "reranker": {
+                "status": "verified",
+                "model": "BAAI/bge-reranker-v2-m3",
+                "route": "local:cuda",
+                "max_length": 1024,
+            }
+        }
+        api = {
+            "reranker": {
+                "status": "verified",
+                "model": "voyageai/rerank-2.5-lite",
+                "route": "openrouter:voyageai/rerank-2.5-lite",
+                "max_length": None,
+            }
+        }
+
+        self.assertNotEqual(
+            history.baseline_fingerprint(config, "reranker.enabled:enable", local),
+            history.baseline_fingerprint(config, "reranker.enabled:enable", api),
+        )
+
+    def test_reranker_baseline_ignores_device_but_not_input_cap(self):
+        """장치는 점수를 안 바꾸고(같은 모델) CUDA OOM 강등으로 실행 중에 바뀌는 축이라,
+        넣으면 baseline 이 스스로 바뀌며 이미 막아 둔 action 의 차단이 풀린다.
+        반면 입력 상한은 긴 청크의 뒤를 자르므로 실제로 다른 점수가 나온다."""
+        config = {"top_k": 5, "use_reranker": True}
+
+        def capability(route, max_length=1024):
+            return {
+                "reranker": {
+                    "status": "verified",
+                    "model": "BAAI/bge-reranker-v2-m3",
+                    "route": route,
+                    "max_length": max_length,
+                }
+            }
+
+        self.assertEqual(
+            history.baseline_fingerprint(
+                config, "reranker.enabled:enable", capability("local:cuda")
+            ),
+            history.baseline_fingerprint(
+                config, "reranker.enabled:enable", capability("local:cpu")
+            ),
+        )
+        self.assertNotEqual(
+            history.baseline_fingerprint(
+                config, "reranker.enabled:enable", capability("local:cuda")
+            ),
+            history.baseline_fingerprint(
+                config, "reranker.enabled:enable", capability("local:cuda", None)
+            ),
+        )
+
     def test_candidate_fingerprint_ignores_path_spelling(self):
         self.assertEqual(
             history.candidate_fingerprint({"top_k": 9}),

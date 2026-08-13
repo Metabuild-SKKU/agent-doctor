@@ -59,6 +59,10 @@ class ResolveDeviceTests(unittest.TestCase):
 
     def test_explicit_cuda_downgrades_loudly(self):
         # 조용히 내리면 "GPU 로 돌리는 중" 이라 믿은 실행이 CPU 속도로 기어간다.
+        # 경고는 용도·요청값 조합당 프로세스에 한 번이다(리랭커가 질의마다 이 함수를
+        # 부르게 되면서) — 다른 테스트가 먼저 소비했을 수 있어 플래그를 비우고 잰다.
+        store._routes_notified.clear()
+        self.addCleanup(store._routes_notified.clear)
         with patch.dict(sys.modules, {"torch": _fake_torch(False)}), \
              patch("builtins.print") as printed:
             self.assertEqual(store.resolve_embedding_device("cuda"), "cpu")

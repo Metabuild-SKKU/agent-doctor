@@ -47,6 +47,8 @@ class RerankerExecutionTest(unittest.TestCase):
         qdrant_store._rerankers.clear()
         qdrant_store._failed_rerankers.clear()
         qdrant_store._reranker_max_lengths.clear()
+        qdrant_store._reranker_routes.clear()
+        qdrant_store._reranker_device_overrides.clear()
 
     def test_none_metadata_uses_default_reranker_model(self):
         settings = resolve_retrieval_settings(
@@ -162,7 +164,8 @@ class RerankerExecutionTest(unittest.TestCase):
                 model, status = qdrant_store._load_reranker(model_name)
 
         self.assertEqual(status, "ready")
-        self.assertEqual(model.kwargs, {})                       # max_length 안 넘김
+        # device 는 별개 축이라 이 상한과 무관하게 넘어간다(경로를 기록으로 남기기 위함).
+        self.assertNotIn("max_length", model.kwargs)
         self.assertIsNone(qdrant_store.reranker_max_length(model_name))
 
     def test_applied_cap_is_queryable(self):
@@ -461,6 +464,8 @@ class RerankerCapabilityTest(unittest.TestCase):
     def tearDown(self):
         qdrant_store._rerankers.clear()
         qdrant_store._failed_rerankers.clear()
+        qdrant_store._reranker_routes.clear()
+        qdrant_store._reranker_device_overrides.clear()
 
     def test_smoke_inference_marks_model_verified(self):
         model_name = "test/verified-reranker"
@@ -571,6 +576,8 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
     def tearDown(self):
         qdrant_store._rerankers.clear()
         qdrant_store._failed_rerankers.clear()
+        qdrant_store._reranker_routes.clear()
+        qdrant_store._reranker_device_overrides.clear()
 
     @staticmethod
     def _finding():
@@ -674,6 +681,9 @@ class RerankerEvaluationSafetyTest(unittest.TestCase):
                 "pairs": 0,
                 "ms_per_pair": None,
                 "max_lengths": [],
+                "routes": [],
+                "attempted_routes": [],
+                "mixed_models": False,
                 "status_counts": {
                     "load_failed": 1,
                     "applied": 1,

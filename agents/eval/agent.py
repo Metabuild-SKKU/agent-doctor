@@ -35,6 +35,7 @@ from pathlib import Path
 
 from core.schema import Probe, EvalSnapshot
 from core.llm_usage import print_summary, snapshot_usage, step
+from core import progress
 from core.parallel import parallel_map
 from core.state import AgentDoctorState
 
@@ -66,6 +67,7 @@ from agents.eval.metrics_common import (
     set_context as set_diag_context,
     set_mode,
 )
+from agents.eval import llm_provider as eval_llm_provider
 from agents.eval import topic_cluster
 from agents.eval.metrics_basic import _compute_metrics
 from agents.eval.diagnose import diagnose, _is_success
@@ -98,6 +100,22 @@ _EVAL_CACHE_ENV_KEYS = (
     # 심판 동작을 바꾸는 스위치라 EVAL_JUDGE_MODEL 과 같은 급이다 — 빠지면
     # 토글해도 캐시가 히트해 "켜서 비교" 자체가 불가능해진다.
     "OPENROUTER_REASONING",
+    # 리랭크 실행 축. 이 값들은 index_config 가 아니라 env 로 정해지는데, provider 를
+    # 바꾸면 리랭커 **모델 자체**가 바뀌어(로컬 bge ↔ OpenRouter voyage) 검색 순위가
+    # 달라진다. 빠지면 config 가 같다는 이유로 다른 리랭커의 리포트가 복원된다.
+    "INDEX_RERANKER_PROVIDER",
+    "INDEX_RERANKER_MODEL_OPENROUTER",
+    # 장치는 **의도적으로 여기만** 들어간다. Optimize 의 baseline 정체성
+    # (agents/optimize/history.py 의 _capability_identity)은 장치를 제외하는데, 두 곳의
+    # 판정 기준이 다르기 때문이다:
+    #   - baseline 은 "이 측정이 같은 조건인가" 라 장치를 넣으면 CUDA OOM 강등
+    #     (local:cuda → local:cpu)만으로 baseline 이 실행 중에 바뀌어 이미 막아 둔
+    #     action 의 차단이 풀린다. 같은 모델이라 점수는 어차피 같다.
+    #   - 캐시는 "복원해도 되는가" 라 반대로 보수적인 쪽이 안전하다. 틀리면 조용히
+    #     남의 리포트를 복원하는데, 더 재는 비용은 재실행 한 번뿐이다.
+    "INDEX_RERANKER_DEVICE",
+    # 상한이 걸리면 긴 청크의 뒤가 잘려 점수가 달라진다(장치와 달리 결과를 바꾼다).
+    "INDEX_RERANKER_MAX_LENGTH",
 )
 _EVAL_CACHE_SECRET_KEYS = (
     "OPENAI_API_KEY",
@@ -565,12 +583,22 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
         # 키만 읽고 나머지(chunk_size 등)는 무시한다. 없으면 기본값이 현 동작 유지.
         gen_config = state.index_config or {}
         with step("Eval", 2, "검색 + 답변 생성"):
-            # Phase A(순차): 검색 + record 준비
+            # Phase A(순차): 검색 + record 준비. 진행률을 붙이는 이유 — 리랭커가 켜지면
+            # probe 당 수 초(VRAM 경합 시 수십 초)라 이 구간이 몇 분을 조용히 돌고,
+            # 실측에서 세 번이나 hang 으로 오인됐다(#131). 최소 간격 10초 규약 그대로라
+            # 빠른 라운드(전체 수 초)는 지금처럼 침묵한다.
+            search_reporter = progress.start("  [Eval] STEP2 검색", len(probes))
             records = []
-            for p in probes:
-                rec = _prepare_record(p, retriever, chunk_text, top_k,
-                                      state.diagnosis_cache.setdefault(p.probe_id, {}))
-                records.append(rec)
+            try:
+                for p in probes:
+                    rec = _prepare_record(p, retriever, chunk_text, top_k,
+                                          state.diagnosis_cache.setdefault(p.probe_id, {}))
+                    records.append(rec)
+                    progress.tick(search_reporter)
+            except BaseException:
+                progress.abort(search_reporter, "예외")
+                raise
+            progress.finish(search_reporter)
 
             # Phase B(병렬): 실제 트랙 답변 생성만 동시 실행 (EVAL_LLM_CONCURRENCY, 1이면 순차).
             # 오라클 트랙은 여기서 안 만든다 — 실패로 판정된 probe 에만 필요해서 STEP3 로 미룬다.
@@ -597,8 +625,14 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             if mode < Mode.DEEP:
                 print(f"  모드 {_MODE_NAMES.get(mode, mode)} — RAGAS 생략 (deep 이상에서 실행)")
             else:
-                real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records, concurrency,
-                                           label="  [Eval] STEP3 RAGAS 실제 트랙")
+                # anthropic 배치 모드면 fan-out = record 수 — 동시성이 곧 배치 크기다
+                # (좁히면 배치가 쪼개져 배치당 대기가 곱해진다. judge_fanout 주석 참고).
+                # 같은 이유로 배치에서는 ETA 를 끈다 — 전 항목이 배치 완료 시점에
+                # 한꺼번에 끝나, 첫 완료 기준 외삽이 60배까지 부풀었다(실측 #131).
+                batch_eta = not eval_llm_provider.judge_batch_active()
+                real_scores = parallel_map(lambda r: _ragas_track(r, "real") or {}, records,
+                                           eval_llm_provider.judge_fanout(len(records), concurrency),
+                                           label="  [Eval] STEP3 RAGAS 실제 트랙", eta=batch_eta)
                 for rec, score in zip(records, real_scores):
                     rec.ragas, rec.ragas_done = score, True
 
@@ -630,8 +664,10 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
             # _ragas_track 이 {} 를 돌려주므로 기존과 같다.
             if mode >= Mode.DEEP and failed:
                 print(f"  RAGAS 실제 {len(records)}건 / 오라클 {len(failed)}건")
-                oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed, concurrency,
-                                             label="  [Eval] STEP3 RAGAS 오라클 트랙")
+                oracle_scores = parallel_map(lambda r: _ragas_track(r, "oracle") or {}, failed,
+                                             eval_llm_provider.judge_fanout(len(failed), concurrency),
+                                             label="  [Eval] STEP3 RAGAS 오라클 트랙",
+                                             eta=not eval_llm_provider.judge_batch_active())
                 for rec, score in zip(failed, oracle_scores):
                     rec.oracle_ragas, rec.oracle_ragas_done = score, True
 

@@ -31,6 +31,7 @@ force_utf8_stdio()
 
 from langgraph.graph import StateGraph, END
 
+from core.llm_clients import print_batch_summary
 from core.llm_usage import print_agent_table
 from core.state import AgentDoctorState
 from agents.ingest.agent import run as ingest_run
@@ -165,6 +166,9 @@ def run_pipeline(
         final_state = AgentDoctorState(**final_state)
 
     print_agent_table()   # 에이전트별 LLM 사용량 누적(루프를 여러 번 돌았어도 총계)
+    # 배치를 썼다면 그 대가(제출 수·평균 대기)를 비용 표 바로 옆에 남긴다 —
+    # 표에는 싸진 것만 보이고 늘어난 벽시계 시간은 안 보인다.
+    print_batch_summary()
 
     print("=" * 60)
     print("완료")
