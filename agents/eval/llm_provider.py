@@ -59,7 +59,7 @@ def _warn_unknown_provider_once(raw: str) -> None:
         if raw in _warned_providers:
             return
         _warned_providers.add(raw)
-    print(f"[Eval] 알 수 없는 EVAL_LLM_PROVIDER '{raw}' — openai 로 폴백 "
+    print(f"[Eval] 알 수 없는 EVAL_LLM_PROVIDER '{raw}' - openai 로 폴백 "
           f"(openai|gemini|github|openrouter|anthropic)")
 
 
@@ -117,7 +117,7 @@ def _batch_max_fanout() -> int:
         # 비울 때 이 경고까지 같이 비워지는 결합이 생긴다(리뷰 지적).
         _warn_config_once(
             f"[Eval] EVAL_ANTHROPIC_BATCH_MAX_FANOUT='{raw}' 은 정수가 아닙니다 "
-            f"— 기본값 {_BATCH_MAX_FANOUT_DEFAULT} 을 씁니다.")
+            f"- 기본값 {_BATCH_MAX_FANOUT_DEFAULT} 을 씁니다.")
         return _BATCH_MAX_FANOUT_DEFAULT
     return value if value > 0 else _BATCH_MAX_FANOUT_DEFAULT
 
@@ -365,7 +365,7 @@ def _embed_provider_override() -> str:
     if raw not in _EMBED_PROVIDER_CHOICES:
         _notify_embed_once(
             f"[Eval] EVAL_EMBED_PROVIDER='{raw}' 는 지원하지 않는 값입니다"
-            f"(openrouter|openai|gemini|local) — 기본 폴백 사슬을 씁니다.")
+            f"(openrouter|openai|gemini|local) - 기본 폴백 사슬을 씁니다.")
         return ""
     return raw
 
@@ -450,14 +450,14 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
             _notify_embed_once(
                 f"[Eval] EVAL_EMBED_PROVIDER={override} 를 쓸 수 없습니다"
                 f"({'로컬 모델 로드 불가' if override == 'local' else '해당 provider 키 없음'}) "
-                f"— 명시 경로는 다른 provider 로 폴백하지 않습니다. 임베딩 의존 지표"
+                f"- 명시 경로는 다른 provider 로 폴백하지 않습니다. 임베딩 의존 지표"
                 f"(response_relevancy)와 bad_gold_answer 라벨을 건너뜁니다. "
                 f"키를 채우거나 EVAL_EMBED_PROVIDER 를 지우세요.")
         else:
             _notify_embed_once(
                 f"[Eval] EVAL_LLM_PROVIDER={_provider()} 의 임베딩 키도, OPENAI_API_KEY 도, "
                 f"로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표(response_relevancy)를 "
-                f"건너뜁니다 — bad_gold_answer 라벨도 함께 침묵합니다.")
+                f"건너뜁니다 - bad_gold_answer 라벨도 함께 침묵합니다.")
         return []
 
     api_failure = None
@@ -481,16 +481,16 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
         # 안 남는다 — 그래서 실행 로그에 실패 사유를 남긴다.
         _notify_embed_once(
             f"[Eval] 임베딩 API({route}) 호출이 실패해({api_failure}) 로컬 임베딩(BGE-M3)으로 "
-            f"이어서 계산합니다 — 비용 0, 외부 호출 없음. 이 실행의 response_relevancy 는 "
+            f"이어서 계산합니다 - 비용 0, 외부 호출 없음. 이 실행의 response_relevancy 는 "
             f"API 임베딩 실행과 벡터 공간이 달라 직접 비교하지 마세요.")
     elif _embed_provider_override() == "local":
         _notify_embed_once(
-            "[Eval] EVAL_EMBED_PROVIDER=local — 로컬 임베딩(BGE-M3)으로 계산합니다 "
+            "[Eval] EVAL_EMBED_PROVIDER=local - 로컬 임베딩(BGE-M3)으로 계산합니다 "
             "(비용 0, 외부 호출 없음).")
     else:
         _notify_embed_once(
             f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없어 "
-            f"로컬 임베딩(BGE-M3)으로 계산합니다 — 비용 0, 외부 호출 없음. "
+            f"로컬 임베딩(BGE-M3)으로 계산합니다 - 비용 0, 외부 호출 없음. "
             f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
             f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요. "
             f"로컬 GPU 가 좁으면(리랭커와 VRAM 경합) EVAL_EMBED_PROVIDER=openrouter 권장.")
