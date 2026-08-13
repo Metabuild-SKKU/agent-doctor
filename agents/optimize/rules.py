@@ -755,6 +755,27 @@ LABEL_TO_PRESCRIPTIONS: dict[str, dict] = {
         # BLOCKER: generation_config 필드 및 calculation checker 단계 없음.
     },
 
+    "generation_chronological_error": {
+        "group": "B",
+        "status": "draft",              # generation_config 필드 합의 필요
+        "diagnosis_confidence": None,   # 숫자 튜닝 필요
+        # 시점은 각각 근거에 있어 faithfulness 는 안 낮다(그래서 hallucination 이 아니다).
+        # 틀린 건 시점 사이의 관계라 hop_binding 과 같은 이유로 answer_relevancy 를 본다.
+        "target_metrics": ["answer_relevancy"],
+        "prescriptions": [
+            {
+                # 답변에 나온 시점을 뽑아 근거의 시간축과 대조시킨다.
+                "id": "enable_chronology_check",
+                "patch": {"chronology_check": True},
+                "reindex": False,
+                "cost": None,           # 숫자 튜닝 필요
+            },
+        ],
+        # BLOCKER: generation_config 필드 및 verifier 단계 없음(옆 셋과 같은 벽).
+        #   시간축 검증을 generation_verifier 의 별도 단계로 둘지 그 안의 한 종류로 둘지는
+        #   그 노드 설계에서 정해진다 — 정해지면 이 patch 키가 그쪽 스키마로 흡수될 수 있다.
+    },
+
     "generation_hop_binding_error": {
         "group": "B",
         "status": "draft",              # multi-hop answer planning 스키마 합의 필요

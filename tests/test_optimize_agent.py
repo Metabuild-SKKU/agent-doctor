@@ -1119,7 +1119,7 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         )
         self.assertIn("context.compression.enabled:enable", out)   # 롤백된 action
         self.assertIn("retriever.top_k:decrease", out)             # 새로 적용된 action
-        self.assertIn("판정 결과: keep=false, before=60.00, after=40.00", out)
+        self.assertIn("판정 결과: keep=false, before=60.00(6000.0), after=40.00(4000.0)", out)
         verdict_block = out[:out.index("판정 결과: keep=false")]
         self.assertIn("Eval 결과:", verdict_block)
         self.assertIn("발견된 문제:", verdict_block)
@@ -1150,7 +1150,7 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
             "(처방 context_compression)",
             out,
         )
-        self.assertIn("판정 결과: keep=true, before=60.00, after=75.00", out)
+        self.assertIn("판정 결과: keep=true, before=60.00(6000.0), after=75.00(7500.0)", out)
         self.assertIn(
             "선택한 action: chunker.chunk_size:decrease (처방 shrink_chunk_size)",
             out,
@@ -1230,7 +1230,7 @@ class OptimizeAgentRollbackTest(unittest.TestCase):
         self.assertTrue(state.reindex_required)   # 롤백 재색인 요구가 보존됨
         out = buf.getvalue()
         self.assertIn("선택한 action: chunker.chunk_size:decrease", out)
-        self.assertIn("판정 결과: keep=false, before=60.00, after=50.00", out)
+        self.assertIn("판정 결과: keep=false, before=60.00(6000.0), after=50.00(5000.0)", out)
         self.assertIn("선택한 action: retriever.mmr:enable", out)
         verdict_block = out[:out.index("판정 결과: keep=false")]
         self.assertNotIn("다음 단계:", verdict_block)
@@ -1583,7 +1583,7 @@ class OptimizeReportWiringTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("지지 라벨: too_long_context", out)
         self.assertIn("선택한 action: context.compression.enabled:enable", out)
-        self.assertIn("판정 결과: keep=true, before=60.00, after=75.00", out)
+        self.assertIn("판정 결과: keep=true, before=60.00(6000.0), after=75.00(7500.0)", out)
         self.assertIn("다음 단계: Serve 이동 (verified, 반복 예산 소진)", out)
         self.assertNotIn("선택한 action: -", out)
 
