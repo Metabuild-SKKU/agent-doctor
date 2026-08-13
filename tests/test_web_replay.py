@@ -169,6 +169,48 @@ class GoldenGateTests(_ReplayClient):
         self.assertEqual(res.status_code, 400)
         self.assertIn("gold_contexts", res.json()["detail"])
 
+    def test_rejects_golden_file_without_ground_truth(self):
+        """같은 정렬이 골든셋 '파일' 경로에도 있어야 한다(리뷰 지적).
+
+        인라인으로 gold_contexts 만 주면 막는데 파일로 같은 걸 주면 통과하고 있었다 -
+        질문이 겹치는지만 보고 그 항목이 정답을 채우는지는 안 봤다. 결과는 같다:
+        신뢰도 축이 통째로 빠지고 진단서가 총점을 감춘다."""
+        golden = json.dumps({"question": "질문 0", "gold_contexts": ["정답 근거"]},
+                            ensure_ascii=False)
+        res = self._post(_log_lines(2, inline_golden=False),
+                         golden=("golden.jsonl", golden))
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("ground_truth", res.json()["detail"])
+
+    def test_rejects_golden_file_with_questions_only(self):
+        """질문 열 하나짜리 골든셋 - 매칭은 전부 되는데 아무것도 안 채운다."""
+        golden = json.dumps({"question": "질문 0"}, ensure_ascii=False)
+        res = self._post(_log_lines(2, inline_golden=False),
+                         golden=("golden.jsonl", golden))
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("ground_truth", res.json()["detail"])
+
+    def test_golden_file_without_answers_is_allowed_when_the_log_has_inline_ones(self):
+        """정답 없는 골든셋이어도 로그가 인라인 정답을 들고 있으면 대조가 된다 -
+        매칭 0건 선검사와 같은 이유로, 재료를 더 줄수록 거부되면 안 된다."""
+        golden = json.dumps({"question": "질문 0", "gold_contexts": ["정답 근거"]},
+                            ensure_ascii=False)
+        with patch.object(web_api, "_run_replay_background"):
+            res = self._post(_log_lines(2), golden=("golden.jsonl", golden))
+        self.assertEqual(res.status_code, 200)
+
+    def test_zero_match_golden_message_points_at_matching_not_answers(self):
+        """매칭 0건이면 정답도 0건이라, 순서를 뒤집으면 '골든셋에 정답이 없다'는
+        엉뚱한 사유가 나간다 - 고치는 방법이 완전히 다르다
+        (report_view._reliability_unavailable_how 와 같은 순서)."""
+        golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
+                            ensure_ascii=False)
+        res = self._post(_log_lines(2, inline_golden=False),
+                         golden=("golden.jsonl", golden))
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("매칭", res.json()["detail"])
+        self.assertNotIn("정답 열", res.json()["detail"])
+
     def test_zero_match_golden_is_allowed_when_the_log_has_inline_answers(self):
         """매칭 0건 선검사가 인라인 정답이 있는 로그까지 막고 있었다.
 

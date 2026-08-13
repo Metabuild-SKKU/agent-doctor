@@ -380,13 +380,33 @@ def _start_replay_run(
         # 붙어도 정답 대조가 되고, 파일을 안 준 경우(아래 elif)보다 재료가 많은데
         # 거부하면 재료를 더 줄수록 거부되는 게이트가 된다. 매칭률은 진단서가 밝힌다.
         log_questions = {normalize_question(r.question) for r in logs}
-        if not (log_questions & set(qa_map)) and not has_inline_gt:
-            raise HTTPException(
-                status_code=400,
-                detail=f"골든셋 {len(qa_map)}건이 로그의 질문과 한 건도 매칭되지 "
-                       "않았습니다. 골든셋 질문과 로그 질문의 표기를 확인해 주세요 "
-                       "(공백·문장부호·대소문자는 자동 정규화됩니다).",
-            )
+        matched_keys = log_questions & set(qa_map)
+        if not has_inline_gt:
+            if not matched_keys:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"골든셋 {len(qa_map)}건이 로그의 질문과 한 건도 매칭되지 "
+                           "않았습니다. 골든셋 질문과 로그 질문의 표기를 확인해 주세요 "
+                           "(공백·문장부호·대소문자는 자동 정규화됩니다).",
+                )
+            # 매칭됐다고 정답이 채워지는 건 아니다 - gold_contexts 만 있는 골든셋이
+            # 그 경우다. 위 has_inline_gt 게이트와 같은 재료(ground_truth)를 봐야
+            # 파일로 준 정답 없는 골든셋만 통과하는 구멍이 안 생긴다. 사후에는
+            # report_view._reliability_unavailable_how 가 정확히 이 사유를 말하는데,
+            # 사전에 막으라고 세운 게이트가 통과시키면 그 진단서를 전 레코드 RAGAS 를
+            # 돌린 뒤에야 받게 된다.
+            # 순서도 그쪽과 같다 - 매칭 0건이면 정답도 0건이라, 매칭을 먼저 보지 않으면
+            # "골든셋에 정답이 없다"는 엉뚱한 사유가 나간다(고치는 방법이 다르다).
+            if not any(qa_map[key].get("ground_truth") for key in matched_keys):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"골든셋의 매칭된 {len(matched_keys)}건에 정답"
+                           "(ground_truth)이 없습니다. 정답이 없으면 답변이 맞았는지 "
+                           "대조할 수 없어 종합점수를 낼 수 없고, 원인도 7종 중 3종만 "
+                           "나옵니다 (gold_contexts 만으로는 검색축까지만 잽니다). "
+                           "골든셋에 정답 열을 채우거나 로그 줄에 ground_truth 를 "
+                           "넣어 주세요.",
+                )
         qa = (qa_map, qa_errors)
     elif not has_inline_gt:
         # 이 화면에는 골든셋 면제가 없다. 정답지가 없으면 신뢰도 축을 못 재고 종합점수
