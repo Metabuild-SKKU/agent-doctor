@@ -23,6 +23,10 @@ BLOCKS = ["answer_statements", "faithfulness_verdicts", "relevancy",
           "context_verdicts", "reference_statements", "correctness",
           "recall_classifications"]
 
+# 재요청이 첫 호출과 같은 조건으로 나가는지 보려고 심는 표식.
+CACHE_PREFIX = "CACHE-PREFIX"
+JSON_SCHEMA = {"type": "object", "marker": "SCHEMA"}
+
 
 def _full() -> dict:
     return {k: [] for k in R._fused_required_keys(BLOCKS)}
@@ -52,27 +56,42 @@ class RefetchTest(unittest.TestCase):
         def fake_chat(judge, prompt, max_output_tokens=None, label="", **kwargs):
             # 여기 오는 호출은 전부 재요청이다 — 첫 응답(first)은 인자로 이미 넘어온다.
             # **kwargs: _chat 이 provider 별 옵션(cache_prefix/json_schema)을 늘려도
-            # 이 스텁이 TypeError 로 죽지 않게. 재요청 여부·프롬프트만 보는 테스트다.
-            calls.append(prompt)
+            # 이 스텁이 TypeError 로 죽지 않게. 대신 받은 걸 그대로 모아
+            # test_refetch_forwards_provider_options 가 전달 여부를 직접 본다.
+            calls.append((prompt, kwargs))
             return {} if retry is None else retry
 
         buf = io.StringIO()
         with patch.object(R, "_chat", fake_chat), redirect_stdout(buf):
-            out = R._refetch_fused_if_incomplete(None, first, "PROMPT", BLOCKS)
-        return out, len(calls), buf.getvalue()
+            out = R._refetch_fused_if_incomplete(None, first, "PROMPT", BLOCKS,
+                                                 cache_prefix=CACHE_PREFIX,
+                                                 json_schema=JSON_SCHEMA)
+        return out, calls, buf.getvalue()
 
     def test_complete_response_does_not_refetch(self):
-        out, n, log = self._run(_full())
-        self.assertEqual(n, 0)
+        out, calls, log = self._run(_full())
+        self.assertEqual(len(calls), 0)
         self.assertEqual(log, "")
 
     def test_missing_key_triggers_one_refetch(self):
         partial = _full()
         del partial["recall_classifications"]
-        out, n, log = self._run(partial, _full())
-        self.assertEqual(n, 1)                       # 1회만
+        out, calls, log = self._run(partial, _full())
+        self.assertEqual(len(calls), 1)              # 1회만
         self.assertIn("recall_classifications", out)
         self.assertIn("1회 재요청", log)
+
+    def test_refetch_forwards_provider_options(self):
+        # 재요청은 첫 호출과 같은 조건으로 나가야 한다 — cache_prefix 가 빠지면 캐시
+        # 접두가 갈려 프롬프트 캐시가 안 맞고, json_schema 가 빠지면 스키마 강제가 없는
+        # 응답을 받아 애초에 이 경로를 부른 이유(키 누락)가 그대로 재현된다.
+        # _chat 이 인자를 늘릴 때 스텁이 **kwargs 로 조용히 삼키므로, 전달 자체는
+        # 여기서 못박아 둔다.
+        partial = _full()
+        del partial["recall_classifications"]
+        _out, calls, _log = self._run(partial, _full())
+        self.assertEqual(calls[0][1],
+                         {"cache_prefix": CACHE_PREFIX, "json_schema": JSON_SCHEMA})
 
     def test_first_response_wins_on_overlap(self):
         # 재요청분은 빈 자리만 메운다 — 같은 트랙에서 두 응답이 섞이면 판정 근거가
@@ -83,23 +102,23 @@ class RefetchTest(unittest.TestCase):
         retry = _full()
         retry["faithfulness_verdicts"] = ["RETRY"]
         retry["recall_classifications"] = ["FILLED"]
-        out, _n, _log = self._run(partial, retry)
+        out, _calls, _log = self._run(partial, retry)
         self.assertEqual(out["faithfulness_verdicts"], ["FIRST"])
         self.assertEqual(out["recall_classifications"], ["FILLED"])
 
     def test_empty_retry_keeps_original(self):
         partial = _full()
         del partial["correctness"]
-        out, n, _log = self._run(partial, {})
-        self.assertEqual(n, 1)
+        out, calls, _log = self._run(partial, {})
+        self.assertEqual(len(calls), 1)
         self.assertNotIn("correctness", out)         # 보수 경로가 이어받는다
 
     def test_disabled_repair_skips_refetch(self):
         partial = _full()
         del partial["correctness"]
         with patch.object(R, "_fused_repair_enabled", lambda: False):
-            out, n, log = self._run(partial, _full())
-        self.assertEqual(n, 0)
+            out, calls, log = self._run(partial, _full())
+        self.assertEqual(len(calls), 0)
         self.assertEqual(log, "")
 
     def test_no_blocks_is_a_noop(self):
