@@ -908,8 +908,10 @@
   var QA_QUESTION_KEYS = ['question', 'q', 'query'];
   var QA_GROUND_TRUTH_KEYS = ['ground_truth', 'gold_answer', 'answer', 'answers'];
   // 로그 자체에 정답이 인라인으로 들어 있으면 골든셋이 "없는" 게 아니다 —
-  // replay.py 의 게이트도 이 두 필드를 보고 통과시킨다.
-  var LOG_INLINE_GOLDEN_KEYS = ['ground_truth', 'gold_contexts'];
+  // web_api 의 게이트도 이 필드를 보고 통과시킨다. gold_contexts 는 여기 넣지 않는다:
+  // 그것만으로는 검색축까지만 재고 답변축(ground_truth 대조)이 빠져 신뢰도 축이 통째로
+  // 미측정이 되고, 진단서가 총점을 감춘다 — 게이트가 막겠다고 적어둔 그 결과다.
+  var LOG_INLINE_GOLDEN_KEYS = ['ground_truth'];
 
   function hasAnyKey(obj, keys) {
     return !!obj && keys.some(function (k) {

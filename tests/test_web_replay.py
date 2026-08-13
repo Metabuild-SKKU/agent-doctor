@@ -156,6 +156,63 @@ class GoldenGateTests(_ReplayClient):
                              golden=("golden.jsonl", golden))
         self.assertEqual(res.status_code, 200)
 
+    def test_rejects_gold_contexts_without_ground_truth(self):
+        """게이트가 보는 재료를 점수층(scoring._is_evaluable)과 같은 것으로 맞춘다.
+
+        gold_contexts 만으로는 답변축을 못 재 신뢰도 축이 통째로 빠지고, 진단서는
+        총점을 감춘다 - 게이트가 막겠다고 적어둔 그 결과다. 그런데 전 레코드 RAGAS 를
+        돌고 _PIPELINE_LOCK 을 놓은 뒤에야 알게 됐다."""
+        log = "\n".join(json.dumps(
+            {"question": f"질문 {i}", "contexts": [f"근거 {i}"], "answer": f"답변 {i}",
+             "gold_contexts": [f"정답 근거 {i}"]}, ensure_ascii=False) for i in range(2))
+        res = self._post(log)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("gold_contexts", res.json()["detail"])
+
+    def test_zero_match_golden_is_allowed_when_the_log_has_inline_answers(self):
+        """매칭 0건 선검사가 인라인 정답이 있는 로그까지 막고 있었다.
+
+        파일을 안 준 경우는 인라인을 인정하는데 파일을 준 경우만 안 하면, 재료를 더
+        줄수록 거부되는 게이트가 된다. 이 로그는 골든셋이 한 건도 안 붙어도 정답
+        대조가 된다."""
+        golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
+                            ensure_ascii=False)
+        with patch.object(web_api, "_run_replay_background"):
+            res = self._post(_log_lines(2), golden=("golden.jsonl", golden))
+        self.assertEqual(res.status_code, 200)
+
+
+class RejectedUploadCleanupTests(_ReplayClient):
+    """거부한 업로드는 남기지 않는다.
+
+    400 응답에는 run_id 가 없어 올린 사람이 찾아 지울 수 없는데, 화면 안내는 "끝나면
+    직접 지우세요"라고 말한다. 남는 파일이 실행 로그(실제 질문·정답·답변 원문)라
+    그냥 두면 안 된다."""
+
+    def _upload_files(self):
+        return sorted(p.name for p in Path(self._tmp.name).rglob("*") if p.is_file())
+
+    def test_rejected_log_is_discarded(self):
+        res = self._post(_log_lines(2, inline_golden=False))
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(self._upload_files(), [])
+
+    def test_rejected_golden_is_discarded_too(self):
+        """골든셋 거부는 로그를 이미 저장한 뒤에 일어난다 - 두 파일 다 지워져야 한다."""
+        golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
+                            ensure_ascii=False)
+        res = self._post(_log_lines(2, inline_golden=False),
+                         golden=("golden.jsonl", golden))
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(self._upload_files(), [])
+
+    def test_accepted_upload_survives(self):
+        """정리는 거부 경로에서만 한다 - 진단이 읽어야 할 파일을 지우면 안 된다."""
+        with patch.object(web_api, "_run_replay_background"):
+            res = self._post(_log_lines(2))
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(self._upload_files())
+
 
 class BackgroundRunTests(_ReplayClient):
     def _run_background(self, diagnose_return):
