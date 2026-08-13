@@ -138,8 +138,14 @@ class CompositeScore:
     components: list[_Component]
 
     def as_dict(self) -> dict:
-        """DiagnosticReport.composite_score 에 실을 직렬화 형태(성분별 0~100 포함)."""
-        return {
+        """DiagnosticReport.composite_score 에 실을 직렬화 형태(성분별 0~100 포함).
+
+        partial 을 함께 싣는다 — 이 dict 를 읽는 출구가 CLI 한 줄·산출물 payload·
+        진단서 셋인데, "이 total 을 종합점수로 읽어도 되는가"를 각자 components 에서
+        다시 판정하고 있었다. 그래서 판정을 구현한 두 곳만 '부분' 표시를 붙이고
+        payload 는 total 90 만 실어, 같은 실행이 창에 따라 다른 답을 냈다.
+        판정은 payload 자신이 답한다."""
+        d = {
             "total": self.total,
             "components": [
                 {"key": c.key, "label": c.label,
@@ -147,6 +153,8 @@ class CompositeScore:
                 for c in self.components
             ],
         }
+        d["partial"] = is_partial(d)
+        return d
 
 
 def compute_composite(records: list[EvalRecord]) -> CompositeScore:
@@ -159,20 +167,40 @@ def compute_composite(records: list[EvalRecord]) -> CompositeScore:
     return CompositeScore(total=total, components=components)
 
 
+def unmeasured_components(d: Optional[dict]) -> list[dict]:
+    """composite_score dict 중 재료가 없어 못 잰 성분들. 전부 측정됐으면 빈 리스트.
+
+    '무엇이 빠졌나'의 단일 창구다. 구버전 payload(partial 키 없음)도 components 만으로
+    같은 답이 나오므로, 소비자는 이 함수/is_partial 만 부르면 된다."""
+    if not isinstance(d, dict):
+        return []
+    return [c for c in d.get("components", []) if c.get("score") is None]
+
+
+def is_partial(d: Optional[dict]) -> bool:
+    """총점은 났는데 성분이 빠진 상태인가. as_dict 의 partial 필드가 담는 판정.
+
+    compute_composite 는 측정된 성분만으로 결합하므로(우아한 저하) 성분이 하나 없어도
+    숫자는 나오는데, 그 값은 남은 축의 점수이지 종합점수가 아니다 - 검색을 통째로 실패한
+    외부 로그가 '종합점수 90' 으로 찍힌 게 그 경우다. total 이 아예 없는 것은 '부분'이
+    아니다(낼 게 없는 것이라, 표기가 아니라 사유가 필요한 다른 상태다)."""
+    if not isinstance(d, dict) or d.get("total") is None:
+        return False
+    return bool(unmeasured_components(d))
+
+
 def format_composite(d: Optional[dict]) -> str:
     """composite_score dict → '68/100 (품질 79 / 신뢰도 60)' 로그·표시용 한 줄.
     (dict 에서 복원하므로 CompositeScore 객체 없이도 리포트만 있으면 출력 가능.)
 
-    성분이 빠진 총점에는 '부분' 표시를 붙인다. compute_composite 는 측정된 성분만으로
-    결합하므로(우아한 저하) 성분이 하나 없어도 숫자는 나오는데, 그 값은 남은 축의
-    점수이지 종합점수가 아니다 - 골든셋 없는 외부 로그가 그 경우이고, 검색을 통째로
-    실패한 로그가 '종합점수 90' 으로 찍혔다. 계산은 그대로 두고 표기만 사실에 맞춘다."""
+    성분이 빠진 총점에는 '부분' 표시를 붙인다(판정은 is_partial 이 단독으로 갖는다).
+    계산은 그대로 두고 표기만 사실에 맞춘다."""
     if not d:
         return "-"
     total = d.get("total")
     components = d.get("components", [])
-    missing = [str(c.get("label") or c.get("key")) for c in components
-               if c.get("score") is None]
+    missing = [str(c.get("label") or c.get("key"))
+               for c in unmeasured_components(d)]
     if total is None:
         head = "-/100"
     elif missing:
