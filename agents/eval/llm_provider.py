@@ -76,7 +76,14 @@ def _warn_unusable_embed_provider_once(raw: str) -> None:
 
     같은 set 을 공유하면 EVAL_LLM_PROVIDER 에 같은 오타를 낸 실행이 이 경고를 삼킨다.
     사유를 둘로 가른다 - 오타와 "심판으로는 되지만 임베딩은 안 되는 값"은 고치는 방법이
-    다르다(전자는 철자, 후자는 축 선택)."""
+    다르다(전자는 철자, 후자는 축 선택).
+
+    **귀착지를 이름으로 찍는다.** 유효값 목록만 알려주면 "그래서 이번 실행은 어디로
+    갔나" 가 안 남는다 - 이 축은 미지원 값을 심판 provider 로 되돌리므로(_embed_provider
+    의 divergence 주석) 그 심판이 API provider 면 오타 한 번이 과금 경로로 이어진다.
+    형제 축이 로컬로 떨어뜨리며 막으려던 게 "조용히 API 과금" 인데, 방향을 달리 하는
+    대신 목적지를 소리내어 말해서 '조용히' 쪽을 없앤다. 값 자체가 정식이 된 local 과
+    달리 local 의 철자 오타(locl 등)는 여전히 여기로 오므로, 그 잔여도 이 문구가 덮는다."""
     key = f"embed:{raw}"
     with _warned_providers_lock:
         if key in _warned_providers:
@@ -84,8 +91,10 @@ def _warn_unusable_embed_provider_once(raw: str) -> None:
         _warned_providers.add(key)
     why = ("는 임베딩 엔드포인트가 없습니다"
            if normalize_provider(raw) in _KNOWN_PROVIDERS else "는 지원하지 않는 값입니다")
-    print(f"[Eval] EVAL_EMBED_PROVIDER '{raw}'{why} · 심판 provider 를 따릅니다 "
-          f"({'|'.join(sorted(_EMBED_PROVIDERS))})")
+    fallback = _provider()
+    print(f"[Eval] EVAL_EMBED_PROVIDER '{raw}'{why} · 심판 provider 를 따라 "
+          f"'{fallback}' 로 임베딩합니다 — 키가 있으면 API 과금이 발생합니다 "
+          f"· 받는 값: {'|'.join(sorted(_EMBED_PROVIDERS))}")
 
 
 def _provider() -> str:
@@ -281,7 +290,10 @@ def _embed_provider() -> str:
     오타 한 번이 통째로 과금되지만, 채점 임베딩은 probe 수십 건이라 금액이 작고 대신
     **경로가 바뀌면 코사인 분포가 달라져 실행 간 response_relevancy 비교가 깨진다**.
     그래서 여기서는 "설정이 무시됐다(= 미지정과 같은 동작)" 를 택했다. 이 선택이
-    안전한 건 가장 흔한 오타 대상인 local 이 이제 정식 값이기 때문이다."""
+    안전한 건 가장 흔한 오타 대상인 local 이 이제 정식 값이기 때문이고, 남는 잔여
+    (local 의 철자 오타)는 경고가 **귀착지 provider 이름을 찍어서** 덮는다
+    (_warn_unusable_embed_provider_once). 형제 축이 방향으로 막으려던 건 "조용히 API
+    과금" 인데, 여기서는 방향 대신 "조용히" 쪽을 없앤다."""
     raw = os.getenv("EVAL_EMBED_PROVIDER", "").strip().lower()
     if not raw:
         return _provider()
@@ -385,13 +397,21 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
     else:
         api_failure = None
 
+    embed_provider = _embed_provider()
     if _local_embeddings_available():
         # AGENTS.md 규약대로 공통 모듈을 통해서만 임베딩한다(직접 모델 로드 금지).
         from agents.index.qdrant_store import embed_batch
         if api_failure is not None:
             head = f"[Eval] 임베딩 API 호출이 실패해({api_failure}) "
-        elif _embed_provider() == "local":
+        elif embed_provider == "local":
             head = "[Eval] EVAL_EMBED_PROVIDER=local 이라 "
+        elif embed_provider in _EMBED_PROVIDERS:
+            # 엔드포인트는 있는데 키가 없는 경우. 여기를 "엔드포인트가 없어" 로 뭉치면
+            # 이 PR 의 대표 조합(심판 anthropic + EVAL_EMBED_PROVIDER=openrouter, 키 만료)
+            # 에서 "openrouter 는 임베딩 엔드포인트가 없어" 라는 거짓 사유가 찍힌다 —
+            # opt-in 한 실행이 조용히 로컬로 내려간 사실은 축 이름으로 드러나지만,
+            # 사유가 틀리면 읽는 사람이 키가 아니라 provider 선택을 의심하게 된다.
+            head = f"[Eval] {_embed_axis_label()} 의 임베딩 키가 없어 "
         else:
             head = f"[Eval] {_embed_axis_label()} 는 임베딩 엔드포인트가 없어 "
         _notify_embed_once(
@@ -403,9 +423,14 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
         # "비용 0, 외부 호출 없음" 이라 찍어놓고 실제로는 과금 호출을 한다.
         return embed_batch(texts, provider="local")
 
+    # local 을 못 박은 실행에는 "키도 없다" 가 성립하지 않는다 — 이 경로에 키는 애초에
+    # 안 본다(_api_embeddings_available). 고쳐야 할 것이 키가 아니라 로컬 모델이다.
+    why = ("EVAL_EMBED_PROVIDER=local 인데 로컬 임베딩 모델을 쓸 수 없어"
+           if embed_provider == "local" else
+           f"{_embed_axis_label()} 의 임베딩 키도, OPENAI_API_KEY 도, "
+           f"로컬 임베딩 모델도 쓸 수 없어")
     _notify_embed_once(
-        f"[Eval] {_embed_axis_label()} 의 임베딩 키도, OPENAI_API_KEY 도, "
-        f"로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표(response_relevancy)를 "
+        f"[Eval] {why} 임베딩 의존 지표(response_relevancy)를 "
         f"건너뜁니다 · bad_gold_answer 라벨도 함께 침묵합니다.")
     return []
 
