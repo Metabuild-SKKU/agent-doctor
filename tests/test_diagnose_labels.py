@@ -1166,16 +1166,35 @@ class GenerationLabelTest(_DiagnoseTestBase):
         self.assertIsNone(diagnose.generation_hallucination(rec))
 
     def test_reasoning_modes_map_to_their_labels(self):
-        """분류기 한 번 호출로 세 라벨이 갈린다 — 함수는 하나, 라벨은 셋."""
+        """분류기 한 번 호출로 네 라벨이 갈린다 — 함수는 하나, 라벨은 넷."""
         for mode, label in (("contradiction", "generation_contradiction"),
                             ("numerical_error", "generation_numerical_error"),
-                            ("misinterpretation", "generation_misinterpretation")):
+                            ("misinterpretation", "generation_misinterpretation"),
+                            ("chronological", "generation_chronological_error")):
             self._with(ragas=_FakeReasoningJudge(mode))
             rec = _record(oracle_f1=0.1, faith_oracle=0.9, rel_oracle=0.9)
             finding = diagnose.generation_reasoning_failure(rec)
             self.assertIsNotNone(finding, mode)
             self.assertEqual(finding.label, label)
             self.assertTrue(finding.confirmed)
+
+    def test_chronological_mode_is_not_absorbed_for_single_hop(self):
+        """hop_binding 과 다르다 — 한 문장 안의 두 시점만으로 순서 오류가 성립하므로
+        단일홉이어도 흡수하지 않는다."""
+        self._with(ragas=_FakeReasoningJudge("chronological"))
+        rec = _record(oracle_f1=0.1, qtype=None, faith_oracle=0.9, rel_oracle=0.9)
+        finding = diagnose.generation_reasoning_failure(rec)
+        self.assertEqual(finding.label, "generation_chronological_error")
+        self.assertTrue(finding.confirmed)
+
+    def test_chronological_mode_needs_high_faithfulness(self):
+        """근거가 없으면 순서 오류가 아니라 환각이다 — 시점을 지어낸 답까지 시간축 라벨로
+        가져가면 처방(시간축 검증)이 근거 없는 답에 붙는다."""
+        self._with(ragas=_FakeReasoningJudge("chronological"))
+        rec = _record(oracle_f1=0.1, faith_oracle=RAGAS_FAITHFULNESS_MIN - 0.01, rel_oracle=0.9)
+        self.assertIsNone(diagnose.generation_reasoning_failure(rec))
+        self.assertEqual(diagnose._pick(rec, diagnose._GENERATION_CAUSE).label,
+                         "generation_hallucination")
 
     def test_hop_binding_mode_maps_to_its_label_for_multi_hop(self):
         self._with(ragas=_FakeReasoningJudge("hop_binding"))

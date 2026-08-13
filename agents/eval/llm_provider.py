@@ -59,42 +59,8 @@ def _warn_unknown_provider_once(raw: str) -> None:
         if raw in _warned_providers:
             return
         _warned_providers.add(raw)
-    print(f"[Eval] 알 수 없는 EVAL_LLM_PROVIDER '{raw}' — openai 로 폴백 "
+    print(f"[Eval] 알 수 없는 EVAL_LLM_PROVIDER '{raw}' - openai 로 폴백 "
           f"(openai|gemini|github|openrouter|anthropic)")
-
-
-# 임베딩축 전용 값 집합. 심판축(_KNOWN_PROVIDERS)을 재사용하면 양방향으로 틀린다 —
-# 임베딩 엔드포인트가 없는 anthropic·github 를 받아 조용히 다른 모델로 새고(코사인 분포가
-# 달라져 실행 간 비교가 깨진다), 정작 "임베딩 실행 위치" 축의 대표 값인 local 은 거부해
-# 심판축(과금 경로)으로 떨어뜨린다. 형제 축 INDEX_EMBED_PROVIDER 와 값이 맞아야
-# "같은 계약" 이라는 이 축의 설명이 사실이 된다.
-_EMBED_PROVIDERS = {"openai", "gemini", "openrouter", "local"}
-
-
-def _warn_unusable_embed_provider_once(raw: str) -> None:
-    """쓸 수 없는 EVAL_EMBED_PROVIDER 값 경고를 값당 한 번만 출력한다.
-
-    같은 set 을 공유하면 EVAL_LLM_PROVIDER 에 같은 오타를 낸 실행이 이 경고를 삼킨다.
-    사유를 둘로 가른다 - 오타와 "심판으로는 되지만 임베딩은 안 되는 값"은 고치는 방법이
-    다르다(전자는 철자, 후자는 축 선택).
-
-    **귀착지를 이름으로 찍는다.** 유효값 목록만 알려주면 "그래서 이번 실행은 어디로
-    갔나" 가 안 남는다 - 이 축은 미지원 값을 심판 provider 로 되돌리므로(_embed_provider
-    의 divergence 주석) 그 심판이 API provider 면 오타 한 번이 과금 경로로 이어진다.
-    형제 축이 로컬로 떨어뜨리며 막으려던 게 "조용히 API 과금" 인데, 방향을 달리 하는
-    대신 목적지를 소리내어 말해서 '조용히' 쪽을 없앤다. 값 자체가 정식이 된 local 과
-    달리 local 의 철자 오타(locl 등)는 여전히 여기로 오므로, 그 잔여도 이 문구가 덮는다."""
-    key = f"embed:{raw}"
-    with _warned_providers_lock:
-        if key in _warned_providers:
-            return
-        _warned_providers.add(key)
-    why = ("는 임베딩 엔드포인트가 없습니다"
-           if normalize_provider(raw) in _KNOWN_PROVIDERS else "는 지원하지 않는 값입니다")
-    fallback = _provider()
-    print(f"[Eval] EVAL_EMBED_PROVIDER '{raw}'{why} · 심판 provider 를 따라 "
-          f"'{fallback}' 로 임베딩합니다 — 키가 있으면 API 과금이 발생합니다 "
-          f"· 받는 값: {'|'.join(sorted(_EMBED_PROVIDERS))}")
 
 
 def _provider() -> str:
@@ -108,6 +74,85 @@ def _provider() -> str:
         _warn_unknown_provider_once(raw)
         return "openai"
     return raw
+
+
+def provider_name() -> str:
+    """활성 심판 provider 이름(외부 조회용). metrics_ragas 의 compact 변형 게이트가 쓴다 —
+    _provider() 를 직접 노출하면 경고 부작용까지 계약이 되므로 이름만 감싼다."""
+    return _provider()
+
+
+# 배치 모드 fan-out 상한. 이 값이 곧 parallel_map 의 worker 스레드 수이므로, 권장 실행이
+# 150 QA 로 커지면 스레드도 그만큼 생긴다. 대부분 배치 결과를 기다리며 잠들어 있어 비용은
+# 작지만, 로컬·CI·Windows 에서 스레드 수 자체가 부담이 될 수 있어 안전선을 둔다(리뷰 지적).
+# 기본값은 현재 권장 실행(150 QA)을 한 배치로 담을 만큼 크게 잡는다 — 상한이 낮으면
+# 배치가 쪼개져 배치당 대기(수 분)가 곱해지므로, 낮추는 쪽이 오히려 위험하다.
+_BATCH_MAX_FANOUT_DEFAULT = 256
+
+
+_warned_config: set[str] = set()
+_warned_config_lock = threading.Lock()
+
+
+def _warn_config_once(message: str) -> None:
+    """설정 경고를 메시지별로 실행당 1회만 — 임베딩 경로 안내(_notify_embed_once)와
+    저장소를 분리해, 한쪽을 초기화해도 다른 쪽이 딸려 지워지지 않게 한다."""
+    with _warned_config_lock:
+        if message in _warned_config:
+            return
+        _warned_config.add(message)
+    print(message)
+
+
+def _batch_max_fanout() -> int:
+    """EVAL_ANTHROPIC_BATCH_MAX_FANOUT (기본 256). 비수치·0 이하면 기본값."""
+    raw = (os.getenv("EVAL_ANTHROPIC_BATCH_MAX_FANOUT") or "").strip()
+    if not raw:
+        return _BATCH_MAX_FANOUT_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        # 라운드마다(judge_fanout 호출마다) 반복되지 않게 1회만. 임베딩 안내용
+        # one-shot(_notify_embed_once)을 빌리지 않는다 — 테스트가 임베딩 안내를
+        # 비울 때 이 경고까지 같이 비워지는 결합이 생긴다(리뷰 지적).
+        _warn_config_once(
+            f"[Eval] EVAL_ANTHROPIC_BATCH_MAX_FANOUT='{raw}' 은 정수가 아닙니다 "
+            f"- 기본값 {_BATCH_MAX_FANOUT_DEFAULT} 을 씁니다.")
+        return _BATCH_MAX_FANOUT_DEFAULT
+    return value if value > 0 else _BATCH_MAX_FANOUT_DEFAULT
+
+
+def judge_batch_active() -> bool:
+    """RAGAS 판정이 Message Batches 로 나가는 조합인지 (anthropic 심판 + 배치 스위치).
+
+    fan-out 폭(judge_fanout)과 진행률 ETA 억제(agents/eval/agent.py)가 같은 조건을
+    본다 — 배치에서는 전 항목이 한꺼번에 끝나 평균 속도 외삽이 수십 배로 틀리므로,
+    이 값이 True 면 parallel_map 에 eta=False 를 넘길 것."""
+    from core.llm_clients import anthropic_batch_enabled
+    return _provider() == "anthropic" and anthropic_batch_enabled()
+
+
+def judge_fanout(n_items: int, default: int) -> int:
+    """RAGAS 판정 fan-out 폭. anthropic 배치 모드에서는 동시성이 곧 배치 크기이므로
+    항목 수 전체로 넓힌다 — 좁히면 EVAL_LLM_CONCURRENCY 개씩 배치가 쪼개져 배치당
+    대기(수 분)가 곱해진다. 즉 배치 모드에서는 EVAL_LLM_CONCURRENCY 가 트랙 전체에서
+    무시된다.
+
+    ⚠ 넓어지는 것은 심판 호출만이 아니라 **_ragas_track 전체**다(리뷰 지적) — 배치가
+    끝나는 순간 fan-out 폭의 스레드가 한꺼번에 깨어나 후처리(relevancy 임베딩, 드물게
+    _fused_repair 의 동기 보수 호출)를 같이 실행한다. 임베딩 동시 로드는 qdrant_store
+    의 로드 락이, API 429 는 재시도가 흡수하지만, 이 폭이 부담스러운 환경은
+    EVAL_ANTHROPIC_BATCH_MAX_FANOUT 으로 낮출 것.
+
+    다만 이 값이 곧 로컬 스레드 수라 EVAL_ANTHROPIC_BATCH_MAX_FANOUT(기본 256)으로
+    상한을 둔다. 상한을 넘으면 그 크기의 배치 여러 개로 나뉘고, 배치 수만큼 대기가
+    직렬로 붙는다(150 QA 는 기본값 안에 들어와 한 배치다).
+
+    답변 생성(RAG provider)은 대상이 아니다 — 이 함수는 심판(EVAL_LLM_PROVIDER) 호출을
+    묶는 parallel_map 에만 쓸 것."""
+    if judge_batch_active():
+        return max(1, min(n_items, _batch_max_fanout()))
+    return default
 
 
 def has_key() -> bool:
@@ -144,6 +189,7 @@ def chat_json(
     label: str = "",
     json_schema: dict | None = None,
     cache_prefix: str = "",
+    batchable: bool = False,
 ) -> dict:
     """JSON 응답 강제 chat 호출 → dict. 실패 시 {} (API 예외는 호출부로 전파).
 
@@ -163,7 +209,13 @@ def chat_json(
     system 블록으로 올려 cache_control 을 걸고, 나머지 provider 에서는 user 앞에 도로
     붙여 예전과 바이트가 같은 한 덩어리를 만든다. 그냥 system 에 실으면 지시문이
     user → system 으로 역할이 바뀌어, 캐싱과 무관한 provider 의 판정 분포까지 건드리게
-    된다(같은 글자라도 역할이 다르면 모델이 다르게 받아들일 수 있다)."""
+    된다(같은 글자라도 역할이 다르면 모델이 다르게 받아들일 수 있다).
+
+    batchable 은 "이 호출이 다른 호출들과 **동시에** 날아간다"는 호출부의 보증이다.
+    anthropic + EVAL_ANTHROPIC_BATCH=1 일 때만 실제로 Message Batches 로 간다(50% 할인,
+    대신 결과가 수 분 뒤). 기본 False 인 이유는 순차 구간의 호출이 1건짜리 배치가 되면
+    건마다 폴링 대기를 그대로 지불하기 때문이다 — 지금 켜는 곳은 RAGAS fused 판정
+    하나뿐이고, probe 합성·보수 호출 등은 켜지 않는다."""
     def _do():
         provider = _provider()
         # anthropic 이 아니면 캐시 지점이라는 개념이 없다 → 원래대로 user 앞에 이어붙인다.
@@ -192,7 +244,8 @@ def chat_json(
         elif provider == "anthropic":
             return _anthropic_generate(
                 sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL_ANTHROPIC", "claude-sonnet-5"),
-                json_schema=json_schema, max_output_tokens=max_output_tokens)
+                json_schema=json_schema, max_output_tokens=max_output_tokens,
+                batchable=batchable)
         return _openai_generate(
             sys_text, user_text, model or os.getenv("EVAL_JUDGE_MODEL", "gpt-4o"),
             json_mode=True, max_output_tokens=max_output_tokens)
@@ -240,94 +293,113 @@ def chat_json(
 # 폴백하고, 그것도 없으면 Index 가 이미 쓰는 로컬 BGE-M3 로 계산한다.
 # 셋 다 불가할 때만 결측이 된다.
 #
-# 임베딩 경로는 기본적으로 **심판 provider 를 따라간다**. OPENROUTER_API_KEY 가 있다고 해서
-# 심판이 anthropic/github 인 실행을 임의로 OpenRouter 임베딩으로 보내지는 않는다 — 그렇게
-# 하면 심판 설정을 하나도 안 바꾼 사람의 실행이 OpenRouter 가용성에 새로 묶이고, 예전에
+# 임베딩 경로는 **심판 provider 를 따라간다**. OPENROUTER_API_KEY 가 있다고 해서 심판이
+# anthropic/github 인 실행을 임의로 OpenRouter 임베딩으로 보내지 않는다 — 그렇게 하면
+# 심판 설정을 하나도 안 바꾼 사람의 실행이 OpenRouter 가용성에 새로 묶이고, 예전에
 # 오프라인으로 돌던 조합이 남의 장애에 같이 죽는다(아래 embed_texts 독스트링이 설명하는
 # bad_gold_answer 침묵 → probe 재생성 정지가 정확히 그 대가다).
-#
-# 심판축과 임베딩축을 나누고 싶으면 EVAL_EMBED_PROVIDER 로 **명시**한다(_embed_provider).
-# Index 쪽의 INDEX_EMBED_PROVIDER 와 같은 모양이고, 기본값은 "심판을 따른다" 라 아무것도
-# 설정하지 않은 실행의 동작은 바뀌지 않는다.
+# 심판축과 임베딩축을 분리하는 설계 자체는 유효하나, 그건 명시적 opt-in 으로 따로 올린다.
 
-# 임베딩 경로 전환/불가를 실행당 한 번만 알린다. 안 그러면 probe·트랙마다 같은 줄이 찍혀
-# 정작 봐야 할 로그를 덮는다(agents/index/graph_index.py 의 _notify_llm_extraction_once 와 같은 패턴).
-_embed_notified = False
+# 임베딩 경로 전환/불가 등의 안내를 **메시지별로** 실행당 한 번만 찍는다. 안 그러면
+# probe·트랙마다 같은 줄이 찍혀 정작 봐야 할 로그를 덮는다. 예전엔 전역 one-shot
+# 하나라 먼저 찍힌 안내(예: EVAL_EMBED_PROVIDER 오타 경고)가 나머지("로컬 임베딩 —
+# 비교 금지")를 영구히 삼켰다(리뷰 지적) — 서로 다른 안내는 각각 나가야 한다.
+_embed_notified: set[str] = set()
 _embed_notice_lock = threading.Lock()
 
 
 def _notify_embed_once(message: str) -> None:
-    global _embed_notified
     with _embed_notice_lock:
-        if _embed_notified:
+        if message in _embed_notified:
             return
-        _embed_notified = True
+        _embed_notified.add(message)
     print(message)
 
 
-def _embed_provider() -> str:
-    """임베딩을 실제로 부를 provider. 기본은 심판 provider 와 같다.
-
-    anthropic·github 는 임베딩 엔드포인트가 없어, 그 심판을 쓰면 OPENROUTER_API_KEY 가
-    있어도 2GB 로컬 모델을 띄우게 된다(실측: 로컬 16.8s vs OpenRouter 3.1s, 벡터는
-    코사인 1.00000 으로 동일). 그 낭비를 피하려면 임베딩축만 따로 지정한다.
-
-    **키가 있다고 자동 전환하지는 않는다.** 그러면 심판 설정을 안 바꾼 사람의 실행이
-    OpenRouter 가용성에 새로 묶이고, 예전에 오프라인으로 돌던 조합이 남의 장애에 같이
-    죽는다. 전환은 EVAL_EMBED_PROVIDER 를 적은 사람만 받는다 — Index 의
-    INDEX_EMBED_PROVIDER 와 같은 계약이다.
-
-    받는 값은 _EMBED_PROVIDERS — openai·gemini·openrouter·local. anthropic·github 는
-    심판으로는 되지만 임베딩 엔드포인트가 없어 여기서는 거부한다(그대로 두면 아래 분기가
-    openai 로 떨어져, 'anthropic 으로 임베딩한다'고 적어둔 실행이 실제로는 OpenAI 에
-    과금 호출을 한다 - 심판축의 폴백 사슬과 달리 여기서는 사용자가 직접 고른 값이라
-    조용히 바꾸면 안 된다).
-
-    **미지원 값은 심판 provider 로 떨어뜨린다(경고 후).** 형제 축
-    (qdrant_store.resolve_embedding_provider)은 같은 상황에서 local 로 떨어뜨린다 -
-    "오타가 '조용히 API 과금' 이 아니라 '조용히 로컬' 로 끝나게" 라는 fail-safe 다.
-    여기서 방향이 다른 이유는 두 축의 비용 구조가 달라서다: 색인은 코퍼스 전량이라
-    오타 한 번이 통째로 과금되지만, 채점 임베딩은 probe 수십 건이라 금액이 작고 대신
-    **경로가 바뀌면 코사인 분포가 달라져 실행 간 response_relevancy 비교가 깨진다**.
-    그래서 여기서는 "설정이 무시됐다(= 미지정과 같은 동작)" 를 택했다. 이 선택이
-    안전한 건 가장 흔한 오타 대상인 local 이 이제 정식 값이기 때문이고, 남는 잔여
-    (local 의 철자 오타)는 경고가 **귀착지 provider 이름을 찍어서** 덮는다
-    (_warn_unusable_embed_provider_once). 형제 축이 방향으로 막으려던 건 "조용히 API
-    과금" 인데, 여기서는 방향 대신 "조용히" 쪽을 없앤다."""
-    raw = os.getenv("EVAL_EMBED_PROVIDER", "").strip().lower()
-    if not raw:
-        return _provider()
-    provider = normalize_provider(raw)
-    if provider not in _EMBED_PROVIDERS:
-        _warn_unusable_embed_provider_once(raw)
-        return _provider()
-    return provider
-
-
-def _embed_axis_label() -> str:
-    """폴백 안내에 쓸 "어느 설정 때문인가" 문구.
-
-    축을 나눠 놓고 로그가 심판축 이름만 말하면 판정 주체와 문구가 어긋난다 - 사용자가
-    EVAL_EMBED_PROVIDER 를 적었는데 "EVAL_LLM_PROVIDER=openrouter 는 임베딩 엔드포인트가
-    없어" 라고 찍히면 엉뚱한 변수를 들여다보게 된다. 두 축이 같을 때만 심판축 이름을 쓴다."""
-    embed = _embed_provider()
-    if embed == _provider():
-        return f"EVAL_LLM_PROVIDER={embed}"
-    return f"EVAL_EMBED_PROVIDER={embed}"
-
-
-def _api_embeddings_available() -> bool:
-    """활성 임베딩 provider 로 임베딩 API 를 부를 수 있는지. 키 유무만 본다(호출은 안 한다)."""
-    provider = _embed_provider()
+def _embed_api_key_ready(provider: str) -> bool:
+    """해당 provider 의 임베딩 API 키가 있는지. 키 유무만 본다(호출은 안 한다)."""
     if provider == "local":
-        # 사용자가 로컬을 못 박았다 - 키가 있어도 API 를 부르지 않는다.
-        # embed_texts 가 아래 로컬 분기로 이어진다.
-        return False
+        return False    # 로컬은 API 키 개념이 없다 — else(openai) 분기로 흘려 오답을 주지 않는다
     if provider == "gemini":
         return bool(os.getenv("GEMINI_API_KEY"))
     if provider == "openrouter":
         return bool(os.getenv("OPENROUTER_API_KEY"))
     return bool(os.getenv("OPENAI_API_KEY"))
+
+
+def _api_embeddings_available() -> bool:
+    """활성 심판 provider 로 임베딩 API 를 부를 수 있는지."""
+    return _embed_api_key_ready(_provider())
+
+
+def _embed_via_api(provider: str, texts: list[str], model: str | None) -> list[list[float]]:
+    """provider 의 임베딩 API 1회 호출. 미지원 provider(anthropic·github)는 openai 로 흡수
+    — 기존 폴백 사슬의 else 분기와 같은 동작이다."""
+    if provider == "gemini":
+        return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
+    if provider == "openrouter":
+        return _openrouter_embed(
+            texts, model or os.getenv("EVAL_EMBED_MODEL_OPENROUTER", "baai/bge-m3"))
+    return _openai_embed(texts, model or os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small"))
+
+
+_EMBED_PROVIDER_CHOICES = {"openrouter", "openai", "gemini", "local"}
+
+
+def _embed_provider_override() -> str:
+    """EVAL_EMBED_PROVIDER — 임베딩 provider 를 심판(EVAL_LLM_PROVIDER)에서 분리하는 스위치.
+
+    없으면 기존 폴백 사슬(심판 provider 의 임베딩 API → 로컬 BGE-M3 → 결측) 그대로다.
+    분리가 필요한 이유는 실제 사고다(2026-08-11): 심판만 anthropic 으로 바꿨는데 —
+    anthropic 은 임베딩 엔드포인트가 없어 — 임베딩이 로컬 BGE-M3 로 끌려왔고,
+    (1) 배치 fan-out 의 동시 로드 race 로 모델 13벌이 상주해 OS 가 프리즈했으며(수정:
+    qdrant_store._embed_model_lock), (2) 8GB GPU 에서 리랭커와 VRAM 을 다투며 검색이
+    192초 → 31분+ 로 열화됐다. OPENROUTER_API_KEY 가 있는 환경이라면
+    EVAL_EMBED_PROVIDER=openrouter 로 로컬 경로 자체를 피하는 것이 낫다($0.01/1M).
+
+    미지원 값은 무시하고 폴백 사슬을 탄다 — 오타 때문에 임베딩 의존 지표
+    (response_relevancy)와 bad_gold_answer 라벨이 조용히 죽으면 안 된다. 위의 강제값
+    정책은 **받는 값을 적었는데 그 경로를 못 쓸 때**의 이야기다.
+
+    경고는 여기서 찍지 않는다 — embedding_route() 가 귀착지까지 정한 뒤에 찍는다
+    (_warn_unusable_embed_provider_once). 목적지를 모르는 자리에서 찍으면 "그래서 이번
+    실행은 어디로 갔나" 를 말할 수 없다."""
+    raw = normalize_provider(os.getenv("EVAL_EMBED_PROVIDER", ""))
+    return raw if raw in _EMBED_PROVIDER_CHOICES else ""
+
+
+def _unsupported_embed_provider() -> str:
+    """EVAL_EMBED_PROVIDER 에 적혔지만 받을 수 없는 값. 없으면 "".
+
+    오타와 "심판으로는 되지만 임베딩 엔드포인트가 없는 값"(anthropic·github) 둘 다다 —
+    고치는 방법은 다르지만(철자 / 축 선택) 동작은 같다: 설정을 무시하고 폴백 사슬."""
+    raw = normalize_provider(os.getenv("EVAL_EMBED_PROVIDER", ""))
+    return "" if not raw or raw in _EMBED_PROVIDER_CHOICES else raw
+
+
+def _warn_unusable_embed_provider_once(raw: str, route: str) -> None:
+    """받을 수 없는 EVAL_EMBED_PROVIDER 값 경고. **귀착지를 이름으로 찍는다.**
+
+    유효값 목록만 알려주면 "그래서 이번 실행은 어디로 갔나" 가 안 남는다. 이 축은
+    미지원 값을 폴백 사슬로 되돌리므로 그 끝이 API provider 면 오타 한 번이 과금
+    경로로 이어진다. 형제 축(qdrant_store)은 방향을 local 로 틀어 그걸 막는데, 이쪽은
+    방향 대신 '조용히' 를 없앤다 — 경로를 바꾸면 코사인 분포가 달라져 실행 간 비교가
+    깨지기 때문이다(AGENTS.md "임베딩 provider" 절).
+
+    귀착지는 embedding_route() 가 정한 값을 그대로 받는다. 여기서 _provider() 를 다시
+    읽으면 심판이 anthropic·github 일 때 거짓말이 된다 — 그 둘은 임베딩 엔드포인트가
+    없어 실제로는 openai(또는 local)로 나간다(리뷰 지적)."""
+    where = (f"이번 실행은 '{route}' 로 임베딩합니다"
+             + (" - 키가 있으면 API 과금이 발생합니다" if route not in ("local", "none") else "")
+             if route != "none" else
+             "이번 실행은 임베딩 의존 지표(response_relevancy)를 건너뜁니다")
+    # 사유를 둘로 가른다 - 오타와 "심판으로는 되지만 임베딩은 안 되는 값"은 고치는
+    # 방법이 다르다(전자는 철자, 후자는 축 선택).
+    why = ("는 임베딩 엔드포인트가 없는 provider 라 이 축에서는 지원하지 않는 값입니다"
+           if raw in _KNOWN_PROVIDERS else "는 지원하지 않는 값입니다")
+    _notify_embed_once(
+        f"[Eval] EVAL_EMBED_PROVIDER='{raw}'{why} - 설정을 무시하고 기본 폴백 사슬을 "
+        f"씁니다 · {where} (받는 값: openrouter|openai|gemini|local).")
 
 
 def _local_embeddings_available() -> bool:
@@ -347,18 +419,57 @@ def _local_embeddings_available() -> bool:
         return False
 
 
+def embedding_route() -> str:
+    """실제 임베딩이 나갈 경로 — "openrouter" | "openai" | "gemini" | "local" | "none".
+
+    embed_texts 는 이 함수가 정한 경로로만 전송한다(분기 중복 금지). 리포트 메타데이터
+    (agents/eval/report.py 의 _embedding_source)도 같은 값을 그대로 남긴다 — 예전엔
+    리포트가 심판 provider 기준(_api_embeddings_available)으로 따로 판정해서,
+    EVAL_EMBED_PROVIDER 가 걸린 실행에서 실제 경로(openrouter)와 기록(local)이 갈릴
+    수 있었다(리뷰 지적). 갈리면 실행 간 코사인 비교의 근거 자체가 무너진다.
+
+    명시 override 는 **강제값**이다: 그 경로를 쓸 수 없으면 다른 provider 로 새지 않고
+    "none"(임베딩 의존 지표 결측)이다. 이번 사고(2026-08-11)의 핵심이 "로컬로 조용히
+    새서 GPU 경합"이었으므로, override 를 적은 사용자의 의도(그 경로만)를 지킨다.
+    override 가 없을 때만 기존 폴백 사슬(심판 provider API → 로컬 → 결측)을 탄다."""
+    override = _embed_provider_override()
+    if override == "local":
+        return "local" if _local_embeddings_available() else "none"
+    if override:
+        return override if _embed_api_key_ready(override) else "none"
+
+    if _api_embeddings_available():
+        provider = _provider()
+        # anthropic·github 은 임베딩 엔드포인트가 없어 openai 로 흡수(기존 else 분기).
+        route = provider if provider in ("gemini", "openrouter") else "openai"
+    else:
+        route = "local" if _local_embeddings_available() else "none"
+
+    # 받을 수 없는 값을 적어 사슬로 되돌아온 실행이면, 그 사실과 **귀착지**를 여기서
+    # 알린다 - 경로가 정해진 뒤라야 목적지를 사실대로 말할 수 있다.
+    unusable = _unsupported_embed_provider()
+    if unusable:
+        _warn_unusable_embed_provider_once(unusable, route)
+    return route
+
+
 def embeddings_available() -> bool:
-    """임베딩 의존 지표를 계산할 수 있는지(API 또는 로컬 모델)."""
-    return _api_embeddings_available() or _local_embeddings_available()
+    """임베딩 의존 지표를 계산할 수 있는지 — embedding_route 와 반드시 같은 판정."""
+    return embedding_route() != "none"
 
 
 def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
     """텍스트 리스트 → 임베딩 벡터 리스트. (rate limit 은 재시도)
 
-    우선순위: 활성 provider 의 임베딩 API > 로컬 BGE-M3 > 결측(빈 리스트).
-    로컬은 임베딩 API 가 없는 조합(GitHub Models·Anthropic 등)이나 키가 없을 때,
-    그리고 **API 호출이 재시도 끝에 실패했을 때** 쓰인다. 로컬마저 쓸 수 없으면
-    그때만 API 예외가 호출부로 전파된다.
+    경로 결정은 embedding_route() 하나가 소유한다: EVAL_EMBED_PROVIDER 명시(강제값 —
+    못 쓰면 결측, 다른 provider 로 새지 않음) > 활성 provider 의 임베딩 API > 로컬
+    BGE-M3 > 결측(빈 리스트). 여기서 분기를 다시 만들지 말 것 — 리포트 메타데이터가
+    같은 함수를 봐서, 갈리면 실제 경로와 기록이 어긋난다.
+
+    딱 하나 예외가 런타임 장애다: API 경로를 **정상적으로 골랐는데** 호출이 재시도를
+    다 쓰고도 실패하면, 명시 override 가 없는 실행에 한해 로컬 BGE-M3 로 이어 계산한다.
+    경로 선택을 다시 하는 게 아니라 고른 경로가 죽었을 때의 강등이다 — 명시 override 는
+    "그 경로만" 이라는 뜻이므로 여기서도 폴백하지 않고 예외를 전파한다.
 
     주의: provider 를 바꾸면 임베딩 모델이 바뀌고 코사인 분포도 달라진다.
     response_relevancy 를 실행 간에 비교하려면 한 번 정한 뒤 고정할 것.
@@ -370,69 +481,76 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
     if not texts:
         return []
 
-    if _api_embeddings_available():
-        def _do():
-            # _api_embeddings_available 과 같은 해석기를 써야 한다 — 다르면
-            # "쓸 수 있다"고 판정한 provider 와 실제로 부르는 곳이 어긋난다.
-            provider = _embed_provider()
-            if provider == "gemini":
-                return _gemini_embed(texts, model or os.getenv("EVAL_EMBED_MODEL_GEMINI", "gemini-embedding-001"))
-            if provider == "openrouter":
-                return _openrouter_embed(
-                    texts,
-                    model or os.getenv("EVAL_EMBED_MODEL_OPENROUTER", "baai/bge-m3"),
-                )
-            return _openai_embed(texts, model or os.getenv("EVAL_EMBED_MODEL", "text-embedding-3-small"))
+    route = embedding_route()
 
+    if route == "none":
+        override = _embed_provider_override()
+        if override:
+            # 명시 경로를 못 쓰는 상황 — 다른 provider 로 새지 않는다(embedding_route
+            # 주석의 정책). 이번 사고의 원인이 조용한 폴백이었으므로 결측을 택한다.
+            # 사유도 고칠 방법도 local 이면 다르다. local 을 못 박은 실행에는 "키"
+            # 얘기가 성립하지 않는다 - 이 경로는 키를 아예 안 본다(embedding_route).
+            # 뭉쳐 적으면 로컬 모델을 못 올린 사람이 있지도 않은 키를 찾는다.
+            why, fix = (("로컬 임베딩 모델을 쓸 수 없습니다",
+                         "로컬 모델을 쓸 수 있게 하거나")
+                        if override == "local" else
+                        (f"{override} 의 임베딩 키가 없습니다", "키를 채우거나"))
+            _notify_embed_once(
+                f"[Eval] EVAL_EMBED_PROVIDER={override} 인데 {why} "
+                f"- 명시 경로는 다른 provider 로 폴백하지 않습니다. 임베딩 의존 지표"
+                f"(response_relevancy)와 bad_gold_answer 라벨을 건너뜁니다. "
+                f"{fix} EVAL_EMBED_PROVIDER 를 지우세요.")
+        else:
+            _notify_embed_once(
+                f"[Eval] EVAL_LLM_PROVIDER={_provider()} 의 임베딩 키도, OPENAI_API_KEY 도, "
+                f"로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표(response_relevancy)를 "
+                f"건너뜁니다 - bad_gold_answer 라벨도 함께 침묵합니다.")
+        return []
+
+    api_failure = None
+    if route != "local":
         try:
-            return _run_with_retry(_do, "임베딩")
+            return _run_with_retry(lambda: _embed_via_api(route, texts, model), "임베딩")
         except Exception as exc:      # noqa: BLE001 — 폴백 판단만 하고 못 메우면 되던진다
             # 임베딩 API 가 죽었다고 진단 기능까지 같이 죽을 이유는 없다. 재시도를 다
             # 쓴 뒤에도 실패하면, 쓸 수 있는 로컬 모델이 있는 한 그쪽으로 계속한다 —
             # 아래 "로컬 폴백이 필요한 이유" 의 침묵 연쇄가 외부 장애로 열리는 것을 막는다.
-            # 로컬도 못 쓰면 전파한다(무의미한 값으로 메우지 않는다 — _local_embeddings_available 참고).
-            if not _local_embeddings_available():
+            # 단 명시 override 는 "그 경로만" 이라는 뜻이라 강등하지 않는다(embedding_route
+            # 정책). 로컬도 못 쓰면 전파한다 — 무의미한 해시 벡터로 메우지 않는다.
+            if _embed_provider_override() or not _local_embeddings_available():
                 raise
             api_failure = exc
-    else:
-        api_failure = None
 
-    embed_provider = _embed_provider()
-    if _local_embeddings_available():
-        # AGENTS.md 규약대로 공통 모듈을 통해서만 임베딩한다(직접 모델 로드 금지).
-        from agents.index.qdrant_store import embed_batch
-        if api_failure is not None:
-            head = f"[Eval] 임베딩 API 호출이 실패해({api_failure}) "
-        elif embed_provider == "local":
-            head = "[Eval] EVAL_EMBED_PROVIDER=local 이라 "
-        elif embed_provider in _EMBED_PROVIDERS:
-            # 엔드포인트는 있는데 키가 없는 경우. 여기를 "엔드포인트가 없어" 로 뭉치면
-            # 이 PR 의 대표 조합(심판 anthropic + EVAL_EMBED_PROVIDER=openrouter, 키 만료)
-            # 에서 "openrouter 는 임베딩 엔드포인트가 없어" 라는 거짓 사유가 찍힌다 —
-            # opt-in 한 실행이 조용히 로컬로 내려간 사실은 축 이름으로 드러나지만,
-            # 사유가 틀리면 읽는 사람이 키가 아니라 provider 선택을 의심하게 된다.
-            head = f"[Eval] {_embed_axis_label()} 의 임베딩 키가 없어 "
-        else:
-            head = f"[Eval] {_embed_axis_label()} 는 임베딩 엔드포인트가 없어 "
+    # AGENTS.md 규약대로 공통 모듈을 통해서만 임베딩한다(직접 모델 로드 금지).
+    from agents.index.qdrant_store import embed_batch
+    if api_failure is not None:
+        # 리포트의 embedding_source 는 embedding_route() 를 보므로 이 강등은 기록에
+        # 안 남는다 — 그래서 실행 로그에 실패 사유를 남긴다.
         _notify_embed_once(
-            head +
-            f"로컬 임베딩(BGE-M3)으로 계산합니다 · 비용 0, 외부 호출 없음. "
+            f"[Eval] 임베딩 API({route}) 호출이 실패해({api_failure}) 로컬 임베딩(BGE-M3)으로 "
+            f"이어서 계산합니다 - 비용 0, 외부 호출 없음. 이 실행의 response_relevancy 는 "
+            f"API 임베딩 실행과 벡터 공간이 달라 직접 비교하지 마세요.")
+    elif _embed_provider_override() == "local":
+        _notify_embed_once(
+            "[Eval] EVAL_EMBED_PROVIDER=local - 로컬 임베딩(BGE-M3)으로 계산합니다 "
+            "(비용 0, 외부 호출 없음).")
+    else:
+        # 사유를 둘로 가른다. 이 분기에 오는 경우는 "엔드포인트가 없다" 와 "키가 없다"
+        # 두 가지인데, 뭉쳐서 전자로 적으면 심판이 openai/gemini/openrouter 인 실행에
+        # **거짓 사유**가 찍힌다 - 그 provider 들은 임베딩 엔드포인트가 있고, 없는 건
+        # 키다. 읽는 사람이 키가 아니라 provider 선택을 의심하게 된다.
+        judge = _provider()
+        why = (f"는 임베딩 엔드포인트가 없고 OPENAI_API_KEY 도 없어"
+               if judge in ("anthropic", "github") else "의 임베딩 키가 없어")
+        _notify_embed_once(
+            f"[Eval] EVAL_LLM_PROVIDER={judge} {why} "
+            f"로컬 임베딩(BGE-M3)으로 계산합니다 - 비용 0, 외부 호출 없음. "
             f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
-            f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요.")
-        # provider 를 못 박는다 — Index 의 기본값은 openrouter 라 그냥 부르면
-        # "비용 0, 외부 호출 없음" 이라 찍어놓고 실제로는 과금 호출을 한다.
-        return embed_batch(texts, provider="local")
-
-    # local 을 못 박은 실행에는 "키도 없다" 가 성립하지 않는다 — 이 경로에 키는 애초에
-    # 안 본다(_api_embeddings_available). 고쳐야 할 것이 키가 아니라 로컬 모델이다.
-    why = ("EVAL_EMBED_PROVIDER=local 인데 로컬 임베딩 모델을 쓸 수 없어"
-           if embed_provider == "local" else
-           f"{_embed_axis_label()} 의 임베딩 키도, OPENAI_API_KEY 도, "
-           f"로컬 임베딩 모델도 쓸 수 없어")
-    _notify_embed_once(
-        f"[Eval] {why} 임베딩 의존 지표(response_relevancy)를 "
-        f"건너뜁니다 · bad_gold_answer 라벨도 함께 침묵합니다.")
-    return []
+            f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요. "
+            f"로컬 GPU 가 좁으면(리랭커와 VRAM 경합) EVAL_EMBED_PROVIDER=openrouter 권장.")
+    # provider 를 못 박는다 — Index 의 기본값은 openrouter 라 그냥 부르면
+    # "비용 0, 외부 호출 없음" 이라 찍어놓고 실제로는 과금 호출을 한다.
+    return embed_batch(texts, provider="local")
 
 
 # ── provider 별 transport (core/llm_clients.py 공용 구현에 위임) ──
@@ -483,13 +601,15 @@ def _openrouter_embed(texts: list[str], model: str) -> list[list[float]]:
 def _anthropic_generate(
     system: str, user: str, model: str, json_schema: dict | None = None,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    batchable: bool = False,
 ) -> str:
     """Anthropic transport. 다른 transport 와 달리 json_mode 대신 json_schema 를 받는다 —
     Messages API 에는 스키마 없는 JSON 모드가 없기 때문이다(core/llm_clients.py 참고).
-    temperature 도 넘기지 않는다(Sonnet 5 이후 세대는 비기본 sampling 값을 400 으로 거부)."""
+    temperature 도 넘기지 않는다(Sonnet 5 이후 세대는 비기본 sampling 값을 400 으로 거부).
+    batchable 은 Message Batches 사용을 호출부가 명시적으로 켠 경우만 True 다."""
     return anthropic_chat(
         system, user, model, json_schema=json_schema,
-        max_output_tokens=max_output_tokens,
+        max_output_tokens=max_output_tokens, use_batch=batchable,
         api_key=os.getenv("ANTHROPIC_API_KEY"), tag="Eval",
     )
 

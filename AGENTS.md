@@ -61,6 +61,8 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
   - 임베딩 실행 위치: `INDEX_EMBED_PROVIDER`(색인) / `INDEX_QUERY_EMBED_PROVIDER`(질의).
     기본 `openrouter`이며 `local`로 내릴 수 있습니다. 질의 축을 안 정하면 색인 축을
     따릅니다. 아래 "임베딩 provider" 참고
+  - 리랭크 실행 위치: `INDEX_RERANKER_PROVIDER`(기본 `local`) / `INDEX_RERANKER_DEVICE`.
+    임베딩과 기본값이 반대이고 경로를 바꾸면 모델도 바뀝니다. 아래 "리랭크 provider" 참고
 - 문서 임베딩과 질의 임베딩은 반드시 같은 모델·차원을 사용해야 합니다. 기존 컬렉션과 차원이
   다르면 오류가 나며, 재생성을 허용하려면 `index_config["recreate_collection_on_dimension_mismatch"] = True`를
   명시적으로 설정합니다.
@@ -82,30 +84,19 @@ def run(state: AgentDoctorState) -> AgentDoctorState:
 | `INDEX_EMBED_PROVIDER` | `openrouter` | 문서 색인 |
 | `INDEX_QUERY_EMBED_PROVIDER` | `INDEX_EMBED_PROVIDER` 따름 (없으면 `openrouter`) | 검색 질의 |
 | `INDEX_EMBED_DEVICE` | `auto` | `local`일 때 `cuda`/`cpu` |
-| `EVAL_EMBED_PROVIDER` | `EVAL_LLM_PROVIDER` 따름 | Eval 채점 (`response_relevancy`) |
+| `EVAL_EMBED_PROVIDER` | (미설정 = 심판 provider 따름) | Eval 축(RAGAS relevancy) — `openrouter`/`openai`/`gemini`/`local`. **명시하면 강제값**: 못 쓰면 결측이지 다른 provider 로 새지 않는다. 심판=anthropic 이면 로컬 폴백이 리랭커와 VRAM 을 다투므로 `openrouter` 권장 |
 
-`EVAL_EMBED_PROVIDER`가 받는 값은 `openai` · `gemini` · `openrouter` · `local` 입니다.
-`anthropic`·`github`는 심판으로는 되지만 임베딩 엔드포인트가 없어 여기서는 거부합니다
-(경고 후 심판 provider를 따릅니다) — 그대로 두면 OpenAI로 떨어져 "anthropic으로
-임베딩한다"고 적어둔 실행이 실제로는 OpenAI에 과금 호출을 하기 때문입니다.
-
-**미지원 값의 폴백 방향이 색인축과 반대입니다.** 색인축은 오타를 `local`로 떨어뜨리지만
+**강제값 정책은 "받는 값을 적었는데 그 경로를 못 쓸 때"의 이야기입니다.** 받는 값 밖
+(오타, 그리고 임베딩 엔드포인트가 없는 `anthropic`·`github`)은 "설정을 못 읽었다 = 안 적은
+것"으로 보고 기본 폴백 사슬을 그대로 탑니다 — 철자 하나가 진단을 통째로 끄는 것이 더
+나쁘기 때문입니다. 색인축은 같은 상황을 `local`로 떨어뜨리는데
 (`qdrant_store.resolve_embedding_provider` — "오타가 '조용히 API 과금'이 아니라 '조용히
-로컬'로") 채점축은 심판 provider로 되돌립니다. 두 축의 비용 구조가 달라서입니다: 색인은
-코퍼스 전량이라 오타 한 번이 통째로 과금되지만, 채점 임베딩은 probe 수십 건이라 금액이
-작고 대신 **경로가 바뀌면 코사인 분포가 달라져 실행 간 비교가 깨집니다.** 그래서 채점축은
-"설정이 무시됐다(= 미지정과 같은 동작)"를 택했습니다. 색인축의 fail-safe 가 막으려는 건
-"조용히 API 과금"인데, 채점축은 방향 대신 **"조용히"를 없앱니다** — 경고가 귀착지 provider
-이름(`… 심판 provider 를 따라 'openrouter' 로 임베딩합니다 — 키가 있으면 API 과금`)을
-찍으므로, `local`의 철자 오타처럼 정식 값 목록으로 못 막는 잔여도 로그에 남습니다.
-
-Eval 축만 기본값이 다릅니다. **심판 provider 를 따라가고, 키가 있다고 자동 전환하지
-않습니다.** `anthropic`·`github` 는 임베딩 엔드포인트가 없어 `OPENROUTER_API_KEY` 가
-있으면 그쪽으로 보내고 싶어지지만(실측 로컬 16.8s vs OpenRouter 3.1s, 코사인 1.00000),
-그렇게 하면 심판 설정을 하나도 안 바꾼 실행이 OpenRouter 가용성에 새로 묶입니다 —
-임베딩이 결측되면 `response_relevancy` 하나가 아니라 `bad_gold_answer` 라벨과 그 라벨에
-걸린 probe 자동 재생성 루프까지 멈춥니다. 전환은 `EVAL_EMBED_PROVIDER` 를 적은 사람만
-받고, 임베딩 API 가 재시도 끝에 실패하면 로컬 모델이 뜨는 한 그쪽으로 이어 계산합니다.
+로컬'로"), 채점축이 방향을 달리하는 이유는 비용 구조입니다: 색인은 코퍼스 전량이라 오타
+한 번이 통째로 과금되지만, 채점 임베딩은 probe 수십 건이라 금액이 작고 대신 **경로가
+바뀌면 코사인 분포가 달라져 실행 간 비교가 깨집니다.** 색인축의 fail-safe 가 막으려는 건
+"조용히 API 과금"인데, 채점축은 방향 대신 **"조용히"를 없앱니다** — 경고가 이번 실행의
+귀착지 provider 이름을 찍으므로, `local`의 철자 오타처럼 값 목록으로 못 막는 잔여도
+로그에 남습니다.
 
 실측(한국어 1,000청크 — 측정 도구 `tools/bench_embedding.py` 는 측정값을 여기와 커밋에 박제한 뒤 제거했습니다. 재검증이 필요하면 `git log --diff-filter=D -- tools/bench_embedding.py` 로 복원): 로컬 CPU 2 chunks/sec vs
 OpenRouter 동시 8에서 371 chunks/sec. 26MB 코퍼스 환산으로 **2.3시간 vs 0.7분 / $0.06**
@@ -162,6 +153,60 @@ Eval의 RAGAS `response_relevancy` 임베딩은 기본적으로 `EVAL_LLM_PROVID
 임베딩한다"고 적어둔 실행이 실제로는 OpenAI에 과금 호출을 하기 때문입니다.
 **provider를 바꾸면 코사인 분포가 달라지므로 실행 간 비교를 하려면 한 번 정한 뒤
 고정하세요.**
+
+---
+
+### 리랭크 provider (cross-encoder)
+
+리랭크도 **어디서 계산하느냐**를 고를 수 있습니다. 임베딩과 같은 3지선다지만
+**기본값이 반대(`local`)**이고, 임베딩과 달리 **경로를 바꾸면 모델도 바뀝니다.**
+
+| env | 기본값 | 대상 |
+|---|---|---|
+| `INDEX_RERANKER_PROVIDER` | `local` | `local` \| `openrouter` |
+| `INDEX_RERANKER_MODEL_OPENROUTER` | `voyageai/rerank-2.5-lite` | `openrouter`일 때 부를 모델 |
+| `INDEX_RERANKER_DEVICE` | `INDEX_EMBED_DEVICE` 따름 (없으면 `auto`) | `local`일 때 `cuda`/`cpu` |
+
+```bash
+python graph.py --rerank gpu              # 로컬 CUDA (없으면 경고 후 CPU)
+python graph.py --rerank cpu              # 로컬 CPU
+python graph.py --rerank openrouter       # API (질의마다 과금)
+python graph.py --embed openrouter --rerank gpu   # 임베딩만 API, 리랭크는 로컬 GPU
+```
+
+**기본값이 `local`인 이유는 과금 시점입니다.** 임베딩은 색인 1회지만 리랭크는
+**질의마다** 부과됩니다. Eval 한 번이 질문 수만큼이고 Optimize는 같은 셋을 반복
+평가하므로, 기본값을 API로 두면 실행할수록 조용히 곱해집니다. 임베딩 쪽 근거("예산이
+있으면 API가 100배 빠르다")는 여기 그대로 적용되지 않습니다 — 리랭크 후보는 보통
+20건이라 로컬 GPU로도 한 자릿수 ms입니다.
+
+API 모델 기본값이 `voyageai/rerank-2.5-lite`인 이유: 토큰 과금($0.02/1M)이라 이
+워크로드(후보 20건 × ~292토큰 ≈ 검색당 $0.00012, KorQuAD 스모크 한 바퀴 ≈ $0.03)에서
+`cohere/rerank-v3.5`($0.001/search)보다 약 8배 싸고, 컨텍스트도 32K로 후보 전체가
+들어갑니다(v3.5는 4K라 정책 내 구성에서도 넘칠 수 있음). 무료 nvidia 계열은 free 티어의
+분당·일당 상한이 Eval의 버스트 호출과 충돌하고(한도에 걸리면 리랭크가 조용히 빠진 채
+점수가 나옴) 프롬프트 로깅 정책도 있어 기본값으로 두지 않습니다.
+
+**바꾸면 안전하지 않습니다.** 로컬 `BAAI/bge-reranker-v2-m3`와 Voyage/Cohere 계열은
+서로 다른 모델이라 점수 스케일도 순위도 다릅니다(임베딩의 코사인 0.99997 같은 호환성이
+없습니다). OpenRouter 카탈로그에 bge 계열이 없어 이름 변환도 불가능합니다. 그래서 실제
+경로가 실행마다 남습니다 — `runtime_summary.reranker.routes`(리포트)와
+`runtime_capabilities.reranker.route`(Index preflight). **경로가 다른 두 실행의 점수를
+Optimize의 처방 효과로 읽지 마세요.**
+
+`openrouter`인데 `OPENROUTER_API_KEY`가 없으면 리랭크만 건너뛰고 원순위를 유지합니다
+(임베딩처럼 예외로 끊지 않습니다 — 리랭커는 optional이라 여기서 던지면 키 오타 하나로
+모든 검색이 죽습니다). 대신 capability에 `api_key_missing`이 재시도 불가로 남아 Index
+preflight 단계에서 드러납니다.
+
+로컬 경로에서 CUDA OOM이 나면(로드·추론 모두) 경고하고 CPU로 내려 그 실행 동안
+고정합니다. 쿨다운 후 같은 GPU로 재시도하면 같은 자리에서 계속 죽기 때문입니다.
+
+API 경로에는 입력 길이 상한(`INDEX_RERANKER_MAX_LENGTH`)이 걸리지 않습니다 — 토크나이저가
+로컬에만 있기 때문이고, 리포트에는 `max_lengths: [None]`으로 남습니다. 정책 밖 구성으로
+후보 전체가 모델 컨텍스트(voyage-2.5-lite 기준 32K)를 넘기면 API가 400을 내고, 그 실행의
+리랭크는 쿨다운 동안 건너뜁니다(원순위 유지). 후보 20건 x 1500자 기준 약 17K라 정책 내
+구성에서는 닿지 않습니다.
 
 ## 3. 아키텍처 요약
 

@@ -813,6 +813,41 @@ def _as_bool(value: Any) -> bool:
     return bool(value)
 
 
+def _scoring_reranker_model(model_name: str) -> str:
+    """이 실행이 실제로 채점에 쓸 리랭커 모델명. 확인에 실패해도 알 수 있는 값이다.
+
+    probe 를 못 돌린 분기(preflight 비활성·probe 미주입·확인 실패)의 capability 도
+    이 값을 써야 한다 — 요청 이름을 그대로 두면 로컬 실행과 API 실행의 capability 가
+    구분되지 않아 Optimize 의 baseline 이 둘을 같은 조건으로 본다.
+    qdrant_store 를 못 불러도 Index 가 죽지는 않게 요청 이름으로 물러난다."""
+    try:
+        from agents.index.qdrant_store import effective_reranker_model
+
+        return effective_reranker_model(model_name)
+    except Exception:
+        return model_name
+
+
+def _should_smoke_test_reranker(policy: str, config: dict) -> bool:
+    """preflight 에서 실제 추론까지 해볼지.
+
+    로컬 경로의 smoke 는 이미 올린 모델을 한 번 돌리는 것이라 공짜라서 항상 한다 —
+    가중치가 깨졌다거나 하는 문제를 Eval 수십 건을 태운 뒤가 아니라 여기서 잡는다.
+
+    반면 provider=openrouter 의 smoke 는 실제 API 호출이고, 이 함수는 Index 가 돌 때마다
+    (즉 optimize → index 루프를 도는 횟수만큼) 불린다. 리랭커를 쓰지도 않는 실행이 매
+    회차 네트워크를 타고 과금되는 건 놀랄 일이므로, 꺼져 있으면 호출 없이 설정만
+    확인한다(키·모델명 존재 여부는 그대로 남아 Optimize 가 처방을 낼 수 있다).
+    """
+    if policy == "dependency_only":
+        return False
+    if _as_bool(config.get("use_reranker")):
+        return True
+    from agents.index.qdrant_store import resolve_reranker_provider
+
+    return resolve_reranker_provider() != "openrouter"
+
+
 def _refresh_runtime_capabilities(
     state: AgentDoctorState,
     config: dict,
@@ -826,7 +861,12 @@ def _refresh_runtime_capabilities(
     if policy == "disabled" or tools.probe_reranker_capability is None:
         capability = {
             "status": "unknown",
-            "model": model_name,
+            # 확인을 안 했어도 **어느 모델을 쓸 실행인지**는 안다. 요청 이름을 그대로
+            # 쓰면 openrouter + preflight=disabled 조합에서 로컬 실행과 API 실행의
+            # capability 가 똑같아져, Optimize 가 둘을 한 baseline 으로 묶는다.
+            "model": _scoring_reranker_model(model_name),
+            "route": None,
+            "max_length": None,
             "checked_at": None,
             "retryable": True,
             "reason": (
@@ -840,7 +880,7 @@ def _refresh_runtime_capabilities(
             capability = dict(
                 tools.probe_reranker_capability(
                     model_name,
-                    smoke_test=policy != "dependency_only",
+                    smoke_test=_should_smoke_test_reranker(policy, config),
                 )
             )
         except Exception as exc:
@@ -848,7 +888,9 @@ def _refresh_runtime_capabilities(
             print(f"[Index] reranker capability 확인 실패: {exc}")
             capability = {
                 "status": "unavailable",
-                "model": model_name,
+                "model": _scoring_reranker_model(model_name),
+                "route": None,
+                "max_length": None,
                 "checked_at": None,
                 "retryable": True,
                 "reason": "capability_probe_failed",

@@ -228,7 +228,17 @@ def _print_golden_summary(cap: dict) -> None:
     질문 표기가 달라 못 붙었는데 '골든셋 줬으니 됐다'고 오해하게 된다."""
     g = cap.get("golden")
     if g is None:
-        print("골든셋: 없음 (--no-golden) — 검색축 라벨 3종 침묵, 환각은 예비 고정")
+        # 골든셋 "파일" 이 없다고 정답이 없는 게 아니다 - 로그 줄에 인라인으로 들어 있는
+        # 경우가 있고(문서·시뮬레이터가 안내하는 --golden 없는 명령이 그 경우다), 그때는
+        # 검색축 라벨도 정상 발동한다. 여기서 "골든셋: 없음 — 3종 침묵" 이라고 찍으면
+        # 실제로는 발동한 소견을 보면서 "안 나왔어야 할 게 나왔나" 하게 된다.
+        inline_gt = cap.get("with_ground_truth", 0)
+        inline_gold = cap.get("with_gold_contexts", 0)
+        if inline_gt or inline_gold:
+            print(f"골든셋: 파일 없음 · 로그 인라인 사용 (정답 {inline_gt}건 · "
+                  f"근거문단 {inline_gold}건)")
+        else:
+            print("골든셋: 없음 (--no-golden) — 검색축 라벨 3종 침묵, 환각은 예비 고정")
         return
     print(f"골든셋: {g['qa_entries']}건 중 {g['matched']}건 매칭 "
           f"· 정답 {g['filled_ground_truth']}건 · 근거문단 {g['filled_gold_contexts']}건"

@@ -27,8 +27,8 @@ def _env(**overrides):
 class _NoticeReset(unittest.TestCase):
     def setUp(self):
         # 안내는 실행당 1회라 전역 플래그를 쓴다. 테스트마다 되돌린다.
-        llm_provider._embed_notified = False
-        self.addCleanup(setattr, llm_provider, "_embed_notified", False)
+        llm_provider._embed_notified.clear()    # 메시지별 1회 알림(set) — 테스트 간 격리
+        self.addCleanup(llm_provider._embed_notified.clear)
 
 
 class ApiAvailabilityTests(unittest.TestCase):
@@ -64,90 +64,125 @@ class ApiAvailabilityTests(unittest.TestCase):
                 self.assertFalse(llm_provider._api_embeddings_available())
 
 
-class EmbedProviderOptInTests(unittest.TestCase):
+class EmbedProviderOptInTests(_NoticeReset):
+    """EVAL_EMBED_PROVIDER - 채점 임베딩축을 심판축에서 분리하는 스위치.
+
+    경로 판정은 embedding_route() 하나가 소유한다(llm_provider 의 같은 이름 독스트링).
+    여기서 고정하는 계약은 셋이다: 미지정=심판 따름 / 명시=강제값 / 받을 수 없는
+    값=설정 무시 + 귀착지를 소리내어 말함."""
+
+    def _local_ok(self):
+        return patch("agents.index.qdrant_store.embedding_is_fallback", return_value=False)
+
     def test_defaults_to_judge_provider(self):
-        with _env(EVAL_LLM_PROVIDER="anthropic"):
-            self.assertEqual(llm_provider._embed_provider(), "anthropic")
+        with _env(EVAL_LLM_PROVIDER="openrouter", OPENROUTER_API_KEY="k"):
+            self.assertEqual(llm_provider.embedding_route(), "openrouter")
 
     def test_explicit_opt_in_splits_the_axis(self):
-        """심판은 anthropic 그대로 두고 임베딩만 OpenRouter 로 — 이 PR 의 목적."""
+        """심판은 anthropic 그대로 두고 임베딩만 OpenRouter 로 - 이 PR 의 목적."""
         with _env(EVAL_LLM_PROVIDER="anthropic", OPENROUTER_API_KEY="k",
                   EVAL_EMBED_PROVIDER="openrouter"):
-            self.assertEqual(llm_provider._embed_provider(), "openrouter")
+            self.assertEqual(llm_provider.embedding_route(), "openrouter")
             self.assertEqual(llm_provider._provider(), "anthropic")
-            self.assertTrue(llm_provider._api_embeddings_available())
 
     def test_alias_is_normalized(self):
         """EVAL_LLM_PROVIDER 와 같은 철자표를 쓴다(PROVIDER_ALIASES)."""
         with _env(EVAL_LLM_PROVIDER="anthropic", OPENROUTER_API_KEY="k",
                   EVAL_EMBED_PROVIDER="Open-Router"):
-            self.assertEqual(llm_provider._embed_provider(), "openrouter")
+            self.assertEqual(llm_provider.embedding_route(), "openrouter")
 
-    def _forget_warning(self, raw: str) -> None:
-        """경고 dedup 전역을 되돌린다. addCleanup 이라 단언이 실패해도 실행된다 —
-        assert 뒤에 두면 실패한 실행이 전역을 오염시킨 채 남는다."""
-        self.addCleanup(llm_provider._warned_providers.discard, f"embed:{raw}")
+    def test_explicit_route_is_a_hard_value(self):
+        """명시했는데 그 경로를 못 쓰면 다른 provider 로 새지 않고 결측이다.
 
-    def test_provider_without_embeddings_is_rejected(self):
-        """anthropic·github 를 명시하면 아래 분기가 openai 로 떨어져, 'anthropic 으로
-        임베딩한다'고 적어둔 실행이 실제로는 OpenAI 에 과금 호출을 한다.
-        심판축의 폴백 사슬과 달리 여기서는 사용자가 직접 고른 값이라 조용히 바꾸면 안 된다."""
-        for bad in ("anthropic", "github"):
-            self._forget_warning(bad)
-            with self.subTest(provider=bad), \
-                 _env(EVAL_LLM_PROVIDER="openai", OPENAI_API_KEY="k",
-                      EVAL_EMBED_PROVIDER=bad), \
-                 patch("builtins.print") as printed:
-                self.assertEqual(llm_provider._embed_provider(), "openai")
-                self.assertTrue(printed.called)
-                self.assertIn("임베딩 엔드포인트가 없습니다", printed.call_args.args[0])
-
-    def test_unknown_value_falls_back_to_judge_with_warning(self):
-        """조용히 openai 로 떨어뜨리지 않는다 — 임베딩 모델이 바뀌면 코사인 분포가
-        달라져 실행 간 response_relevancy 비교가 깨진다."""
-        self._forget_warning("opebrouter")
-        with _env(EVAL_LLM_PROVIDER="anthropic", EVAL_EMBED_PROVIDER="opebrouter"), \
+        이 스위치가 생긴 사고(2026-08-11)의 핵심이 "로컬로 조용히 새서 GPU 경합" 이라,
+        opt-in 한 사용자의 의도(그 경로만)를 지키는 것이 폴백보다 중요하다. 로컬이
+        멀쩡히 떠 있어도 그쪽으로 가지 않는다는 게 이 테스트의 요점이다."""
+        with _env(EVAL_LLM_PROVIDER="anthropic", EVAL_EMBED_PROVIDER="openrouter"), \
+             self._local_ok(), \
+             patch("agents.index.qdrant_store.embed_batch") as embed_batch, \
              patch("builtins.print") as printed:
-            self.assertEqual(llm_provider._embed_provider(), "anthropic")
+            self.assertEqual(llm_provider.embedding_route(), "none")
+            self.assertEqual(llm_provider.embed_texts(["a"]), [])
+
+        embed_batch.assert_not_called()
+        message = printed.call_args.args[0]
+        # 사유는 키를 지목해야 한다 - openrouter 는 임베딩 엔드포인트가 **있다**.
+        self.assertIn("EVAL_EMBED_PROVIDER=openrouter", message)
+        self.assertIn("임베딩 키가 없습니다", message)
+        self.assertNotIn("엔드포인트가 없", message)
+
+    def test_provider_without_embeddings_is_not_accepted(self):
+        """anthropic·github 는 심판으로는 되지만 임베딩 엔드포인트가 없다.
+
+        받는 값이 아니므로 강제값이 아니라 "설정을 못 읽었다" 로 처리한다 - 그대로
+        받아주면 아래 분기가 openai 로 떨어져 'anthropic 으로 임베딩한다'고 적어둔
+        실행이 실제로는 OpenAI 에 과금 호출을 한다."""
+        for bad in ("anthropic", "github"):
+            with self.subTest(provider=bad):
+                llm_provider._embed_notified.clear()
+                with _env(EVAL_LLM_PROVIDER="openai", OPENAI_API_KEY="k",
+                          EVAL_EMBED_PROVIDER=bad), \
+                     patch("builtins.print") as printed:
+                    self.assertEqual(llm_provider.embedding_route(), "openai")
+                self.assertTrue(printed.called)
+                self.assertIn("임베딩 엔드포인트가 없는 provider 라",
+                              printed.call_args.args[0])
+
+    def test_unknown_value_is_ignored_with_a_warning(self):
+        """오타까지 결측으로 만들면 철자 하나가 진단을 통째로 끈다 - 강제값 정책은
+        '받는 값을 적었는데 못 쓸 때' 의 이야기다. 대신 조용히 넘기지는 않는다."""
+        with _env(EVAL_LLM_PROVIDER="openrouter", OPENROUTER_API_KEY="k",
+                  EVAL_EMBED_PROVIDER="opebrouter"), \
+             patch("builtins.print") as printed:
+            self.assertEqual(llm_provider.embedding_route(), "openrouter")
         self.assertTrue(printed.called)
         self.assertIn("지원하지 않는 값", printed.call_args.args[0])
 
     def test_warning_names_where_the_run_actually_went(self):
         """유효값 목록만 알려주면 "이번 실행은 어디로 갔나" 가 안 남는다.
 
-        이 축은 미지원 값을 심판 provider 로 되돌리므로(형제 축과 반대 방향), 심판이
-        API provider 면 오타 한 번이 과금 경로가 된다. 형제 축이 방향으로 막으려던 게
-        '조용히 API 과금' 인데, 여기서는 목적지를 이름으로 찍어 '조용히' 를 없앤다.
-        정식 값이 된 local 과 달리 local 의 철자 오타는 여전히 여기로 온다."""
-        self._forget_warning("locl")
+        받을 수 없는 값은 폴백 사슬로 되돌아가므로 그 끝이 API provider 면 오타 한 번이
+        과금 경로가 된다. 형제 축(qdrant_store)은 방향을 local 로 틀어 그걸 막는데,
+        이 축은 방향 대신 '조용히' 를 없앤다. 정식 값이 된 local 과 달리 local 의 철자
+        오타는 여전히 여기로 온다."""
         with _env(EVAL_LLM_PROVIDER="openrouter", OPENROUTER_API_KEY="k",
                   EVAL_EMBED_PROVIDER="locl"), \
              patch("builtins.print") as printed:
-            self.assertEqual(llm_provider._embed_provider(), "openrouter")
+            self.assertEqual(llm_provider.embedding_route(), "openrouter")
 
         message = printed.call_args.args[0]
         self.assertIn("'openrouter' 로 임베딩합니다", message)
         self.assertIn("과금", message)
 
+    def test_warning_names_the_effective_route_not_the_judge(self):
+        """심판이 anthropic·github 이면 실제 임베딩은 그 이름으로 나가지 않는다 -
+        엔드포인트가 없어 openai 로 흡수된다. 귀착지를 심판 이름으로 찍으면 경고가
+        거짓말을 한다(리뷰 지적: 'anthropic 로 임베딩합니다' 인데 실제는 OpenAI)."""
+        with _env(EVAL_LLM_PROVIDER="anthropic", OPENAI_API_KEY="k",
+                  EVAL_EMBED_PROVIDER="locl"), \
+             patch("builtins.print") as printed:
+            self.assertEqual(llm_provider.embedding_route(), "openai")
+
+        message = printed.call_args.args[0]
+        self.assertIn("'openai' 로 임베딩합니다", message)
+        self.assertNotIn("'anthropic'", message)
+
     def test_local_is_a_first_class_value(self):
         """형제 축(INDEX_EMBED_PROVIDER)의 대표 값이다. 미지원으로 두면 '로컬로 돌리려던'
-        오타가 심판축(과금 경로)으로 떨어진다 - 실측: local -> openrouter bge-m3 호출."""
-        self._forget_warning("local")
+        설정이 심판축(과금 경로)으로 떨어진다 - 실측: local -> openrouter bge-m3 호출."""
         with _env(EVAL_LLM_PROVIDER="openrouter", OPENROUTER_API_KEY="k",
-                  EVAL_EMBED_PROVIDER="local"):
-            self.assertEqual(llm_provider._embed_provider(), "local")
+                  EVAL_EMBED_PROVIDER="local"), self._local_ok():
             # 키가 있어도 API 를 부르지 않는다 - 사용자가 로컬을 못 박았다.
-            self.assertFalse(llm_provider._api_embeddings_available())
+            self.assertEqual(llm_provider.embedding_route(), "local")
 
     def test_local_actually_reaches_the_local_path(self):
         with _env(EVAL_LLM_PROVIDER="openrouter", OPENROUTER_API_KEY="k",
                   EVAL_EMBED_PROVIDER="local"), \
              patch.object(llm_provider, "openai_embed") as api_embed, \
-             patch("agents.index.qdrant_store.embedding_is_fallback", return_value=False), \
+             self._local_ok(), \
              patch("agents.index.qdrant_store.embed_batch") as embed_batch, \
              patch("builtins.print"):
             embed_batch.return_value = [[1.0]]
-            llm_provider._embed_notified = False
             self.assertEqual(llm_provider.embed_texts(["a"]), [[1.0]])
 
         api_embed.assert_not_called()
@@ -157,43 +192,38 @@ class EmbedProviderOptInTests(unittest.TestCase):
         """축을 나눠 놓고 로그가 심판축 이름만 말하면 엉뚱한 변수를 들여다보게 된다."""
         with _env(EVAL_LLM_PROVIDER="openrouter", OPENROUTER_API_KEY="k",
                   EVAL_EMBED_PROVIDER="local"), \
-             patch("agents.index.qdrant_store.embedding_is_fallback", return_value=False), \
+             self._local_ok(), \
              patch("agents.index.qdrant_store.embed_batch", return_value=[[1.0]]), \
              patch("builtins.print") as printed:
-            llm_provider._embed_notified = False
             llm_provider.embed_texts(["a"])
 
         message = printed.call_args.args[0]
         self.assertIn("EVAL_EMBED_PROVIDER", message)
         self.assertNotIn("EVAL_LLM_PROVIDER", message)
 
-    def test_notice_blames_the_key_not_the_endpoint(self):
-        """축 이름만 고치고 사유를 그대로 두면 대표 조합에서 거짓 문장이 남는다.
-
-        심판 anthropic + EVAL_EMBED_PROVIDER=openrouter 에서 키가 없으면 opt-in 한
-        실행이 조용히 로컬로 내려가는데, openrouter 는 임베딩 엔드포인트가 **있다** —
-        "엔드포인트가 없어" 라고 찍으면 읽는 사람이 키가 아니라 provider 선택을 의심한다."""
-        with _env(EVAL_LLM_PROVIDER="anthropic", EVAL_EMBED_PROVIDER="openrouter"), \
-             patch("agents.index.qdrant_store.embedding_is_fallback", return_value=False), \
+    def test_local_fallback_notice_blames_the_key_when_there_is_an_endpoint(self):
+        """심판축을 따라가다 로컬로 내려온 사유는 둘이다 - 엔드포인트가 없거나, 키가
+        없거나. 뭉쳐서 전자로 적으면 openai·gemini·openrouter 심판 실행에 거짓 사유가
+        찍히고, 읽는 사람이 키가 아니라 provider 선택을 의심한다."""
+        with _env(EVAL_LLM_PROVIDER="openai"), \
+             self._local_ok(), \
              patch("agents.index.qdrant_store.embed_batch", return_value=[[1.0]]), \
              patch("builtins.print") as printed:
-            llm_provider._embed_notified = False
             llm_provider.embed_texts(["a"])
 
         message = printed.call_args.args[0]
-        self.assertIn("EVAL_EMBED_PROVIDER=openrouter 의 임베딩 키가 없어", message)
-        self.assertNotIn("엔드포인트가 없어", message)
+        self.assertIn("EVAL_LLM_PROVIDER=openai 의 임베딩 키가 없어", message)
+        self.assertNotIn("엔드포인트가 없", message)
 
-    def test_notice_still_blames_the_endpoint_when_that_is_true(self):
-        """심판축을 따라가는데 그 심판이 anthropic 이면 '엔드포인트 없음' 이 참이다."""
+    def test_local_fallback_notice_still_blames_the_endpoint_when_that_is_true(self):
+        """심판이 anthropic 이면 '엔드포인트 없음' 이 참이다."""
         with _env(EVAL_LLM_PROVIDER="anthropic"), \
-             patch("agents.index.qdrant_store.embedding_is_fallback", return_value=False), \
+             self._local_ok(), \
              patch("agents.index.qdrant_store.embed_batch", return_value=[[1.0]]), \
              patch("builtins.print") as printed:
-            llm_provider._embed_notified = False
             llm_provider.embed_texts(["a"])
 
-        self.assertIn("EVAL_LLM_PROVIDER=anthropic 는 임베딩 엔드포인트가 없어",
+        self.assertIn("EVAL_LLM_PROVIDER=anthropic 는 임베딩 엔드포인트가 없",
                       printed.call_args.args[0])
 
     def test_explicit_route_reaches_the_transport(self):
@@ -307,7 +337,7 @@ class RoutingTests(_NoticeReset):
             self.assertEqual(llm_provider.embed_texts(["a"]), [])
 
         message = printed.call_args.args[0]
-        self.assertIn("로컬 임베딩 모델을 쓸 수 없어", message)
+        self.assertIn("로컬 임베딩 모델을 쓸 수 없습니다", message)
         self.assertNotIn("OPENAI_API_KEY", message)
 
     def test_empty_input_makes_no_call(self):

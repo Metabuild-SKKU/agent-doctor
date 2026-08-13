@@ -39,6 +39,7 @@ from typing import Any
 from core.schema import DiagnosticReport
 from core.state import AgentDoctorState
 from agents.optimize.config_mapper import canonical_config_view, canonicalize_path
+from agents.optimize.score_display import to_display_scale
 from agents.optimize.schemas import (
     ActionAttemptKey,
     ActionStudyKey,
@@ -147,6 +148,21 @@ def _capability_identity(
     reranker 처럼 Index 가 실제 로드해 봐야 아는 optional 모델이 대상이다. 모델이
     바뀌거나 verified 로 승격되면 같은 config 전이라도 결과가 달라지므로 baseline
     정체성에 포함한다. 무관한 capability 까지 넣으면 관계없는 변화에 차단이 풀린다.
+
+    `model` 은 실행 위치까지 반영한 **실제 채점 모델**이다(qdrant_store.
+    effective_reranker_model) — 로컬 bge 와 OpenRouter 의 voyage 는 점수 스케일도 순위도
+    달라, 두 경로의 측정이 한 baseline 으로 섞이면 처방 효과 판정이 오염된다.
+    `max_length` 도 같은 이유다(뒤가 잘린 청크는 다른 점수를 낸다).
+
+    반대로 **장치(cuda/cpu)는 일부러 넣지 않는다.** 같은 모델이라 점수가 같고, CUDA OOM
+    강등(local:cuda → local:cpu)이 실행 중에 일어나는 축이라 넣으면 baseline 이 스스로
+    바뀌면서 이미 막아 둔 action 의 차단이 풀린다. 그래서 route 전체가 아니라 점수를
+    바꾸는 값만 고른다.
+
+    Eval 캐시 키(agents/eval/agent.py 의 _EVAL_CACHE_ENV_KEYS)는 반대로 장치를 포함한다 —
+    의도한 비대칭이다. 이쪽은 "같은 조건의 측정인가" 를 묻고 틀리면 차단이 풀리지만,
+    저쪽은 "복원해도 되는가" 를 묻고 틀리면 남의 리포트가 조용히 복원된다. 후자는 보수적인
+    쪽이 안전하고 대가도 재실행 한 번뿐이다.
     """
     if not action_key.startswith("reranker.") or not isinstance(
         runtime_capabilities, dict
@@ -159,6 +175,7 @@ def _capability_identity(
         "reranker": {
             "status": capability.get("status"),
             "model": capability.get("model"),
+            "max_length": capability.get("max_length"),
         }
     }
 
@@ -550,6 +567,10 @@ def judge(
     # 판정도 표시도 모두 composite 기준. 심판용(0~1)과 표시용(0~100)을 함께 싣는다.
     before_composite = _read_composite(before_report)
     after_composite = _read_composite(after_report)
+    # reason 은 사용자에게 그대로 노출된다(report_view 처방 카드의 "판정 근거" 캡션).
+    # 판정은 0~1 탐색 신호로 하되, 문장 안의 숫자는 리포트 헤드라인과 같은 0~100 이어야
+    # 한다 — "종합점수"라고 이름을 대면서 0.780 을 보여주면 상단의 78.0 과 앞뒤가 안 맞는다.
+    show_before, show_after = to_display_scale(before_score), to_display_scale(after_score)
 
     violations = check_floor(after_report.ragas_scores)
     if violations:
@@ -572,8 +593,9 @@ def judge(
             before_composite=before_composite,
             after_composite=after_composite,
             reason=(
-                f"종합점수 상승 {before_score:.3f}→{after_score:.3f} "
-                f"(+{improvement:.3f} ≥ 마진 {MIN_IMPROVEMENT_MARGIN:.3f}) → 유지"
+                f"종합점수 상승 {show_before:.1f}→{show_after:.1f} "
+                f"(+{to_display_scale(improvement):.1f} ≥ 마진 "
+                f"{to_display_scale(MIN_IMPROVEMENT_MARGIN):.1f}) → 유지"
             ),
         )
 
@@ -587,8 +609,9 @@ def judge(
             after_composite=after_composite,
             margin_rejected=True,
             reason=(
-                f"종합점수 상승폭 부족 {before_score:.3f}→{after_score:.3f} "
-                f"(+{improvement:.3f}, 필요 +{MIN_IMPROVEMENT_MARGIN:.3f}) → 롤백"
+                f"종합점수 상승폭 부족 {show_before:.1f}→{show_after:.1f} "
+                f"(+{to_display_scale(improvement):.1f}, 필요 "
+                f"+{to_display_scale(MIN_IMPROVEMENT_MARGIN):.1f}) → 롤백"
             ),
         )
 
@@ -598,7 +621,7 @@ def judge(
         after_score=after_score,
         before_composite=before_composite,
         after_composite=after_composite,
-        reason=f"종합점수 미상승 {before_score:.3f}→{after_score:.3f} → 롤백",
+        reason=f"종합점수 미상승 {show_before:.1f}→{show_after:.1f} → 롤백",
     )
 
 

@@ -3,8 +3,14 @@
 멀티홉 후보 페어링(원인1: 무관한 청크가 억지로 엮이던 문제)의 회귀 방지.
 임베딩을 손으로 준 2차원 벡터로 결정적으로 검증한다 — BGE-M3 다운로드/API 불필요.
 """
+import io
 import math
+import os
+import random
+import sys
 import unittest
+from contextlib import redirect_stdout
+from unittest.mock import patch
 
 from core.schema import Chunk
 from agents.eval import knowledge_graph as kg
@@ -65,6 +71,153 @@ class TopKGraphTest(unittest.TestCase):
         graph = kg.build_graph(chunks, top_k=3)
         weights = [w for _, w in graph.edges["A"]]
         self.assertEqual(weights, sorted(weights, reverse=True))
+
+
+class VectorizedEdgeParityTests(unittest.TestCase):
+    """벡터화 경로가 루프 경로와 같은 그래프를 만드는지 고정한다.
+
+    build_graph 는 모든 청크 쌍을 도는 O(n^2) 라, 순수 파이썬 루프로는 6,584청크에
+    약 16분이 걸린다(진행률 로그가 없어 '멈춤' 과 구분되지 않는다). numpy 행렬곱으로
+    바꾸되 **결과가 같아야** 한다 — 다르면 최적화가 아니라 동작 변경이고, 나중에
+    검색 점수가 흔들릴 때 원인을 여기서 찾을 수 없게 된다.
+    """
+
+    @staticmethod
+    def _chunks(n, seed, *, dim=32, drop_emb=0.0, no_kw=0.0):
+        rng = random.Random(seed)
+        vocab = [f"키워드{i}" for i in range(40)]
+        out = []
+        for i in range(n):
+            words = "" if rng.random() < no_kw else " ".join(
+                rng.sample(vocab, rng.randint(1, 6)))
+            emb = None if rng.random() < drop_emb else [
+                rng.random() for _ in range(dim)]
+            out.append(Chunk(chunk_id=f"c{i}", doc_id="d",
+                             text=f"본문 {i} {words}", embedding=emb))
+        return out
+
+    @staticmethod
+    def _loop_graph(chunks, top_k=kg.KG_TOP_K_NEIGHBORS):
+        """벡터화를 꺼서 기존 루프 경로를 강제한다."""
+        with patch.object(kg, "_candidate_edges_vectorized",
+                          return_value=None):
+            return kg.build_graph(chunks, top_k=top_k)
+
+    def _assert_same(self, chunks, label, top_k=kg.KG_TOP_K_NEIGHBORS):
+        fast = kg.build_graph(chunks, top_k=top_k)
+        slow = self._loop_graph(chunks, top_k=top_k)
+        fast_edges = {(cid, nid): w for cid, lst in fast.edges.items() for nid, w in lst}
+        slow_edges = {(cid, nid): w for cid, lst in slow.edges.items() for nid, w in lst}
+        self.assertEqual(set(fast_edges), set(slow_edges), f"{label}: 엣지 집합이 다르다")
+        for key, weight in fast_edges.items():
+            self.assertAlmostEqual(weight, slow_edges[key], places=12,
+                                   msg=f"{label}: {key} 가중치가 다르다")
+
+    def test_matches_loop_on_normal_corpus(self):
+        self._assert_same(self._chunks(60, seed=7), "일반")
+
+    def test_matches_loop_when_some_embeddings_missing(self):
+        # 임베딩이 없는 청크는 코사인 0 이어야 한다(cosine() 규약).
+        self._assert_same(self._chunks(60, seed=8, drop_emb=0.3), "임베딩 일부 없음")
+
+    def test_matches_loop_when_all_embeddings_missing(self):
+        # mock 데이터처럼 임베딩이 아예 없으면 키워드만으로 엣지가 결정된다.
+        self._assert_same(self._chunks(60, seed=9, drop_emb=1.0), "임베딩 전부 없음")
+
+    def test_matches_loop_when_some_keywords_missing(self):
+        self._assert_same(self._chunks(60, seed=10, no_kw=0.3), "키워드 일부 없음")
+
+    def test_matches_loop_across_row_block_boundary(self):
+        """행 블록 단위로 도므로 블록 경계에서 엣지가 새거나 빠지면 안 된다."""
+        with patch.dict(os.environ, {"EVAL_KG_BLOCK_ROWS": "16"}):
+            self._assert_same(self._chunks(40, seed=11), "블록 경계")
+
+    def test_falls_back_to_loop_without_numpy(self):
+        """numpy 가 없는 환경에서도 그래프가 만들어져야 한다(느릴 뿐)."""
+        chunks = self._chunks(30, seed=12)
+        with patch.dict(sys.modules, {"numpy": None}):
+            graph = kg.build_graph(chunks)
+        self.assertEqual(set(graph.nodes), {c.chunk_id for c in chunks})
+        self.assertEqual(graph.edges, self._loop_graph(chunks).edges)
+
+    def test_self_is_not_a_neighbor(self):
+        graph = kg.build_graph(self._chunks(30, seed=13))
+        for cid, neigh in graph.edges.items():
+            self.assertNotIn(cid, [nid for nid, _ in neigh], f"{cid} 가 자기 이웃이다")
+
+    def test_reports_which_path_it_took(self):
+        """어느 경로로 돌았는지 로그로 남아야 한다(조용한 폴백 금지).
+
+        이 모듈이 고쳐진 계기가 "16분 동안 출력이 없어 멈춘 줄 알았다" 였다. 벡터화가
+        빨라져도 폴백으로 빠지면 증상이 그대로 재발하므로, 그때 '왜 느린지' 를 로그만
+        보고 알 수 있어야 한다.
+        """
+        chunks = self._chunks(30, seed=17, dim=8)
+        cases = [(lambda: kg.build_graph(chunks), "vectorized", None)]
+
+        mixed = self._chunks(30, seed=17, dim=8)
+        mixed[3].embedding = mixed[3].embedding[:5]
+        cases.append((lambda: kg.build_graph(mixed), "loop_fallback", "mixed_embedding_dim"))
+
+        def without_numpy():
+            with patch.dict(sys.modules, {"numpy": None}):
+                return kg.build_graph(chunks)
+        cases.append((without_numpy, "loop_fallback", "numpy_missing"))
+        cases.append((lambda: kg.build_graph(chunks[:1]), "loop_fallback", "too_few_chunks"))
+
+        for run, mode, reason in cases:
+            with self.subTest(mode=mode, reason=reason):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    run()
+                line = buffer.getvalue()
+                self.assertIn(f"kg_build_mode={mode}", line)
+                if reason:
+                    self.assertIn(f"reason={reason}", line)
+                else:
+                    self.assertNotIn("reason=", line)
+                # cp949 콘솔에서 죽으면 호출부(try 안)가 STEP1 을 실패로 기록한다.
+                line.encode("cp949")
+
+    def test_matches_loop_when_top_k_takes_everything(self):
+        """top_k<=0 은 절단 없음이다 — 벡터화가 limit 를 n 으로 열어야 같아진다."""
+        for top_k in (0, -1, 999):
+            with self.subTest(top_k=top_k):
+                self._assert_same(self._chunks(40, seed=14), f"top_k={top_k}", top_k=top_k)
+
+    def test_empty_embedding_list_is_cosine_zero_not_a_dim(self):
+        """빈 리스트 임베딩은 '차원 0' 이 아니라 '코사인 0' 이다(cosine() 규약).
+
+        차원 판정에 빈 리스트가 끼면 전체 임베딩 행렬이 사라져 코사인 신호가 통째로
+        0 이 된다 — 엣지가 자카드만으로 결정돼 그래프가 조용히 달라진다.
+        """
+        chunks = self._chunks(40, seed=15)
+        for i in range(0, 40, 4):
+            chunks[i].embedding = []
+        self._assert_same(chunks, "빈 리스트 임베딩")
+
+    def test_mixed_embedding_dims_fall_back_to_loop(self):
+        """차원이 섞이면 행렬로 담을 수 없다 — 패딩하지 말고 루프로 넘겨야 한다.
+
+        짧은 쪽을 0 으로 패딩한 코사인은 루프 경로의 cosine()(zip 이라 긴 쪽을 자른다)과
+        값이 다르고, 그 차이가 임계값을 넘나들어 엣지가 통째로 갈린다(실측 60청크에서
+        절반). 어느 셈이 옳은지는 이 최적화가 정할 문제가 아니라 값이 갈리면 안 된다.
+        """
+        chunks = self._chunks(40, seed=16, dim=8)
+        chunks[3].embedding = chunks[3].embedding[:5]
+        ids = [c.chunk_id for c in chunks]
+        nodes, embs = {}, {}
+        for c in chunks:
+            enrich = kg._heuristic_enrich(c.text)
+            nodes[c.chunk_id] = kg.KGNode(
+                chunk_id=c.chunk_id, doc_id=c.doc_id, text=c.text,
+                summary=enrich["summary"], entities=enrich["keywords"],
+                keywords=enrich["keywords"])
+            embs[c.chunk_id] = c.embedding
+        self.assertIsNone(
+            kg._candidate_edges_vectorized(ids, nodes, embs, kg.KG_TOP_K_NEIGHBORS),
+            "차원이 섞였는데 벡터화 경로가 결과를 냈다")
+        self._assert_same(chunks, "차원 불일치")
 
 
 if __name__ == "__main__":

@@ -291,7 +291,7 @@ class EmbeddingFallbackTest(unittest.TestCase):
     "OpenRouter 에 임베딩 모델 0개" 였는데 사실이 아니었다."""
 
     def setUp(self):
-        llm_provider._embed_notified = False
+        llm_provider._embed_notified.clear()    # 메시지별 1회 알림(set) — 테스트 간 격리
         # 임베딩축을 비워 심판축을 따르게 되돌린다. 이게 없으면 실행 머신의 .env 에
         # EVAL_EMBED_PROVIDER=openrouter 가 있을 때 아래 대역(_openai_embed 하나)을
         # 우회해 **실제 키로 openrouter.ai 에 요청이 나간다** - clear=False 라 env 가
@@ -317,6 +317,7 @@ class EmbeddingFallbackTest(unittest.TestCase):
 
     # provider 는 openrouter 지만 임베딩에 쓸 키가 하나도 없는 상태.
     _OR = {"EVAL_LLM_PROVIDER": "openrouter",
+           "EVAL_EMBED_PROVIDER": "",          # 개발 머신 env 의 override 가 새지 않게 고정
            "OPENAI_API_KEY": "",
            "OPENROUTER_API_KEY": ""}
 

@@ -5,11 +5,13 @@
 EVAL_ENABLE_LLM=0 을 강제해 폴백(빈 RAGAS)으로 검증한다.
 """
 
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -205,6 +207,37 @@ class TestDiagnoseExternalLog(unittest.TestCase):
                 f.write("\n".join(lines))
             _, cap, _ = replay.diagnose_external_log(path)
         self.assertEqual(cap["diagnosed"], cap["records"])
+
+
+class GoldenSummaryLineTests(unittest.TestCase):
+    """CLI 한 줄이 "골든셋 파일 없음"과 "정답 없음"을 구분해야 한다.
+
+    실증 로그를 다시 돌리다 발견했다 - 인라인 정답이 6건 다 들어 있는 로그에
+    "골든셋: 없음 - 검색축 라벨 3종 침묵" 이라고 찍혀 있었다. 실제로는 검색축 라벨이
+    정상 발동한 상태라, 그 줄을 믿으면 나온 소견을 보며 "안 나왔어야 할 게 나왔나"
+    하게 된다."""
+
+    def _line(self, cap: dict) -> str:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            replay._print_golden_summary(cap)
+        return buf.getvalue().strip()
+
+    def test_inline_golden_is_not_reported_as_missing(self):
+        line = self._line({"with_ground_truth": 6, "with_gold_contexts": 6})
+        self.assertIn("인라인", line)
+        self.assertNotIn("침묵", line)
+
+    def test_truly_missing_golden_keeps_the_warning(self):
+        line = self._line({"with_ground_truth": 0, "with_gold_contexts": 0})
+        self.assertIn("없음", line)
+        self.assertIn("침묵", line)
+
+    def test_merged_golden_reports_match_counts(self):
+        line = self._line({"golden": {"qa_entries": 5, "matched": 3,
+                                      "filled_ground_truth": 3,
+                                      "filled_gold_contexts": 2, "conflicts": 0}})
+        self.assertIn("5건 중 3건 매칭", line)
 
 
 if __name__ == "__main__":

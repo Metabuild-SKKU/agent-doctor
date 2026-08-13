@@ -206,6 +206,138 @@ class TrialReportTest(unittest.TestCase):
         self.assertEqual(report.supporting_labels, ["retrieval_missing_gold"])
 
 
+class ScoreDisplayTest(unittest.TestCase):
+    """요약의 점수는 표시용 composite(0~100)여야 한다.
+
+    Verdict.before_score/after_score 는 마진 판정용 탐색 신호(0~1)다. 이를
+    그대로 :.1f 로 찍으면 72.4→78.1 개선이 "0.7→0.8"로, 그보다 작은 개선은
+    "0.7→0.7"(올랐다면서 같은 숫자)로 표시되는 회귀가 있었다.
+    """
+
+    @staticmethod
+    def _item(**overrides):
+        return TrialReportTest._item(**overrides)
+
+    def test_kept_summary_shows_composite_scale(self):
+        verdict = Verdict(
+            keep=True,
+            before_score=0.724,
+            after_score=0.781,
+            before_composite=72.4,
+            after_composite=78.1,
+        )
+
+        report = reporter.build_trial_report(self._item(), verdict)
+
+        self.assertIn("72.4→78.1", report.summary)
+        self.assertNotIn("0.7→0.8", report.summary)
+
+    def test_small_improvement_never_renders_identical_numbers(self):
+        """composite 한 자리 차이(72.4→74.0)도 서로 다른 숫자로 보여야 한다."""
+        verdict = Verdict(
+            keep=True,
+            before_score=0.724,
+            after_score=0.740,
+            before_composite=72.4,
+            after_composite=74.0,
+        )
+
+        report = reporter.build_trial_report(self._item(), verdict)
+
+        self.assertIn("72.4→74.0", report.summary)
+
+    def test_missing_composite_falls_back_to_scaled_search_score(self):
+        """composite 미측정(구버전 Verdict)이면 탐색 신호×100 으로 표시한다."""
+        verdict = Verdict(keep=True, before_score=0.6, after_score=0.8)
+
+        report = reporter.build_trial_report(self._item(), verdict)
+
+        self.assertIn("60.0→80.0", report.summary)
+
+    def test_apply_report_summary_uses_composite_too(self):
+        """build_report 의 apply 경로도 같은 표시 규약을 쓴다."""
+        verdict = Verdict(
+            keep=True,
+            before_score=0.724,
+            after_score=0.781,
+            before_composite=72.4,
+            after_composite=78.1,
+        )
+
+        report = reporter.build_report(_decision(), _request(), verdict)
+
+        self.assertIn("72.4→78.1", report.summary)
+
+    def test_metadata_carries_display_composites(self):
+        """하류 UI 가 0~1 값을 스케일 오인하지 않도록 표시 값도 함께 싣는다."""
+        verdict = Verdict(
+            keep=True,
+            before_score=0.724,
+            after_score=0.781,
+            before_composite=72.4,
+            after_composite=78.1,
+        )
+
+        report = reporter.build_trial_report(self._item(), verdict)
+
+        self.assertEqual(report.metadata["before_score"], 0.724)
+        self.assertEqual(report.metadata["after_score"], 0.781)
+        self.assertEqual(report.metadata["before_composite"], 72.4)
+        self.assertEqual(report.metadata["after_composite"], 78.1)
+
+    def test_partial_composite_omits_the_number_instead_of_mixing_axes(self):
+        """한쪽만 composite 이면 숫자를 빼고 미측정이라고 말한다.
+
+        prescreener sweep 이 이 경우다 — after_score 는 종합점수가 아니라 정답 span
+        포함률이라, ×100 으로 채우면 "점수가 72.4→92.0로 올라"처럼 축이 다른 두 값이
+        한 문장에 들어간다. 눈에 보이는 오류를 그럴듯한 오류로 바꾸는 셈이라 표시를 뺀다.
+        """
+        verdict = Verdict(
+            keep=True,
+            before_score=0.724,
+            after_score=0.92,
+            before_composite=72.4,
+            after_composite=None,
+        )
+
+        report = reporter.build_trial_report(self._item(), verdict)
+
+        self.assertNotIn("92.0", report.summary)
+        self.assertNotIn("72.4→", report.summary)
+        self.assertIn("유지", report.summary)
+
+    def test_proxy_only_verdict_never_shows_a_composite_number(self):
+        """proxy_only 판정은 값이 갖춰져 있어도 종합점수로 표시하지 않는다."""
+        verdict = Verdict(
+            keep=True,
+            before_score=0.724,
+            after_score=0.92,
+            before_composite=72.4,
+            after_composite=92.0,
+            proxy_only=True,
+        )
+
+        report = reporter.build_trial_report(self._item(), verdict)
+
+        self.assertNotIn("92.0", report.summary)
+
+    def test_rollback_summary_carries_the_reason_on_display_scale(self):
+        """롤백 요약은 history 가 만든 reason 을 그대로 싣는다(그쪽이 0~100 으로 쓴다)."""
+        verdict = Verdict(
+            keep=False,
+            before_score=0.780,
+            after_score=0.750,
+            before_composite=78.0,
+            after_composite=75.0,
+            reason="종합점수 미상승 78.0→75.0 → 롤백",
+        )
+
+        report = reporter.build_trial_report(self._item(), verdict)
+
+        self.assertIn("78.0→75.0", report.summary)
+        self.assertNotIn("0.780", report.summary)
+
+
 class NoActionReportTest(unittest.TestCase):
     """실행 가능한 action 이 하나도 없으면 request 가 없다 — 그래도 이유는 남아야 한다."""
 

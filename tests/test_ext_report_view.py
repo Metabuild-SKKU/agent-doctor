@@ -380,7 +380,7 @@ class ExtScoreWithheldTests(unittest.TestCase):
     composite 는 측정된 성분만으로 결합하므로 신뢰도가 빠지면 '품질 점수'가 '종합점수'
     이름을 달고 나간다 — 검색이 통째로 실패한 로그(gold 겹침 0.00)가 90점을 받고
     게이트까지 통과했다. 골든셋 필수화로는 안 막힌다: ground_truth 없이 gold_contexts
-    만 준 로그가 같은 구멍에 빠지고, 퍼지 질문 매칭이라 부분 매칭도 흔하다."""
+    만 준 로그가 같은 구멍에 빠지고, 질문 매칭이 정규화 후 완전 일치라 부분 매칭도 흔하다."""
 
     def _view(self, reliability, golden=None):
         report = _report()
@@ -425,7 +425,7 @@ class ExtScoreWithheldTests(unittest.TestCase):
         self.assertIn("gold_contexts", reason)
 
     def test_transparency_shows_golden_match_rate(self):
-        """병합은 퍼지 질문 매칭이라 부분 매칭이 흔한데 CLI 만 그 사실을 찍고 있었다."""
+        """병합은 정규화 후 완전 일치라 부분 매칭이 흔한데 CLI 만 그 사실을 찍고 있었다."""
         g = self._view(0.8, golden={"qa_entries": 5, "matched": 2,
                                     "filled_ground_truth": 2})["transparency"]["external"]["golden"]
         self.assertEqual((g["entries"], g["matched"]), (5, 2))
@@ -491,6 +491,118 @@ class FormatCompositeTests(unittest.TestCase):
         text = format_composite({"total": None, "components": [
             {"key": "quality", "label": "품질", "score": None}]})
         self.assertIn("-/100", text)
+
+
+class PartialFlagTests(unittest.TestCase):
+    """'이 총점을 종합점수로 읽어도 되는가' 를 payload 자신이 답한다.
+
+    같은 로그가 CLI(90/100 [부분]) · 산출물 payload({'total': 90}) · 진단서(–) 에서
+    다른 답을 냈다. 판정을 두 곳이 각각 구현하고 있었고, 세 번째 소비자인 payload 는
+    그 구현이 없어 부분 여부를 아예 알리지 않았다."""
+
+    def _composite(self, quality, reliability):
+        from agents.eval.scoring import CompositeScore, _Component
+        return CompositeScore(
+            total=90 if quality is not None or reliability is not None else None,
+            components=[_Component("quality", "품질", quality),
+                        _Component("reliability", "신뢰도", reliability)],
+        ).as_dict()
+
+    def test_payload_carries_partial(self):
+        self.assertTrue(self._composite(0.9, None)["partial"])
+
+    def test_full_measurement_is_not_partial(self):
+        self.assertFalse(self._composite(0.9, 0.8)["partial"])
+
+    def test_no_total_is_not_partial(self):
+        """총점 자체가 없는 것은 '부분' 이 아니다 - 표기가 아니라 사유가 필요한 상태다."""
+        d = self._composite(None, None)
+        self.assertIsNone(d["total"])
+        self.assertFalse(d["partial"])
+
+    def test_three_exits_agree(self):
+        """CLI 한 줄 · payload · 진단서가 같은 판정을 낸다."""
+        from agents.eval.scoring import format_composite
+        d = self._composite(0.9, None)
+        report = _report()
+        report.composite_score = d
+        view = build_ext_report_view(report, {"tier": "triad"})
+        self.assertTrue(d["partial"])                       # payload
+        self.assertIn("부분", format_composite(d))           # CLI 한 줄
+        self.assertIsNone(view["score"]["after"])            # 진단서
+        self.assertEqual(view["score"]["unmeasured"], ["신뢰도"])
+
+    def test_legacy_payload_without_partial_key(self):
+        """구버전 리포트에는 partial 키가 없다 - components 로 같은 답이 나와야 한다."""
+        from agents.eval.scoring import is_partial
+        self.assertTrue(is_partial({"total": 90, "components": [
+            {"key": "quality", "label": "품질", "score": 90},
+            {"key": "reliability", "label": "신뢰도", "score": None}]}))
+
+
+class ScoreUnavailableReasonTests(unittest.TestCase):
+    """사유는 빠진 축마다 다르다.
+
+    골든셋 얘기를 품질 축(LLM 판정 미실행)에까지 쓰면, 정답을 이미 준 사람에게
+    정답을 더 달라고 하는 문장이 나간다."""
+
+    def _reason(self, quality, reliability, capability):
+        report = _report()
+        report.composite_score = {
+            "total": 90,
+            "components": [{"key": "quality", "label": "품질", "score": quality},
+                           {"key": "reliability", "label": "신뢰도", "score": reliability}],
+        }
+        cap = {"tier": "triad"}
+        cap.update(capability)
+        return build_ext_report_view(report, cap)["score"]["score_unavailable_reason"]
+
+    def test_quality_axis_does_not_blame_the_golden_set(self):
+        """정답 3건이 인라인이고 못 잰 축이 품질(LLM 꺼짐)인 실행."""
+        reason = self._reason(None, 80, {"with_ground_truth": 3})
+        self.assertIn("RAGAS", reason)
+        self.assertNotIn("골든셋", reason)
+
+    def test_inline_ground_truth_is_not_reported_as_missing(self):
+        """골든셋 '파일' 이 없는 것과 '정답' 이 없는 것은 다르다."""
+        reason = self._reason(90, None, {"with_ground_truth": 3})
+        self.assertNotIn("골든셋(정답)이 없어", reason)
+        self.assertIn("정답은 있으나", reason)
+
+    def test_no_golden_anywhere_still_says_so(self):
+        self.assertIn("골든셋(정답)이 없어",
+                      self._reason(90, None, {"with_ground_truth": 0}))
+
+    def test_both_axes_report_both_reasons(self):
+        reason = self._reason(None, None, {"with_ground_truth": 0})
+        self.assertIn("RAGAS", reason)
+        self.assertIn("골든셋(정답)이 없어", reason)
+
+
+class ExtNoticeTests(unittest.TestCase):
+    """상단 안내는 없는 점수를 설명하지 않는다."""
+
+    def _notice(self, reliability):
+        report = _report()
+        report.composite_score = {
+            "total": 90,
+            "components": [{"key": "quality", "label": "품질", "score": 90},
+                           {"key": "reliability", "label": "신뢰도", "score": reliability}],
+        }
+        return build_ext_report_view(report, {"tier": "triad"})["mode"]["notice"]
+
+    def test_score_sentence_is_dropped_without_a_total(self):
+        """score_note 는 score.after != null 일 때만 붙게 고쳤는데 notice 는 고정이라,
+        총점을 감춘 실행에도 점수의 성질을 설명하는 문장이 남아 있었다."""
+        self.assertNotIn("점수의 검색축", self._notice(None))
+
+    def test_score_sentence_survives_with_a_total(self):
+        self.assertIn("점수의 검색축", self._notice(0.8))
+
+    def test_sensitive_data_warning_always_survives(self):
+        """민감정보 고지는 점수와 무관하다 - 총점이 없어도 로그 원문은 실린다."""
+        for reliability in (None, 0.8):
+            self.assertIn("민감정보", self._notice(reliability))
 
 
 class RenderStateLeakTests(unittest.TestCase):

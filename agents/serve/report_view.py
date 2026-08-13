@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+from agents.eval.scoring import unmeasured_components
 from agents.optimize import gate
+from agents.optimize.score_display import DisplayScores, display_scores_from_metadata
 from core.state import AgentDoctorState
 
 _EVAL_MODE_LABELS = {
@@ -203,35 +205,53 @@ def _unmeasured_components(report) -> list[dict[str, Any]]:
 
     composite 는 측정된 성분만으로 결합하므로(scoring.combine), 성분이 빠져도 total 은
     나온다. 그 값은 남은 축의 점수이지 종합점수가 아니다 - 외부 진단서가 그걸 종합점수
-    이름으로 내보내면 검색을 통째로 실패한 로그가 높은 점수를 받는다."""
+    이름으로 내보내면 검색을 통째로 실패한 로그가 높은 점수를 받는다.
+
+    판정 자체는 scoring 이 단독으로 갖는다(예전엔 여기와 format_composite 이 같은 것을
+    각각 구현해, 세 번째 소비자인 산출물 payload 만 판정 없이 total 을 실었다)."""
     composite = getattr(report, "composite_score", None) if report else None
-    if not isinstance(composite, dict):
-        return []
-    return [c for c in composite.get("components", []) if c.get("score") is None]
+    return unmeasured_components(composite)
+
+
+def _reliability_unavailable_how(capability: dict) -> str:
+    """신뢰도 축을 못 잰 이유. 정답(ground_truth)이 어디까지 있는지로 갈린다.
+
+    순서가 중요하다 - 매칭이 0건이면 filled_ground_truth 도 0 이라, 매칭을 먼저
+    보지 않으면 "골든셋에 정답이 없다"는 엉뚱한 사유가 나간다(실제로는 정답이 있는데
+    질문 표기가 달라 안 붙은 것이고, 고치는 방법이 완전히 다르다)."""
+    golden = capability.get("golden")
+    inline_gt = capability.get("with_ground_truth") or 0
+    if golden is not None:
+        if golden.get("qa_entries") and not golden.get("matched"):
+            return ("골든셋이 로그의 질문과 한 건도 매칭되지 않았습니다"
+                    " - 골든셋 질문과 로그 질문의 표기를 확인하세요")
+        if not golden.get("filled_ground_truth") and not inline_gt:
+            return ("골든셋에 정답(ground_truth)이 없어 답변이 맞았는지 대조할 수 없습니다"
+                    " - 정답 근거(gold_contexts)만으로는 검색축까지만 잽니다")
+    elif not inline_gt:
+        return "골든셋(정답)이 없어 답변이 맞았는지 대조할 수 없습니다"
+    # 정답은 있는데 못 쟀다. 골든셋 탓으로 돌리면 상대는 있는 정답을 다시 만든다.
+    return ("정답은 있으나 신뢰도를 낼 수 있는 레코드가 없습니다"
+            " - 검색 근거(retrieved_contexts)가 비어 있으면 검색축을 재지 못합니다")
 
 
 def _score_unavailable_reason(unmeasured: list[dict[str, Any]], capability: dict) -> str:
     """총점을 못 낸 사유 — 무엇이 없어서 무엇을 못 쟀는지까지 말한다.
 
-    "측정 불가" 만 적으면 상대 팀은 도구가 고장 난 줄 안다. 신뢰도 축이 빠지는 이유는
-    거의 항상 정답(ground_truth)이 없어서이고, 그건 상대가 채워 줄 수 있는 것이다."""
+    "측정 불가" 만 적으면 상대 팀은 도구가 고장 난 줄 안다. 사유는 빠진 축마다 다르다 -
+    골든셋 얘기를 품질 축(LLM 판정 미실행)에까지 쓰면, 정답을 이미 준 사람에게 정답을
+    더 달라고 하는 문장이 나간다."""
     if not unmeasured:
         return ""
     names = " · ".join(str(c.get("label") or c.get("key")) for c in unmeasured)
-    golden = capability.get("golden")
-    # 순서가 중요하다 - 매칭이 0건이면 filled_ground_truth 도 0 이라, 매칭을 먼저
-    # 보지 않으면 "골든셋에 정답이 없다"는 엉뚱한 사유가 나간다(실제로는 정답이 있는데
-    # 질문 표기가 달라 안 붙은 것이고, 고치는 방법이 완전히 다르다).
-    if golden is None:
-        how = "골든셋(정답)이 없어 답변이 맞았는지 대조할 수 없습니다"
-    elif golden.get("qa_entries") and not golden.get("matched"):
-        how = ("골든셋이 로그의 질문과 한 건도 매칭되지 않았습니다"
-               " - 골든셋 질문과 로그 질문의 표기를 확인하세요")
-    elif not golden.get("filled_ground_truth"):
-        how = ("골든셋에 정답(ground_truth)이 없어 답변이 맞았는지 대조할 수 없습니다"
-               " - 정답 근거(gold_contexts)만으로는 검색축까지만 잽니다")
-    else:
-        how = "정답 대조가 가능한 레코드가 없습니다"
+    hows = []
+    for comp in unmeasured:
+        if comp.get("key") == "reliability":
+            hows.append(_reliability_unavailable_how(capability))
+        elif comp.get("key") == "quality":
+            hows.append("RAGAS 지표가 없어 답변 품질을 재지 못했습니다"
+                        " - LLM 판정을 끄고 실행하면 이 축은 비어 있습니다")
+    how = " · ".join(hows) if hows else "측정에 필요한 재료가 없습니다"
     return (f"{names} 축을 재지 못해 종합점수를 내지 않습니다 - {how}. "
             f"아래 소견과 권고는 잰 지표만으로 낸 것이라 그대로 유효합니다.")
 
@@ -329,14 +349,13 @@ def _build_metrics(report, history: list) -> list[dict[str, Any]]:
     return out
 
 
-def _course_point_score(item, key: str, fallback: float) -> float:
-    """치료경과 한 점의 헤드라인 점수(0~100). 설계 종합점수(composite, 이미 0~100)를
-    우선 쓰고, 없으면 구버전 overall(0~1)×100 로 폴백. key 는 'before'|'after'."""
-    comp = item.metadata.get(f"{key}_composite")
-    if comp is not None:
-        return round(float(comp), 1)
-    raw = item.metadata.get(f"{key}_score")
-    return _to_100(raw) if raw is not None else fallback
+def _course_scores(item) -> DisplayScores:
+    """이 이력 항목의 표시용 점수 쌍. 변환 규약은 score_display 가 단독으로 갖는다.
+
+    한쪽만 composite 인 경우(prescreener 처럼 after 가 프록시 지표인 경로) 축이 섞인
+    숫자를 만들지 않고 `available=False` 를 돌려준다 — 호출부가 그 점을 어떻게 다룰지
+    정한다(차트는 점을 빼고, 카드는 점수 행을 뺀다)."""
+    return display_scores_from_metadata(item.metadata)
 
 
 def _is_study_error(item) -> bool:
@@ -389,8 +408,12 @@ def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
 
         kept = item.status == "applied" and not item.metadata.get("pending")
         rolled_back = item.status == "failed"
-        before = _course_point_score(item, "before", baseline_score)
-        after = _course_point_score(item, "after", before)
+        scores = _course_scores(item)
+        # 점수 쌍이 같은 축으로 갖춰지지 않으면 차트에 점을 찍지 않는다. study 오류와
+        # 같은 이유다 — 축이 섞인 값으로 가짜 상승·하락 곡선을 그리지 않는다.
+        if not scores.available:
+            continue
+        before, after = scores.before, scores.after
         # 같은 진단 라벨에 여러 처방을 시도해도 Rx 순번만으로 뭉뚱그리지 않고,
         # 차트에서는 실제 처방 이름을 점 이름으로 쓴다.
         label = _course_point_label(item, prescription_index)
@@ -452,14 +475,15 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             ]
 
         # 헤드라인(composite)과 일관되게 처방 카드 점수도 종합점수로 표시.
-        # (유지/롤백 판정 자체는 overall 탐색 신호 기준이므로 direction 과 verdict 이
-        #  드물게 어긋날 수 있으나, 표시 점수는 사용자가 보는 종합점수로 통일한다.)
+        # (유지/롤백 판정 자체는 탐색 신호 기준이므로 direction 과 verdict 이 드물게
+        #  어긋날 수 있으나, 표시 점수는 사용자가 보는 종합점수로 통일한다.)
+        # 축이 섞인 쌍은 점수 행 자체를 뺀다 — report.html 은 score=None 을 이미 다룬다.
         score = None
         if not study_error:
-            before_head = _course_point_score(item, "before", 0.0)
-            after_head = _course_point_score(item, "after", before_head)
-            direction = "up" if after_head >= before_head else "down"
-            score = [str(before_head), str(after_head), direction]
+            rx_scores = _course_scores(item)
+            if rx_scores.available:
+                direction = "up" if rx_scores.after >= rx_scores.before else "down"
+                score = [str(rx_scores.before), str(rx_scores.after), direction]
 
         # 이 변경을 지지한 라벨 전체를 보여준다. 대표 하나로 좁히면 "왜 이걸
         # 골랐나"의 핵심(여러 문제가 같은 변경을 원했다)이 사라진다.
@@ -811,14 +835,28 @@ def build_ext_report_view(
         # 결합하므로, 신뢰도가 빠지면 '품질 점수'가 '종합점수' 이름을 달고 나간다 -
         # 검색이 통째로 실패한 로그(gold 겹침 0.00)가 90점을 받고 게이트까지 통과했다.
         # 골든셋을 필수로 만들어도 막히지 않는다: ground_truth 없이 gold_contexts 만 준
-        # 로그(문서가 '권장'으로 안내하는 형태)가 같은 구멍에 빠지고, 퍼지 질문 매칭이라
-        # 부분 매칭도 흔하다.
+        # 로그(문서가 '권장'으로 안내하는 형태)가 같은 구멍에 빠지고, 질문 매칭이
+        # 정규화 후 완전 일치라 부분 매칭도 흔하다.
         #
         # scoring.py 는 건드리지 않는다. ground_truth 가 없으면 답변축(answer_score)이
         # 진짜로 측정 불가라(f1·correctness 둘 다 재료가 없다) 신뢰도에 어떤 수를 넣어도
         # 절반은 지어낸 값이 된다. 잴 수 없는 것을 채우는 대신 못 잰다고 말한다 -
         # 이 진단서의 다른 자리와 같은 규약이다.
         headline = None
+
+    # 상단 안내. 점수의 성질을 설명하는 문장은 점수가 있을 때만 붙인다 - 총점을 감춘
+    # 실행에서 "점수의 검색축은 …" 이 그대로 나가면 없는 점수를 설명하는 문장이 된다
+    # (같은 이유로 report.html 은 score_note 를 score.after != null 일 때만 붙인다).
+    notice_parts = ["외부 RAG 실행 로그 진단입니다. 남의 인덱스에는 처방을 적용할 수 "
+                    "없어 치료 경과·처방 이력은 제공되지 않습니다."]
+    if headline is not None:
+        notice_parts.append("점수의 검색축은 gold 청크 recall 이 아니라 로그 기반 근거 "
+                            "신호라, 내부 진단 점수와 직접 비교할 수 없습니다.")
+    # 이 진단서는 상대 팀에 넘기거나 사내에 공유하는 문서다. 아래 '실패한 검증 질문' 이
+    # 로그 원문(질문·정답·실제 답변)을 그대로 싣는다는 사실을 문서 자신이 밝혀야,
+    # 공유 전에 한 번 보게 된다.
+    notice_parts.append("아래 '실패한 검증 질문'에는 로그의 질문·정답·답변 원문이 "
+                        "그대로 실립니다 — 공유 전에 민감정보가 없는지 확인하세요.")
 
     return {
         "meta": {
@@ -894,15 +932,7 @@ def build_ext_report_view(
             ],
             # 권고는 이 진단서의 결론이다 — 꼬리(06)가 아니라 지표 다음 자리로 올린다.
             "move_before": [{"section": "recommendations", "before": "dxs"}],
-            "notice": "외부 RAG 실행 로그 진단입니다. 남의 인덱스에는 처방을 적용할 수 "
-                      "없어 치료 경과·처방 이력은 제공되지 않습니다. "
-                      "점수의 검색축은 gold 청크 recall 이 아니라 로그 기반 근거 신호라, "
-                      "내부 진단 점수와 직접 비교할 수 없습니다. "
-                      # 이 진단서는 상대 팀에 넘기거나 사내에 공유하는 문서다. 아래
-                      # '실패한 검증 질문' 이 로그 원문(질문·정답·실제 답변)을 그대로
-                      # 싣는다는 사실을 문서 자신이 밝혀야, 공유 전에 한 번 보게 된다.
-                      "아래 '실패한 검증 질문'에는 로그의 질문·정답·답변 원문이 그대로 "
-                      "실립니다 — 공유 전에 민감정보가 없는지 확인하세요.",
+            "notice": " ".join(notice_parts),
         },
         "transparency": {
             "duration_label": "",
@@ -916,7 +946,8 @@ def build_ext_report_view(
                 "tier": _EXT_TIER_SHORT.get(tier, tier or "-"),
                 "with_ground_truth": capability.get("with_ground_truth", 0),
                 "with_gold_contexts": capability.get("with_gold_contexts", 0),
-                # 골든셋 매칭률. 병합은 퍼지 질문 매칭이라 부분 매칭이 흔한데, CLI 만
+                # 골든셋 매칭률. 병합은 질문을 정규화(공백·끝문장부호·대소문자)한 뒤
+                # 완전 일치로 붙이므로 표기가 조금만 달라도 안 붙고 부분 매칭이 흔한데, CLI 만
                 # 그 사실을 찍고 진단서에는 안 나왔다 - "골든셋 줬으니 전부 대조됐다"고
                 # 읽히면 미매칭 레코드의 검색 실패가 점수에서 빠진 걸 눈치챌 수 없다.
                 "golden": _golden_summary(capability.get("golden")),

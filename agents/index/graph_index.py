@@ -285,7 +285,8 @@ def _prefetch_extractions(
         return False
     keys = list(pending)
     results = parallel_map(lambda k: _extract(pending[k], config),
-                           keys, _resolve_extract_concurrency())
+                           keys, _resolve_extract_concurrency(),
+                           label="  [Index] 그래프 entity 추출")
     for key, (entities, relations, used_mode) in zip(keys, results):
         entity_cache[key] = {"entities": entities, "relations": relations, "mode": used_mode}
     return True

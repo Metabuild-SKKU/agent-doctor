@@ -43,9 +43,9 @@ class _ApiRouted(unittest.TestCase):
         store._models.clear()
         # 안내 플래그는 경로별 집합이다(전역 bool 하나였을 때는 먼저 찍힌 경로가
         # 나머지를 삼켰다). 비우지 않으면 앞 테스트의 안내가 남아 0건으로 보인다.
-        store._embed_routes_notified.clear()
+        store._routes_notified.clear()
         self.addCleanup(store._models.clear)
-        self.addCleanup(store._embed_routes_notified.clear)
+        self.addCleanup(store._routes_notified.clear)
 
 
 class OpenRouterRoutingTests(_ApiRouted):
@@ -234,9 +234,9 @@ class QueryAxisTests(unittest.TestCase):
 
     def setUp(self):
         store._models.clear()
-        store._embed_routes_notified.clear()
+        store._routes_notified.clear()
         self.addCleanup(store._models.clear)
-        self.addCleanup(store._embed_routes_notified.clear)
+        self.addCleanup(store._routes_notified.clear)
 
     def test_default_is_openrouter(self):
         # 두 축을 모두 비워야 코드 기본값이 드러난다 — 질의 축이 미지정이면 색인 축을
@@ -316,18 +316,18 @@ class ResponseIntegrityTests(_ApiRouted):
 
 class RouteNoticePerRouteTests(unittest.TestCase):
     def setUp(self):
-        store._embed_routes_notified.clear()
-        self.addCleanup(store._embed_routes_notified.clear)
+        store._routes_notified.clear()
+        self.addCleanup(store._routes_notified.clear)
 
     def test_fallback_notice_is_not_swallowed_by_earlier_route(self):
         """플래그가 하나면 먼저 찍힌 경로가 나머지를 삼킨다.
 
         API 로 시작한 실행이 도중에 해시 fallback 으로 열화되는 게 정확히 그 경우고,
         그때 안내가 사라지는 건 '어디서 계산됐는지 기록한다' 는 목적과 반대다."""
-        store._notify_embed_route_once("openrouter", "[Index] A")
+        store._notify_route_once("openrouter", "[Index] A")
         with patch("builtins.print") as printed:
-            store._notify_embed_route_once("hash_fallback", "[Index] B")
-            store._notify_embed_route_once("hash_fallback", "[Index] B")
+            store._notify_route_once("hash_fallback", "[Index] B")
+            store._notify_route_once("hash_fallback", "[Index] B")
 
         self.assertEqual([c.args[0] for c in printed.call_args_list], ["[Index] B"])
 
