@@ -1,0 +1,75 @@
+# 벤치마크 #1 — AutoRAG 최소 검증용 config (autorag validate 통과가 목적)
+#
+# 왜 샘플(sample_config/rag/korean/non_gpu)을 그대로 못 쓰나:
+#   · bert_score  → torch 미설치 (AutoRAG[gpu] 없이 설치했다)
+#   · ko_kiwi/ko_okt/ko_kkma → kiwipiepy·konlpy 미설치
+#   · llm/embedding "openai" → 이 저장소엔 OPENAI_API_KEY 가 없다(OpenRouter·Gemini·Anthropic 뿐)
+#
+# OpenRouter 를 끼우는 방법 (tools/make_external_rag.py 와 같은 원리 — OpenAI 호환 API):
+#   · 임베딩: vectordb 를 직접 선언해야 한다. `vectordb: default` 는 embedding_model="openai"
+#     (ada-002)를 하드코딩해서 우리 설정을 끼울 자리가 없다(autorag/vectordb/__init__.py).
+#     type 은 openai_like 가 아니라 openai 를 쓴다 — embedding_map 엔 openai_like 가 있지만
+#     _check_keys 허용목록엔 빠져 있어 검증에서 막힌다(0.3.24 의 불일치).
+#   · 생성: generator_models 에 등록된 openailike 를 쓴다. OpenAI 클래스는 "publisher/model"
+#     이름을 자기 카탈로그에서 찾다가 죽는다(make_external_rag.py 주석의 실측과 동일).
+#
+# 키는 ${ENV} 치환으로 넣는다(autorag/utils/util.py:270) — config 에 비밀을 박지 않는다.
+
+vectordb:
+  - name: openrouter_bge_m3
+    db_type: chroma
+    client_type: persistent
+    path: bench/out/autorag_project/resources/chroma
+    collection_name: bge_m3
+    similarity_metric: cosine
+    embedding_model:
+      # bge-m3 는 OpenAI 카탈로그에 없는 모델이라 차원을 명시해야 SDK 검증을 통과한다.
+      # 우리 파이프라인도 같은 모델(BAAI/bge-m3, 1024차원)을 쓴다 — 임베딩 축을 맞춰
+      # 점수 차이를 검색·생성 전략 탓으로 귀속하기 위해서다.
+      - type: openai
+        model_name: baai/bge-m3
+        api_base: https://openrouter.ai/api/v1
+        api_key: ${OPENROUTER_API_KEY}
+        dimensions: 1024
+
+node_lines:
+  - node_line_name: retrieve_node_line
+    nodes:
+      - node_type: semantic_retrieval
+        strategy:
+          metrics: [ retrieval_f1, retrieval_recall, retrieval_precision ]
+        top_k: 5          # 우리 index_config 의 top_k 기본값과 같은 값
+        modules:
+          - module_type: vectordb
+            vectordb: openrouter_bge_m3
+
+  - node_line_name: post_retrieve_node_line
+    nodes:
+      - node_type: prompt_maker
+        # rouge 만 쓴다 — bert_score 는 torch 가 없고, sem_score 는 임베딩 설정을
+        # 메트릭 쪽에도 또 넘겨야 해서 최소 검증 단계에선 뺀다.
+        strategy:
+          metrics: [ rouge ]
+          generator_modules:
+            - module_type: llama_index_llm
+              llm: openailike
+              model: openai/gpt-4o-mini
+              api_base: https://openrouter.ai/api/v1
+              api_key: ${OPENROUTER_API_KEY}
+              is_chat_model: true
+              context_window: 128000
+        modules:
+          - module_type: fstring
+            prompt: "주어진 passage만을 이용하여 question에 따라 답하시오 passage: {retrieved_contents} \n\n Question: {query} \n\n Answer:"
+
+      - node_type: generator
+        strategy:
+          metrics: [ rouge ]
+        modules:
+          - module_type: llama_index_llm
+            llm: openailike
+            model: openai/gpt-4o-mini
+            api_base: https://openrouter.ai/api/v1
+            api_key: ${OPENROUTER_API_KEY}
+            is_chat_model: true
+            context_window: 128000
