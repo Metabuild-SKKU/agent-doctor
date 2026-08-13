@@ -234,7 +234,7 @@ class _AnthropicBatchCollector:
         # 벽시계 시간을 늘리므로, 그 대가를 비용 표 옆에서 읽을 수 있어야 한다.
         # models: 배치에 실린 모델명 집합 — 대기 시간·비용을 실행 간 비교할 때 모델이
         # 갈렸으면 직접 비교하면 안 되므로 요약 줄에 같이 남긴다(리뷰 제안).
-        self._stats = {"batches": 0, "items": 0, "wait_s": 0.0}
+        self._stats = {"batches": 0, "items": 0, "wait_s": 0.0, "failed_submits": 0}
         self._models: set[str] = set()
 
     def stats(self) -> dict:
@@ -338,26 +338,24 @@ class _AnthropicBatchCollector:
             batch = client.messages.batches.create(
                 requests=[{"custom_id": cid, "params": params} for cid, _, params, _ in items])
         except Exception as exc:               # 제출 실패 — 이 배치 전원에게 즉시 알린다
+            with self._cond:
+                # 대기 통계(_record)와 섞지 않는다 — 제출 실패는 서버에 배치가 생기지
+                # 않아 '대기'가 없다. 요약 줄에서 별도 항목으로 드러낸다(리뷰 지적:
+                # 조용히 빠지면 요약의 배치 수가 실제 시도 수와 어긋난다).
+                self._stats["failed_submits"] += 1
             self._fail_items(items, exc)
             return
         print(f"[Anthropic] 배치 제출: {len(items)}건 ({batch.id}) — 완료까지 폴링")
 
         started = last_note = time.monotonic()
         while True:
-            time.sleep(poll)
-            try:
-                b = client.messages.batches.retrieve(batch.id)
-            except Exception:
-                continue                       # 일시 오류 — 다음 폴에서 재시도
-            if b.processing_status == "ended":
-                break
-            now = time.monotonic()
-            if now - last_note >= 60:
-                done = getattr(b.request_counts, "succeeded", 0)
-                print(f"[Anthropic] 배치 진행: {done}/{len(items)}건 · {now - started:.0f}s 경과")
-                last_note = now
-            if now - started > timeout:
-                self._record(len(items), now - started, _item_models(items))
+            # 상한 검사는 **루프 최상단** — retrieve 실패의 continue 로 돌아도 반드시
+            # 거쳐 간다. 예전엔 검사가 retrieve 성공 뒤에 있어서, 배치 상태를 못 읽는
+            # 상황(키 회전·배치 404·네트워크 단절)에서는 상한이 영영 안 걸렸다(리뷰
+            # 지적) — 갇힌 스레드가 큐를 쥐고 있어 다음 물결까지 같이 잠들고, 실제
+            # 탈출은 호출부 최후 방어선(상한 + 5분)이었다.
+            if time.monotonic() - started > timeout:
+                self._record(len(items), time.monotonic() - started, _item_models(items))
                 # 서버 측 배치도 취소한다 — 안 하면 버려진 배치가 끝까지 돌며 과금된다.
                 try:
                     client.messages.batches.cancel(batch.id)
@@ -369,6 +367,18 @@ class _AnthropicBatchCollector:
                     f"anthropic 배치 {batch.id} 가 {timeout:.0f}s 안에 끝나지 않았습니다 — "
                     f"EVAL_ANTHROPIC_BATCH_TIMEOUT 을 늘리거나 배치를 끄세요"))
                 return
+            time.sleep(poll)
+            try:
+                b = client.messages.batches.retrieve(batch.id)
+            except Exception:
+                continue                       # 일시 오류 — 상한 검사는 루프 최상단에서 계속 돈다
+            if b.processing_status == "ended":
+                break
+            now = time.monotonic()
+            if now - last_note >= 60:
+                done = getattr(b.request_counts, "succeeded", 0)
+                print(f"[Anthropic] 배치 진행: {done}/{len(items)}건 · {now - started:.0f}s 경과")
+                last_note = now
 
         elapsed = time.monotonic() - started
         self._record(len(items), elapsed, _item_models(items))
@@ -399,15 +409,16 @@ def print_batch_summary() -> None:
     줄이는 대신 벽시계 시간을 늘리는 거래라, 그 대가(제출 수·평균 대기)를 같은 자리에서
     읽을 수 있어야 "확정 실행이 멈춘 것처럼 보인다"는 오해가 안 생긴다(리뷰 지적)."""
     s = _batch_collector.stats()
-    if not s["batches"]:
+    if not s["batches"] and not s["failed_submits"]:
         return
-    avg = s["wait_s"] / s["batches"]
+    avg = s["wait_s"] / s["batches"] if s["batches"] else 0.0
     # 모델명을 같이 남긴다 — 모델이 갈리면 대기·비용을 실행 간 직접 비교하면 안 되는데,
     # 요약 줄만 보고 비교하는 사고를 막는다(리뷰 제안).
     models = ",".join(s["models"]) if s["models"] else "모델 미상"
     print(f"\n  Anthropic Message Batches({models}): {s['batches']}배치 · {s['items']}건 · "
           f"배치당 평균 대기 {avg:.0f}s({avg / 60:.1f}분) · "
-          f"단가 {_ANTHROPIC_BATCH_DISCOUNT:.0%} 반영됨")
+          f"단가 {_ANTHROPIC_BATCH_DISCOUNT:.0%} 반영됨"
+          + (f" · 제출 실패 {s['failed_submits']}배치" if s["failed_submits"] else ""))
 
 
 def _anthropic_caps(model: str) -> tuple:

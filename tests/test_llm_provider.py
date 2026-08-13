@@ -163,3 +163,26 @@ class EmbedProviderOverrideTest(unittest.TestCase):
             self.assertEqual(llm_provider.embedding_route(), "none")
             self.assertEqual(report._embedding_source(), "none")
             self.assertFalse(llm_provider.embeddings_available())
+
+
+class ConfigWarnOnceTest(unittest.TestCase):
+    """_warn_config_once 는 임베딩 안내(_notify_embed_once)와 저장소가 분리돼 있다
+    (리뷰 지적) — 테스트가 임베딩 안내를 비워도 설정 경고의 1회성은 유지된다."""
+
+    def setUp(self):
+        llm_provider._warned_config.clear()             # 새 전역 — 테스트가 반드시 리셋
+        self.addCleanup(llm_provider._warned_config.clear)
+        llm_provider._embed_notified.clear()
+        self.addCleanup(llm_provider._embed_notified.clear)
+
+    def test_fanout_warning_survives_embed_notice_reset(self):
+        with patch.dict(os.environ, {"EVAL_ANTHROPIC_BATCH_MAX_FANOUT": "이건정수아님"}):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                llm_provider._batch_max_fanout()
+            self.assertIn("정수가 아닙니다", buf.getvalue())
+            llm_provider._embed_notified.clear()        # 임베딩 안내를 비워도
+            buf2 = io.StringIO()
+            with redirect_stdout(buf2):
+                llm_provider._batch_max_fanout()
+            self.assertEqual(buf2.getvalue(), "")       # 경고는 반복되지 않는다

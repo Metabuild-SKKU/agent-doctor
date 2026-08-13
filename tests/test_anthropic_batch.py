@@ -15,6 +15,7 @@ Message Batches 수집기(core/llm_clients._AnthropicBatchCollector)의 계약 �
 import os
 import sys
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -386,6 +387,119 @@ class BatchTimeoutContractTest(unittest.TestCase):
                 fut.result(timeout=10)
         self.assertFalse(is_transient(ctx.exception))   # 재시도 계층이 증폭하지 않는다
         self.assertEqual(len(batches.cancelled), 1)     # 버려진 배치는 서버에서도 취소
+
+
+class BatchDeadlineReachabilityTest(unittest.TestCase):
+    """상한 검사가 retrieve 실패와 무관하게 도달 가능해야 한다(리뷰 지적).
+
+    예전엔 검사가 retrieve 성공 뒤라, 배치 상태를 못 읽는 상황(키 회전·404·네트워크
+    단절)에서 상한이 영영 안 걸렸다 — 갇힌 스레드가 큐를 쥐어 다음 물결까지 잠들고,
+    실제 탈출은 호출부 최후 방어선(상한 + 5분)이었다."""
+
+    def setUp(self):
+        self._patch = patch.dict(os.environ, {**_FAST_ENV,
+                                              "EVAL_ANTHROPIC_BATCH_TIMEOUT": "0.05"})
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_deadline_fires_even_when_retrieve_keeps_failing(self):
+        class _Unreadable(_FakeBatches):
+            def __init__(self):
+                super().__init__({})
+                self.cancelled: list[str] = []
+
+            def retrieve(self, batch_id):
+                raise RuntimeError("배치 상태를 읽을 수 없음 (404/키 회전)")
+
+            def cancel(self, batch_id):
+                self.cancelled.append(batch_id)
+
+        batches = _Unreadable()
+        client = SimpleNamespace(messages=SimpleNamespace(batches=batches))
+        collector = llm_clients._AnthropicBatchCollector()
+        started = time.monotonic()
+        fut = collector.submit(client, {"model": "m"})
+        with self.assertRaises(llm_clients.BatchDeadlineExceeded):
+            fut.result(timeout=10)
+        # 상한(0.05s) 수준에서 끊겨야 한다 — 호출부 방어선(상한+5분)까지 가면 실패.
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertEqual(len(batches.cancelled), 1)     # 취소 시도도 상한 경로에서 수행
+        # 갇힌 스레드가 큐를 쥐지 않는다 — 다음 물결이 정상 처리돼야 한다.
+        ok = {"req-1": SimpleNamespace(type="succeeded", message=_message("ok"))}
+        client2, _ = _fake_client(ok)
+        self.assertEqual(
+            collector.submit(client2, {"model": "m"}).result(timeout=10).content[0].text,
+            "ok")
+
+
+class FailedSubmitAccountingTest(unittest.TestCase):
+    """제출(create) 실패가 요약에서 조용히 빠지지 않는다(리뷰 지적).
+
+    대기 통계(batches/wait_s)와는 섞지 않는다 — 서버에 배치가 생기지 않아 '대기'가
+    없으므로 별도 항목으로 센다. results 실패는 _record 가 results 호출보다 앞이라
+    원래부터 집계된다."""
+
+    def setUp(self):
+        self._patch = patch.dict(os.environ, _FAST_ENV)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_create_failure_counts_and_shows_in_summary(self):
+        import io as _io
+        from contextlib import redirect_stdout
+
+        class _Broken(_FakeBatches):
+            def create(self, requests):
+                raise RuntimeError("제출 실패")
+
+        client = SimpleNamespace(messages=SimpleNamespace(batches=_Broken({})))
+        collector = llm_clients._AnthropicBatchCollector()
+        fut = collector.submit(client, {"model": "m"})
+        with self.assertRaises(RuntimeError):
+            fut.result(timeout=10)
+        self.assertEqual(collector.stats()["failed_submits"], 1)
+
+        buf = _io.StringIO()
+        with patch.object(llm_clients, "_batch_collector", collector), \
+                redirect_stdout(buf):
+            llm_clients.print_batch_summary()
+        self.assertIn("제출 실패 1배치", buf.getvalue())
+
+
+class FutureTimeoutDiscriminationTest(unittest.TestCase):
+    """anthropic_chat 의 except _FutureTimeout 분기 계약(리뷰 지적).
+
+    (a) Future 에 **실려 온** TimeoutError = 일시 장애 → 원형 그대로 전파해 재시도
+        판정(is_transient=True)을 유지한다.
+    (b) 대기 초과 = 수집기 스레드 소실 의심 → BatchDeadlineExceeded(재시도 금지).
+    주석 없이 보면 되돌리기 쉬운 두 줄이라 핀으로 박는다."""
+
+    def _call(self, fut, wait=5.0):
+        stub = SimpleNamespace(submit=lambda client, request: fut)
+        env = {"EVAL_ANTHROPIC_BATCH": "1"}
+        with patch.dict(os.environ, env), \
+                patch.object(llm_clients, "_batch_collector", stub), \
+                patch.object(llm_clients, "_batch_wait_timeout", lambda: wait):
+            return llm_clients.anthropic_chat(
+                "sys", "user", "claude-haiku-4-5", api_key="k", use_batch=True)
+
+    def test_carried_timeout_error_propagates_as_is(self):
+        from core.llm_retry import is_transient
+        fut = llm_clients.Future()
+        fut.set_exception(TimeoutError("업스트림 일시 장애"))
+        with self.assertRaises(TimeoutError) as ctx:
+            self._call(fut)
+        self.assertNotIsInstance(ctx.exception, llm_clients.BatchDeadlineExceeded)
+        self.assertTrue(is_transient(ctx.exception))    # 재시도 판정 유지
+
+    def test_wait_timeout_becomes_deadline_exceeded(self):
+        fut = llm_clients.Future()                      # 영영 완료되지 않는 Future
+        with self.assertRaises(llm_clients.BatchDeadlineExceeded):
+            self._call(fut, wait=0.05)
 
 
 if __name__ == "__main__":

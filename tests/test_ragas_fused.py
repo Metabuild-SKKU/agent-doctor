@@ -496,6 +496,26 @@ class CompactVariantTest(_FusedTestBase):
                  "correctness": {"TP": [0, 2], "FP": [1], "FN": []}}),
             (2, 1, 0))
 
+    def test_index_drop_notice_prints_once_with_raw_values(self):
+        """중복·범위 밖 제외는 조용하면 안 된다(리뷰 지적) — 모델이 1-based 로 답하는
+        상태가 신호 없이 점수만 낮춘다. 원시 배열과 함께 실행당 1회, 2회차부터 침묵."""
+        import io as _io
+        from contextlib import redirect_stdout
+        metrics_ragas._index_drop_notified = False      # 새 전역 — 테스트가 반드시 리셋
+        self.addCleanup(setattr, metrics_ragas, "_index_drop_notified", False)
+        d = {"answer_statements": ["a0", "a1", "a2"], "reference_statements": [],
+             "correctness": {"TP": [1, 2, 3], "FP": [], "FN": []}}
+        buf = _io.StringIO()
+        with redirect_stdout(buf):
+            counts = metrics_ragas._fused_correctness_counts(d)
+        self.assertEqual(counts, (2, 0, 0))             # 1-based 오답: 3 이 범위 밖
+        self.assertIn("[1, 2, 3]", buf.getvalue())      # 원시 값이 보여야 진단 가능
+        self.assertIn("1-based", buf.getvalue())
+        buf2 = _io.StringIO()
+        with redirect_stdout(buf2):
+            metrics_ragas._fused_correctness_counts(d)
+        self.assertEqual(buf2.getvalue(), "")           # 실행당 1회
+
     def test_compact_counts_ignore_duplicate_and_out_of_range_indexes(self):
         """"TP": [0, 0, 9] 같은 값이 문장 전문 중복보다 훨씬 싼 실수라 가드가 필요하다
         (리뷰 지적) — 중복은 1개로, 범위 밖은 0개로 센다. legacy dict 목록은 불변."""
