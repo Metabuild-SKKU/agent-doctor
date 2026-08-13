@@ -21,6 +21,10 @@ data/*
 !data/README.md
 *.json
 !sample_data/*.json
+# 외부 RAG 시뮬레이터의 골든셋(질문+정답+근거) — 코퍼스는 로컬 전용이지만 이 시험지와
+# 뽑아둔 로그(tests/fixtures/external_rag/*.jsonl)는 검증 재현에 필요하다.
+!tools/external_rag_questions.json
+!tools/external_rag_questions_gap.json
 
 # 비밀 정보 — *.json 규칙이 바뀌어도 절대 커밋 금지
 agents/ingest/tokens.json
@@ -35,6 +39,10 @@ uploads/
 # (data/ 와 같은 취지: 용량이 크고 각자 준비한다). 규약을 적은 README 만 남긴다.
 tests/corpus/*
 !tests/corpus/README.md
+
+# 리플레이 진단서 산출물 — 실행할 때마다 덮어쓰는 결과물이다. 같은 폴더의
+# ext_*.jsonl(재현용 고정 자산)과 성격이 반대라 out/ 만 따로 제외한다.
+tests/fixtures/external_rag/out/
 
 # PDF 원본 — 용량이 크고 대개 배포 불가 자료다(테스트 코퍼스 문서 포함)
 *.pdf
@@ -55,3 +63,8 @@ qdrant_storage/
 
 # 로컬 작업용 별도 클론(추적 대상 아님)
 pr34b/
+
+# 리플레이 진단서 산출물(tools/run_replay_report.py). 입력 로그(*.jsonl)는 추적하지만
+# 산출물은 실행할 때마다 새로 만들어지고, 로그 원문(질문·컨텍스트·답변)이 그대로
+# 박혀 있어 커밋되면 안 된다.
+tests/fixtures/external_rag/out/

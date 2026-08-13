@@ -59,7 +59,7 @@ def _warn_unknown_provider_once(raw: str) -> None:
         if raw in _warned_providers:
             return
         _warned_providers.add(raw)
-    print(f"[Eval] 알 수 없는 EVAL_LLM_PROVIDER '{raw}' — openai 로 폴백 "
+    print(f"[Eval] 알 수 없는 EVAL_LLM_PROVIDER '{raw}' - openai 로 폴백 "
           f"(openai|gemini|github|openrouter|anthropic)")
 
 
@@ -117,7 +117,7 @@ def _batch_max_fanout() -> int:
         # 비울 때 이 경고까지 같이 비워지는 결합이 생긴다(리뷰 지적).
         _warn_config_once(
             f"[Eval] EVAL_ANTHROPIC_BATCH_MAX_FANOUT='{raw}' 은 정수가 아닙니다 "
-            f"— 기본값 {_BATCH_MAX_FANOUT_DEFAULT} 을 씁니다.")
+            f"- 기본값 {_BATCH_MAX_FANOUT_DEFAULT} 을 씁니다.")
         return _BATCH_MAX_FANOUT_DEFAULT
     return value if value > 0 else _BATCH_MAX_FANOUT_DEFAULT
 
@@ -289,9 +289,16 @@ def chat_json(
 # bge-m3 는 $0.01/1M 이라 사실상 공짜다. Index 가 쓰는 로컬 모델과 같은 모델이고
 # 벡터도 코사인 0.99997 로 사실상 동일하다(실측 — AGENTS.md "임베딩 provider" 절 참고).
 #
-# GitHub Models 는 여전히 임베딩 엔드포인트가 없다. 그 조합에서는 OPENAI_API_KEY 로
+# GitHub Models·Anthropic 은 임베딩 엔드포인트가 없다. 그 조합에서는 OPENAI_API_KEY 로
 # 폴백하고, 그것도 없으면 Index 가 이미 쓰는 로컬 BGE-M3 로 계산한다.
 # 셋 다 불가할 때만 결측이 된다.
+#
+# 임베딩 경로는 **심판 provider 를 따라간다**. OPENROUTER_API_KEY 가 있다고 해서 심판이
+# anthropic/github 인 실행을 임의로 OpenRouter 임베딩으로 보내지 않는다 — 그렇게 하면
+# 심판 설정을 하나도 안 바꾼 사람의 실행이 OpenRouter 가용성에 새로 묶이고, 예전에
+# 오프라인으로 돌던 조합이 남의 장애에 같이 죽는다(아래 embed_texts 독스트링이 설명하는
+# bad_gold_answer 침묵 → probe 재생성 정지가 정확히 그 대가다).
+# 심판축과 임베딩축을 분리하는 설계 자체는 유효하나, 그건 명시적 opt-in 으로 따로 올린다.
 
 # 임베딩 경로 전환/불가 등의 안내를 **메시지별로** 실행당 한 번만 찍는다. 안 그러면
 # probe·트랙마다 같은 줄이 찍혀 정작 봐야 할 로그를 덮는다. 예전엔 전역 one-shot
@@ -358,7 +365,7 @@ def _embed_provider_override() -> str:
     if raw not in _EMBED_PROVIDER_CHOICES:
         _notify_embed_once(
             f"[Eval] EVAL_EMBED_PROVIDER='{raw}' 는 지원하지 않는 값입니다"
-            f"(openrouter|openai|gemini|local) — 기본 폴백 사슬을 씁니다.")
+            f"(openrouter|openai|gemini|local) - 기본 폴백 사슬을 씁니다.")
         return ""
     return raw
 
@@ -411,12 +418,17 @@ def embeddings_available() -> bool:
 
 
 def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]:
-    """텍스트 리스트 → 임베딩 벡터 리스트. (API 예외는 호출부로 전파; rate limit 은 재시도)
+    """텍스트 리스트 → 임베딩 벡터 리스트. (rate limit 은 재시도)
 
     경로 결정은 embedding_route() 하나가 소유한다: EVAL_EMBED_PROVIDER 명시(강제값 —
     못 쓰면 결측, 다른 provider 로 새지 않음) > 활성 provider 의 임베딩 API > 로컬
     BGE-M3 > 결측(빈 리스트). 여기서 분기를 다시 만들지 말 것 — 리포트 메타데이터가
     같은 함수를 봐서, 갈리면 실제 경로와 기록이 어긋난다.
+
+    딱 하나 예외가 런타임 장애다: API 경로를 **정상적으로 골랐는데** 호출이 재시도를
+    다 쓰고도 실패하면, 명시 override 가 없는 실행에 한해 로컬 BGE-M3 로 이어 계산한다.
+    경로 선택을 다시 하는 게 아니라 고른 경로가 죽었을 때의 강등이다 — 명시 override 는
+    "그 경로만" 이라는 뜻이므로 여기서도 폴백하지 않고 예외를 전파한다.
 
     주의: provider 를 바꾸면 임베딩 모델이 바뀌고 코사인 분포도 달라진다.
     response_relevancy 를 실행 간에 비교하려면 한 번 정한 뒤 고정할 것.
@@ -438,35 +450,53 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
             _notify_embed_once(
                 f"[Eval] EVAL_EMBED_PROVIDER={override} 를 쓸 수 없습니다"
                 f"({'로컬 모델 로드 불가' if override == 'local' else '해당 provider 키 없음'}) "
-                f"— 명시 경로는 다른 provider 로 폴백하지 않습니다. 임베딩 의존 지표"
+                f"- 명시 경로는 다른 provider 로 폴백하지 않습니다. 임베딩 의존 지표"
                 f"(response_relevancy)와 bad_gold_answer 라벨을 건너뜁니다. "
                 f"키를 채우거나 EVAL_EMBED_PROVIDER 를 지우세요.")
         else:
             _notify_embed_once(
                 f"[Eval] EVAL_LLM_PROVIDER={_provider()} 의 임베딩 키도, OPENAI_API_KEY 도, "
                 f"로컬 임베딩 모델도 쓸 수 없어 임베딩 의존 지표(response_relevancy)를 "
-                f"건너뜁니다 — bad_gold_answer 라벨도 함께 침묵합니다.")
+                f"건너뜁니다 - bad_gold_answer 라벨도 함께 침묵합니다.")
         return []
 
-    if route == "local":
-        # AGENTS.md 규약대로 공통 모듈을 통해서만 임베딩한다(직접 모델 로드 금지).
-        from agents.index.qdrant_store import embed_batch
-        if _embed_provider_override() == "local":
-            _notify_embed_once(
-                "[Eval] EVAL_EMBED_PROVIDER=local — 로컬 임베딩(BGE-M3)으로 계산합니다 "
-                "(비용 0, 외부 호출 없음).")
-        else:
-            _notify_embed_once(
-                f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없어 "
-                f"로컬 임베딩(BGE-M3)으로 계산합니다 — 비용 0, 외부 호출 없음. "
-                f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
-                f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요. "
-                f"로컬 GPU 가 좁으면(리랭커와 VRAM 경합) EVAL_EMBED_PROVIDER=openrouter 권장.")
-        # provider 를 못 박는다 — Index 의 기본값은 openrouter 라 그냥 부르면
-        # "비용 0, 외부 호출 없음" 이라 찍어놓고 실제로는 과금 호출을 한다.
-        return embed_batch(texts, provider="local")
+    api_failure = None
+    if route != "local":
+        try:
+            return _run_with_retry(lambda: _embed_via_api(route, texts, model), "임베딩")
+        except Exception as exc:      # noqa: BLE001 — 폴백 판단만 하고 못 메우면 되던진다
+            # 임베딩 API 가 죽었다고 진단 기능까지 같이 죽을 이유는 없다. 재시도를 다
+            # 쓴 뒤에도 실패하면, 쓸 수 있는 로컬 모델이 있는 한 그쪽으로 계속한다 —
+            # 아래 "로컬 폴백이 필요한 이유" 의 침묵 연쇄가 외부 장애로 열리는 것을 막는다.
+            # 단 명시 override 는 "그 경로만" 이라는 뜻이라 강등하지 않는다(embedding_route
+            # 정책). 로컬도 못 쓰면 전파한다 — 무의미한 해시 벡터로 메우지 않는다.
+            if _embed_provider_override() or not _local_embeddings_available():
+                raise
+            api_failure = exc
 
-    return _run_with_retry(lambda: _embed_via_api(route, texts, model), "임베딩")
+    # AGENTS.md 규약대로 공통 모듈을 통해서만 임베딩한다(직접 모델 로드 금지).
+    from agents.index.qdrant_store import embed_batch
+    if api_failure is not None:
+        # 리포트의 embedding_source 는 embedding_route() 를 보므로 이 강등은 기록에
+        # 안 남는다 — 그래서 실행 로그에 실패 사유를 남긴다.
+        _notify_embed_once(
+            f"[Eval] 임베딩 API({route}) 호출이 실패해({api_failure}) 로컬 임베딩(BGE-M3)으로 "
+            f"이어서 계산합니다 - 비용 0, 외부 호출 없음. 이 실행의 response_relevancy 는 "
+            f"API 임베딩 실행과 벡터 공간이 달라 직접 비교하지 마세요.")
+    elif _embed_provider_override() == "local":
+        _notify_embed_once(
+            "[Eval] EVAL_EMBED_PROVIDER=local - 로컬 임베딩(BGE-M3)으로 계산합니다 "
+            "(비용 0, 외부 호출 없음).")
+    else:
+        _notify_embed_once(
+            f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없어 "
+            f"로컬 임베딩(BGE-M3)으로 계산합니다 - 비용 0, 외부 호출 없음. "
+            f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
+            f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요. "
+            f"로컬 GPU 가 좁으면(리랭커와 VRAM 경합) EVAL_EMBED_PROVIDER=openrouter 권장.")
+    # provider 를 못 박는다 — Index 의 기본값은 openrouter 라 그냥 부르면
+    # "비용 0, 외부 호출 없음" 이라 찍어놓고 실제로는 과금 호출을 한다.
+    return embed_batch(texts, provider="local")
 
 
 # ── provider 별 transport (core/llm_clients.py 공용 구현에 위임) ──
