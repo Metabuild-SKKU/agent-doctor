@@ -712,16 +712,34 @@ _ABSTENTION_MARKERS = (
     "not available", "unable to answer",
 )
 
+# 리플레이(agents/eval/replay_labels.py) 전용 확장 마커 - "확인할 수 없"만 있어
+# "확인되지 않습니다"류를 통째로 놓쳤다(실측: 기권 5건이 전부 미검출 → 올바른 기권이
+# 동문서답으로 오진됐다). 다만 "포함되어 있지 않"/"다루지 않"류의 범용 부정 표현은 진짜
+# 기권뿐 아니라 근거 있는 정상 답변("계약서에 위약금 조항이 포함되어 있지 않습니다")에도
+# 매치된다. is_abstention() 은 diagnose.py 의 메인 파이프라인과도 공유하는 함수라 —
+# 기본 tier(AspectCritic 미실행, EVAL_MODE<deep)에서는 이 마커가 기권 판정의 유일한
+# 근거이므로, 오답을 기권으로 오진할 위험을 메인 경로에 새지 않게 replay 전용으로 분리한다.
+_ABSTENTION_MARKERS_EXT = _ABSTENTION_MARKERS + (
+    "확인되지 않", "찾을 수 없", "포함되어 있지 않",
+    "언급되어 있지 않", "명시되어 있지 않", "나와 있지 않",
+    "답변드리기 어렵", "정보가 부족", "다루지 않", "다루고 있지 않",
+    "not mentioned", "not specified",
+)
 
-def is_abstention(answer: str) -> bool:
+
+def is_abstention(answer: str, *, extended: bool = False) -> bool:
     """
     답변이 '모른다/답할 수 없다'류의 기권인지 휴리스틱 판별.
     [추후 구현 포인트] 설계의 Non-Answer Critic(RAGAS AspectCritic)으로 정밀화 가능.
+
+    extended=True 는 replay_labels.py 전용 확장 마커 세트(_ABSTENTION_MARKERS_EXT)를 쓴다 -
+    리콜은 높지만 근거 있는 정상 답변도 걸릴 수 있어 메인 파이프라인 기본값에는 안 쓴다.
     """
     if not answer or not answer.strip():
         return True
     low = answer.lower()
-    return any(m in low for m in _ABSTENTION_MARKERS)
+    markers = _ABSTENTION_MARKERS_EXT if extended else _ABSTENTION_MARKERS
+    return any(m in low for m in markers)
 
 
 # ══════════════════════════════════════════════════════════════════

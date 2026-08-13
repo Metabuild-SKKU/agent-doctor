@@ -318,17 +318,20 @@ def _findings_summary(records: list[EvalRecord], mode: int) -> dict:
 
 
 def _embedding_source() -> str:
-    """임베딩 출처 — "api" | "local" | "none".
+    """임베딩 출처 — "openrouter" | "openai" | "gemini" | "local" | "none".
 
     같은 지표라도 벡터 공간이 다르면 코사인 분포가 달라 실행 간 비교가 성립하지 않는다.
-    성적표만 보고 구분할 수 있게 리포트에 남긴다(agents/eval/llm_provider.embed_texts
-    의 폴백 사슬과 같은 판정)."""
+    성적표만 보고 구분할 수 있게 리포트에 남긴다.
+
+    판정은 llm_provider.embedding_route() **하나만** 쓴다 — 예전엔 여기서
+    _api_embeddings_available(심판 provider 기준)로 따로 판정해서, EVAL_EMBED_PROVIDER
+    override 가 걸린 실행에서 실제 임베딩 경로(openrouter)와 리포트 기록(local)이
+    갈릴 수 있었다(리뷰 지적). 값도 "api" 로 뭉개지 않고 provider 명을 그대로 남긴다 —
+    api 끼리도(openai ↔ openrouter/bge-m3) 벡터 공간이 다르다."""
     try:
         from agents.eval import llm_provider
 
-        if llm_provider._api_embeddings_available():
-            return "api"
-        return "local" if llm_provider._local_embeddings_available() else "none"
+        return llm_provider.embedding_route()
     except Exception:
         return "none"
 

@@ -291,7 +291,16 @@ class EmbeddingFallbackTest(unittest.TestCase):
     "OpenRouter 에 임베딩 모델 0개" 였는데 사실이 아니었다."""
 
     def setUp(self):
-        llm_provider._embed_notified = False
+        llm_provider._embed_notified.clear()    # 메시지별 1회 알림(set) — 테스트 간 격리
+        # 임베딩축을 비워 심판축을 따르게 되돌린다. 이게 없으면 실행 머신의 .env 에
+        # EVAL_EMBED_PROVIDER=openrouter 가 있을 때 아래 대역(_openai_embed 하나)을
+        # 우회해 **실제 키로 openrouter.ai 에 요청이 나간다** - clear=False 라 env 가
+        # 살아 있고, _openrouter_embed 는 패치 대상이 아니다.
+        # conftest.py 에도 같은 핀이 있지만 그건 pytest 전용이고, 이 프로젝트의 표준
+        # 실행은 python -m unittest 라 여기 파일 단위 방어가 실제로 일하는 쪽이다.
+        patcher = patch.dict(os.environ, {"EVAL_EMBED_PROVIDER": ""}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _embed(self, env, local_ok):
         buf = io.StringIO()
@@ -308,6 +317,7 @@ class EmbeddingFallbackTest(unittest.TestCase):
 
     # provider 는 openrouter 지만 임베딩에 쓸 키가 하나도 없는 상태.
     _OR = {"EVAL_LLM_PROVIDER": "openrouter",
+           "EVAL_EMBED_PROVIDER": "",          # 개발 머신 env 의 override 가 새지 않게 고정
            "OPENAI_API_KEY": "",
            "OPENROUTER_API_KEY": ""}
 

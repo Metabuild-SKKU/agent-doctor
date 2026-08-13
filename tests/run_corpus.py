@@ -29,7 +29,6 @@ QA셋은 한 번 만들어지면 계속 재사용된다(EVAL_PROBE_SOURCE=made �
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import webbrowser
@@ -63,7 +62,6 @@ def _load_env() -> None:
 
 
 CORPUS_ROOT = Path(__file__).resolve().parent / "corpus"
-REPORT_TEMPLATE = REPO_ROOT / "web" / "prototype" / "report.html"
 
 DOC_SUFFIXES = (".pdf", ".md", ".txt")
 QA_FILENAME = "qa.json"
@@ -72,9 +70,6 @@ QA_FILENAME = "qa.json"
 # 이름순 첫 번째로 뽑혀 원본 문서 행세를 하는 사고를 막는다.
 _NON_CORPUS_STEMS = {"readme"}
 
-# report.html 이 실서버 응답을 심을 자리를 만들어 주는 주입 스크립트의 표식.
-# 템플릿의 fetch 분기보다 먼저 실행돼 window.__AGENT_DOCTOR_REPORT__ 를 세팅한다.
-_INJECT_MARKER = "/* injected by tests/run_corpus.py */"
 
 
 def find_source_doc(corpus_dir: Path = CORPUS_ROOT) -> Path:
@@ -197,57 +192,16 @@ def _run_with_loop(state):
 
 
 def write_report(state, corpus_dir: Path) -> tuple[Path, dict]:
-    """build_report_view 결과를 report.html 템플릿에 심어 단독 실행 가능한 진단서로 저장."""
+    """build_report_view 결과를 report.html 템플릿에 심어 단독 실행 가능한 진단서로 저장.
+
+    심는 방법 자체는 tools/report_html.py 가 갖는다 — 외부 로그 리플레이
+    (tools/run_replay_report.py)도 같은 템플릿에 심으므로, 두 벌로 복사하면 템플릿이
+    바뀔 때 한쪽만 고쳐져 조용히 빈 리포트를 그린다."""
     from agents.serve.report_view import build_report_view
 
-    view = build_report_view(state)
-    out_dir = corpus_dir / "out"
-    out_dir.mkdir(exist_ok=True)
+    from tools.report_html import write_report_files
 
-    json_path = out_dir / "report.json"
-    json_path.write_text(json.dumps(view, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    if not REPORT_TEMPLATE.exists():
-        print(f"  경고: 리포트 템플릿 없음({REPORT_TEMPLATE}) → JSON 만 저장")
-        return json_path, view
-
-    html = REPORT_TEMPLATE.read_text(encoding="utf-8")
-
-    # 템플릿은 run_id 쿼리스트링이 있으면 서버로 fetch, 없으면 더미를 그린다. 서버가
-    # 없으므로 그 분기 전체(fetch 체인 + else 더미)를 "심어둔 데이터로 렌더" 한 줄로
-    # 갈아끼운다. 분기를 통째로 들어내야 fetch 가 남아 실패 배너를 띄우는 일이 없다.
-    start = "  var runId = new URLSearchParams(location.search).get('run_id');"
-    end = "  } else {\n    renderReport({}, false);\n  }\n"
-    s_at = html.find(start)
-    e_at = html.find(end, s_at)
-    if s_at == -1 or e_at == -1:
-        raise SystemExit(
-            "report.html 의 데이터 로딩 분기를 찾지 못했습니다 — 템플릿이 바뀌었으면 "
-            "tests/run_corpus.py 의 write_report() 도 같이 고쳐야 합니다."
-        )
-    html = (
-        html[:s_at]
-        + f"  {_INJECT_MARKER}\n"
-        + "  renderReport(window.__AGENT_DOCTOR_REPORT__, true);\n"
-        + html[e_at + len(end):]
-    )
-
-    # 데이터 블록은 반드시 렌더 스크립트보다 **앞**에 와야 한다 — 뒤에 두면 렌더 시점엔
-    # 아직 undefined 라 빈 리포트가 그려진다. </script> 파싱을 깨지 않게 </ 는 이스케이프.
-    payload = json.dumps(view, ensure_ascii=False).replace("</", "<\\/")
-    data_script = (
-        f"<script>{_INJECT_MARKER}\n"
-        f"window.__AGENT_DOCTOR_REPORT__ = {payload};\n"
-        "</script>\n"
-    )
-    main_script_at = html.rfind("<script>")
-    if main_script_at == -1:
-        raise SystemExit("report.html 에 <script> 가 없습니다 — write_report() 확인 필요")
-    html = html[:main_script_at] + data_script + html[main_script_at:]
-
-    html_path = out_dir / "report.html"
-    html_path.write_text(html, encoding="utf-8")
-    return html_path, view
+    return write_report_files(build_report_view(state), corpus_dir / "out")
 
 
 def print_summary(state, view: dict, html_path: Path):
@@ -305,6 +259,10 @@ def main():
 
     try:
         state = run_pipeline_for(CORPUS_ROOT, regen_qa=args.regen_qa, loop=args.loop)
+        # 배치 요약은 graph.py 경로에만 있었다 — 정작 벤치마크 라운드(이 러너)가 그
+        # 요약이 막으려던 오해("배치를 켰는데 왜 느리지")의 현장이라 여기도 찍는다(리뷰).
+        from core.llm_clients import print_batch_summary
+        print_batch_summary()
         html_path, view = write_report(state, CORPUS_ROOT)
         print_summary(state, view, html_path)
     except BaseException:

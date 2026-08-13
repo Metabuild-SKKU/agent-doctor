@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+from agents.eval.scoring import unmeasured_components
 from agents.optimize import gate
 from agents.optimize.score_display import DisplayScores, display_scores_from_metadata
 from core.state import AgentDoctorState
@@ -197,6 +198,86 @@ def _headline_score(report) -> float:
         return total
     overall = report.overall_score if report and report.overall_score is not None else 0.0
     return _to_100(overall)
+
+
+def _unmeasured_components(report) -> list[dict[str, Any]]:
+    """composite 성분 중 재료가 없어 못 잰 것들. 전부 측정됐으면 빈 리스트.
+
+    composite 는 측정된 성분만으로 결합하므로(scoring.combine), 성분이 빠져도 total 은
+    나온다. 그 값은 남은 축의 점수이지 종합점수가 아니다 - 외부 진단서가 그걸 종합점수
+    이름으로 내보내면 검색을 통째로 실패한 로그가 높은 점수를 받는다.
+
+    판정 자체는 scoring 이 단독으로 갖는다(예전엔 여기와 format_composite 이 같은 것을
+    각각 구현해, 세 번째 소비자인 산출물 payload 만 판정 없이 total 을 실었다)."""
+    composite = getattr(report, "composite_score", None) if report else None
+    return unmeasured_components(composite)
+
+
+def _reliability_unavailable_how(capability: dict) -> str:
+    """신뢰도 축을 못 잰 이유. 정답(ground_truth)이 어디까지 있는지로 갈린다.
+
+    순서가 중요하다 - 매칭이 0건이면 filled_ground_truth 도 0 이라, 매칭을 먼저
+    보지 않으면 "골든셋에 정답이 없다"는 엉뚱한 사유가 나간다(실제로는 정답이 있는데
+    질문 표기가 달라 안 붙은 것이고, 고치는 방법이 완전히 다르다)."""
+    golden = capability.get("golden")
+    inline_gt = capability.get("with_ground_truth") or 0
+    if golden is not None:
+        if golden.get("qa_entries") and not golden.get("matched"):
+            return ("골든셋이 로그의 질문과 한 건도 매칭되지 않았습니다"
+                    " - 골든셋 질문과 로그 질문의 표기를 확인하세요")
+        if not golden.get("filled_ground_truth") and not inline_gt:
+            return ("골든셋에 정답(ground_truth)이 없어 답변이 맞았는지 대조할 수 없습니다"
+                    " - 정답 근거(gold_contexts)만으로는 검색축까지만 잽니다")
+    elif not inline_gt:
+        return "골든셋(정답)이 없어 답변이 맞았는지 대조할 수 없습니다"
+    # 정답은 있는데 못 쟀다. 골든셋 탓으로 돌리면 상대는 있는 정답을 다시 만든다.
+    return ("정답은 있으나 신뢰도를 낼 수 있는 레코드가 없습니다"
+            " - 검색 근거(retrieved_contexts)가 비어 있으면 검색축을 재지 못합니다")
+
+
+def _score_unavailable_reason(unmeasured: list[dict[str, Any]], capability: dict) -> str:
+    """총점을 못 낸 사유 — 무엇이 없어서 무엇을 못 쟀는지까지 말한다.
+
+    "측정 불가" 만 적으면 상대 팀은 도구가 고장 난 줄 안다. 사유는 빠진 축마다 다르다 -
+    골든셋 얘기를 품질 축(LLM 판정 미실행)에까지 쓰면, 정답을 이미 준 사람에게 정답을
+    더 달라고 하는 문장이 나간다."""
+    if not unmeasured:
+        return ""
+    names = " · ".join(str(c.get("label") or c.get("key")) for c in unmeasured)
+    hows = []
+    for comp in unmeasured:
+        if comp.get("key") == "reliability":
+            hows.append(_reliability_unavailable_how(capability))
+        elif comp.get("key") == "quality":
+            hows.append("RAGAS 지표가 없어 답변 품질을 재지 못했습니다"
+                        " - LLM 판정을 끄고 실행하면 이 축은 비어 있습니다")
+    how = " · ".join(hows) if hows else "측정에 필요한 재료가 없습니다"
+    return (f"{names} 축을 재지 못해 종합점수를 내지 않습니다 - {how}. "
+            f"아래 소견과 권고는 잰 지표만으로 낸 것이라 그대로 유효합니다.")
+
+
+def _golden_summary(golden: Optional[dict]) -> Optional[dict[str, Any]]:
+    """골든셋 병합 결과를 화면용 한 줄로. 골든셋을 안 준 실행이면 None.
+
+    replay._print_golden_summary 가 CLI 에 찍는 것과 같은 사실을 진단서에도 남긴다."""
+    if not isinstance(golden, dict):
+        return None
+    entries = int(golden.get("qa_entries") or 0)
+    matched = int(golden.get("matched") or 0)
+    if not entries:
+        text = "골든셋 0건"
+    elif not matched:
+        text = f"{entries}건 중 0건 매칭 - 질문 표기가 달라 한 건도 붙지 않았습니다"
+    elif matched < entries:
+        text = f"{entries}건 중 {matched}건 매칭 (나머지는 로그에서 해당 질문을 못 찾음)"
+    else:
+        text = f"{entries}건 전부 매칭"
+    return {
+        "entries": entries,
+        "matched": matched,
+        "with_ground_truth": int(golden.get("filled_ground_truth") or 0),
+        "text": text,
+    }
 
 
 def _gate_summary(report) -> dict[str, Any]:
@@ -663,7 +744,15 @@ def _build_recommendations(state: AgentDoctorState, findings: list) -> list[dict
 
 
 def _build_qas(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
+    """state 경유 래퍼 — 내부 모드용. 실제 조립은 _qas_from_report 가 한다."""
+    return _qas_from_report(state.report, findings)
+
+
+def _qas_from_report(report, findings: list) -> list[dict[str, Any]]:
     """실패한 검증 질문을 실제 Eval 답변과 함께 UI 데이터로 변환한다.
+
+    state 가 아니라 report 를 받는다 — 리플레이 모드에는 state 가 없지만
+    report.failed_questions 는 로그의 질문·답변·정답으로 똑같이 채워진다.
 
     한 probe에 Finding이 여러 개여도 질문 카드는 하나만 만들고 진단 설명과 처방을
     합친다. 예비 Finding도 평가상 실패한 질문이므로 숨기지 않는다. 이 섹션은 최신
@@ -671,7 +760,6 @@ def _build_qas(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
     "해결됨" 카드를 추정하지 않는다. 실패 질문은 DiagnosticReport에 보존된 만큼
     모두 전달하며 표시 상한을 임의로 두지 않는다.
     """
-    report = state.report
     failed_questions = getattr(report, "failed_questions", []) if report else []
     findings_by_probe: dict[str, list] = {}
     for finding in findings:
@@ -702,4 +790,316 @@ def _build_qas(state: AgentDoctorState, findings: list) -> list[dict[str, Any]]:
             "fix": " / ".join(prescriptions) or "미처방",
         })
 
+    return out
+
+
+# ── 외부 RAG(리플레이 모드) 진단서 ─────────────────────────────────
+# build_report_view 와 분리한다. 외부 모드에는 치료경과(course)·처방이력(rxs)이
+# 원리적으로 없고(남의 인덱스라 Optimize 를 못 돈다), 라벨도 ext_ 라 rules 조회가
+# 비어 온다. 한 함수가 두 모드를 분기하면 optimization_history 유무 검사가 함수
+# 전체에 번지므로, 진입점에서 갈라 조립 함수만 공유한다(PR #113 설계 원칙과 동일).
+
+_EXT_SEVERITY_BADGE = {
+    "critical": ["prelim", "치명"],
+    "warning": ["rec-badge-data", "주의"],
+    "info": ["rec-badge-data", "참고"],
+}
+
+
+def build_ext_report_view(
+    report,
+    capability: Optional[dict] = None,
+    recommendations: Optional[list] = None,
+) -> dict[str, Any]:
+    """리플레이 진단 결과 → 진단서 뷰(web/prototype/report.html 과 같은 계약).
+
+    state 를 받지 않는다 — 외부 모드는 Ingest/Index 를 안 돌아 documents/chunks/
+    probes 가 없다. 대신 report(진단)와 capability(적재 판정)만으로 만든다.
+
+    course/rxs 는 항상 빈 배열이다. 비워두는 게 정직하다 — 남의 인덱스에는
+    처방을 적용할 수 없으므로 '아직 안 한 것'이 아니라 '할 수 없는 것'이다.
+    """
+    capability = capability or {}
+    findings = report.findings if report else []
+    cards = recommendations
+    if cards is None:
+        from agents.optimize.ext_advisor import build_ext_recommendations
+        cards = build_ext_recommendations(findings, capability.get("config"))
+
+    headline = _headline_score(report)
+    gate_summary = _gate_summary(report)
+    tier = capability.get("tier", "")
+    unmeasured = _unmeasured_components(report)
+    if unmeasured:  # noqa: SIM102 — 아래 주석이 이 분기 전체의 근거다
+        # 성분 하나가 미측정이면 총점을 내지 않는다. composite 는 측정된 성분만으로
+        # 결합하므로, 신뢰도가 빠지면 '품질 점수'가 '종합점수' 이름을 달고 나간다 -
+        # 검색이 통째로 실패한 로그(gold 겹침 0.00)가 90점을 받고 게이트까지 통과했다.
+        # 골든셋을 필수로 만들어도 막히지 않는다: ground_truth 없이 gold_contexts 만 준
+        # 로그(문서가 '권장'으로 안내하는 형태)가 같은 구멍에 빠지고, 질문 매칭이
+        # 정규화 후 완전 일치라 부분 매칭도 흔하다.
+        #
+        # scoring.py 는 건드리지 않는다. ground_truth 가 없으면 답변축(answer_score)이
+        # 진짜로 측정 불가라(f1·correctness 둘 다 재료가 없다) 신뢰도에 어떤 수를 넣어도
+        # 절반은 지어낸 값이 된다. 잴 수 없는 것을 채우는 대신 못 잰다고 말한다 -
+        # 이 진단서의 다른 자리와 같은 규약이다.
+        headline = None
+
+    # 상단 안내. 점수의 성질을 설명하는 문장은 점수가 있을 때만 붙인다 - 총점을 감춘
+    # 실행에서 "점수의 검색축은 …" 이 그대로 나가면 없는 점수를 설명하는 문장이 된다
+    # (같은 이유로 report.html 은 score_note 를 score.after != null 일 때만 붙인다).
+    notice_parts = ["외부 RAG 실행 로그 진단입니다. 남의 인덱스에는 처방을 적용할 수 "
+                    "없어 치료 경과·처방 이력은 제공되지 않습니다."]
+    if headline is not None:
+        notice_parts.append("점수의 검색축은 gold 청크 recall 이 아니라 로그 기반 근거 "
+                            "신호라, 내부 진단 점수와 직접 비교할 수 없습니다.")
+    # 이 진단서는 상대 팀에 넘기거나 사내에 공유하는 문서다. 아래 '실패한 검증 질문' 이
+    # 로그 원문(질문·정답·실제 답변)을 그대로 싣는다는 사실을 문서 자신이 밝혀야,
+    # 공유 전에 한 번 보게 된다.
+    notice_parts.append("아래 '실패한 검증 질문'에는 로그의 질문·정답·답변 원문이 "
+                        "그대로 실립니다 — 공유 전에 민감정보가 없는지 확인하세요.")
+
+    return {
+        "meta": {
+            "corpus": "외부 RAG 실행 로그",
+            "depth": _EXT_TIER_LABELS.get(tier, "외부 로그 진단"),
+            # diagnosed = 실제로 진단한 건수(--limit 반영). records 는 적재 건수라
+            # limit 이 걸리면 부풀려 보인다. 구버전 payload 는 records 로 폴백.
+            "question_count": capability.get("diagnosed", capability.get("records", 0)),
+            "created_at": report.created_at.isoformat() if report else "",
+            "tier": _EXT_TIER_SHORT.get(tier, tier or "-"),
+        },
+        "score": {
+            # before 를 after 와 같게 둔다 — 개선 전후를 비교하려면 처방을 적용한
+            # 두 번째 로그가 필요한데, 1회 진단에는 비교 대상이 없다.
+            "before": headline,
+            "after": headline,
+            "delta": 0.0,
+            # 통과/미달 판정을 싣지 않는다(None). 게이트 문턱(composite >= 90)은 우리
+            # 인덱스를 우리 gold 로 잰 값에 맞춘 것인데, 외부 진단은 검색축이 gold 청크
+            # recall 이 아니라 겹침/faithfulness 대역이라 같은 자가 아니다. 아래 notice 가
+            # "내부 점수와 직접 비교할 수 없다"고 밝히면서 그 문턱으로 배지를 그리면
+            # 스스로 모순이다. 화면은 None 을 받으면 배지를 숨긴다(report.html renderHero).
+            "pass_threshold": None,
+            # gate 자체는 남긴다 — 진단 범위 섹션이 composite 구성(품질·신뢰도)을 보여준다.
+            "gate": gate_summary,
+            # 총점을 못 낸 사유. 화면은 total 자리를 비우고 이 문구와 성분을 대신 그린다.
+            # 숫자가 없는 것보다 "왜 없는지"가 없는 게 더 나쁘다 — 값이 비면 사람은
+            # 계산이 깨진 줄 안다.
+            "unmeasured": [c.get("label") or c.get("key") for c in unmeasured],
+            "score_unavailable_reason": _score_unavailable_reason(unmeasured, capability),
+            "components": (report.composite_score or {}).get("components", [])
+                          if report and isinstance(report.composite_score, dict) else [],
+            "findings_count": len(findings),
+            # 외부 모드 hero 는 처방 수 대신 증거 수준을 보여준다 — 소견이 확정인지
+            # 예비인지가 상대에게 "얼마나 믿고 고칠지"를 알려주는 값이다.
+            "confirmed": sum(1 for f in findings if f.confirmed),
+            "tentative": sum(1 for f in findings if not f.confirmed),
+            "kept": 0, "rolled": 0, "errors": 0, "pending": 0,
+        },
+        # 라벨 코드(ext_grounded_but_wrong)를 그대로 노출하지 않는다 — 진단서는
+        # 우리 코드를 모르는 상대 팀이 읽는 문서다.
+        "priority": _ext_priority(findings),
+        "metrics": _ext_metrics(report),
+        "course": [],
+        "rxs": [],
+        "dxs": _ext_dxs(findings),
+        # 로그에도 질문·답변·정답이 있으므로 실패 질문은 채운다 — "어떤 질문에서
+        # 무너졌나"가 상대에게 넘길 진단서의 핵심이다.
+        "qas": _ext_qas(report, findings),
+        "recommendations": _ext_recommendation_cards(cards),
+        # 화면이 "없음"과 "할 수 없음"을 구분할 수 있게 한다. 빈 치료경과를 그대로
+        # 그리면 "최적화를 안 했나"로 읽히는데, 실제로는 남의 인덱스라 못 하는 것이다.
+        "mode": {
+            "kind": "external",
+            # 점수 이름을 내부와 다르게 붙인다. "종합점수 70/100" 이라고 쓰면 안내에
+            # "비교 불가"라고 적어둬도 사람은 내부 실행의 종합점수와 나란히 놓고 본다 —
+            # 같은 이름이 붙어 있으면 같은 자로 잰 값이라고 읽는 게 자연스럽다.
+            # 이름은 뷰가 정하고 화면은 받아 쓴다(문구가 두 곳에 갈라지지 않게).
+            "score_label": "로그 진단 점수",
+            "score_note": "검색축을 gold 청크 recall 이 아니라 로그 기반 근거 신호"
+                          "(gold 문단 겹침 · context precision)로 계산합니다.",
+            # 치료경과(Rx 목록 포함)는 남의 인덱스라 원리적으로 없다.
+            "hidden_sections": ["course"],
+            # 내부 모드 전제가 담긴 제목을 외부 뜻으로 바꾼다. "처방 전후"는 비교
+            # 대상이 없고, "남은 권고"는 자동 처방 뒤 잔여물이란 뜻이라 성립하지 않는다.
+            "section_titles": [
+                {"section": "metrics", "title": "품질 지표",
+                 "sub": "RAGAS 4개 지표 (실측)"},
+                {"section": "recommendations", "title": "처방 추천",
+                 "sub": "우리가 적용할 수 없어 상대 팀이 직접 적용할 항목"},
+                {"section": "transparency", "title": "진단 범위",
+                 "sub": "무엇을 근거로 어디까지 쟀나"},
+            ],
+            # 권고는 이 진단서의 결론이다 — 꼬리(06)가 아니라 지표 다음 자리로 올린다.
+            "move_before": [{"section": "recommendations", "before": "dxs"}],
+            "notice": " ".join(notice_parts),
+        },
+        "transparency": {
+            "duration_label": "",
+            # diagnosed = 실제로 진단한 건수(--limit 반영). records 는 적재 건수라
+            # limit 이 걸리면 부풀려 보인다. 구버전 payload 는 records 로 폴백.
+            "question_count": capability.get("diagnosed", capability.get("records", 0)),
+            "rx_count": 0, "rx_kept": 0, "rx_rolled": 0, "rx_errors": 0,
+            "chunk_count": 0,
+            # 외부 모드에서만 있는 사실 — 어디까지 잰 진단인지 화면이 밝힐 수 있게 남긴다.
+            "external": {
+                "tier": _EXT_TIER_SHORT.get(tier, tier or "-"),
+                "with_ground_truth": capability.get("with_ground_truth", 0),
+                "with_gold_contexts": capability.get("with_gold_contexts", 0),
+                # 골든셋 매칭률. 병합은 질문을 정규화(공백·끝문장부호·대소문자)한 뒤
+                # 완전 일치로 붙이므로 표기가 조금만 달라도 안 붙고 부분 매칭이 흔한데, CLI 만
+                # 그 사실을 찍고 진단서에는 안 나왔다 - "골든셋 줬으니 전부 대조됐다"고
+                # 읽히면 미매칭 레코드의 검색 실패가 점수에서 빠진 걸 눈치챌 수 없다.
+                "golden": _golden_summary(capability.get("golden")),
+                "notes": capability.get("notes", []),
+            },
+        },
+    }
+
+
+_EXT_TIER_LABELS = {
+    "triad": "외부 로그 진단 (질문·컨텍스트·답변)",
+    "qa_only": "외부 로그 진단 (질문·답변만 — 제한적)",
+}
+
+# tier 코드(triad/qa_only)는 우리 적재기의 내부 이름이다. 화면에는 "무엇이 있어서
+# 이만큼 잴 수 있었나"로 풀어 쓴다 — 상대가 코드를 알 리 없다.
+_EXT_TIER_SHORT = {
+    "triad": "컨텍스트까지",
+    "qa_only": "질문·답변만",
+    "none": "판정 불가",
+}
+
+
+def _ext_reason(finding) -> str:
+    """소견 1건의 근거 문구에서 내부 접두어("[리플레이 소견] 라벨 - ")를 걷어낸다.
+    metadata['reason'] 이 그 접두어 없는 원문이라 그것을 우선 쓴다."""
+    reason = str(finding.metadata.get("reason") or "").strip()
+    if reason:
+        return reason
+    text = (finding.description or "").split("\n")[0]
+    return text.split(" - ", 1)[-1].strip() if " - " in text else text.strip()
+
+
+def _ext_group_by_label(findings: list) -> list[tuple[str, list]]:
+    """라벨 단위로 묶는다. probe 마다 카드를 만들면 같은 문장이 6번 반복된다
+    (실측: 소견 9건이 사실은 라벨 2종이었다)."""
+    groups: dict[str, list] = {}
+    for f in findings:
+        groups.setdefault(f.label or f.type, []).append(f)
+    order = {"critical": 0, "warning": 1, "info": 2}
+    return sorted(groups.items(),
+                  key=lambda kv: (order.get(kv[1][0].severity, 9), -len(kv[1])))
+
+
+def _ext_priority(findings: list) -> list[dict[str, Any]]:
+    """가장 시급한 문제 — 라벨별로 묶어 사람 말 제목으로."""
+    from agents.optimize.ext_advisor import label_summary
+
+    out = []
+    for label, items in _ext_group_by_label([f for f in findings if f.confirmed])[:3]:
+        out.append({
+            "group": "",
+            "severity": items[0].severity,
+            "title": f"{label_summary(label)} — 질문 {len(items)}건",
+            "desc": _ext_reason(items[0]),
+            "confirmed": True,
+            "affected": len(items),
+        })
+    return out
+
+
+def _ext_dxs(findings: list) -> list[dict[str, Any]]:
+    """진단 상세 — 라벨별 카드. code 자리에도 짧은 한글명을 쓴다."""
+    from agents.optimize.ext_advisor import label_short, label_summary
+
+    out = []
+    for label, items in _ext_group_by_label(findings):
+        confirmed = [f for f in items if f.confirmed]
+        out.append({
+            "grp": "",
+            "title": label_summary(label),
+            "code": label_short(label),
+            "badge": ["confirm", "확정"] if confirmed else ["prelim", "예비"],
+            "desc": _ext_reason(items[0]),
+            "foot": f"질문 {len(items)}건 영향"
+                    + (f" · 예비 {len(items) - len(confirmed)}건"
+                       if len(confirmed) < len(items) else ""),
+            # 처방은 '처방 추천' 섹션이 담당한다. 여기서 "미처방"이라고 적으면
+            # 고칠 방법이 없는 것처럼 읽힌다.
+            "rx": "처방 추천 참고",
+        })
+    return out
+
+
+def _ext_qas(report, findings: list) -> list[dict[str, Any]]:
+    """실패한 검증 질문 — 라벨 코드 대신 짧은 한글명을 배지에 쓴다."""
+    from agents.optimize.ext_advisor import label_short
+
+    rows = _qas_from_report(report, findings)
+    by_probe: dict[str, list] = {}
+    for f in findings:
+        for pid in f.affected_probes:
+            by_probe.setdefault(pid, []).append(f)
+    ordered_probes = [r.get("probe_id") for r in
+                      (getattr(report, "failed_questions", []) or [])]
+    for row, pid in zip(rows, ordered_probes):
+        labels = list(dict.fromkeys(
+            label_short(f.label or f.type) for f in by_probe.get(pid, [])))
+        row["label"] = " / ".join(labels) or "검증 실패"
+        row["fix"] = "처방 추천 참고"
+    return rows
+
+
+def _ext_metrics(report) -> list[dict[str, Any]]:
+    """품질 지표 — 외부 모드에는 '처방 전 값'이 없다. before 를 실어 보내면
+    화면이 전후 막대 2개를 그리는데 둘이 같은 값이라 변화 없음으로 읽힌다.
+    single=True 로 현재값 하나만 그리게 한다."""
+    out = _build_metrics(report, [])
+    for m in out:
+        m["single"] = True
+        m.pop("before", None)
+    return out
+
+
+def _ext_recommendation_cards(cards: list[dict]) -> list[dict[str, Any]]:
+    """ext_advisor 카드 → 템플릿의 recommendations 계약.
+
+    ext_advisor 는 '무엇을 왜 권하나'까지만 만든다(Optimize 소관). 여기서
+    화면 표현(배지·아이콘 종류·CTA 문구)을 입힌다."""
+    out: list[dict[str, Any]] = []
+    for c in cards or []:
+        n_conf, n_tent = c.get("confirmed", 0), c.get("tentative", 0)
+        counts = []
+        if n_conf:
+            counts.append(f"확정 {n_conf}건")
+        if n_tent:
+            counts.append(f"예비 {n_tent}건")
+        manual = any(s.get("manual") for s in c.get("steps", []))
+        out.append({
+            # manual 이면 데이터 아이콘(RECIC_BOX) — 사람이 코퍼스를 손봐야 하는 부류다.
+            "kind": "manual" if manual else "prelim",
+            "code": c.get("label", ""),
+            "badge": _EXT_SEVERITY_BADGE.get(c.get("severity"), ["rec-badge-data", "주의"]),
+            "title": c.get("summary", ""),
+            "desc": " · ".join(c.get("evidence", [])[:2]),
+            "items": [],
+            "steps": [
+                {
+                    # 번호를 앞에 단다 — "①번부터 하나씩"이라는 지침이 목록과 맞물려야
+                    # 상대가 순서를 지킬 수 있다.
+                    "action": (f"{s['order']}. " if s.get("order") and not s.get("manual") else "")
+                              + s["action"]
+                              + (f" ({s['current']})" if s.get("current") else ""),
+                    "detail": " ".join(x for x in (
+                        s.get("detail", ""),
+                        "재색인이 필요합니다." if s.get("needs_reindex") else "",
+                        "" if s.get("primary") else "앞 항목이 듣지 않을 때만 시도하세요.",
+                    ) if x).strip(),
+                }
+                for s in c.get("steps", [])
+            ],
+            "note": c.get("how_to_apply", ""),
+            "cta": " · ".join(counts),
+        })
     return out

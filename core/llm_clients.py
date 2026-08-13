@@ -19,7 +19,11 @@ from __future__ import annotations
 
 import os
 import threading
+import time
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as _FutureTimeout
 
+from core.llm_retry import PermanentError
 from core.llm_usage import log_usage
 
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
@@ -145,6 +149,307 @@ _ANTHROPIC_UNKNOWN = (None, None, 1024, True, True)
 # 이걸 무시하고 전부 입력가로 계산하면 캐시가 잘 걸릴수록 비용이 과대집계된다.
 _ANTHROPIC_CACHE_WRITE_MULT = 1.25
 _ANTHROPIC_CACHE_READ_MULT = 0.10
+
+# Message Batches 는 입력·출력 모두 표준가의 50% 다. 이걸 안 곱하면 배치로 아낀 돈이
+# 비용 표에서 사라져 "배치를 켰는데 왜 똑같지" 가 된다.
+_ANTHROPIC_BATCH_DISCOUNT = 0.5
+
+
+def _env_float(name: str, default: float) -> float:
+    """숫자 env 를 안전하게 읽는다 — 비수치·0 이하면 경고 1회 후 기본값.
+
+    배치 수집기는 이 값들을 **백그라운드 스레드 안에서** 읽는다. 그대로 float() 를
+    부르면 오타 하나(EVAL_ANTHROPIC_BATCH_POLL=15s)로 스레드가 죽고, 호출부는
+    Future.result() 에서 영원히 잠든다 — 무인 실행에서 실패보다 나쁜 실패 모드다.
+    .env.example 에 값이 노출돼 있어 실제로 충분히 일어날 수 있다(리뷰 지적)."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        _warn_once(f"env-float-{name}",
+                   f"[LLM] {name}='{raw}' 은 숫자가 아닙니다 — 기본값 {default} 을 씁니다.")
+        return default
+    if value <= 0:
+        _warn_once(f"env-float-{name}",
+                   f"[LLM] {name}={value} 는 0 이하라 쓸 수 없습니다 — 기본값 {default} 을 씁니다.")
+        return default
+    return value
+
+
+# 배치 진행/조회 실패 안내의 최소 간격(초). 테스트가 줄여 쓸 수 있게 상수로 둔다.
+_BATCH_NOTE_INTERVAL = 60.0
+
+
+def anthropic_batch_enabled() -> bool:
+    """Message Batches 경로를 **쓸 수 있는지** (EVAL_ANTHROPIC_BATCH=1, 기본 끔).
+
+    이 스위치만으로는 아무 호출도 배치로 가지 않는다. 실제 경로 선택은 호출부가
+    anthropic_chat(use_batch=True) 로 명시할 때만 일어난다 — env 하나가 Eval 의 모든
+    anthropic 호출(probe 합성 등)을 조용히 비동기로 바꾸지 않게 하기 위해서다(리뷰 지적).
+    현재 opt-in 하는 곳은 RAGAS fused 판정 하나뿐이다(agents/eval/metrics_ragas.py).
+
+    동일 요청을 50% 가격에 처리하는 대신 결과가 비동기다(제출→폴링). 판정처럼
+    "여러 건 던지고 전부 기다리는" 워크로드 전용 — 대화형·순차 경로에는 켜지 말 것
+    (1건짜리 배치가 되어 건마다 폴링 대기를 그대로 지불한다).
+    실측(2026-08-11, 한국 오전): 5건 배치 제출→종료 3.2분. 한국 낮 = 미국 밤이라
+    큐 대기가 사실상 0이고, 미국 업무 시간대에는 이보다 느릴 수 있다."""
+    return (os.getenv("EVAL_ANTHROPIC_BATCH") or "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _batch_wait_timeout() -> float:
+    """호출부가 Future 를 기다릴 상한(초).
+
+    수집기 자체 timeout 보다 넉넉히 길게 잡는다 — 정상 상태에서는 수집기가 먼저
+    TimeoutError 를 Future 에 실어 주고, 이 값은 수집기 스레드가 통째로 사라진
+    경우에만 걸리는 최후 방어선이다. 값이 짧으면 정상 대기를 오탐으로 끊는다."""
+    return (_env_float("EVAL_ANTHROPIC_BATCH_TIMEOUT", 7200.0)
+            + _env_float("EVAL_ANTHROPIC_BATCH_WINDOW", 2.0) + 300.0)
+
+
+class BatchDeadlineExceeded(PermanentError):
+    """배치 대기 상한 초과 — 재시도 금지(PermanentError).
+
+    일반 TimeoutError 로 던지면 재시도 계층이 이름으로 transient 판정해 상한이
+    재시도 횟수만큼 곱해진다(EVAL_ANTHROPIC_BATCH_TIMEOUT=7200 × 6회 = 12시간).
+    무인 실행에서는 "2시간 내 실패" 가 계약이므로 타입으로 재시도를 끊는다."""
+
+
+def _item_models(items: list) -> set[str]:
+    """배치 항목들의 모델명 집합 — (custom_id, client, params, Future) 튜플에서 뽑는다."""
+    return {str(params.get("model", "")) for _, _, params, _ in items if params.get("model")}
+
+
+class _AnthropicBatchCollector:
+    """동시 다발로 들어오는 anthropic_chat 호출을 배치 하나로 묶는 수집기.
+
+    호출부(스레드)는 submit() 후 Future 를 기다리며 잠든다 — 기존 parallel_map 구조를
+    그대로 쓰기 위한 설계다(호출부 코드 변경 0). 수집 창(기본 2초) 동안 새 요청이 없으면
+    그때까지 모인 것을 배치 하나로 제출하고, 완료를 폴링해 custom_id 로 결과를 돌려준다.
+
+    fan-out 폭이 곧 배치 크기다: agents/eval/agent.py 가 배치 모드에서 RAGAS parallel_map
+    동시성을 record 수 전체로 넓힌다(llm_provider.judge_fanout). 동시성을 안 넓히면
+    EVAL_LLM_CONCURRENCY 개씩 잘게 배치가 쪼개져 배치당 대기(수 분)가 곱해진다."""
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._pending: list[tuple[str, object, dict, Future]] = []  # (cid, client, params, fut)
+        self._seq = 0
+        self._thread: threading.Thread | None = None
+        # 실행 요약용 누적(print_batch_summary). 배치는 비용을 절반으로 줄이는 대신
+        # 벽시계 시간을 늘리므로, 그 대가를 비용 표 옆에서 읽을 수 있어야 한다.
+        # models: 배치에 실린 모델명 집합 — 대기 시간·비용을 실행 간 비교할 때 모델이
+        # 갈렸으면 직접 비교하면 안 되므로 요약 줄에 같이 남긴다(리뷰 제안).
+        self._stats = {"batches": 0, "items": 0, "wait_s": 0.0,
+                       "failed_submits": 0, "expired_batches": 0}
+        self._models: set[str] = set()
+
+    def stats(self) -> dict:
+        with self._cond:
+            return {**self._stats, "models": sorted(self._models)}
+
+    def _record(self, n_items: int, elapsed: float, models: set[str] | None = None) -> None:
+        with self._cond:
+            self._stats["batches"] += 1
+            self._stats["items"] += n_items
+            self._stats["wait_s"] += elapsed
+            if models:
+                self._models.update(models)
+
+    @staticmethod
+    def _settle(fut: Future, exc: BaseException) -> None:
+        """Future 에 예외를 싣는다. 이미 결과가 실렸으면 덮어쓰지 않는다."""
+        try:
+            fut.set_exception(exc)
+        except Exception:                          # InvalidStateError 등
+            pass
+
+    def _fail_items(self, items, exc: BaseException) -> None:
+        """이 배치에 속한 항목만 예외로 깨운다(큐에 남은 다음 배치는 건드리지 않는다)."""
+        for _, _, _, fut in items:
+            self._settle(fut, exc)
+
+    def _fail_all(self, items, exc: BaseException) -> None:
+        """진행 중이던 항목과 아직 큐에 남은 항목 **전부**를 예외로 깨운다.
+
+        수집기 스레드가 접힐 때만 쓴다. 하나라도 빠뜨리면 그 호출 스레드가
+        Future.result() 에서 잠든 채 남는다 — 스레드가 죽은 뒤에는 아무도 그 Future 를
+        해소해 주지 않기 때문이다."""
+        with self._cond:
+            pending, self._pending = self._pending, []
+            self._thread = None                    # 다음 submit 이 새 스레드를 띄우게 한다
+        self._fail_items(list(items) + pending, exc)
+
+    def submit(self, client, params: dict) -> Future:
+        fut: Future = Future()
+        with self._cond:
+            # client 를 항목에 함께 담는다 — 예전엔 최근 submit 의 client 를 수집기
+            # 속성으로 들고 있어서, 다음 배치의 client 로 현재 배치를 제출할 수 있었다
+            # (리뷰 지적 — 지금은 단일 client 라 무해하지만 구조적으로 막는다).
+            cid = f"req-{self._seq}"
+            self._seq += 1
+            self._pending.append((cid, client, params, fut))
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._run, name="anthropic-batch", daemon=True)
+                self._thread.start()
+            self._cond.notify_all()
+        return fut
+
+    def _run(self):
+        while True:
+            items: list[tuple] = []
+            try:
+                items = self._drain()
+                if not items:
+                    return                   # 새 일감 없음 — 스레드 종료(다음 submit 이 재기동)
+                self._dispatch(items)
+            except BaseException as exc:     # noqa: BLE001 — 여기서 안 잡으면 호출부가 영구 대기
+                # daemon thread 가 조용히 죽는 것이 이 구조의 최악 시나리오다.
+                # _dispatch 안의 개별 try/except 가 못 잡은 것(예: env 파싱, SDK 시그니처
+                # 변경, MemoryError)까지 여기서 전원에게 전달하고 스레드를 접는다.
+                print(f"[Anthropic] 배치 수집기 중단({type(exc).__name__}: {exc}) "
+                      f"— 대기 중인 호출을 모두 실패로 깨웁니다.")
+                self._fail_all(items, exc)
+                return
+
+    def _drain(self) -> list[tuple]:
+        """수집 창이 조용해질 때까지 모은 뒤 스냅샷을 돌려준다."""
+        window = _env_float("EVAL_ANTHROPIC_BATCH_WINDOW", 2.0)
+        with self._cond:
+            while True:
+                if not self._pending:
+                    self._cond.wait(timeout=5.0)
+                    if not self._pending:
+                        # 종료 선언을 **락 안에서** 한다. 그냥 빠져나가면 submit 이
+                        # is_alive() 로 "아직 살아 있다"를 보고 큐에만 넣는 창이 열리고,
+                        # 그 사이 스레드가 죽으면 그 Future 는 영원히 안 깨어난다.
+                        # 여기서 None 을 박으면 submit 이 같은 락 아래에서 반드시
+                        # "스레드 없음"을 보고 새로 띄운다.
+                        self._thread = None
+                        return []
+                    continue
+                before = len(self._pending)
+                self._cond.wait(timeout=window)
+                # 창 동안 새 요청이 없으면 마감. Batches API 상한(100,000건)보다 훨씬
+                # 낮은 안전선에서도 마감해 요청 폭주 시 제출이 무한정 미뤄지지 않게 한다.
+                if len(self._pending) == before or len(self._pending) >= 10_000:
+                    items, self._pending = self._pending, []
+                    return items
+
+    def _dispatch(self, items: list[tuple]) -> None:
+        client = items[0][1]
+        poll = _env_float("EVAL_ANTHROPIC_BATCH_POLL", 15.0)
+        timeout = _env_float("EVAL_ANTHROPIC_BATCH_TIMEOUT", 7200.0)
+        try:
+            batch = client.messages.batches.create(
+                requests=[{"custom_id": cid, "params": params} for cid, _, params, _ in items])
+        except Exception as exc:               # 제출 실패 — 이 배치 전원에게 즉시 알린다
+            with self._cond:
+                # 대기 통계(_record)와 섞지 않는다 — 제출 실패는 서버에 배치가 생기지
+                # 않아 '대기'가 없다. 요약 줄에서 별도 항목으로 드러낸다(리뷰 지적:
+                # 조용히 빠지면 요약의 배치 수가 실제 시도 수와 어긋난다).
+                self._stats["failed_submits"] += 1
+            self._fail_items(items, exc)
+            return
+        print(f"[Anthropic] 배치 제출: {len(items)}건 ({batch.id}) — 완료까지 폴링")
+
+        started = last_note = time.monotonic()
+        while True:
+            # 상한 검사는 **루프 최상단** — retrieve 실패의 continue 로 돌아도 반드시
+            # 거쳐 간다. 예전엔 검사가 retrieve 성공 뒤에 있어서, 배치 상태를 못 읽는
+            # 상황(키 회전·배치 404·네트워크 단절)에서는 상한이 영영 안 걸렸다(리뷰
+            # 지적) — 갇힌 스레드가 큐를 쥐고 있어 다음 물결까지 같이 잠들고, 실제
+            # 탈출은 호출부 최후 방어선(상한 + 5분)이었다.
+            if time.monotonic() - started > timeout:
+                with self._cond:
+                    # 정상 배치 통계(_record)와 섞지 않는다 — 결과 0건으로 취소된
+                    # 배치가 '1배치 · 평균 대기 = 상한' 으로 남아 평균을 부풀린다
+                    # (리뷰 지적 — 제출 실패를 따로 센 것과 같은 이유).
+                    self._stats["expired_batches"] += 1
+                    self._models.update(_item_models(items))
+                # 서버 측 배치도 취소한다 — 안 하면 버려진 배치가 끝까지 돌며 과금된다.
+                try:
+                    client.messages.batches.cancel(batch.id)
+                    print(f"[Anthropic] 배치 취소: {batch.id} (대기 상한 {timeout:.0f}s 초과)")
+                except Exception as exc:
+                    print(f"[Anthropic] 배치 취소 실패({type(exc).__name__}) — "
+                          f"{batch.id} 는 콘솔에서 수동 취소 필요")
+                self._fail_items(items, BatchDeadlineExceeded(
+                    f"anthropic 배치 {batch.id} 가 {timeout:.0f}s 안에 끝나지 않았습니다 — "
+                    f"EVAL_ANTHROPIC_BATCH_TIMEOUT 을 늘리거나 배치를 끄세요"))
+                return
+            time.sleep(poll)
+            try:
+                b = client.messages.batches.retrieve(batch.id)
+            except Exception as exc:
+                now = time.monotonic()
+                if now - last_note >= _BATCH_NOTE_INTERVAL:
+                    # 조회가 계속 실패하면 아래 진행 안내(성공 경로)가 영영 안 나가
+                    # 상한까지 로그가 침묵한다 — "느린 배치"와 "상태를 못 읽는 배치"를
+                    # 로그에서 구분할 수 있게 실패 쪽에도 같은 주기의 안내를 둔다(리뷰).
+                    print(f"[Anthropic] 배치 상태 조회 실패({type(exc).__name__}) — "
+                          f"재시도 중 · {now - started:.0f}s 경과 "
+                          f"(느린 배치가 아니라 조회가 안 되는 상태입니다)")
+                    last_note = now
+                continue                       # 상한 검사는 루프 최상단에서 계속 돈다
+            if b.processing_status == "ended":
+                break
+            now = time.monotonic()
+            if now - last_note >= _BATCH_NOTE_INTERVAL:
+                done = getattr(b.request_counts, "succeeded", 0)
+                print(f"[Anthropic] 배치 진행: {done}/{len(items)}건 · {now - started:.0f}s 경과")
+                last_note = now
+
+        elapsed = time.monotonic() - started
+        self._record(len(items), elapsed, _item_models(items))
+        try:
+            by_id = {r.custom_id: r.result for r in client.messages.batches.results(batch.id)}
+        except Exception as exc:
+            self._fail_items(items, exc)
+            return
+        print(f"[Anthropic] 배치 완료: {len(items)}건 · {elapsed:.0f}s ({elapsed / 60:.1f}분)")
+        for cid, _, _, fut in items:
+            res = by_id.get(cid)
+            if res is None:
+                self._settle(fut, RuntimeError(f"배치 결과에 {cid} 누락"))
+            elif res.type == "succeeded":
+                fut.set_result(res.message)
+            else:                              # errored | canceled | expired
+                self._settle(fut, RuntimeError(
+                    f"배치 항목 실패({res.type}): {getattr(res, 'error', None)}"))
+
+
+_batch_collector = _AnthropicBatchCollector()
+
+
+def print_batch_summary() -> None:
+    """배치 실행 요약 한 줄. 배치를 한 번도 안 썼으면 아무것도 찍지 않는다.
+
+    비용 표(print_agent_table)에는 배치로 싸진 것만 보인다. 배치는 비용을 절반으로
+    줄이는 대신 벽시계 시간을 늘리는 거래라, 그 대가(제출 수·평균 대기)를 같은 자리에서
+    읽을 수 있어야 "확정 실행이 멈춘 것처럼 보인다"는 오해가 안 생긴다(리뷰 지적)."""
+    s = _batch_collector.stats()
+    if not s["batches"] and not s["failed_submits"] and not s["expired_batches"]:
+        return
+    # 모델명을 같이 남긴다 — 모델이 갈리면 대기·비용을 실행 간 직접 비교하면 안 되는데,
+    # 요약 줄만 보고 비교하는 사고를 막는다(리뷰 제안).
+    models = ",".join(s["models"]) if s["models"] else "모델 미상"
+    if s["batches"]:
+        avg = s["wait_s"] / s["batches"]
+        line = (f"{s['batches']}배치 · {s['items']}건 · "
+                f"배치당 평균 대기 {avg:.0f}s({avg / 60:.1f}분) · "
+                f"단가 {_ANTHROPIC_BATCH_DISCOUNT:.0%} 반영됨")
+    else:
+        # 완주한 배치가 없으면 할인 문구를 붙이지 않는다 — 나간 배치가 없는데
+        # "단가 반영됨" 이 남는 것이 오해의 근원이었다(리뷰 지적).
+        line = "완료된 배치 없음"
+    if s["expired_batches"]:
+        line += f" · 상한 초과(취소) {s['expired_batches']}배치"
+    if s["failed_submits"]:
+        line += f" · 제출 실패 {s['failed_submits']}배치"
+    print(f"\n  Anthropic Message Batches({models}): {line}")
 
 
 def _anthropic_caps(model: str) -> tuple:
@@ -431,6 +736,7 @@ def anthropic_chat(
     api_key: str | None = None,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     cache_system: bool = True,
+    use_batch: bool = False,
     tag: str = "LLM",
 ) -> str:
     """Anthropic Messages API 1회 호출 → 응답 텍스트("" 가능).
@@ -453,6 +759,12 @@ def anthropic_chat(
     parallel_map 으로 동시 채점하므로, 실행 시작 시 같이 출발한 EVAL_LLM_CONCURRENCY 개
     호출은 전부 캐시 미스이고 각자 쓰기(1.25배)를 지불한다. "판정 1건 50% 절감" 은 캐시가
     더워진 정상 상태의 수치라 실행 전체로는 그만큼 나오지 않는다.
+
+    use_batch 는 이 호출을 Message Batches 로 보낼지의 **호출부 의사표시**다. 실제 배치
+    사용은 use_batch 와 EVAL_ANTHROPIC_BATCH 가 모두 참일 때만 일어난다. env 만으로
+    결정하면 스위치 하나가 Eval 의 anthropic 호출 전체(probe 합성 등)를 비동기로 바꾸고,
+    순차 구간의 호출은 1건짜리 배치가 되어 건마다 폴링 대기를 지불한다 — 그래서 "묶여
+    날아가는 것을 아는" 호출부만 켠다. 기본값 False 를 바꾸지 말 것.
 
     실측 기반 추정(probe 30, 실제 30 + 오라클 15 호출, EVAL_LLM_CONCURRENCY=10):
         캐시 없음        $0.998
@@ -501,29 +813,55 @@ def anthropic_chat(
         kwargs["system"] = [block]
 
     client = anthropic.Anthropic(**({"api_key": api_key} if api_key else {}))
+    batch = use_batch and anthropic_batch_enabled()
 
     def _call(limit: int):
-        resp = client.messages.create(
+        request = dict(
             model=model,
             max_tokens=limit,
             messages=[{"role": "user", "content": user}],
             **kwargs,
         )
+        if batch:
+            # 수집기에 넘기고 배치 완료까지 이 스레드는 잠든다. 결과(Message)는 동기
+            # 호출과 같은 형태라 아래 usage/stop_reason 처리가 그대로 통한다.
+            # timeout 은 수집기 스레드가 통째로 사라진 경우의 최후 방어선이다 —
+            # 무인 실행에서는 예외보다 hang 이 나쁘므로 무한 대기를 두지 않는다.
+            fut = _batch_collector.submit(client, request)
+            try:
+                resp = fut.result(timeout=_batch_wait_timeout())
+            except _FutureTimeout:
+                # 두 경우가 같은 예외로 온다(3.11+ 에서 cf.TimeoutError = builtin):
+                #   (a) 대기 초과 — 수집기 스레드 소실 의심. 재시도 금지로 전환한다.
+                #   (b) Future 에 **실려 온** TimeoutError — 일시 장애일 수 있으므로
+                #       원래 예외 그대로 전파해 재시도 판정을 유지한다(리뷰 지적).
+                # fut.done() 이 둘을 가른다 — (b)는 결과가 실린 뒤 result() 가 되던진 것.
+                if fut.done():
+                    raise
+                raise BatchDeadlineExceeded(
+                    "anthropic 배치 수집기가 응답하지 않습니다 — 스레드 소실 의심, "
+                    "재시도하지 않고 즉시 실패합니다") from None
+        else:
+            resp = client.messages.create(**request)
         usage = getattr(resp, "usage", None)
         if usage:
             fresh = getattr(usage, "input_tokens", 0) or 0
             write = getattr(usage, "cache_creation_input_tokens", 0) or 0
             read = getattr(usage, "cache_read_input_tokens", 0) or 0
+            cost = _anthropic_cost_usd(caps, usage)
+            if cost is not None and batch:
+                cost *= _ANTHROPIC_BATCH_DISCOUNT
             # 입력 토큰은 세 갈래의 합으로 넘긴다 — fresh 만 넘기면 캐시가 잘 걸릴수록
             # 토큰 열이 작아져 "입력이 줄었다" 는 거짓 인상을 준다(비용만 준 것이다).
             log_usage(model, fresh + write + read,
                       getattr(usage, "output_tokens", 0) or 0,
-                      tag=tag, cost_usd=_anthropic_cost_usd(caps, usage))
-            if cache_system and system and system.strip() and not (write or read):
+                      tag=tag, cost_usd=cost)
+            if cache_system and system and system.strip() and not (write or read) and not batch:
                 _warn_once(
                     f"anthropic-cache-{model}",
                     f"[{tag}] {model} 에서 프롬프트 캐시가 걸리지 않았습니다 "
-                    f"(캐시 최소 {cache_min}토큰, 이번 입력 {fresh}토큰) "
+                    f"(캐시 최소 {cache_min}토큰 — 대상은 system 블록만이며, "
+                    f"이번 요청 전체 입력은 {fresh}토큰) "
                     f"— 지시문이 최소 길이에 못 미치면 에러 없이 무시됩니다.")
         return resp, _anthropic_text(getattr(resp, "content", None))
 
