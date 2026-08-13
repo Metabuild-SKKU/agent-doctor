@@ -1,0 +1,123 @@
+# 벤치마크 #1 — AutoRAG 실전 탐색 config (1-2 최적화 실행용)
+#
+# 설계 원칙: 검색축은 넓게, 생성축은 좁게.
+#   검색 노드는 후보를 늘려도 LLM 을 부르지 않는다(임베딩은 1회 계산 후 재사용) —
+#   사실상 공짜다. 반면 prompt_maker/generator 는 후보 하나마다 train 49문항 전체를
+#   LLM 으로 돌려야 한다. 그래서 공짜인 축을 최대한 열고 비싼 축을 조인다.
+#
+#   검색축을 넉넉히 여는 건 공정성 문제이기도 하다. 검색 최적화가 AutoRAG 의 주무대라
+#   거길 좁게 주면 "상대를 약하게 세웠다"는 지적을 받는다.
+#
+# 생성 LLM 을 고정하는 이유(중요):
+#   모델까지 탐색하게 두면 시스템이 아니라 **모델을 비교**하게 된다. 우리 파이프라인도
+#   같은 값으로 고정한다(RAG_LLM_PROVIDER=openrouter, RAG_OPENROUTER_MODEL=openai/gpt-4o-mini).
+#   temperature 는 사실 확인형 QA 에서 낮은 값이 거의 항상 이겨 탐색 가치가 낮지만,
+#   생성축에도 고를 것을 남겨 두려고 2종만 둔다.
+#
+# 샘플(sample_config/rag/korean/non_gpu)에서 뺀 것과 이유:
+#   · bert_score / sem_score → torch 미설치, 임베딩 설정을 메트릭에도 또 넘겨야 함
+#   · similarity_*_cutoff    → 임베딩 설정 중복. 점수 기반 cutoff 로 대체
+#   · passage_compressor     → 패시지마다 LLM 호출. 비용 대비 효과가 불확실
+#   · 로컬 리랭커            → torch 미설치(non_gpu). API 리랭커는 키 없음
+#     ↳ 우리 파이프라인의 리랭커 축은 잠그지 않는다. 실제로 켜지는지는 optimization_history
+#       로 사후 확인하고, 켜졌고 기여가 크면 그때 슬라이드에 명시한다.
+#
+# OpenRouter 접속 방법은 autorag_config_simple.yaml 주석 참고(vectordb 직접 선언 이유,
+# type: openai_like 가 _check_keys 에서 막히는 0.3.24 불일치 등).
+
+vectordb:
+  - name: openrouter_bge_m3
+    db_type: chroma
+    client_type: persistent
+    path: bench/out/autorag_project/resources/chroma
+    collection_name: bge_m3
+    similarity_metric: cosine
+    embedding_model:
+      # 우리 파이프라인과 같은 모델·차원(BAAI/bge-m3, 1024) — 임베딩 축을 맞춰
+      # 점수 차이를 검색·생성 전략 탓으로 귀속하기 위해서다.
+      - type: openai
+        model_name: baai/bge-m3
+        api_base: https://openrouter.ai/api/v1
+        api_key: ${OPENROUTER_API_KEY}
+        dimensions: 1024
+
+node_lines:
+  # ── 검색축: 넓게 (LLM 호출 없음) ─────────────────────────────────
+  - node_line_name: retrieve_node_line
+    nodes:
+      - node_type: lexical_retrieval
+        strategy:
+          metrics: [ retrieval_f1, retrieval_recall, retrieval_precision,
+                     retrieval_ndcg, retrieval_map, retrieval_mrr ]
+        top_k: 10
+        modules:
+          # ko_kiwi 는 형태소 분석기(kiwipiepy)를 쓴다. 공백 토크나이저로 두면 한국어
+          # BM25 가 부당하게 불리해져 "상대를 약하게 세팅했다"가 된다.
+          - module_type: bm25
+            bm25_tokenizer: [ ko_kiwi ]
+
+      - node_type: semantic_retrieval
+        strategy:
+          metrics: [ retrieval_f1, retrieval_recall, retrieval_precision,
+                     retrieval_ndcg, retrieval_map, retrieval_mrr ]
+        top_k: 10
+        modules:
+          - module_type: vectordb
+            vectordb: openrouter_bge_m3
+
+      - node_type: hybrid_retrieval
+        strategy:
+          metrics: [ retrieval_f1, retrieval_recall, retrieval_precision,
+                     retrieval_ndcg, retrieval_map, retrieval_mrr ]
+        top_k: 10
+        modules:
+          - module_type: hybrid_rrf
+            weight_range: (4,80)
+          - module_type: hybrid_cc
+            normalize_method: [ mm, tmm, z, dbsf ]
+            weight_range: (0.0, 1.0)
+            test_weight_size: 101
+
+      - node_type: passage_filter
+        strategy:
+          metrics: [ retrieval_f1, retrieval_recall, retrieval_precision ]
+        modules:
+          - module_type: pass_passage_filter
+          - module_type: threshold_cutoff
+            threshold: 0.85
+          - module_type: percentile_cutoff
+            percentile: 0.6
+
+  # ── 생성축: 좁게 (후보마다 49문항 × LLM) ──────────────────────────
+  - node_line_name: post_retrieve_node_line
+    nodes:
+      - node_type: prompt_maker
+        strategy:
+          metrics: [ bleu, rouge ]
+          generator_modules:
+            - module_type: llama_index_llm
+              llm: openailike
+              model: openai/gpt-4o-mini
+              api_base: https://openrouter.ai/api/v1
+              api_key: ${OPENROUTER_API_KEY}
+              is_chat_model: true
+              context_window: 128000
+              temperature: 0.0
+        modules:
+          - module_type: fstring
+            prompt:
+              - "주어진 passage만을 이용하여 question에 따라 답하시오 passage: {retrieved_contents} \n\n Question: {query} \n\n Answer:"
+              - "당신은 세금 안내 도우미입니다. 아래 자료에 명시된 내용만으로 질문에 답하고, 자료에 없으면 '자료에서 확인되지 않습니다'라고 답하세요.\n\n자료:\n{retrieved_contents}\n\n질문: {query}\n답변:"
+
+      - node_type: generator
+        strategy:
+          metrics: [ bleu, rouge ]
+        modules:
+          - module_type: llama_index_llm
+            llm: openailike
+            model: openai/gpt-4o-mini
+            api_base: https://openrouter.ai/api/v1
+            api_key: ${OPENROUTER_API_KEY}
+            is_chat_model: true
+            context_window: 128000
+            temperature: [ 0.0, 0.5 ]
