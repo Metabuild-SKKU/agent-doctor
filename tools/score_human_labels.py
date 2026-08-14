@@ -38,7 +38,9 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from tools.make_label_sheet import NO_LABEL, PRIMARY_FIELD, UNSURE
-from tools.score_ragec import _pad, _read_jsonl, _rpad, _wrap, probe_failed, stage_of
+from tools.score_ragec import (
+    _pad, _read_jsonl, _rpad, _width, _wrap, probe_failed, stage_of,
+)
 
 # LABELS.md 의 그룹 구분. 그룹 정확도는 라벨보다 거칠어 표기 흔들림에 강하다.
 _GROUPS = {"chunking_": "A", "retrieval_": "A", "reranker_": "A",
@@ -154,23 +156,35 @@ def format_report(result: dict) -> str:
     if not total:
         lines.append("  채점 대상이 없습니다 — 아래 제외 내역을 보세요.")
     else:
-        lines.append(f"  라벨 포함 정확도  {hit}/{total}  ({hit / total * 100:.1f}%)")
-        lines.append(f"  라벨 top-1 정확도 {result['top1']}/{total} "
-                     f"({result['top1'] / total * 100:.1f}%)   "
-                     f"← 포함만 보면 라벨 남발이 점수를 올린다")
-        for name, key in (("단계 정확도", "stage"), ("그룹 정확도", "group")):
-            n = result[f"{key}_total"]
-            if n:
-                lines.append(f"  {name}       {result[f'{key}_hit']}/{n} "
-                             f"({result[f'{key}_hit'] / n * 100:.1f}%)")
+        # 이름 열 폭을 고정하지 않고 제일 긴 항목에 맞춘다 — 사람이 쉼표로 라벨 둘을 적으면
+        # 45자가 나와 고정 폭(40)을 넘고, 그 줄부터 숫자 열이 통째로 밀린다(실측).
+        rows = [("라벨 포함 정확도", hit, total,
+                 "우리 findings 안에 사람 라벨이 있나"),
+                ("라벨 top-1 정확도", result["top1"], total,
+                 "그걸 **1순위로** 냈나 — 포함만 보면 라벨 남발이 점수를 올린다"),
+                ("단계 정확도", result["stage_hit"], result["stage_total"],
+                 "검색/생성 중 어느 단계인지는 맞췄나"),
+                ("그룹 정확도", result["group_hit"], result["group_total"],
+                 "A/B/C/D 그룹은 맞췄나 — 가장 거친 축")]
+        name_w = max(_width(r[0]) for r in rows) + 2
+        for name, ok, n, note in rows:
+            if not n:
+                continue
+            lines.append("  " + _pad(name, name_w)
+                         + _rpad(f"{ok}/{n}", 8) + _rpad(f"({ok / n * 100:.1f}%)", 10)
+                         + "   " + note)
         lines.append("")
         lines.append("  참고 — RAGEC 논문(arXiv:2510.13975)의 자체 분류기:"
                      " 단계 57.8% · 유형 40.3%")
         lines.append("        (채점 규칙이 달라 직접 비교는 불가. 수준 감각용)")
 
-        lines += ["", "  " + _pad("사람이 붙인 라벨", 40) + _rpad("맞음", 8) + _rpad("전체", 8)]
+        label_w = max([_width("사람이 붙인 라벨")]
+                      + [_width(k) for k in result["per_label"]]) + 2
+        lines += ["", "  " + _pad("사람이 붙인 라벨", label_w)
+                  + _rpad("맞음", 6) + _rpad("전체", 6)]
         for label, (ok, n) in result["per_label"].items():
-            lines.append("  " + _pad(label, 40) + _rpad(str(ok), 8) + _rpad(str(n), 8))
+            lines.append("  " + _pad(label, label_w)
+                         + _rpad(str(ok), 6) + _rpad(str(n), 6))
 
     lines.append("")
     if result["no_diagnosis"]:

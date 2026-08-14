@@ -22,6 +22,7 @@ from tools.make_label_sheet import (
     NO_LABEL, PRIMARY_FIELD, UNSURE, build_sheet, stratified_sample, to_entry,
 )
 from tools.score_human_labels import group_of, read_sheet, score
+from tools.score_ragec import _width
 
 
 def _row(qa_id, *labels, failed=True, recall=0.0, **obs):
@@ -121,6 +122,35 @@ class EndToEndFromRealReportTest(unittest.TestCase):
         blob = json.dumps(entry, ensure_ascii=False)
         self.assertNotIn("retrieval_low_rank", blob)
         self.assertNotIn("근거 문구", blob)
+
+    def test_wide_rank_reaches_the_sheet_from_a_real_report(self):
+        """헬퍼만 테스트하면 report 가 안 실어도 통과한다 — 이 프로젝트에서 같은 유형의
+        배선 누락이 세 번째다(observations · qtype · 여기).
+
+        signals["gold_ranks"] 가 EvalRecord 와 함께 사라지므로 report 가 관측으로 남기지
+        않으면 시트는 영영 '검색안됨' 만 보게 되고, 사람이 low_rank 와 missing_gold 를
+        구분할 수 없다.
+        """
+        from agents.eval.report import build_report
+        from agents.eval.types import EvalRecord
+        from core.schema import Finding, Probe
+        from tools.score_ragec import findings_from_report
+
+        probe = Probe(probe_id="probe_qa_8", question="질문?", source="taxonomy",
+                      ground_truth="정답", gold_chunk_ids=["d_chunk_5"])
+        record = EvalRecord(
+            probe=probe,
+            generated_answer="틀린 답",
+            retrieved_chunk_ids=["d_chunk_1", "d_chunk_2"],
+            findings=[Finding(finding_id="f1", type="retrieval_failure",
+                              severity="warning", description="근거",
+                              label="retrieval_low_rank", affected_probes=["probe_qa_8"])],
+        )
+        record.signals["gold_ranks"] = {"d_chunk_5": 13}      # tier2 재검색 측정치
+
+        rows = findings_from_report(build_report([record], iteration=1, mode=1), [probe])
+
+        self.assertEqual(to_entry(rows[0])["정답청크_순위"], "d_chunk_5=검색안됨(전체 13위)")
 
 
 class StratifiedSamplingTest(unittest.TestCase):
@@ -258,6 +288,58 @@ class ResultSavingTest(unittest.TestCase):
         _text, data = self._save()
         for key in ("total", "hit", "top1", "stage_hit", "per_label", "측정시각"):
             self.assertIn(key, data, key)
+
+
+class WideRankInSheetTest(unittest.TestCase):
+    """top_k 밖 순위를 안 보여주면 사람이 low_rank 와 missing_gold 를 못 가른다.
+
+    실측: 라벨러가 6건을 전부 retrieval_missing_gold 로 봤는데(대조 0/6), 그 청크들은
+    넓은 재검색에서 13·15·24·27위였다. 진단기는 알고 있었고 시트만 몰랐다.
+    """
+
+    def test_missed_gold_shows_its_wide_rank(self):
+        entry = to_entry(_row("1", "x", gold_chunk_ids=["g1"], retrieved_chunk_ids=["a"],
+                              gold_wide_ranks={"g1": 13}))
+        self.assertEqual(entry["정답청크_순위"], "g1=검색안됨(전체 13위)")
+
+    def test_gold_beyond_the_wide_search_is_marked_differently(self):
+        """100위 밖은 순위 문제가 아니라 표현이 안 맞는 쪽이다 — 처방이 다르다."""
+        entry = to_entry(_row("1", "x", gold_chunk_ids=["g1"], retrieved_chunk_ids=["a"],
+                              gold_wide_ranks={"g2": 5}))
+        self.assertEqual(entry["정답청크_순위"], "g1=검색안됨(100위 밖)")
+
+    def test_retrieved_gold_keeps_its_result_rank(self):
+        entry = to_entry(_row("1", "x", gold_chunk_ids=["g1"],
+                              retrieved_chunk_ids=["a", "g1"], gold_wide_ranks={"g1": 2}))
+        self.assertEqual(entry["정답청크_순위"], "g1=2위")
+
+    def test_without_wide_ranks_it_falls_back_quietly(self):
+        """구버전 덤프(재검색 미측정)에서도 시트가 나가야 한다."""
+        entry = to_entry(_row("1", "x", gold_chunk_ids=["g1"], retrieved_chunk_ids=["a"]))
+        self.assertEqual(entry["정답청크_순위"], "g1=검색안됨")
+
+
+class ReportTableAlignmentTest(unittest.TestCase):
+    """사람이 쉼표로 라벨 둘을 적으면 45자가 나와 고정 폭(40)을 넘고 숫자 열이 밀린다."""
+
+    def test_long_label_does_not_shift_the_number_columns(self):
+        from tools.score_human_labels import format_report
+        rows = [{"qa_id": "1", PRIMARY_FIELD: "retrieval_low_rank"},
+                {"qa_id": "2", PRIMARY_FIELD: "bad_gold_answer, retrieval_duplicate_crowding"}]
+        found = [_row("1", "retrieval_low_rank"), _row("2", "retrieval_low_rank")]
+        out = format_report(score(rows, found)).splitlines()
+        table = [l for l in out if "사람이 붙인 라벨" in l or l.startswith("  retrieval_low_rank")
+                 or l.startswith("  bad_gold_answer,")]
+        self.assertEqual(len({_width(l) for l in table}), 1, chr(10).join(table))
+
+    def test_headline_rows_line_up(self):
+        from tools.score_human_labels import format_report
+        out = format_report(score([{"qa_id": "1", PRIMARY_FIELD: "retrieval_low_rank"}],
+                                  [_row("1", "retrieval_low_rank")])).splitlines()
+        head = [l for l in out if "정확도" in l and "%" in l]
+        self.assertGreaterEqual(len(head), 3)
+        starts = {_width(l[:l.index("(")]) for l in head}
+        self.assertEqual(len(starts), 1, chr(10).join(head))
 
 
 class SheetRoundTripTest(unittest.TestCase):

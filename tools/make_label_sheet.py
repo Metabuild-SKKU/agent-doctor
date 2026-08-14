@@ -113,19 +113,38 @@ def stratified_sample(rows: list[dict], limit: int, seed: int = 0) -> list[dict]
 
 
 def _rank_note(obs: dict) -> str:
-    """정답 청크가 검색 결과의 몇 위였나. 없으면 '검색안됨'.
+    """정답 청크가 몇 위였나. 시트에서 **가장 중요한 항목**이다.
 
-    이게 없으면 사람이 retrieval_low_rank(순위가 밀림)와 retrieval_missing_gold(아예 없음)를
-    구분할 수 없다 — 지표 중 가장 중요한 항목이다.
+    두 순위를 함께 보여준다.
+
+      · 최종 결과 안의 순위 — top_k 안에 들어왔나
+      · 넓은 재검색(100위까지) 기준 순위 — 안 들어왔다면 얼마나 밀렸나
+
+    후자가 없으면 top_k 밖이 전부 '검색안됨' 으로 뭉뚱그려져, 사람이
+    retrieval_low_rank(밀림)와 retrieval_missing_gold(아예 없음)를 **구분할 수 없다.**
+    실측: 라벨러가 6건을 전부 missing_gold 로 봤는데, 그 청크들은 13·15·24·27위였다
+    (진단기는 알고 있었고 시트만 몰랐다 → 사람 라벨 대조 0/6).
     """
     gold = obs.get("gold_chunk_ids") or []
     retrieved = obs.get("retrieved_chunk_ids") or []
+    wide = obs.get("gold_wide_ranks") or {}
     if not gold:
         return "-"
-    return ", ".join(
-        f"{cid}={retrieved.index(cid) + 1}위" if cid in retrieved else f"{cid}=검색안됨"
-        for cid in gold
-    )
+
+    notes = []
+    for cid in gold:
+        if cid in retrieved:
+            notes.append(f"{cid}={retrieved.index(cid) + 1}위")
+            continue
+        rank = wide.get(cid)
+        if isinstance(rank, int):
+            notes.append(f"{cid}=검색안됨(전체 {rank}위)")
+        elif wide:
+            # 재검색 100위 안에도 없다 — 순위 문제가 아니라 표현이 안 맞는 쪽이다.
+            notes.append(f"{cid}=검색안됨(100위 밖)")
+        else:
+            notes.append(f"{cid}=검색안됨")
+    return ", ".join(notes)
 
 
 def _round(value, digits: int = 3):

@@ -263,6 +263,12 @@ def _observations(record: EvalRecord) -> dict:
         "gold_chunk_total": len(gold_ids),
         "gold_chunk_ids": gold_ids,
         "retrieved_chunk_ids": retrieved,
+        # **넓은 재검색(wide_n=100) 기준 gold 순위.** top_k 안의 순위만 보여주면 그 밖은
+        # 전부 '검색안됨' 으로 뭉뚱그려져, 사람이 retrieval_low_rank(밀림)와
+        # retrieval_missing_gold(아예 없음)를 **구분할 수단이 없다**. 실측: 라벨러가 6건을
+        # 전부 missing_gold 로 봤는데 진단기는 그 청크들이 13·15·24·27위라는 걸 알고 있었다
+        # (사람 라벨 대조 0/6). 이건 측정값이라 시트에 실어도 블라인딩을 깨지 않는다.
+        "gold_wide_ranks": record.signals.get("gold_ranks") or {},
         "search_mode": details.get("search_mode", "-"),
         "reranker_status": details.get("reranker_status", "disabled"),
         "mmr_applied": bool(details.get("mmr_applied")),
