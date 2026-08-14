@@ -103,7 +103,10 @@ def main() -> int:
     os.environ.setdefault("RAG_ANSWER_LANGUAGE", "match")
 
     from core.run_logger import setup_run_logging
-    log_path = setup_run_logging(prefix="ragec")
+    # 검증 로그는 output/logs 가 아니라 검증 폴더 아래에 모은다 — 파이프라인 스모크 로그와
+    # 섞이면 "어느 게 유효성 검증이었지" 를 매번 뒤져야 한다. 산출물(findings·시트·채점)이
+    # 전부 output/ragec 아래 있으니 로그도 같은 자리에 둔다.
+    log_path = setup_run_logging(log_dir=str(OUT_DIR / "logs"), prefix="run")
 
     from agents.eval.agent import run as eval_run
     from agents.index.agent import run as index_run

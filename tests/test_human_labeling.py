@@ -214,6 +214,43 @@ class GroupMappingTest(unittest.TestCase):
             self.assertEqual(group_of(label), expected, label)
 
 
+class ResultSavingTest(unittest.TestCase):
+    """사람 시간이 몇 시간 들어간 산출물이라 콘솔에만 두면 안 된다.
+
+    창을 닫으면 사라지고, 나중에 "그때 몇 % 였지" 를 확인하려면 라벨링을 다시 해야 한다.
+    """
+
+    def _save(self):
+        import pathlib
+        import tempfile
+        from tools.score_human_labels import format_report, save_result
+        result = score([{"qa_id": "1", PRIMARY_FIELD: "retrieval_missing_gold"}],
+                       [_row("1", "retrieval_low_rank")])
+        tmp = tempfile.mkdtemp()
+        txt, js = save_result(result, pathlib.Path(tmp), format_report(result))
+        return (pathlib.Path(txt).read_text(encoding="utf-8"),
+                json.loads(pathlib.Path(js).read_text(encoding="utf-8")))
+
+    def test_text_report_is_written(self):
+        text, _ = self._save()
+        self.assertIn("사람 라벨 대조", text)
+        self.assertIn("retrieval_missing_gold", text)
+
+    def test_json_carries_the_confusion_pairs(self):
+        """혼동 쌍은 튜플 키라 그냥 담으면 직렬화가 죽는다 — 어디가 어긋났는지가
+        제일 쓸모 있는 정보라 리스트로 펴서 싣는다."""
+        _text, data = self._save()
+        self.assertEqual(data["confusion"],
+                         [{"사람": "retrieval_missing_gold",
+                           "우리": "retrieval_low_rank", "건수": 1}])
+
+    def test_json_keeps_the_headline_numbers(self):
+        """실행 간 비교(개선 전후)를 하려면 파싱 가능한 형태여야 한다."""
+        _text, data = self._save()
+        for key in ("total", "hit", "top1", "stage_hit", "per_label", "측정시각"):
+            self.assertIn(key, data, key)
+
+
 class SheetRoundTripTest(unittest.TestCase):
     """사람이 손으로 채우는 파일이라 읽기가 관대해야 한다."""
 

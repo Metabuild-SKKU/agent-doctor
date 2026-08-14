@@ -63,6 +63,7 @@ Ingest → Index → Eval까지만 돕니다. **Optimize는 일부러 돌리지 
 ```
 output/ragec/findings.jsonl     probe별 우리 진단 + 관측값
 output/ragec/label_sheet.json   사람이 채울 시트 (우리 진단 없음)
+output/ragec/logs/run_*.log     실행 로그 (파이프라인 스모크 로그와 분리)
 콘솔                            RAGEC 대조 결과
 ```
 
@@ -125,6 +126,9 @@ qa_id 2205
 1. `output/ragec/label_sheet.json`을 엽니다
 2. 각 항목의 상황을 읽고 **`정답라벨`** 칸에 라벨 이름을 적습니다
 3. 저장 후 `python tools/score_human_labels.py`
+
+결과는 `output/ragec/scores/human_labels_<시각>.txt`(사람용)와 `.json`(실행 간 비교용)으로
+자동 저장됩니다. 콘솔에만 두면 창을 닫는 순간 사라지고, 다시 보려면 라벨링을 다시 해야 합니다.
 
 ### 시트 모양
 

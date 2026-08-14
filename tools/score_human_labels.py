@@ -31,6 +31,7 @@ import argparse
 import collections
 import json
 import pathlib
+from datetime import datetime
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -199,14 +200,44 @@ def format_detail(result: dict) -> str:
     return "\n".join(lines)
 
 
+def save_result(result: dict, out_dir: pathlib.Path, text: str) -> tuple[str, str]:
+    """채점 결과를 파일로 남긴다.
+
+    사람 시간이 몇 시간 들어간 라벨링의 산출물이라 콘솔에만 두면 안 된다 — 창을 닫으면
+    사라지고, 나중에 "그때 몇 % 였지" 를 확인하려면 라벨 시트를 다시 찾아야 한다.
+    사람이 읽을 텍스트와 기계가 읽을 JSON 을 함께 남긴다(전자는 보고용, 후자는 실행 간
+    비교용 — 개선 전후를 나란히 놓으려면 파싱 가능한 형태가 필요하다).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    txt = out_dir / f"human_labels_{stamp}.txt"
+    txt.write_text(text, encoding="utf-8")
+
+    payload = {k: v for k, v in result.items() if k != "confusion"}
+    # 혼동 쌍은 튜플 키라 JSON 이 못 담는다 — 어디가 어긋났는지가 제일 쓸모 있는 정보라
+    # 리스트로 펴서 싣는다.
+    payload["confusion"] = [
+        {"사람": gold, "우리": got, "건수": n}
+        for (gold, got), n in result["confusion"].most_common()
+    ]
+    payload["측정시각"] = stamp
+    js = out_dir / f"human_labels_{stamp}.json"
+    js.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(txt), str(js)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="사람 라벨 ↔ 우리 진단 대조")
     ap.add_argument("--sheet", default="output/ragec/label_sheet.json",
                     help=f"'{PRIMARY_FIELD}' 을 채운 라벨 시트")
     ap.add_argument("--findings", default="output/ragec/findings.jsonl")
+    ap.add_argument("--out", default="output/ragec/scores",
+                    help="채점 결과 저장 위치")
     ap.add_argument("--detail", action="store_true", default=True,
                     help="probe 별 대조(기본 ON)")
     ap.add_argument("--no-detail", dest="detail", action="store_false")
+    ap.add_argument("--no-save", dest="save", action="store_false", default=True,
+                    help="파일로 저장하지 않고 콘솔에만 출력")
     args = ap.parse_args()
 
     for path in (args.sheet, args.findings):
@@ -215,10 +246,14 @@ def main() -> int:
             return 1
 
     result = score(read_sheet(args.sheet), _read_jsonl(args.findings))
-    if args.detail:
-        print(format_detail(result))
-        print()
-    print(format_report(result))
+    blocks = ([format_detail(result), ""] if args.detail else []) + [format_report(result)]
+    text = "\n".join(blocks)
+    print(text)
+
+    if args.save:
+        txt, js = save_result(result, pathlib.Path(args.out), text)
+        print(f"\n저장 → {txt}")
+        print(f"     → {js}")
     return 0
 
 
