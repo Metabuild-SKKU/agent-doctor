@@ -148,7 +148,9 @@ class JudgeReasonScaleTest(unittest.TestCase):
 
         self.assertIn("78.0→79.0", verdict.reason)
         self.assertIn("+1.0", verdict.reason)
-        self.assertIn("+2.0", verdict.reason)   # MIN_IMPROVEMENT_MARGIN 0.02 → 2.0
+        # 마진도 ×100 되어야 문장 안에서 상승폭과 같은 축이 된다. 상수를 재보정해도
+        # (#102) 이 계약은 그대로여야 하므로 리터럴 대신 상수에서 끌어온다.
+        self.assertIn(f"+{history.MIN_IMPROVEMENT_MARGIN * 100:.1f}", verdict.reason)
         self.assertTrue(verdict.margin_rejected)
 
     def test_keep_reason_uses_display_scale(self):
