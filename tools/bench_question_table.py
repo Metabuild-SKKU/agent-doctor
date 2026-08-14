@@ -23,6 +23,7 @@ tools/bench_question_table.py
         "우리+리랭커=bench/out/report_ours_rr"
 
   값은 진단서 폴더 경로다(report.json 과 *.jsonl 이 그 안에 있어야 한다).
+  --out=bench/out/question_table_li  로 짝마다 다른 파일에 쓴다(확장자는 붙지 않는다).
 """
 from __future__ import annotations
 
@@ -76,11 +77,18 @@ def main(argv: list[str]) -> int:
     from core.console import force_utf8_stdio
     force_utf8_stdio()
 
+    # 산출 경로를 바꿀 수 있어야 한다. 기본 경로로만 쓰면 비교 짝을 바꿔 돌릴 때마다
+    # 앞서 만든 표(발표에 쓰는 커밋된 산출물)를 말없이 덮어쓴다.
+    global OUT_JSON, OUT_MD
     golden_path = DEFAULT_GOLDEN
     pairs = []
     for arg in argv:
         if arg.startswith("--golden="):
             golden_path = arg.split("=", 1)[1]
+        elif arg.startswith("--out="):
+            stem = arg.split("=", 1)[1]
+            stem = stem[:-5] if stem.endswith(".json") else stem
+            OUT_JSON, OUT_MD = f"{stem}.json", f"{stem}.md"
         elif "=" in arg:
             label, folder = arg.split("=", 1)
             pairs.append((label, folder))

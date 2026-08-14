@@ -19,9 +19,23 @@ LlamaIndex 는 자체 청킹(SentenceSplitter)·자체 노드 ID(UUID)·자체 �
     hallucinate  컨텍스트를 무시하고 지어내라고 지시 → 환각 유도
     offtopic     엉뚱한 질문의 컨텍스트를 붙인다 → 검색 무관 유도
 
+--stock 은 결함 주입과 다른 용도다(벤치마크용). 결함 프로파일은 검색 설정을 **우리와
+같은 값**(512/50, top_k=5)으로 맞춰 놓는다 - 결함 축만 흔들어야 원인 귀속이 되기
+때문이다. 반대로 벤치마크에서 알고 싶은 건 "LlamaIndex 에 맡기면 뭐가 나오나"이므로,
+그 고정을 **걷어내고** 라이브러리 기본값 그대로 돌린다:
+
+    청킹 SentenceSplitter 1024/200 · top_k 2 · 리랭커 없음 · COMPACT 합성 · 기본 프롬프트
+
+임베딩·생성 모델만은 --stock 에서도 고정한다. 그걸 풀면 LlamaIndex 기본 임베딩(OpenAI)
+대 우리 bge-m3 가 되어 **시스템이 아니라 벤더를 비교**하게 되고, 점수 차를 루프 덕으로
+귀속할 수 없다. 그래서 통제 항목은 임베딩·생성 모델·temperature 셋뿐이다.
+
 사용법:
     python -m tools.make_external_rag --defect=none --out=tests/fixtures/external_rag/ext_none.jsonl
     python -m tools.make_external_rag --defect=starve --limit=5
+    # 벤치마크용 - LlamaIndex 기본값 그대로, 시험지는 우리와 같은 골든셋
+    EXT_RAG_LLM_MODEL=openai/gpt-4o-mini python -m tools.make_external_rag --stock \
+        --questions=bench/golden_test_50.json --out=bench/out/llamaindex.jsonl
 
 임베딩·LLM 은 .env 의 OpenRouter 키를 쓴다(INDEX_EMBED_PROVIDER 와 무관하게
 이 도구는 자기 스택으로 돈다 — '남의 RAG' 이므로 우리 설정을 따르지 않는다).
@@ -45,6 +59,9 @@ GAP_QUESTIONS = "tools/external_rag_questions_gap.json"
 # 뽑은 로그는 커밋되는 테스트 자산이라 tests/fixtures 로 간다. 최상위 logs/ 를 쓰면
 # 런타임 산출물 경로(output/logs — core/run_logger.py)와 이름이 겹쳐 성격이 헷갈린다.
 FIXTURE_DIR = "tests/fixtures/external_rag"
+# --stock 산출물은 테스트 자산이 아니라 벤치마크 결과물이라 bench/out 으로 간다
+# (우리 쪽 로그 tools/make_our_rag.py 와 같은 폴더 - 채점 도구가 둘을 나란히 읽는다).
+STOCK_OUT = "bench/out/llamaindex.jsonl"
 
 # OpenRouter 는 OpenAI 호환 API 라 llama-index-embeddings-openai / llms-openai 를
 # 그대로 쓴다(추가 패키지 불필요 — PR #88 이 core/llm_clients 에서 쓴 것과 같은 원리).
@@ -122,8 +139,12 @@ def load_questions(path: str) -> list[dict]:
     return [q for q in items if str(q.get("question") or "").strip()]
 
 
-def build_index(docs: list[dict], defect: str):
-    """LlamaIndex 로 '남의 RAG' 를 구성한다. 우리 모듈은 일절 쓰지 않는다."""
+def build_index(docs: list[dict], defect: str, stock: bool = False, top_k: int = 0):
+    """LlamaIndex 로 '남의 RAG' 를 구성한다. 우리 모듈은 일절 쓰지 않는다.
+
+    stock=True 면 청킹·top_k 를 지정하지 않는다 - LlamaIndex 기본값이 나오게 둔다.
+    top_k>0 은 stock 에서 **그 축 하나만** 되돌린다("top_k=2 는 누구나 5 로 올린다"는
+    반론용 대조 열). 청킹·프롬프트·합성은 여전히 LlamaIndex 기본값이다."""
     from llama_index.core import Document, VectorStoreIndex, Settings
     from llama_index.core.node_parser import SentenceSplitter
     from llama_index.embeddings.openai import OpenAIEmbedding
@@ -133,7 +154,7 @@ def build_index(docs: list[dict], defect: str):
     if not key:
         sys.exit("[ext-rag] OPENROUTER_API_KEY 가 없습니다 — .env 를 확인하세요.")
 
-    cfg = DEFECTS[defect]
+    cfg = dict(DEFECTS[defect])
     # bge-m3 는 OpenAI 카탈로그에 없는 모델이라 차원을 명시해야 SDK 가 검증을 통과한다.
     Settings.embed_model = OpenAIEmbedding(
         model_name=EMBED_MODEL, api_base=OPENROUTER_BASE, api_key=key, dimensions=1024)
@@ -145,24 +166,53 @@ def build_index(docs: list[dict], defect: str):
         context_window=int(os.getenv("EXT_RAG_CONTEXT_WINDOW", "200000")),
         is_chat_model=True,
         temperature=1.0 if defect == "hallucinate" else 0.0)
-    Settings.node_parser = SentenceSplitter(
-        chunk_size=cfg["chunk_size"], chunk_overlap=cfg["chunk_overlap"])
+    # stock 은 node_parser 를 아예 건드리지 않는다 - Settings 가 lazy 로 만드는 기본
+    # SentenceSplitter 가 그대로 쓰인다. 같은 값을 여기 베껴 적으면 '기본값 그대로'라는
+    # 주장이 우리 상수에 의존하게 되어, 라이브러리가 기본을 바꿔도 눈치채지 못한다.
+    if not stock:
+        Settings.node_parser = SentenceSplitter(
+            chunk_size=cfg["chunk_size"], chunk_overlap=cfg["chunk_overlap"])
 
     li_docs = [Document(text=d["text"], metadata={"source": d.get("source") or d.get("id")})
                for d in docs]
     index = VectorStoreIndex.from_documents(li_docs)
 
-    kwargs = {"similarity_top_k": cfg["top_k"]}
+    if stock:
+        kwargs = {"similarity_top_k": top_k} if top_k else {}
+    else:
+        kwargs = {"similarity_top_k": cfg["top_k"]}
     tmpl = {"hallucinate": HALLUCINATE_TMPL,
             "hallucinate_fixed": HALLUCINATE_FIXED_TMPL}.get(defect)
     if tmpl:
         from llama_index.core import PromptTemplate
         kwargs["text_qa_template"] = PromptTemplate(tmpl)
-    return index.as_query_engine(**kwargs), cfg
+    engine = index.as_query_engine(**kwargs)
+
+    if stock:
+        # 로그의 config 는 '실제로 돈 값'이어야 한다(진단기가 처방에 현재값을 싣는다).
+        # 상수를 적어 넣지 않고 엔진·Settings 에서 되읽어, 로그만 거짓말하는 일을 막는다.
+        cfg = {
+            "top_k": engine.retriever.similarity_top_k,
+            "chunk_size": Settings.node_parser.chunk_size,
+            "chunk_overlap": Settings.node_parser.chunk_overlap,
+            "preset": f"llamaindex_stock_topk{top_k}" if top_k else "llamaindex_stock",
+        }
+    return engine, cfg
 
 
 def run(questions: list[dict], engine, cfg: dict, defect: str) -> list[dict]:
     """질문을 돌려 스키마 v1 로그 레코드를 만든다."""
+    # 실행 내내 같은 값이라 루프 밖에서 한 번만 만든다. chunk_overlap 을 싣는 이유:
+    # 청킹 처방(chunk_size 512→768 류)은 겹침까지 봐야 현재값을 제대로 반영한다.
+    log_config = {
+        "top_k": cfg["top_k"], "chunk_size": cfg["chunk_size"],
+        "chunk_overlap": cfg["chunk_overlap"],
+        "embedding_model": EMBED_MODEL, "llm_model": LLM_MODEL,
+        "use_reranker": False,
+    }
+    if cfg.get("preset"):
+        log_config["preset"] = cfg["preset"]
+
     records = []
     for i, q in enumerate(questions, 1):
         question = q["question"]
@@ -187,9 +237,7 @@ def run(questions: list[dict], engine, cfg: dict, defect: str) -> list[dict]:
             "question": question,
             "contexts": contexts,
             "answer": str(resp).strip(),
-            "config": {"top_k": cfg["top_k"], "chunk_size": cfg["chunk_size"],
-                       "embedding_model": EMBED_MODEL, "llm_model": LLM_MODEL,
-                       "use_reranker": False},
+            "config": dict(log_config),
             "latency_ms": latency,
         }
         # 골든셋 계열은 있을 때만 싣는다(시험지 필드 — 로그엔 원래 없는 값).
@@ -205,18 +253,38 @@ def run(questions: list[dict], engine, cfg: dict, defect: str) -> list[dict]:
 
 
 def main() -> int:
+    # 콘솔 인코딩 고정 - 형제 도구(make_our_rag / bench_compare)와 같은 처리.
+    # 없으면 cp949 stdout 에서 한글 진행 로그가 깨지거나 UnicodeEncodeError 로 죽는다.
+    from core.console import force_utf8_stdio
+    force_utf8_stdio()
+
     ap = argparse.ArgumentParser(description="외부 RAG 시뮬레이터 (LlamaIndex)")
     ap.add_argument("--defect", default="none", choices=sorted(DEFECTS),
                     help="주입할 결함 (기본 none = 정상 대조군)")
     ap.add_argument("--corpus", default=DEFAULT_CORPUS)
     ap.add_argument("--questions", default=None,
                     help=f"기본: {DEFAULT_QUESTIONS} (hallucinate 는 {GAP_QUESTIONS})")
+    ap.add_argument("--stock", action="store_true",
+                    help=f"LlamaIndex 기본값 그대로 돌린다(벤치마크용). 기본 출력: {STOCK_OUT}")
+    ap.add_argument("--top-k", type=int, default=0,
+                    help="stock 에서 top_k 축만 되돌린다(반론 대조 열). 청킹은 기본값 유지")
     ap.add_argument("--out", default=None,
                     help=f"기본: {FIXTURE_DIR}/ext_<defect>.jsonl")
     ap.add_argument("--limit", type=int, default=0, help="질문 수 제한(0=전체)")
     ap.add_argument("--no-gold", action="store_true",
                     help="골든셋 필드를 빼고 뽑는다(triad 전용 tier 재현)")
     args = ap.parse_args()
+
+    # 결함 프로파일은 검색 설정을 고정해야 성립하고, stock 은 그 고정을 걷어내는 것이라
+    # 둘은 같이 못 선다. 조용히 한쪽을 이기게 두면 '결함을 주입했다'고 적힌 로그가
+    # 실제로는 기본값으로 돌아 버린다.
+    if args.stock and args.defect != "none":
+        sys.exit(f"[ext-rag] --stock 은 --defect={args.defect} 와 함께 쓸 수 없습니다"
+                 " (stock 은 결함 프로파일의 설정 고정을 걷어냅니다).")
+    # 결함 프로파일에서 top_k 를 덮으면 starve(top_k=1) 같은 정의가 조용히 무너진다.
+    if args.top_k and not args.stock:
+        sys.exit("[ext-rag] --top-k 는 --stock 에서만 씁니다"
+                 " (결함 프로파일의 top_k 는 결함 정의의 일부입니다).")
 
     _require("llama_index.core", "llama-index")
     _require("llama_index.embeddings.openai", "llama-index-embeddings-openai")
@@ -231,19 +299,34 @@ def main() -> int:
     if args.no_gold:
         questions = [{"question": q["question"]} for q in questions]
 
-    out = args.out or f"{FIXTURE_DIR}/ext_{args.defect}.jsonl"
+    stock_out = (STOCK_OUT.replace(".jsonl", f"_topk{args.top_k}.jsonl")
+                 if args.top_k else STOCK_OUT)
+    out = args.out or (stock_out if args.stock
+                       else f"{FIXTURE_DIR}/ext_{args.defect}.jsonl")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
 
-    print(f"[ext-rag] defect={args.defect} docs={len(docs)} questions={len(questions)}")
+    mode = f"defect={args.defect}"
+    if args.stock:
+        mode = ("stock(LlamaIndex 기본값)" if not args.top_k
+                else f"stock + top_k={args.top_k} 만 지정")
+    print(f"[ext-rag] {mode} docs={len(docs)} questions={len(questions)}")
     print(f"[ext-rag] embed={EMBED_MODEL} llm={LLM_MODEL} (OpenRouter)")
-    engine, cfg = build_index(docs, args.defect)
+    engine, cfg = build_index(docs, args.defect, stock=args.stock, top_k=args.top_k)
+    if args.stock:
+        # 되읽은 값을 찍는다 - 표에 들어갈 '상대 설정'이라 눈으로 확인하고 넘어가야 한다.
+        print(f"[ext-rag] 기본값 확인: chunk {cfg['chunk_size']}/{cfg['chunk_overlap']}"
+              f" · top_k={cfg['top_k']} · 리랭커 없음")
     records = run(questions, engine, cfg, args.defect)
 
     with open(out, "w", encoding="utf-8") as f:
         for r in records:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     print(f"[ext-rag] {len(records)}건 → {out}")
-    print(f"[ext-rag] 다음: python -m agents.eval.replay {out}")
+    if args.stock:
+        print(f"[ext-rag] 다음: python -m tools.bench_compare llamaindex={out}"
+              f" --golden={q_path}")
+    else:
+        print(f"[ext-rag] 다음: python -m agents.eval.replay {out}")
     return 0
 
 
