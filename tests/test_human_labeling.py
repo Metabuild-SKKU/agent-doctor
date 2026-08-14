@@ -79,6 +79,50 @@ class SheetHidesOurDiagnosisTest(unittest.TestCase):
         self.assertIn(UNSURE, guide)
 
 
+class EndToEndFromRealReportTest(unittest.TestCase):
+    """build_report → findings_from_report → 라벨 시트까지 **실제 경로**로 한 번 태운다.
+
+    손으로 만든 덤프로만 테스트하면 중간 배선이 빠져도 통과한다 — 실제로 그랬다.
+    report 는 observations 를 제대로 실었는데 findings_from_report 가 그걸 덤프로 옮기지
+    않아, 30건 실측에서 라벨 시트가 **지표 없이** 나갔다. 시트에 recall·순위가 없으면
+    사람이 검색 계열 라벨을 구분할 수 없어 라벨링 자체가 불가능해진다.
+    """
+
+    def _sheet_entry(self):
+        from agents.eval.report import build_report
+        from agents.eval.types import EvalRecord
+        from core.schema import Finding, Probe
+        from tools.score_ragec import findings_from_report
+
+        probe = Probe(probe_id="probe_qa_7", question="질문?", source="taxonomy",
+                      ground_truth="정답", gold_chunk_ids=["d_chunk_1"])
+        record = EvalRecord(
+            probe=probe,
+            generated_answer="틀린 답",
+            retrieved_chunk_ids=["d_chunk_9", "d_chunk_1"],
+            retrieval_details={"search_mode": "dense", "reranker_status": "disabled"},
+            findings=[Finding(finding_id="f1", type="retrieval_failure",
+                              severity="warning", description="근거 문구",
+                              label="retrieval_low_rank", affected_probes=["probe_qa_7"])],
+        )
+        report = build_report([record], iteration=1, mode=1)
+        rows = findings_from_report(report, [probe])
+        return rows[0], to_entry(rows[0])
+
+    def test_observations_reach_the_sheet(self):
+        row, entry = self._sheet_entry()
+        self.assertTrue(row.get("observations"), "덤프에 observations 가 실리지 않았습니다")
+        self.assertEqual(entry["정답청크_검색됨"], "1/1")
+        self.assertEqual(entry["정답청크_순위"], "d_chunk_1=2위")
+        self.assertEqual(entry["검색방식"], "dense")
+
+    def test_sheet_from_real_report_still_hides_our_diagnosis(self):
+        _row, entry = self._sheet_entry()
+        blob = json.dumps(entry, ensure_ascii=False)
+        self.assertNotIn("retrieval_low_rank", blob)
+        self.assertNotIn("근거 문구", blob)
+
+
 class StratifiedSamplingTest(unittest.TestCase):
     """무작위로 뽑으면 실측처럼 한 라벨로 쏠려(10건 중 5건이 low_rank) 희귀 라벨을 영영 못 잰다."""
 

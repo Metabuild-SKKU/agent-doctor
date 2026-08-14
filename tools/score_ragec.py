@@ -218,11 +218,18 @@ def findings_from_report(report, probes: list | None = None) -> list[dict]:
             row["gold_answer"] = gold
         if answer:
             row["answer"] = answer
-        # recall 은 실패 probe 에만 있다(성공 probe 는 failed_questions 에 안 남는다).
-        # 채점 대상이 실패 probe 뿐이라 그걸로 충분하다.
+        # recall·observations 는 실패 probe 에만 있다(성공 probe 는 failed_questions 에
+        # 안 남는다). 채점 대상도 라벨링 대상도 실패 probe 뿐이라 그걸로 충분하다.
+        #
+        # observations 를 여기서 안 옮기면 라벨 시트가 **지표 없이** 나가고, 사람이 검색 계열
+        # 라벨을 구분할 수 없게 된다. 실제로 30건 실측에서 그렇게 나갔다 — report 는 제대로
+        # 실었는데 이 줄이 없어 덤프에서 끊겼고, 스모크 테스트를 손으로 만든 덤프로 해서
+        # 이 구간이 한 번도 안 돌았다.
         if "recall_at_k" in answer_row:
             row["recall_at_k"] = answer_row["recall_at_k"]
             row["recall_basis"] = answer_row.get("recall_basis", "")
+        if answer_row.get("observations"):
+            row["observations"] = answer_row["observations"]
         rows.append(row)
     return rows
 
