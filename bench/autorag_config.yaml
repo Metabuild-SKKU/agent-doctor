@@ -18,9 +18,20 @@
 #   · bert_score / sem_score → torch 미설치, 임베딩 설정을 메트릭에도 또 넘겨야 함
 #   · similarity_*_cutoff    → 임베딩 설정 중복. 점수 기반 cutoff 로 대체
 #   · passage_compressor     → 패시지마다 LLM 호출. 비용 대비 효과가 불확실
-#   · 로컬 리랭커            → torch 미설치(non_gpu). API 리랭커는 키 없음
-#     ↳ 우리 파이프라인의 리랭커 축은 잠그지 않는다. 실제로 켜지는지는 optimization_history
-#       로 사후 확인하고, 켜졌고 기여가 크면 그때 슬라이드에 명시한다.
+#   · 로컬 리랭커            → torch 미설치(non_gpu)
+#
+# 리랭커 축에 대한 정정(실측 후):
+#   처음엔 "AutoRAG 는 리랭커를 못 쓴다"고 보고 이 축을 양쪽 모두 잠갔다. 틀렸다 —
+#   AutoRAG 에는 API 리랭커 모듈(voyageai/cohere/jina/mixedbreadai)이 있고 torch 가
+#   필요 없다. 다만 그 모듈들은 벤더 API 를 직접 부르고(VOYAGE_API_KEY 등) 우리에겐
+#   해당 키가 없어, 같은 OpenRouter 키로 닿는 rankgpt 를 준다.
+#   이 축을 빼면 벤치마크의 핵심 레버가 빠진다 — 우리 파이프라인은 여기서 검색 정밀
+#   0.69→0.93, 근거부족 기권 5건→0건을 얻었다.
+#
+# 검색 노드 top_k=40 인 이유: 리랭커의 **입력 후보 풀**이다. 우리 옵티마이저가 후보창을
+# 20→38 로 넓혀 +4점을 얻었으므로, AutoRAG 에게 10개만 주면 재료가 4배 적은 비대칭이 된다.
+# 리랭커 출력은 5로 맞춰(우리 top_k=5) 최종 컨텍스트 수를 대칭으로 둔다. pass_reranker 도
+# top_k 를 지키므로(입력 앞 5개를 자른다) "같은 재료·같은 출력, 정렬 방식만 다른" A/B 가 된다.
 #
 # OpenRouter 접속 방법은 autorag_config_simple.yaml 주석 참고(vectordb 직접 선언 이유,
 # type: openai_like 가 _check_keys 에서 막히는 0.3.24 불일치 등).
@@ -49,7 +60,7 @@ node_lines:
         strategy:
           metrics: [ retrieval_f1, retrieval_recall, retrieval_precision,
                      retrieval_ndcg, retrieval_map, retrieval_mrr ]
-        top_k: 10
+        top_k: 40
         modules:
           # ko_kiwi 는 형태소 분석기(kiwipiepy)를 쓴다. 공백 토크나이저로 두면 한국어
           # BM25 가 부당하게 불리해져 "상대를 약하게 세팅했다"가 된다.
@@ -60,7 +71,7 @@ node_lines:
         strategy:
           metrics: [ retrieval_f1, retrieval_recall, retrieval_precision,
                      retrieval_ndcg, retrieval_map, retrieval_mrr ]
-        top_k: 10
+        top_k: 40
         modules:
           - module_type: vectordb
             vectordb: openrouter_bge_m3
@@ -69,7 +80,7 @@ node_lines:
         strategy:
           metrics: [ retrieval_f1, retrieval_recall, retrieval_precision,
                      retrieval_ndcg, retrieval_map, retrieval_mrr ]
-        top_k: 10
+        top_k: 40
         modules:
           - module_type: hybrid_rrf
             weight_range: (4,80)
@@ -77,6 +88,32 @@ node_lines:
             normalize_method: [ mm, tmm, z, dbsf ]
             weight_range: (0.0, 1.0)
             test_weight_size: 101
+
+      # 리랭커 축 — 우리 파이프라인이 이 축에서 검색 정밀 0.69→0.93 을 얻었으므로,
+      # 빼고 비교하면 벤치마크의 핵심 레버가 빠진다. AutoRAG 도 API 리랭커를 지원한다
+      # (voyageai/cohere/jina — torch 불필요). 다만 그 모듈들은 벤더 API 를 직접 부르고
+      # 우리에겐 해당 키가 없어, **같은 OpenRouter 키로 닿는** rankgpt 를 준다.
+      #
+      # pass_reranker 를 후보에 함께 두는 게 중요하다 — 리랭커를 강제로 붙인 게 아니라
+      # "쓸 수 있게 열어줬고 AutoRAG 가 스스로 골랐다"가 되어야 공정하다.
+      #
+      # 방식은 서로 다르다(우리 cross-encoder vs AutoRAG LLM 기반). 같은 리랭커가 아니라
+      # "각자의 프레임워크가 우리 키로 접근할 수 있는 최선"이며, 슬라이드에 명시한다.
+      - node_type: passage_reranker
+        strategy:
+          metrics: [ retrieval_f1, retrieval_recall, retrieval_precision,
+                     retrieval_ndcg, retrieval_map, retrieval_mrr ]
+        top_k: 5
+        modules:
+          - module_type: pass_reranker
+          - module_type: rankgpt
+            llm: openailike
+            model: openai/gpt-4o-mini
+            api_base: https://openrouter.ai/api/v1
+            api_key: ${OPENROUTER_API_KEY}
+            is_chat_model: true
+            context_window: 128000
+            temperature: 0.0
 
       - node_type: passage_filter
         strategy:
