@@ -68,20 +68,26 @@ _FLOORS: dict[str, float] = {
 
 # ── 개선 판정 최소 마진 ───────────────────────────────────────────
 # 개선으로 인정할 최소 상승폭(정규화 composite 0~1 기준).
-# 표시 점수 2점 = 0.02. Eval 노이즈(LLM judge 편차·표본 오차) 안에 묻히는 상승을
+# 표시 점수 3점 = 0.03. Eval 노이즈(LLM judge 편차·표본 오차) 안에 묻히는 상승을
 # "개선"으로 확정하지 않기 위한 값이다.
 #
-# ⚠️ 이 값은 **잠정치다. 노이즈 분포를 측정해서 나온 값이 아니다.**
-#    관측 근거는 두 건뿐이다.
-#      · 같은 config 재평가가 82↔78(표시 4점 폭)로 흔들린 사례(PR #66 리뷰)
-#      · corpus_20260804_103059 에서 기능적으로 동일한 config(리랭커 off — 후보창
-#        값은 읽히지 않는다)가 0.75 와 0.73 으로 측정된 사례. 편차가 **마진과 같다.**
-#    둘 다 2점이 노이즈보다 작거나 같다는 쪽을 가리킨다. 같은 config 반복 Eval 로
-#    σ 를 재고 마진을 k·σ 로 다시 정해야 한다.
+# **측정에서 나온 값이다** (#102, 2026-08-14). tools/measure_eval_sigma.py 로 같은
+# config 를 5회 반복 측정했다 — probe 25개(라벨 분포 층화), ragec 코퍼스 40문서,
+# EVAL_MODE=deep. 같은 config 인데 표시 점수가 43~47 로 흔들렸다(PR #66 이 관측한
+# 82↔78 과 같은 폭). probe 100개 기준으로 환산하면:
+#      σ(한 번 측정) 0.0076 · σ_Δ(두 측정의 차이) 0.0107 · |Δ| 95분위 0.0209
+# 마진은 σ 가 아니라 **σ_Δ** 로 정한다 — 판정은 서로 다른 두 config 를 각각 한 번씩
+# 잰 차이에 걸리므로, 독립 두 측정의 차이 분포가 기준이다(σ_Δ ≈ √2·σ).
+# max(2·σ_Δ, P95) = 0.0214 → 판정 눈금(0.01)으로 올려 0.03.
+# 옛 값 0.02 는 P95(0.0209)보다 작아서, 순수 노이즈만으로도 20번에 한 번 이상 마진을
+# 넘었다. sweep 은 후보 T개 중 최고를 baseline 과 비교해(승자의 저주) 더 큰 마진이
+# 필요한데(후보 2~4개 → 0.0203~0.0229), 0.03 이면 그쪽도 함께 덮는다.
 #
-#    관측 수집은 자동이다 — max_repeated_measurement_spread 가 이력에서 같은 도착
-#    config 의 재측정 편차를 뽑고, 그것이 이 마진 이상이면 Optimize 로그가 경고한다.
-#    시도별 상승폭 분포는 finalize_item 이 남긴다
+#    ⚠️ 이 값은 **위 조건에 딸린 값이다.** judge 모델이나 QA셋 크기가 바뀌면 다시 재야
+#    한다(σ 는 probe 수의 1/√N 로 줄어든다). 재측정은 위 도구를 그대로 돌리면 된다.
+#    조건이 틀어졌다는 신호도 자동으로 잡힌다 — max_repeated_measurement_spread 가
+#    이력에서 같은 도착 config 의 재측정 편차를 뽑고, 그것이 이 마진 이상이면 Optimize
+#    로그가 경고한다. 시도별 상승폭 분포는 finalize_item 이 남긴다
 #    (margin_rejected·score_delta·improvement_margin).
 #
 # ⚠️ 스케일 주의: judge 도 sweep objective 도 정규화 composite(0~1)를 쓴다.
@@ -92,7 +98,7 @@ _FLOORS: dict[str, float] = {
 # 다르면 같은 점수 변화가 경로에 따라 다르게 보고된다.
 # internal_adapter 는 history 를 import 하지 않으므로 planner 가 이 값을
 # OptimizationRequest.metadata["min_delta"] 로 중계한다(planner._build_request).
-MIN_IMPROVEMENT_MARGIN: float = 0.02
+MIN_IMPROVEMENT_MARGIN: float = 0.03
 
 
 def meets_improvement_margin(
@@ -379,13 +385,13 @@ def max_repeated_measurement_spread(
 ) -> float | None:
     """같은 config 를 다시 쟀을 때 벌어진 점수 폭 중 가장 큰 값. 없으면 None.
 
-    MIN_IMPROVEMENT_MARGIN 주석이 요구하는 σ 관측을 **정상 실행에서 공짜로** 모으기
-    위한 것이다. 마진은 "노이즈로 우연히 오른 점수를 개선으로 보지 않는다"가 목적인데,
-    그러려면 노이즈가 얼마나 큰지 알아야 한다. 지금 값(0.02)은 측정에서 나오지 않은
-    잠정치라, 노이즈가 그보다 크면 마진이 제 역할을 못 한다.
+    마진(#102 에서 σ 측정으로 정한 값)이 **여전히 이 코퍼스·이 judge 모델에 맞는지**를
+    정상 실행에서 공짜로 감시하기 위한 것이다. 마진은 "노이즈로 우연히 오른 점수를
+    개선으로 보지 않는다"가 목적이라, 노이즈가 마진보다 커지면 제 역할을 못 한다.
 
-    설정을 바꾸지 않고 Eval 을 반복하는 전용 실험 없이도, 롤백이 config 를 되돌리는
-    과정에서 같은 config 가 자연스럽게 두 번 측정된다. 그 편차가 곧 σ 의 하한 관측이다.
+    전용 실험(tools/measure_eval_sigma.py)을 다시 돌리지 않아도, 롤백이 config 를
+    되돌리는 과정에서 같은 config 가 자연스럽게 두 번 측정된다. 그 편차가 곧 σ 의 하한
+    관측이고, 마진을 넘으면 재측정하라는 신호다.
     """
     spreads = [
         max(observations) - min(observations)
