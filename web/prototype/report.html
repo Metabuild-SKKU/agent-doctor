@@ -103,21 +103,42 @@
   .badge.prelim { color: var(--faint); background: var(--surface-2); border: 1px solid var(--border); }
 
   /* metrics dumbbell */
-  .metrics { display: flex; flex-direction: column; gap: 2px; }
-  .metric-row { display: grid; grid-template-columns: 170px 1fr 132px; align-items: center; gap: 20px; padding: 15px 4px; border-bottom: 1px solid var(--border); }
+  .metric-panel { border: 1px solid var(--border); border-radius: 18px; background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 94%, var(--accent-glow)), var(--surface)); box-shadow: 0 18px 50px rgba(15, 23, 42, .06), inset 0 1px 0 var(--hi); overflow: hidden; }
+  .metric-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px 12px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface-2) 70%, transparent); }
+  .metric-scope { display: flex; flex-wrap: wrap; gap: 8px; }
+  .metric-tab { border: 1px solid var(--border); background: var(--surface); color: var(--muted); border-radius: 999px; padding: 7px 11px; font-family: var(--mono); font-size: 11px; cursor: pointer; transition: border-color .18s ease, color .18s ease, background .18s ease, transform .18s ease; }
+  .metric-tab:hover { color: var(--ink); border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); transform: translateY(-1px); }
+  .metric-tab.active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 54%, var(--border)); background: var(--accent-glow); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-glow) 70%, transparent); }
+  .metric-focus { display: flex; justify-content: space-between; gap: 18px; padding: 18px 18px 4px; }
+  .metric-focus .eyebrow { font-family: var(--mono); font-size: 10px; color: var(--accent); letter-spacing: .08em; text-transform: uppercase; }
+  .metric-focus .title { margin-top: 5px; font-size: 16px; font-weight: 650; letter-spacing: -.02em; }
+  .metric-focus .desc { margin-top: 6px; font-size: 12.5px; color: var(--muted); line-height: 1.55; }
+  .metric-focus-score { flex: none; min-width: 112px; align-self: flex-start; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); text-align: right; box-shadow: inset 0 1px 0 var(--hi); }
+  .metric-focus-score .label { display: block; font-family: var(--mono); font-size: 10px; color: var(--faint); letter-spacing: .05em; text-transform: uppercase; }
+  .metric-focus-score .value { display: block; margin-top: 5px; font-family: var(--mono); font-size: 22px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .metric-focus-score .delta { display: block; margin-top: 3px; font-family: var(--mono); font-size: 11.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .metric-focus-score.up .delta { color: var(--good); }
+  .metric-focus-score.down .delta { color: var(--critical); }
+  .metric-focus-score.flat .delta { color: var(--faint); }
+  .metrics { display: flex; flex-direction: column; gap: 0; padding: 8px 18px 18px; }
+  .metric-row { display: grid; grid-template-columns: 170px 1fr 150px; align-items: center; gap: 22px; padding: 18px 8px; border-bottom: 1px solid var(--border); }
   .metric-row:last-child { border-bottom: none; }
   .metric-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 7px; }
   .metric-name .en { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
-  .dumbbell { position: relative; height: 22px; }
-  .dumbbell .track { position: absolute; left: 0; right: 0; top: 50%; height: 3px; transform: translateY(-50%); background: var(--border); border-radius: 3px; }
-  .dumbbell .connect { position: absolute; top: 50%; height: 3px; transform: translateY(-50%); background: linear-gradient(90deg, var(--faint), var(--accent)); border-radius: 3px; }
-  .dumbbell .pt { position: absolute; top: 50%; width: 12px; height: 12px; border-radius: 50%; transform: translate(-50%, -50%); border: 2px solid var(--surface); }
+  .dumbbell { position: relative; height: 28px; }
+  .dumbbell .track { position: absolute; left: 0; right: 0; top: 50%; height: 5px; transform: translateY(-50%); background: color-mix(in srgb, var(--border) 84%, var(--faint)); border-radius: 999px; }
+  .dumbbell .connect { position: absolute; top: 50%; height: 5px; transform: translateY(-50%); background: linear-gradient(90deg, var(--faint), var(--accent)); border-radius: 999px; }
+  .metric-row.down .dumbbell .connect { background: linear-gradient(90deg, var(--warning), var(--critical)); }
+  .dumbbell .pt { position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 50%; transform: translate(-50%, -50%); border: 2px solid var(--surface); }
   .dumbbell .pt.before { background: var(--faint); }
-  .dumbbell .pt.after { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .dumbbell .pt.after { background: var(--accent); box-shadow: 0 0 0 5px var(--accent-glow); }
+  .metric-row.down .dumbbell .pt.after { background: var(--critical); box-shadow: 0 0 0 5px var(--critical-glow); }
   .metric-vals { font-family: var(--mono); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; }
   .metric-vals .b { color: var(--faint); } .metric-vals .a { color: var(--ink); font-weight: 500; }
-  .metric-vals .d { color: var(--good); font-size: 11px; margin-left: 6px; }
-  .metric-legend { display: flex; gap: 18px; margin-bottom: 18px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .metric-vals .d { color: var(--good); font-size: 11px; margin-left: 6px; font-weight: 700; }
+  .metric-row.down .metric-vals .d { color: var(--critical); }
+  .metric-row.flat .metric-vals .d { color: var(--faint); }
+  .metric-legend { display: flex; gap: 18px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
   .metric-legend .k { display: inline-flex; align-items: center; gap: 6px; }
   .metric-legend .sw { width: 10px; height: 10px; border-radius: 50%; }
 
@@ -147,6 +168,30 @@
   .rx-scoredelta { font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; color: var(--muted); }
   .rx-scoredelta b.up { color: var(--good); } .rx-scoredelta b.down { color: var(--critical); }
   .rx-scoredelta.error { color: var(--faint); }
+  .rx-metric-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .rx-metric-chip { display: inline-flex; align-items: baseline; gap: 5px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+  .rx-metric-chip .mk { color: var(--muted); }
+  .rx-metric-chip .mv { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .rx-metric-chip.up .mv { color: var(--good); }
+  .rx-metric-chip.down .mv { color: var(--critical); }
+  .rx-metric-chip.flat .mv { color: var(--faint); }
+  .rx-metrics { margin-top: 14px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
+  .rx-metrics-head, .rx-metrics-row { display: grid; grid-template-columns: 132px 1fr 82px 82px 78px; gap: 12px; align-items: center; }
+  .rx-metrics-head { padding: 10px 12px; background: var(--surface-2); color: var(--faint); font-family: var(--mono); font-size: 10px; letter-spacing: .05em; text-transform: uppercase; }
+  .rx-metrics-row { padding: 11px 12px; border-top: 1px solid var(--border); }
+  .rx-metrics-name { min-width: 0; }
+  .rx-metrics-name .ko { display: block; font-size: 12.5px; font-weight: 560; color: var(--ink); letter-spacing: -.01em; }
+  .rx-metrics-name .en { display: block; margin-top: 2px; font-family: var(--mono); font-size: 10px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rx-metric-track { position: relative; height: 24px; border-radius: 999px; background: var(--surface-2); overflow: hidden; box-shadow: inset 0 0 0 1px var(--border); }
+  .rx-metric-track i { position: absolute; left: 0; height: 100%; border-radius: 999px; }
+  .rx-metric-track .before { top: 6px; height: 12px; background: var(--faint); opacity: .34; }
+  .rx-metric-track .after { top: 0; height: 100%; background: linear-gradient(90deg, var(--accent), var(--good)); opacity: .78; }
+  .rx-metrics-row.down .rx-metric-track .after { background: linear-gradient(90deg, var(--warning), var(--critical)); opacity: .62; }
+  .rx-metrics-val, .rx-metrics-delta { font-family: var(--mono); font-size: 11.5px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .rx-metrics-delta { font-weight: 600; }
+  .rx-metrics-row.up .rx-metrics-delta { color: var(--good); }
+  .rx-metrics-row.down .rx-metrics-delta { color: var(--critical); }
+  .rx-metrics-row.flat .rx-metrics-delta { color: var(--faint); }
   .rx-verdict { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: 6px; }
   .rx-verdict.keep { color: var(--good); background: var(--good-glow); }
   .rx-verdict.roll { color: var(--warning); background: var(--warning-glow); }
@@ -255,7 +300,11 @@
     .hero { grid-template-columns: 1fr; justify-items: start; }
     .prio, .dx { grid-template-columns: 1fr; }
     .trans { grid-template-columns: repeat(2, 1fr); }
+    .metric-toolbar, .metric-focus { flex-direction: column; align-items: stretch; }
+    .metric-focus-score { width: auto; text-align: left; }
     .metric-row { grid-template-columns: 120px 1fr 118px; gap: 12px; }
+    .rx-metrics-head, .rx-metrics-row { grid-template-columns: 1fr 1fr 64px; }
+    .rx-metric-track, .rx-metrics-head span:nth-child(2), .rx-metrics-head span:nth-child(3), .rx-metrics-val.before { display: none; }
     .qa-ans { grid-template-columns: 1fr; }
     .qa-ans .col.before { border-right: none; border-bottom: 1px solid var(--border); }
   }
@@ -364,11 +413,17 @@
   <section class="section" data-section="metrics">
     <div class="section-head"><span class="idx">02</span><h2>품질 지표 · 처방 전후</h2><span class="sub">RAGAS 4개 지표</span></div>
     <!-- 전후 비교가 없는 모드(외부 로그 진단)에서는 renderMetrics 가 숨긴다 -->
-    <div class="metric-legend" id="metricLegend">
-      <span class="k"><span class="sw" style="background:var(--faint)"></span> 처방 전</span>
-      <span class="k"><span class="sw" style="background:var(--accent)"></span> 처방 후</span>
+    <div class="metric-panel">
+      <div class="metric-toolbar">
+        <div class="metric-scope" id="metricScope"></div>
+        <div class="metric-legend" id="metricLegend">
+          <span class="k"><span class="sw" style="background:var(--faint)"></span> 처방 전</span>
+          <span class="k"><span class="sw" style="background:var(--accent)"></span> 처방 후</span>
+        </div>
+      </div>
+      <div class="metric-focus" id="metricFocus"></div>
+      <div class="metrics" id="metrics"></div>
     </div>
-    <div class="metrics" id="metrics"></div>
   </section>
 
   <!-- TREATMENT COURSE -->
@@ -446,6 +501,12 @@
       state: 'kept', num: '01', change: ['top_k', '5', '12'], target: '나열형 정답 누락을 겨냥',
       reason: ['GOLD_RANK', '정답이 최대 12위까지 흩어져 있어, 다 담으려면 top_k ≥ 12 필요'],
       score: ['62', '70', 'up'], verdict: ['keep', '유지'],
+      metrics: [
+        { key: 'context_recall', name: '정답 회수율', before: .60, after: .78 },
+        { key: 'context_precision', name: '검색 정확도', before: .66, after: .64 },
+        { key: 'faithfulness', name: '충실도', before: .72, after: .75 },
+        { key: 'response_relevancy', name: '답변 관련성', before: .70, after: .73 }
+      ],
       drill: { label: '후보 실측 (sweep) — 8·12·15를 돌려 최선을 선택', rows: [
         { k: 'top_k = 8', val: '65.4', w: 62 }, { k: 'top_k = 12', val: '70.1', w: 100, win: true }, { k: 'top_k = 15', val: '68.9', w: 88 }
       ], caption: '무릎 분석으로 8·12·15를 후보로 좁힌 뒤 실제로 재평가 — 12에서 종합점수가 가장 높아 채택했습니다. 15는 노이즈가 늘어 오히려 하락.' }
@@ -454,12 +515,24 @@
       state: 'rolled', num: '02', change: ['chunk_size', '512', '256'], target: '컨텍스트 과다를 겨냥',
       reason: ['기하 사전검증', '청크를 줄이면 노이즈가 줄 것으로 예상'],
       score: ['70', '66', 'down'], verdict: ['roll', '롤백'],
+      metrics: [
+        { key: 'context_recall', name: '정답 회수율', before: .78, after: .52 },
+        { key: 'context_precision', name: '검색 정확도', before: .64, after: .71 },
+        { key: 'faithfulness', name: '충실도', before: .75, after: .68 },
+        { key: 'response_relevancy', name: '답변 관련성', before: .73, after: .69 }
+      ],
       drill: { label: '왜 되돌렸나', rows: [], caption: '청크를 절반으로 줄이자 정답이 청크 경계에서 잘려 오히려 회수율이 떨어졌고, 종합점수가 70→66으로 하락했습니다. 판정 규칙에 따라 이전 설정으로 되돌리고 이 처방을 블랙리스트에 넣었습니다.' }
     },
     {
       state: 'kept', num: '03', change: ['리랭커', 'off', 'on'], target: '정답 순위 낮음을 겨냥',
       reason: ['처방 규칙', '정답이 검색은 되므로, 순위를 재정렬해 앞으로 끌어올림'],
       score: ['70', '84', 'up'], verdict: ['keep', '유지 · 최종'],
+      metrics: [
+        { key: 'context_recall', name: '정답 회수율', before: .78, after: .88 },
+        { key: 'context_precision', name: '검색 정확도', before: .64, after: .79 },
+        { key: 'faithfulness', name: '충실도', before: .75, after: .89 },
+        { key: 'response_relevancy', name: '답변 관련성', before: .73, after: .85 }
+      ],
       drill: { label: '효과', rows: [], caption: 'top_k를 더 키우는 대신 리랭커로 순위만 올려 노이즈 없이 정답을 상위로 이동시켰습니다. 검색 정확도 0.66→0.79, 종합점수 70→84로 최종 채택되었습니다.' }
     }
   ];
@@ -534,7 +607,7 @@
     var score = isLive ? (data.score || DUMMY_SCORE) : DUMMY_SCORE;
     var meta = isLive ? (data.meta || DUMMY_META) : DUMMY_META;
 
-    renderMetrics(metrics);
+    renderMetrics(metrics, rxs, score);
     renderCourse(data.course);
     renderRxs(rxs);
     renderDxs(dxs);
@@ -739,44 +812,151 @@
   }
 
   /* ── metrics dumbbell ── */
-  // 지표는 0~1 이다. 예전엔 0.5~0.95 로 좁혀 차이를 부풀렸는데, 그 범위를 벗어난 값이
-  // 막대 밖으로 튀어나갔다(faithfulness 1.00 → 111%, 0.4 → -22%). 눈금과 점 위치가
-  // 어긋나면 그래프가 거짓말을 하므로 전 구간을 쓰고, 그래도 안전하게 0~100 으로 자른다.
+  // 지표는 0~1 이다. composite 는 0~100 표시 점수라 unit="점" 으로 구분한다.
+  // 전체 before/after 뿐 아니라 처방 한 번마다의 before/after 도 같은 뷰에서 비교한다.
   var SCALE_MIN = 0, SCALE_MAX = 1;
+  var ACTIVE_METRIC_SCOPE = 'overall';
   function pos(v) {
     var p = ((v - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)) * 100;
     return Math.max(0, Math.min(100, p));
   }
-  function renderMetrics(metrics) {
-  var mHtml = metrics.map(function (m) {
-    var pa = pos(m.after);
-    var name = '<div class="metric-name"><span class="term" tabindex="0" data-tip="' + esc(m.tip) + '">' + esc(m.name) + '</span><span class="en">' + esc(m.en) + '</span></div>';
-    // single: 처방 전후가 없는 모드(외부 로그 진단) — 전후 막대 2개를 그리면 둘이
-    // 같은 값이라 "변화 없음"으로 읽힌다. 현재값 점 하나만 찍는다.
-    if (m.single) {
-      return '<div class="metric-row">' + name +
-        '<div class="dumbbell"><div class="track"></div>' +
-          '<div class="pt after" style="left:' + pa + '%"></div>' +
-        '</div>' +
-        '<div class="metric-vals"><span class="a">' + m.after.toFixed(2) + '</span></div>' +
-      '</div>';
+  function metricRowFromAggregate(m) {
+    if (!m) return null;
+    return {
+      key: m.en || m.key || m.name,
+      name: m.name,
+      tip: m.tip,
+      before: m.before,
+      after: m.after,
+      single: m.single,
+      unit: m.unit || ''
+    };
+  }
+  function overallMetricRows(metrics, score) {
+    var rows = (metrics || []).map(metricRowFromAggregate).filter(Boolean);
+    if (score && numOrNull(score.before) !== null && numOrNull(score.after) !== null) {
+      rows.unshift({
+        key: 'composite',
+        name: '종합점수',
+        tip: '품질 지표와 신뢰도 축을 합친 최종 표시 점수입니다.',
+        before: score.before,
+        after: score.after,
+        unit: '점'
+      });
     }
-    var pb = pos(m.before);
-    var lo = Math.min(pb, pa), hi = Math.max(pb, pa);
-    var delta = '+' + Math.round((m.after - m.before) * 100) / 100;
-    return '<div class="metric-row">' + name +
-      '<div class="dumbbell"><div class="track"></div>' +
-        '<div class="connect" style="left:' + lo + '%;width:' + (hi - lo) + '%"></div>' +
-        '<div class="pt before" style="left:' + pb + '%"></div>' +
-        '<div class="pt after" style="left:' + pa + '%"></div>' +
-      '</div>' +
-      '<div class="metric-vals"><span class="b">' + m.before.toFixed(2) + '</span> → <span class="a">' + m.after.toFixed(2) + '</span><span class="d">' + delta + '</span></div>' +
-    '</div>';
-  }).join('');
-  document.getElementById('metrics').innerHTML = mHtml;
-  // 전후 비교가 없으면 '처방 전/후' 범례도 거짓말이 된다 — 점은 하나뿐이다.
-  var legend = document.getElementById('metricLegend');
-  if (legend) legend.style.display = metrics.some(function (m) { return m.single; }) ? 'none' : '';
+    return rows;
+  }
+  function metricScopeTitle(scope) {
+    if (!scope || scope.id === 'overall') return '전체 최적화 결과';
+    var r = scope.rx || {};
+    var change = r.change || [];
+    return 'Rx' + (r.num || '') + ' · ' + (change[0] || r.action || '처방');
+  }
+  function metricScopeDescription(scope) {
+    if (!scope || scope.id === 'overall') {
+      return '최초 기준선과 최종 선택된 설정을 비교합니다.';
+    }
+    var r = scope.rx || {};
+    var verdict = r.verdict && r.verdict[0] === 'keep' ? '유지된 처방' : (r.verdict && r.verdict[0] === 'rollback' ? '롤백된 처방' : '검토된 처방');
+    return verdict + ' 전후로 지표가 어떻게 움직였는지 보여줍니다.';
+  }
+  function metricScopeScoreClass(rows) {
+    var primary = (rows || []).filter(function (row) {
+      return row && numOrNull(row.before) !== null && numOrNull(row.after) !== null;
+    })[0];
+    if (!primary) return 'flat';
+    return metricTrendClass(numOrNull(primary.before), numOrNull(primary.after));
+  }
+  function metricScopeScore(scope, rows) {
+    var primary = (rows || []).filter(function (row) {
+      return row && numOrNull(row.before) !== null && numOrNull(row.after) !== null;
+    })[0];
+    if (!primary) {
+      return '<span class="label">selected scope</span><span class="value">-</span><span class="delta">비교값 없음</span>';
+    }
+    var before = numOrNull(primary.before), after = numOrNull(primary.after);
+    return '<span class="label">' + esc(primary.name || primary.key || 'metric') + '</span>' +
+      '<span class="value">' + esc(metricDisplayValue(primary, after)) + '</span>' +
+      '<span class="delta">' + esc(metricDisplayValue(primary, before)) + ' → ' + esc(metricDisplayValue(primary, after)) +
+      ' · ' + esc(metricDeltaText(primary, before, after)) + '</span>';
+  }
+  function metricScopes(metrics, rxs, score) {
+    var scopes = [{
+      id: 'overall',
+      label: '전체 변화',
+      rows: overallMetricRows(metrics, score)
+    }];
+    (rxs || []).forEach(function (r) {
+      var rows = normalizeRxMetrics(r);
+      if (!rows.length) return;
+      scopes.push({
+        id: 'rx-' + (r.num || scopes.length),
+        label: 'Rx' + (r.num || scopes.length),
+        rows: rows,
+        rx: r
+      });
+    });
+    return scopes;
+  }
+  function renderMetricFocus(scope, rows) {
+    var focus = document.getElementById('metricFocus');
+    if (!focus) return;
+    var scoreCls = metricScopeScoreClass(rows);
+    focus.innerHTML =
+      '<div><div class="eyebrow">selected view</div><div class="title">' + esc(metricScopeTitle(scope)) + '</div><div class="desc">' +
+      esc(metricScopeDescription(scope)) + '</div></div>' +
+      '<div class="metric-focus-score ' + scoreCls + '">' + metricScopeScore(scope, rows) + '</div>';
+  }
+  function renderMetricTabs(scopes, activeId, onSelect) {
+    var target = document.getElementById('metricScope');
+    if (!target) return;
+    target.innerHTML = scopes.map(function (scope) {
+      return '<button class="metric-tab ' + (scope.id === activeId ? 'active' : '') +
+        '" type="button" data-scope="' + esc(scope.id) + '">' + esc(scope.label) + '</button>';
+    }).join('');
+    target.querySelectorAll('.metric-tab').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        onSelect(btn.getAttribute('data-scope'));
+      });
+    });
+  }
+  function renderMetricRows(rows) {
+    if (!rows || !rows.length) {
+      return '<div class="empty">아직 처방별 지표 변화가 기록되지 않았습니다.</div>';
+    }
+    return rows.map(function (m) {
+      var before = numOrNull(m.before), after = numOrNull(m.after);
+      var name = '<div class="metric-name"><span class="term" tabindex="0" data-tip="' + esc(m.tip || '') + '">' + esc(m.name || m.key || 'metric') + '</span><span class="en">' + esc(m.key || '') + '</span></div>';
+      if (before === null || after === null || m.single) {
+        var pa = metricBarWidth(m, after);
+        return '<div class="metric-row single">' + name +
+          '<div class="dumbbell"><div class="track"></div><div class="pt after" style="left:' + pa + '%"></div></div>' +
+          '<div class="metric-vals"><span class="a">' + esc(metricDisplayValue(m, after)) + '</span></div></div>';
+      }
+      var pb = metricBarWidth(m, before), pa2 = metricBarWidth(m, after);
+      var lo = Math.min(pb, pa2), hi = Math.max(pb, pa2);
+      var cls = metricTrendClass(before, after);
+      return '<div class="metric-row ' + cls + '">' + name +
+        '<div class="dumbbell"><div class="track"></div><div class="connect" style="left:' + lo + '%;width:' + (hi - lo) + '%"></div><div class="pt before" style="left:' + pb + '%"></div><div class="pt after" style="left:' + pa2 + '%"></div></div>' +
+        '<div class="metric-vals"><span class="b">' + esc(metricDisplayValue(m, before)) + '</span> → <span class="a">' + esc(metricDisplayValue(m, after)) + '</span><span class="d">' + esc(metricDeltaText(m, before, after)) + '</span></div>' +
+      '</div>';
+    }).join('');
+  }
+  function renderMetrics(metrics, rxs, score) {
+    var scopes = metricScopes(metrics, rxs, score);
+    if (!scopes.some(function (scope) { return scope.id === ACTIVE_METRIC_SCOPE; })) {
+      ACTIVE_METRIC_SCOPE = 'overall';
+    }
+    var active = scopes.filter(function (scope) { return scope.id === ACTIVE_METRIC_SCOPE; })[0] || scopes[0];
+    var rows = active ? active.rows : [];
+    renderMetricTabs(scopes, ACTIVE_METRIC_SCOPE, function (next) {
+      ACTIVE_METRIC_SCOPE = next;
+      renderMetrics(metrics, rxs, score);
+    });
+    renderMetricFocus(active, rows);
+    document.getElementById('metrics').innerHTML = renderMetricRows(rows);
+    var legend = document.getElementById('metricLegend');
+    if (legend) legend.style.display = rows.some(function (m) { return m.single; }) ? 'none' : '';
   }
 
   /* ── course line chart ── */
@@ -862,22 +1042,116 @@
   }
 
   /* ── prescriptions ── */
+  function numOrNull(v) {
+    if (v === null || v === undefined || v === '') return null;
+    var n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  function clampPct(v) {
+    if (!Number.isFinite(v)) return 0;
+    return Math.max(0, Math.min(100, v));
+  }
+  function metricDisplayValue(row, v) {
+    if (v === null || v === undefined) return '-';
+    var n = Number(v);
+    if (!Number.isFinite(n)) return esc(String(v));
+    if (row.key === 'composite' || row.unit === '점') return n.toFixed(1) + '점';
+    if (Math.abs(n) <= 1) return (n * 100).toFixed(1) + '%';
+    return n.toFixed(1) + '%';
+  }
+  function metricDeltaText(row, before, after) {
+    var delta = after - before;
+    var sign = delta > 0 ? '+' : '';
+    if (row.key === 'composite' || row.unit === '점') return sign + delta.toFixed(1);
+    var scaled = Math.abs(before) <= 1 && Math.abs(after) <= 1 ? delta * 100 : delta;
+    return (scaled > 0 ? '+' : '') + scaled.toFixed(1) + 'pp';
+  }
+  function metricBarWidth(row, v) {
+    var n = Number(v);
+    if (!Number.isFinite(n)) return 0;
+    if (row.key === 'composite' || row.unit === '점') return clampPct(n);
+    return clampPct(Math.abs(n) <= 1 ? n * 100 : n);
+  }
+  function normalizeRxMetrics(r) {
+    var rows = [];
+    if (Array.isArray(r.score)) {
+      var beforeScore = numOrNull(r.score[0]);
+      var afterScore = numOrNull(r.score[1]);
+      if (beforeScore !== null && afterScore !== null) {
+        rows.push({ key: 'composite', name: '종합점수', before: beforeScore, after: afterScore, unit: '점' });
+      }
+    }
+    var raw = r.metrics || r.metric_deltas || r.metricChanges || [];
+    if (raw && !Array.isArray(raw) && typeof raw === 'object') {
+      raw = Object.keys(raw).map(function (key) {
+        var val = raw[key] || {};
+        return { key: key, name: val.name || key, before: val.before, after: val.after };
+      });
+    }
+    (raw || []).forEach(function (m) {
+      var before = numOrNull(m.before);
+      var after = numOrNull(m.after);
+      if (before === null || after === null) return;
+      rows.push({
+        key: m.key || m.en || m.name || 'metric',
+        name: m.name || m.label || m.key || m.en || '지표',
+        before: before,
+        after: after,
+        unit: m.unit || ''
+      });
+    });
+    return rows;
+  }
+  function metricTrendClass(before, after) {
+    var d = after - before;
+    if (Math.abs(d) < 0.0005) return 'flat';
+    return d > 0 ? 'up' : 'down';
+  }
+  function renderMetricChips(rows) {
+    if (!rows.length) return '';
+    return '<div class="rx-metric-strip">' + rows.slice(0, 4).map(function (row) {
+      var cls = metricTrendClass(row.before, row.after);
+      return '<span class="rx-metric-chip ' + cls + '"><span class="mk">' + esc(row.name) + '</span>' +
+        '<span class="mv">' + esc(metricDeltaText(row, row.before, row.after)) + '</span></span>';
+    }).join('') + '</div>';
+  }
+  function renderRxMetricTable(rows) {
+    if (!rows.length) return '';
+    return '<div class="rx-metrics">' +
+      '<div class="rx-metrics-head"><span>지표</span><span>변화</span><span>처방 전</span><span>처방 후</span><span>Δ</span></div>' +
+      rows.map(function (row) {
+        var cls = metricTrendClass(row.before, row.after);
+        return '<div class="rx-metrics-row ' + cls + '">' +
+          '<div class="rx-metrics-name"><span class="ko">' + esc(row.name) + '</span><span class="en">' + esc(row.key) + '</span></div>' +
+          '<div class="rx-metric-track"><i class="before" style="width:' + metricBarWidth(row, row.before) + '%"></i><i class="after" style="width:' + metricBarWidth(row, row.after) + '%"></i></div>' +
+          '<div class="rx-metrics-val before">' + esc(metricDisplayValue(row, row.before)) + '</div>' +
+          '<div class="rx-metrics-val after">' + esc(metricDisplayValue(row, row.after)) + '</div>' +
+          '<div class="rx-metrics-delta">' + esc(metricDeltaText(row, row.before, row.after)) + '</div>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+  }
   function rxCard(r) {
+    var drill = r.drill || { label: '상세 지표', rows: [], notes: [], caption: '' };
+    var metrics = normalizeRxMetrics(r);
     var hasScore = Array.isArray(r.score);
     var scoreCls = hasScore && r.score[2] === 'up' ? 'up' : 'down';
     var arrowUp = hasScore && r.score[2] === 'up';
-    var verdictIcon = r.verdict[0] === 'keep' ? '✓' : (r.verdict[0] === 'error' ? '!' : '↩');
+    var verdict = r.verdict || ['pending', '판정 대기'];
+    var verdictIcon = verdict[0] === 'keep' ? '✓' : (verdict[0] === 'error' ? '!' : '↩');
     var scoreHtml = hasScore ?
       '<div class="rx-scoredelta">종합 ' + esc(r.score[0]) + ' <b class="' + scoreCls + '">→ ' + esc(r.score[1]) + (arrowUp ? ' ↑' : ' ↓') + '</b></div>' :
       '<div class="rx-scoredelta error">종합 점수 측정 안 됨</div>';
-    var rows = r.drill.rows || [];
+    var metricChipsHtml = renderMetricChips(metrics);
+    var metricTableHtml = renderRxMetricTable(metrics);
+    var rows = drill.rows || [];
     var rowsHtml = rows.length ? '<div class="sweep">' + rows.map(function (s) {
       return '<div class="sweep-row' + (s.win ? ' win' : '') + '"><span class="sweep-k' + (s.win ? ' win' : '') + '">' + esc(s.k) + '</span>' +
         '<span class="sweep-bar"><i style="width:' + s.w + '%"></i></span><span class="sweep-val">' + esc(s.val) + '</span></div>';
     }).join('') + '</div>' : '';
     // 선택 근거(어떤 라벨이 지지했고 무엇이 실제로 해결됐는지). sweep 막대와 모양이
     // 달라 별도 목록으로 받는다. 구버전 리포트에는 이 키가 없으므로 방어적으로 읽는다.
-    var notes = r.drill.notes || [];
+    var notes = drill.notes || [];
     var notesHtml = notes.length ? '<div class="drill-notes">' + notes.map(function (n) {
       return '<div class="drill-note"><span class="dn-k">' + esc(n[0]) + '</span>' +
         '<span class="dn-v">' + esc(n[1]) + '</span></div>';
@@ -889,15 +1163,16 @@
           '<div class="rx-change">' + esc(r.change[0]) + ' <span style="color:var(--faint)">' + esc(r.change[1]) + '</span><span class="arrow">→</span>' + esc(r.change[2]) + '</div>' +
           '<div class="rx-target">' + esc(r.target) + '</div>' +
           '<div class="rx-reason"><span class="rl">' + esc(r.reason[0]) + '</span> ' + esc(r.reason[1]) + '</div>' +
+          metricChipsHtml +
         '</div>' +
         '<div class="rx-right">' +
-          '<div class="rx-verdict ' + r.verdict[0] + '">' + verdictIcon + ' ' + esc(r.verdict[1]) + '</div>' +
+          '<div class="rx-verdict ' + verdict[0] + '">' + verdictIcon + ' ' + esc(verdict[1]) + '</div>' +
           scoreHtml +
           '<div class="rx-expand">상세 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>' +
         '</div>' +
       '</div>' +
-      '<div class="rx-drill"><div class="drill-label">' + esc(r.drill.label) + '</div>' + rowsHtml + notesHtml +
-        '<div class="drill-caption">' + esc(r.drill.caption) + '</div></div>' +
+      '<div class="rx-drill"><div class="drill-label">' + esc(drill.label) + '</div>' + metricTableHtml + rowsHtml + notesHtml +
+        '<div class="drill-caption">' + esc(drill.caption) + '</div></div>' +
     '</div>';
   }
   function renderRxs(rxs) {

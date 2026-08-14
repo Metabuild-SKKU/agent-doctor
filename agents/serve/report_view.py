@@ -349,6 +349,33 @@ def _build_metrics(report, history: list) -> list[dict[str, Any]]:
     return out
 
 
+def _build_rx_metric_deltas(item) -> list[dict[str, Any]]:
+    """처방 1건의 RAGAS 지표 전후 변화.
+
+    상단 metrics 는 "최초 baseline → 최종 상태"만 보여준다. 처방 카드 안에서는
+    같은 지표를 "이 처방 직전 → 이 처방 직후"로 잘라 보여줘야, 어떤 처방이
+    recall 을 올렸고 어떤 처방이 precision 을 깎았는지 숫자로 추적할 수 있다.
+    """
+    before_scores = dict(item.before_metrics or {})
+    after_scores = dict(item.after_metrics or {})
+    rows: list[dict[str, Any]] = []
+    for key, (name, tip) in _METRIC_LABELS.items():
+        if key not in before_scores and key not in after_scores:
+            continue
+        before = before_scores.get(key, after_scores.get(key))
+        after = after_scores.get(key, before_scores.get(key))
+        if before is None or after is None:
+            continue
+        rows.append({
+            "key": key,
+            "name": name,
+            "tip": tip,
+            "before": round(float(before), 3),
+            "after": round(float(after), 3),
+        })
+    return rows
+
+
 def _course_scores(item) -> DisplayScores:
     """이 이력 항목의 표시용 점수 쌍. 변환 규약은 score_display 가 단독으로 갖는다.
 
@@ -501,6 +528,7 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             "remaining": remaining,
             "reason": ["처방 근거", item.reason or ""],
             "score": score,
+            "metrics": _build_rx_metric_deltas(item),
             "verdict": (
                 ["error", "실험 오류 · 설정 원복"] if study_error else
                 ["keep", "유지"] if kept else
