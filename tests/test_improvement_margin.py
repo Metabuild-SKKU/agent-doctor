@@ -12,7 +12,7 @@ tests/test_improvement_margin.py
      판정하고 둘 다 사용자 리포트로 나가기 때문이다 — 임계가 다르면 같은 점수 변화가
      경로에 따라 다르게 보고된다.)
 
-스케일 주의: 두 지점 모두 정규화 composite(0~1)를 쓴다. 표시 점수 2점 = 0.02.
+스케일 주의: 두 지점 모두 정규화 composite(0~1)를 쓴다. 표시 점수 3점 = 0.03.
 production 배선을 그대로 흉내 내야 부동소수 경계가 실제와 같아진다 —
 judge 는 composite_score.total/100 을, sweep 은 관측값에 실린 composite_score
 (= 같은 total/100)를 읽으므로 두 값이 비트 단위로 같다.
@@ -68,7 +68,7 @@ class JudgeMarginTest(unittest.TestCase):
     """티끌만큼 오른 점수는 노이즈와 구분되지 않으므로 개선이 아니다."""
 
     def test_gain_below_margin_is_rolled_back(self):
-        # 0.800 → 0.818 (+0.018) — 마진 0.02 미만
+        # 0.800 → 0.818 (+0.018) — 마진(0.03) 미만. 실측 σ_Δ(0.0107) 안에 묻히는 폭이다.
         verdict = _judge_totals(80.0, 81.8)
 
         self.assertFalse(verdict.keep)
@@ -342,8 +342,9 @@ class RerankerFloorRelaxationMarginTest(unittest.TestCase):
         """
         relaxed = self._relax(0.800, 0.800 + MARGIN)
 
-        self.assertIn("80.0→82.0", relaxed.reason)
-        self.assertIn("마진 2.0", relaxed.reason)
+        # 마진 상수를 재보정해도(#102) 스케일 계약은 그대로여야 하므로 상수에서 끌어온다.
+        self.assertIn(f"80.0→{(0.800 + MARGIN) * 100:.1f}", relaxed.reason)
+        self.assertIn(f"마진 {MARGIN * 100:.1f}", relaxed.reason)
         self.assertNotIn("0.800", relaxed.reason)
         # 판정에 쓰는 값 자체는 그대로 0~1 탐색 신호다.
         self.assertAlmostEqual(relaxed.before_score, 0.800)
@@ -590,7 +591,7 @@ class ThresholdConsistencyTest(unittest.TestCase):
 
     def test_verdicts_agree_across_and_around_the_boundary(self):
         before_total = 80.0
-        margin_total = MIN_IMPROVEMENT_MARGIN * 100   # 표시 스케일 2점
+        margin_total = MIN_IMPROVEMENT_MARGIN * 100   # 표시 스케일 3점
         after_totals = [
             before_total - 5.0,                    # 하락
             before_total,                          # 동일

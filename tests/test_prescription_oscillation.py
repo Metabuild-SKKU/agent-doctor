@@ -562,10 +562,10 @@ class RollbackPlanningInputTest(unittest.TestCase):
 # ── 5. 재측정 노이즈 관측 ─────────────────────────────────────────
 
 class MeasurementNoiseTest(unittest.TestCase):
-    """마진 재보정에 쓸 σ 관측을 정상 실행에서 모은다.
+    """마진이 여전히 노이즈보다 큰지를 정상 실행에서 감시한다.
 
-    MIN_IMPROVEMENT_MARGIN 은 측정에서 나온 값이 아니라는 것이 주석에 명시돼 있다.
-    노이즈가 그보다 크면 마진이 제 역할을 못 하는데, 지금은 그 사실을 알 방법이 없다.
+    MIN_IMPROVEMENT_MARGIN 은 #102 에서 σ 측정으로 정한 값이지만, 코퍼스·judge 모델·
+    QA셋 크기가 바뀌면 다시 재야 한다. 재측정 편차가 마진을 넘으면 그 신호다.
     """
 
     def test_same_config_measured_twice_reports_the_spread(self):
@@ -585,7 +585,30 @@ class MeasurementNoiseTest(unittest.TestCase):
         spread = history.max_repeated_measurement_spread(items)
 
         self.assertAlmostEqual(spread, 0.02)
-        # 이 폭이 마진 이상이면 '개선'과 노이즈가 구분되지 않는다.
+        # 이 관측이 마진 재보정(#102)의 출발점이었다. 옛 마진 0.02 는 이 편차와 같아서
+        # '개선'과 노이즈가 구분되지 않았고, 실측 σ 로 0.03 으로 올린 지금은 이 폭이
+        # 마진 아래에 있다 — 같은 상황이 다시 오면 롤백된다.
+        self.assertLess(spread, history.MIN_IMPROVEMENT_MARGIN)
+
+    def test_spread_above_margin_is_surfaced(self):
+        """편차가 마진을 넘으면 그 값이 그대로 나와야 한다 — 재측정하라는 신호다.
+
+        이 경로가 죽으면 코퍼스나 judge 모델이 바뀌어 노이즈가 커져도 아무도 모른다."""
+        off = _config(reranker=False)
+        items = [
+            _kept_item(ENABLE, off, _config(), before_score=0.75, after_score=0.78),
+            _kept_item(
+                WIDEN,
+                _config(reranker=False, candidates=22),   # 리랭커가 꺼져 있어 같은 동작
+                _config(),
+                before_score=0.71,
+                after_score=0.80,
+            ),
+        ]
+
+        spread = history.max_repeated_measurement_spread(items)
+
+        self.assertAlmostEqual(spread, 0.04)
         self.assertGreaterEqual(spread, history.MIN_IMPROVEMENT_MARGIN)
 
     def test_a_config_measured_once_has_no_spread(self):
