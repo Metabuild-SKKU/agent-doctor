@@ -614,6 +614,14 @@ def _log_selected_action(request: OptimizationRequest) -> None:
             f"[Optimize]   밀린 action: {runner_up['action_key']} "
             f"(점수 {runner_up['score']})"
         )
+    for demoted in request.metadata.get("margin_demoted_actions", []):
+        # 탈락이 아니라 강등이다 — 인과 우선권만 잃었고 후보로는 남아 있다.
+        print(
+            f"[Optimize]   우선권 강등: {demoted.get('action_key')} "
+            f"({demoted.get('group')}그룹, probe {demoted.get('probe_count')}개 → "
+            f"최대 상승 {history.to_display_scale(demoted.get('ceiling_delta') or 0.0):.1f} "
+            f"< 마진 {history.to_display_scale(demoted.get('margin') or 0.0):.1f})"
+        )
     for deferred in request.metadata.get("deferred_axes", []):
         print(
             f"[Optimize]   보류된 축: {deferred.get('axis')} "

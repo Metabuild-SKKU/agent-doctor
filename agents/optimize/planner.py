@@ -189,6 +189,9 @@ class _ActionSelection:
     ranked: list[Any] = field(default_factory=list)
     rejected: list[Any] = field(default_factory=list)
     deferred: list[dict[str, Any]] = field(default_factory=list)
+    # 성공해도 마진을 못 넘어 인과 우선권을 잃은 후보들(탈락이 아니라 강등이다 —
+    # 더 나은 후보가 없으면 여전히 선택될 수 있다).
+    margin_demoted: list[dict[str, Any]] = field(default_factory=list)
     evidence_cache: dict[str, Any] = field(default_factory=dict)
     findings_by_label: dict[str, list[Finding]] = field(default_factory=dict)
 
@@ -246,6 +249,9 @@ def _select_action(
         ),
     )
     kept, deferred = action_aggregator.resolve_action_conflicts(eligible)
+    # 인과 순서(A>C>B)로 정렬하기 전에, 그 순서를 주장할 자격을 먼저 판정한다 —
+    # 성공해도 종합점수를 마진만큼 못 올리는 후보는 상위 그룹이어도 우선권을 잃는다.
+    margin_demoted = action_aggregator.annotate_margin_reachability(kept, state)
     ranked = action_aggregator.rank_action_candidates(kept)
 
     return _ActionSelection(
@@ -253,6 +259,7 @@ def _select_action(
         ranked=ranked,
         rejected=[*guard_rejected, *rejected],
         deferred=deferred,
+        margin_demoted=margin_demoted,
         evidence_cache=evidence_cache,
         findings_by_label=grouped,
     )
@@ -435,6 +442,7 @@ def _build_action_request(
             {"action_key": c.action_key, "score": round(c.score, 6)}
             for c in selection.ranked[1:4]
         ],
+        "margin_demoted_actions": list(selection.margin_demoted),
     }
     if grounding:
         metadata["candidate_grounding"] = dict(grounding)

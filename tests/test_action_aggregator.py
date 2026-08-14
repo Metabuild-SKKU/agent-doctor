@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from agents.optimize import action_aggregator as aggregator
 from agents.optimize import action_catalog, candidate_values, history
 from agents.optimize.schemas import ActionCandidate, ActionSupport
-from core.schema import UNMEASURED_SIGNAL
+from core.schema import DiagnosticReport, Probe, UNMEASURED_SIGNAL
+from core.state import AgentDoctorState
 from tests.test_planner import make_finding, make_state
 
 
@@ -782,6 +783,115 @@ class BlockedAttemptFilterTest(unittest.TestCase):
             self._top_k_action(eligible).search_space,
             {"retriever.top_k": [7, 9]},
         )
+
+
+class MarginReachabilityTest(unittest.TestCase):
+    """마진에 못 닿는 후보는 인과 우선권(A>C>B)을 잃는다.
+
+    실측 배경(pipeline_20260814_105310): probe 1개짜리 A 후보가 probe 14개짜리 B
+    후보를 반복 1·4 에서 눌렀는데, 그 A 처방은 완벽히 성공해도 종합점수 상한이
+    마진의 절반이었다(실제로 적용 후 점수가 안 올라 롤백됐다).
+    """
+
+    def _state(self, probe_total=100, components=(48, 38)):
+        """probe 총수와 종합점수 성분(0~100)만 있는 최소 state."""
+        report = DiagnosticReport(
+            report_id="r",
+            composite_score={
+                "total": 42,
+                "components": [
+                    {"key": "quality", "label": "품질", "score": components[0]},
+                    {"key": "reliability", "label": "신뢰도", "score": components[1]},
+                ],
+            },
+        )
+        return AgentDoctorState(
+            report=report,
+            probes=[Probe(probe_id=f"p{i}", question="q", source="taxonomy")
+                    for i in range(probe_total)],
+            index_config={"chunk_size": 512, "chunk_overlap": 50, "top_k": 5},
+            iteration=0, max_iterations=3,
+        )
+
+    def _pair(self, a_probes, b_probes):
+        """A그룹 후보 하나 + B그룹 후보 하나."""
+        a = _candidate(
+            "retriever.top_k:increase",
+            [_support("retriever.top_k:increase", "a",
+                      {f"a{i}" for i in range(a_probes)}, group="A")],
+        )
+        b = _candidate(
+            "generation.require_citation:enable",
+            [_support("generation.require_citation:enable", "b",
+                      {f"b{i}" for i in range(b_probes)}, group="B")],
+        )
+        return a, b
+
+    def test_below_margin_a_group_loses_to_above_margin_b_group(self):
+        """probe 1개 A 가 probe 14개 B 에게 자리를 내준다 — 이 변경의 목적."""
+        state = self._state()
+        a, b = self._pair(1, 14)
+        self.assertEqual(aggregator.rank_action_candidates([a, b])[0].action_key,
+                         a.action_key, "전제: 주석 전에는 A 가 이긴다")
+
+        aggregator.annotate_margin_reachability([a, b], state)
+        self.assertEqual(aggregator.rank_action_candidates([a, b])[0].action_key,
+                         b.action_key)
+
+    def test_causal_order_survives_when_both_clear_margin(self):
+        """둘 다 마진을 넘으면 인과 순서가 그대로다 — 규칙을 무력화하지 않는다."""
+        state = self._state()
+        a, b = self._pair(20, 40)
+        aggregator.annotate_margin_reachability([a, b], state)
+        self.assertEqual(aggregator.rank_action_candidates([a, b])[0].action_key,
+                         a.action_key)
+
+    def test_causal_order_survives_when_neither_clears_margin(self):
+        """둘 다 미달이면 같은 층이라 인과 순서가 남는다(더 나은 후보가 없다)."""
+        state = self._state()
+        a, b = self._pair(1, 1)
+        aggregator.annotate_margin_reachability([a, b], state)
+        self.assertEqual(aggregator.rank_action_candidates([a, b])[0].action_key,
+                         a.action_key)
+
+    def test_partial_composite_leaves_order_unchanged(self):
+        """성분이 하나라도 미측정이면 판단을 보류하고 기존 순서를 지킨다."""
+        state = self._state(components=(48, None))
+        a, b = self._pair(1, 14)
+        demoted = aggregator.annotate_margin_reachability([a, b], state)
+        self.assertEqual(demoted, [])
+        self.assertEqual(aggregator.rank_action_candidates([a, b])[0].action_key,
+                         a.action_key)
+
+    def test_no_probes_leaves_order_unchanged(self):
+        """probe 총수를 모르면(분모 없음) 아무것도 강등하지 않는다."""
+        state = self._state(probe_total=0)
+        a, b = self._pair(1, 14)
+        self.assertEqual(aggregator.annotate_margin_reachability([a, b], state), [])
+        self.assertEqual(aggregator.rank_action_candidates([a, b])[0].action_key,
+                         a.action_key)
+
+    def test_unannotated_candidates_keep_legacy_order(self):
+        """주석을 안 붙이면 기존 동작 그대로 — 다른 호출자를 깨지 않는다."""
+        a, b = self._pair(1, 14)
+        self.assertEqual(aggregator.rank_action_candidates([a, b])[0].action_key,
+                         a.action_key)
+
+    def test_demoted_entry_reports_ceiling_and_margin(self):
+        """강등 사유를 로그로 설명할 수 있어야 한다."""
+        state = self._state()
+        a, b = self._pair(1, 14)
+        demoted = aggregator.annotate_margin_reachability([a, b], state)
+        self.assertEqual([d["action_key"] for d in demoted], [a.action_key])
+        entry = demoted[0]
+        self.assertEqual(entry["probe_count"], 1)
+        self.assertLess(entry["ceiling_delta"], entry["margin"])
+
+    def test_gold_error_probes_leave_the_denominator(self):
+        """종합점수가 뺀 probe 는 분모에서도 빠진다 — 같은 집합을 봐야 한다."""
+        state = self._state(probe_total=100)
+        state.report.findings_summary = {"confirmed_labels": {"bad_gold_chunk": 4.0}}
+        self.assertEqual(aggregator._scorable_probe_total(state), 96)
 
 
 if __name__ == "__main__":
