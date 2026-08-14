@@ -17,7 +17,9 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from agents.eval.llm_provider import _strip_code_fence
-from agents.eval.metrics_basic import is_abstention
+# _has_hangul 은 복제하지 않고 공용 구현을 쓴다 — 사본이 생기면 생성 언어 판정과
+# 채점 단위 판정의 계약이 갈린다(generator._has_hangul 주석 참고).
+from agents.eval.metrics_basic import _has_hangul, is_abstention
 from agents.rag.generator import _PROMPT_EN, _PROMPT_KO, _build_prompt
 
 _CONTEXT = ["Acme opened a factory in March 2020."]
@@ -116,10 +118,6 @@ class AnswerLanguageTest(unittest.TestCase):
         for prompts in (_PROMPT_KO, _PROMPT_EN):
             phrase = _extract_quoted(prompts["grounded"])
             self.assertTrue(is_abstention(phrase), phrase)
-
-
-def _has_hangul(text: str) -> bool:
-    return any("가" <= c <= "힣" or "ᄀ" <= c <= "ᇿ" or "㄰" <= c <= "㆏" for c in text)
 
 
 def _extract_quoted(clause: str) -> str:

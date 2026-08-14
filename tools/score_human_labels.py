@@ -38,7 +38,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from tools.make_label_sheet import NO_LABEL, PRIMARY_FIELD, UNSURE
-from tools.score_ragec import _pad, _rpad, _wrap, stage_of
+from tools.score_ragec import _pad, _read_jsonl, _rpad, _wrap, probe_failed, stage_of
 
 # LABELS.md 의 그룹 구분. 그룹 정확도는 라벨보다 거칠어 표기 흔들림에 강하다.
 _GROUPS = {"chunking_": "A", "retrieval_": "A", "reranker_": "A",
@@ -77,10 +77,6 @@ def read_sheet(path: str) -> list[dict]:
     return items
 
 
-def _read_jsonl(path: str) -> list[dict]:
-    return [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
-
-
 def score(label_rows: list[dict], findings_rows: list[dict]) -> dict:
     ours = {str(r["qa_id"]): r for r in findings_rows}
 
@@ -108,7 +104,7 @@ def score(label_rows: list[dict], findings_rows: list[dict]) -> dict:
         if found is None:
             excluded["덤프에 없음"] += 1
             continue
-        if not found.get("failed", bool(found.get("labels"))):
+        if not probe_failed(found):
             excluded["우리는 성공"] += 1   # 실패가 없으니 진단할 것도 없다
             continue
 
@@ -125,16 +121,18 @@ def score(label_rows: list[dict], findings_rows: list[dict]) -> dict:
             for label in predicted or ["(라벨 없음)"]:
                 confusion[(gold, label)] += 1
 
+        # 분모를 라벨 정확도와 **같게** 맞춘다. 우리가 아무 라벨도 못 냈거나 단계 개념이
+        # 없는 라벨(C·D그룹)만 낸 경우를 분모에서 빼면 '단계 주장을 했을 때의 조건부
+        # 정확도'가 되어 위로 편향된다 — 논문 수치(57.8%) 옆에 병기하는 값이라 어긋나면 안 된다.
+        # 사람 라벨 쪽에 단계 개념이 없을 때만(C·D그룹 정답) 채점 대상에서 제외한다.
         gold_stage = stage_of(gold)
-        stages = {stage_of(p) for p in predicted} - {None}
-        if gold_stage and stages:
+        if gold_stage:
             stage_total += 1
-            stage_hit += gold_stage in stages
+            stage_hit += gold_stage in ({stage_of(p) for p in predicted} - {None})
         gold_group = group_of(gold)
-        groups = {group_of(p) for p in predicted} - {None}
-        if gold_group and groups:
+        if gold_group:
             group_total += 1
-            group_hit += gold_group in groups
+            group_hit += gold_group in ({group_of(p) for p in predicted} - {None})
 
         rows.append({"qa_id": qa_id, "gold": gold,
                      "predicted": predicted, "hit": gold in predicted})
@@ -233,9 +231,8 @@ def main() -> int:
     ap.add_argument("--findings", default="output/ragec/findings.jsonl")
     ap.add_argument("--out", default="output/ragec/scores",
                     help="채점 결과 저장 위치")
-    ap.add_argument("--detail", action="store_true", default=True,
-                    help="probe 별 대조(기본 ON)")
-    ap.add_argument("--no-detail", dest="detail", action="store_false")
+    ap.add_argument("--no-detail", dest="detail", action="store_false", default=True,
+                    help="probe 별 대조 없이 총계만 출력")
     ap.add_argument("--no-save", dest="save", action="store_false", default=True,
                     help="파일로 저장하지 않고 콘솔에만 출력")
     args = ap.parse_args()

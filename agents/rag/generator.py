@@ -654,8 +654,14 @@ def _answer_language(question: str, config: dict | None) -> str:
 
 
 def _has_hangul(text: str) -> bool:
-    return any("가" <= c <= "힣" or "ᄀ" <= c <= "ᇿ"
-               or "㄰" <= c <= "㆏" for c in text)
+    """한글 포함 여부 — **채점 단위 판정과 같은 구현을 쓴다.**
+
+    주석에서 "metrics_basic.scoring_unit 과 같은 방식" 이라고 선언한 계약을 코드로 묶는다.
+    복제해 두면 한쪽만 한글 블록을 넓혔을 때 혼합 문자 질문에서 생성 언어와 채점 단위가
+    갈리고, 이 파일이 고친 f1=0 오진이 그 부분집합에서 조용히 재현된다(어떤 테스트도 못 잡음).
+    """
+    from agents.eval.metrics_basic import _has_hangul as _shared
+    return _shared(text)
 
 
 def _build_prompt(

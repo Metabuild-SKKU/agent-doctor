@@ -259,6 +259,36 @@ class RetrievalSucceededExclusionTest(unittest.TestCase):
         self.assertIn("recall@k(span)=1.00", out)
 
 
+class StageDenominatorTest(unittest.TestCase):
+    """단계 분모가 라벨 분모와 같아야 한다.
+
+    미진단(라벨 0개)을 단계에서만 빼면 '우리가 단계 주장을 했을 때의 조건부 정확도' 가 되어
+    체계적으로 위로 편향된다. 그 값을 논문 57.8% 옆에 나란히 찍으므로 어긋나면 안 된다.
+    """
+
+    KEY = [_key("1", "E4 Missed Retrieval", "Retrieval")]
+
+    def test_no_diagnosis_counts_against_stage_too(self):
+        result = score([{"qa_id": "1", "labels": [], "failed": True}], self.KEY)
+        self.assertEqual((result["total"], result["stage_total"]), (1, 1))
+        self.assertEqual(result["stage_hit"], 0)
+
+    def test_labels_without_a_stage_still_count_in_the_denominator(self):
+        """C·D그룹 라벨만 낸 경우도 '단계를 못 짚은 것' 이다."""
+        result = score([_found("1", "too_long_context")], self.KEY)
+        self.assertEqual((result["stage_total"], result["stage_hit"]), (1, 0))
+
+    def test_denominators_match_the_label_axis(self):
+        rows = [_found("1", "retrieval_low_rank"),
+                {"qa_id": "2", "labels": [], "failed": True},
+                _found("3", "generation_hallucination")]
+        keys = [_key("1", "E4 Missed Retrieval", "Retrieval"),
+                _key("2", "E4 Missed Retrieval", "Retrieval"),
+                _key("3", "E4 Missed Retrieval", "Retrieval")]
+        result = score(rows, keys)
+        self.assertEqual(result["total"], result["stage_total"])
+
+
 class StageScoringTest(unittest.TestCase):
     def test_stage_matches_even_when_label_is_wrong(self):
         """단계 채점은 라벨보다 거칠어 정책 차이에 강하다 — 그래서 병기한다.
@@ -328,6 +358,29 @@ class FindingsFromReportTest(unittest.TestCase):
     def test_findings_without_label_are_skipped(self):
         report = self._Report([self._Finding(None, ["probe_qa_1"])])
         self.assertEqual(findings_from_report(report), [])
+
+    def test_diagnosis_order_is_preserved_not_alphabetised(self):
+        """첫 원소를 두 곳이 '진단 1순위' 로 읽는다 — top-1 정확도와 층화추출 키.
+
+        set + sorted() 로 담으면 그게 알파벳 순이 되어 generation_* 이 항상 앞에 온다.
+        그러면 top-1 이 진단 품질이 아니라 사전순을 재고, '라벨 남발 감시' 라는 취지가
+        통째로 무력해진다(실측: 라벨 2개인 7건이 전부 generation_* 을 1순위로 달고 있었다).
+        """
+        report = self._Report([
+            self._Finding("retrieval_low_rank", ["probe_qa_1"]),          # diagnose 1순위
+            self._Finding("generation_hallucination", ["probe_qa_1"]),
+        ])
+        self.assertEqual(findings_from_report(report)[0]["labels"],
+                         ["retrieval_low_rank", "generation_hallucination"])
+
+    def test_duplicate_labels_are_folded_without_reordering(self):
+        report = self._Report([
+            self._Finding("retrieval_low_rank", ["probe_qa_1"]),
+            self._Finding("generation_hallucination", ["probe_qa_1"]),
+            self._Finding("retrieval_low_rank", ["probe_qa_1"]),
+        ])
+        self.assertEqual(findings_from_report(report)[0]["labels"],
+                         ["retrieval_low_rank", "generation_hallucination"])
 
     def test_probe_ids_as_strings_still_work(self):
         """구 호출부는 probe_id 문자열 목록을 넘긴다 — 계약을 깨지 않는다."""

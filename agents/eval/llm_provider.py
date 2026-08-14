@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 
 from core.llm_clients import (
@@ -196,10 +197,15 @@ def _strip_code_fence(raw: str) -> str:
     text = (raw or "").strip()
     if not text.startswith("```"):
         return text
-    # 첫 줄은 ``` 또는 ```json — 언어 태그가 붙어도 벗긴다.
-    _, _, rest = text.partition("\n")
-    end = rest.rfind("```")
-    return (rest[:end] if end != -1 else rest).strip()
+    # 여는 펜스(``` 또는 ```json)와 닫는 펜스를 한 번에 벗긴다.
+    #
+    # 줄 단위(partition("\n"))로 하면 **개행 없는 한 줄 펜스**에서 본문을 통째로 버린다
+    # (```json{"verdict": 1}``` → ''). 최종 결과는 {} 로 같아 회귀는 아니지만, 이 함수가
+    # 흡수한다고 선언한 실패 모드가 그대로 남는다. 닫는 펜스는 절단 응답을 위해 선택이다.
+    # 언어 태그는 낱말 문자만 — `[^\s\`]*` 로 두면 개행 없는 응답에서 태그가 본문까지
+    # 먹어(```json{"v":1}``` 의 `json{"v":1}` 전체) 결과가 빈 문자열이 된다.
+    match = re.match(r"^```[A-Za-z0-9_+-]*\s*(.*?)\s*(?:```)?$", text, re.DOTALL)
+    return match.group(1).strip() if match else text
 
 
 def chat_json(

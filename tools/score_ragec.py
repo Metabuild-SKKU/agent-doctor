@@ -175,12 +175,20 @@ def findings_from_report(report, probes: list | None = None) -> list[dict]:
     '실패 목록' 이 아니라 빠진다). 성공 probe 는 채점 대상도 아니므로 질문·정답만으로
     충분하다고 보고 여기서 넓히지 않는다.
     """
-    by_probe: dict[str, set[str]] = collections.defaultdict(set)
+    # **순서를 보존한다.** report.findings 는 diagnose 의 처방 우선순위(확정 우선, 그룹
+    # D→A→C→B)로 정렬돼 있고, 그 첫 원소를 두 곳이 '진단 1순위'로 읽는다:
+    #   · score_human_labels 의 top-1 정확도 (라벨 남발 감시)
+    #   · make_label_sheet 의 층화추출 키
+    # set + sorted() 로 담으면 그게 **알파벳 순**이 된다 — generation_* 이 retrieval_* 보다
+    # 항상 앞이라 top-1 이 진단 품질이 아니라 사전순을 재게 되고, 층화도 엉뚱한 축으로 쏠린다.
+    # (실측: 라벨 2개인 7건이 전부 generation_* 을 1순위로 달고 있었다)
+    by_probe: dict[str, list[str]] = collections.defaultdict(list)
     for finding in getattr(report, "findings", []) or []:
         if not finding.label:
             continue
         for probe_id in finding.affected_probes:
-            by_probe[probe_id].add(finding.label)
+            if finding.label not in by_probe[probe_id]:   # 순서 보존 dedup
+                by_probe[probe_id].append(finding.label)
 
     # 실패 판정은 report 가 소유한다 — findings 유무로 추론하지 않는다. 골드 오류 probe 는
     # findings 는 있지만 failed_questions 에서 빠지므로(평가셋 결함이라 '실패한 검증 질문'
@@ -203,7 +211,7 @@ def findings_from_report(report, probes: list | None = None) -> list[dict]:
         answer_row = answers.get(probe_id, {})
         row = {
             "qa_id": _qa_id(probe_id),
-            "labels": sorted(by_probe.get(probe_id, ())),
+            "labels": list(by_probe.get(probe_id, ())),   # 진단 순서 그대로(위 주석 참고)
             "failed": probe_id in answers or bool(by_probe.get(probe_id)),
         }
         question = getattr(probe, "question", "") or answer_row.get("question", "")
@@ -235,7 +243,18 @@ def findings_from_report(report, probes: list | None = None) -> list[dict]:
 
 
 def _read_jsonl(path: str) -> list[dict]:
+    """덤프 리더 **정본**. 다른 도구도 이걸 import 한다 — 세 곳에 복사해 두면 한쪽에만
+    개선(BOM 허용·깨진 줄 안내)이 들어갔을 때 같은 파일이 도구에 따라 읽히거나 죽는다."""
     return [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
+
+
+def probe_failed(row: dict) -> bool:
+    """이 probe 를 실패로 볼 것인가. **구버전 덤프 호환 추론이 여기 한 곳에만 있다.**
+
+    `failed` 필드가 없던 덤프는 라벨 유무로 추론한다. 이 규칙이 세 도구 네 곳에 복사돼
+    있었는데, 하나만 놓치면 도구마다 성공/실패 버킷이 달라져 '우리는 성공' 집계와
+    층화 표본이 서로 다른 모집단을 보게 된다."""
+    return bool(row.get("failed", bool(row.get("labels"))))
 
 
 # ── 표 정렬 (한글은 터미널에서 두 칸을 먹는다) ────────────────────
@@ -263,10 +282,7 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
     # "failed" 가 없는 덤프(구버전)는 라벨 유무로 추론한다 — 그 경우 '우리는 성공' 과
     # '실패했는데 원인을 못 짚음' 이 구분되지 않으므로 리포트가 그렇다고 밝힌다.
     has_status = any("failed" in r for r in findings_rows)
-    failed = {
-        str(r["qa_id"]): bool(r.get("failed", bool(r.get("labels"))))
-        for r in findings_rows
-    }
+    failed = {str(r["qa_id"]): probe_failed(r) for r in findings_rows}
 
     recalls = {
         str(r["qa_id"]): r["recall_at_k"]
@@ -316,16 +332,21 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
         if not got:
             no_diagnosis += 1        # 실패했는데 원인을 못 짚었다 = 진짜 미진단
             per_category[category].append(False)
+            stage_total += 1         # 단계도 못 짚은 것 — 아래 주석 참고
             continue
 
         per_category[category].append(bool(expected & got))
 
         # 단계는 우리가 낸 라벨 중 **하나라도** 그 단계면 맞은 것으로 본다(포함과 같은 취지).
+        #
+        # 분모를 라벨 정확도와 **같게** 맞춘다. 미진단(라벨 0개)이나 단계 개념이 없는 라벨만
+        # 낸 경우를 분모에서 빼면, 단계 수치가 '우리가 단계 주장을 했을 때의 조건부 정확도'가
+        # 되어 체계적으로 위로 편향된다 — 그 값을 논문 57.8% 옆에 나란히 찍으면 비교가
+        # 어긋난다. 말 안 한 것도 못 맞힌 것으로 센다.
+        stage_total += 1
         stages = {stage_of(label) for label in got} - {None}
-        if stages:
-            stage_total += 1
-            if key["ragec_stage"].strip() in stages:
-                stage_hit += 1
+        if key["ragec_stage"].strip() in stages:
+            stage_hit += 1
 
     scored = [hit for hits in per_category.values() for hit in hits]
     return {
@@ -409,7 +430,7 @@ def _verdict(row: dict, category: str) -> str:
     expected = RAGEC_TO_OURS.get(category)
     if not expected:
         return "-"            # 대응 라벨 없음 또는 대조표에 없는 카테고리 — 제외
-    if not row.get("failed", bool(labels)):
+    if not probe_failed(row):
         return "성공"          # 우리 파이프라인이 이 질문에 성공 — 채점 제외
     recall = row.get("recall_at_k")
     if (category in RECALL_REFUTES
@@ -522,10 +543,10 @@ def main() -> int:
     ap.add_argument("--key", default="data/ragec_answer_key.jsonl")
     # 기본 ON. 정확도 숫자만으로는 대조표를 고칠지 진단을 고칠지 못 정한다 — 실제로 두 번
     # 다 probe 별 원문을 보고서야 원인을 찾았다(format_detail 참고). 끄는 쪽을 플래그로 둔다.
-    ap.add_argument("--detail", action="store_true", default=True,
-                    help="probe 별 대조(기본 ON)")
-    ap.add_argument("--no-detail", dest="detail", action="store_false",
-                    help="정확도 표만 출력")
+    # --detail 은 두지 않는다 — 기본이 ON 이라 동작을 못 바꾸는 죽은 플래그가 되고,
+    # 나중에 기본값을 뒤집으면 도움말이 거짓이 된다.
+    ap.add_argument("--no-detail", dest="detail", action="store_false", default=True,
+                    help="probe 별 대조 없이 총계만 출력")
     args = ap.parse_args()
 
     for path in (args.findings, args.key):

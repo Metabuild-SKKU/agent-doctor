@@ -192,6 +192,15 @@ class ScoringTest(unittest.TestCase):
         self.assertEqual(r["hit"], 0)
         self.assertEqual((r["stage_hit"], r["stage_total"]), (1, 1))
 
+    def test_stage_denominator_matches_the_label_axis(self):
+        """미진단이나 단계 개념 없는 라벨만 낸 경우를 단계 분모에서 빼면 위로 편향된다 —
+        논문 57.8% 옆에 병기하는 값이라 어긋나면 안 된다."""
+        no_label = self._score("retrieval_low_rank")               # 우리가 라벨 0개
+        self.assertEqual((no_label["total"], no_label["stage_total"]), (1, 1))
+        self.assertEqual(no_label["stage_hit"], 0)
+        c_only = self._score("retrieval_low_rank", "too_long_context")   # C그룹만 냄
+        self.assertEqual((c_only["stage_total"], c_only["stage_hit"]), (1, 0))
+
     def test_group_axis_is_coarser_than_stage(self):
         """A그룹 안에 검색·청킹·리랭킹이 다 있어 그룹은 단계보다 관대하다."""
         r = self._score("chunking_overchunking", "retrieval_low_rank")

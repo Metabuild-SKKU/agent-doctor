@@ -49,6 +49,8 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from tools.score_ragec import _read_jsonl, probe_failed
+
 LABELS_MD = "tests/diagnose_grid/LABELS.md"
 
 # 라벨러가 32개 라벨 밖을 표현할 통로. 둘 다 없으면 억지로 하나를 고르게 되어, 택소노미
@@ -74,10 +76,6 @@ GUIDE = [
 ]
 
 
-def _read_jsonl(path: str) -> list[dict]:
-    return [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
-
-
 def stratified_sample(rows: list[dict], limit: int, seed: int = 0) -> list[dict]:
     """우리 예측 라벨 기준으로 **골고루** 뽑는다.
 
@@ -87,7 +85,7 @@ def stratified_sample(rows: list[dict], limit: int, seed: int = 0) -> list[dict]
     예측 라벨로 층을 나누는 게 라벨러에게 힌트가 되지는 않는다 — 표본을 고르는 데만 쓰고
     시트에는 싣지 않는다. '우리가 X 라고 본 것들' 을 골고루 담을 뿐 정답이 X 라는 뜻이 아니다.
     """
-    scoreable = [r for r in rows if r.get("failed", bool(r.get("labels")))]
+    scoreable = [r for r in rows if probe_failed(r)]
     if limit <= 0 or len(scoreable) <= limit:
         return sorted(scoreable, key=lambda r: str(r["qa_id"]))
 

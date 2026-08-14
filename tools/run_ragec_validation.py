@@ -93,14 +93,23 @@ def main() -> int:
     os.environ["EVAL_TAXONOMY_QA"] = QA
     os.environ["KORQUAD_MAX_DOCS"] = "0"           # 108개 전부
     os.environ["KORQUAD_QA_LIMIT"] = str(max(0, args.limit))
-    os.environ.setdefault("EVAL_MODE", "deep")     # 라벨을 확정하려면 RAGAS 가 필요하다
-    os.environ.setdefault("EVAL_ENABLE_LLM", "1")
+    # setdefault 가 아니라 **직접 대입**이다. _load_env() 가 override=True 로 .env 를 먼저
+    # 실었기 때문에, setdefault 로 두면 팀원 .env 의 EVAL_MODE=fast 나
+    # RAG_ANSWER_LANGUAGE=ko 가 조용히 이긴다 — 이 스크립트가 막겠다고 선언한
+    # "절반만 맞은 설정으로 비용만 나가는" 사고가 그대로 난다. 바뀐 값은 아래에서 로그로 남긴다.
+    forced = {
+        "EVAL_MODE": "deep",          # 라벨을 확정하려면 RAGAS 가 필요하다
+        "EVAL_ENABLE_LLM": "1",
     # DragonBall 은 영어 코퍼스다. 생성 프롬프트 기본값(한국어)으로 두면 질문은 영어인데
     # 답변만 한국어로 나와 char-F1 이 **구조적으로 0** 이 되고, _is_success 의 lexical 축이
     # 항상 실패라 **검색이 완벽해도 실패로 집계된다**(실측: recall=1.00·gold 2/2 검색인데
     # f1=0.00 → generation_hallucination 오진). 그러면 채점이 진단 품질이 아니라 언어
     # 불일치를 재게 된다.
-    os.environ.setdefault("RAG_ANSWER_LANGUAGE", "match")
+        "RAG_ANSWER_LANGUAGE": "match",
+    }
+    overridden = {k: os.environ[k] for k, v in forced.items()
+                  if os.environ.get(k) not in (None, v)}
+    os.environ.update(forced)
 
     from core.run_logger import setup_run_logging
     # 검증 로그는 output/logs 가 아니라 검증 폴더 아래에 모은다 — 파이프라인 스모크 로그와
@@ -124,6 +133,11 @@ def main() -> int:
         print(f"[RAGEC] 임베딩 설정 적용: {applied}")
     print(f"[RAGEC] 코퍼스 {CORPUS} · QA {QA}"
           f"{f' (상한 {args.limit})' if args.limit else ' (전체)'}")
+    if overridden:
+        # .env 와 달라진 값은 반드시 남긴다 — 나중에 "이 수치가 어떤 설정에서 나왔나" 를
+        # 로그만 보고 알 수 있어야 한다.
+        print(f"[RAGEC] .env 값을 검증용으로 덮어씀: "
+              + ", ".join(f"{k} {v} → {forced[k]}" for k, v in overridden.items()))
 
     state = AgentDoctorState()
     state.source_type = "korquad"
@@ -162,13 +176,23 @@ def main() -> int:
     if sample:
         write_sheet(sample, sheet_path)
         print(f"라벨 시트 → {sheet_path}  ({len(sample)}건)")
-        print(summarize(sample))
-    print(f"\n  ↳ '{PRIMARY_FIELD}' 칸을 채운 뒤: python tools/score_human_labels.py")
 
+    # **probe 별 우리 진단을 콘솔에 찍지 않는다.** 소규모 팀에서는 실행자가 라벨러를 겸하는데,
+    # 여기서 qa_id별 진단을 화면에 뿌리면 시트를 열기도 전에 답을 본 상태가 되어 시트에서
+    # 라벨을 뺀 블라인딩이 통째로 무력해진다. 표본의 예측 라벨 분포(summarize)도 같은 이유로
+    # 뺀다 — "이 표본은 low_rank 가 12건" 을 알고 라벨링하면 그쪽으로 끌린다.
+    # 둘 다 파일로는 남으니 라벨링이 끝난 뒤에 보면 된다.
     key_rows = _read_jsonl(str(REPO_ROOT / KEY))
-    print(format_detail(rows, key_rows))
-    print()
+    detail_path = OUT_DIR / "ragec_detail.txt"
+    detail_path.write_text(format_detail(rows, key_rows)
+                           + ("\n\n" + summarize(sample) if sample else ""),
+                           encoding="utf-8")
+
     print(format_report(score(rows, key_rows)))
+    print(f"\nprobe 별 대조 → {detail_path}  (우리 진단이 들어 있음)")
+    print(f"  ⚠ 라벨링을 직접 하실 거면 **채우기 전에 열지 마세요** — 답을 보고 채우면")
+    print(f"    '진단이 맞나' 가 아니라 '동의하나' 를 재게 됩니다.")
+    print(f"\n  ↳ '{PRIMARY_FIELD}' 칸을 채운 뒤: python tools/score_human_labels.py")
     if log_path:
         print(f"\n[log] {log_path}")
     return 0

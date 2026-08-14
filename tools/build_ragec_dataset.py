@@ -174,7 +174,14 @@ def locate(reference: str, content: str) -> tuple[int, int] | None:
         flexible_head = r"\s+".join(re.escape(tok) for tok in head.split())
         match = re.search(flexible_head, content)
         if match:
-            return match.start(), match.start() + len(ref)
+            # end 는 **문서 안에서** 끝나야 한다. 이 경로는 애초에 원문과 참조가 그대로
+            # 일치하지 않을 때만 오므로(공백·따옴표 차이) start+len(ref) 가 실제 문장 끝을
+            # 넘거나 문서 밖으로 나갈 수 있다. 넘으면 gold span 이 다음 문장을 삼켜
+            # span_recall 판정이 어긋나고, 문서 밖이면 좌표 자체가 무효다.
+            # 문서 끝에서 자르고, 마지막 문장부호까지만 인정해 다음 문장 침범을 줄인다.
+            end = min(len(content), match.start() + len(ref))
+            tail = content.rfind(".", match.end(), end)
+            return match.start(), (tail + 1) if tail != -1 else end
     return None
 
 
@@ -182,7 +189,10 @@ def build(ragec_path: str, docs_path: str, queries_path: str,
           out_corpus: str, out_qa: str, out_key: str) -> dict:
     docs = load_docs(docs_path)
     queries = load_queries(queries_path)
-    with open(ragec_path, encoding="utf-8") as fh:
+    # utf-8-sig: 팀원이 엑셀로 한 번 열어 저장하면 BOM 이 붙고, 그러면 DictReader 의 첫
+    # 컬럼명이 "﻿query_id" 가 되어 ann["query_id"] 가 KeyError 로 죽는다(재현 확인).
+    # 사람이 편집하는 라벨 시트는 이미 utf-8-sig 로 읽고 있어 여기만 예외였다.
+    with open(ragec_path, encoding="utf-8-sig") as fh:
         annotations = list(csv.DictReader(fh))
 
     stats: Counter = Counter()

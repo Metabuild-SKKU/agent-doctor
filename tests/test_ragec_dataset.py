@@ -147,6 +147,18 @@ class RagecDatasetBuildTest(unittest.TestCase):
     def _key(key, qa_id):
         return next(k for k in key if k["qa_id"] == qa_id)
 
+    def test_csv_with_bom_still_builds(self):
+        """팀원이 엑셀로 한 번 열어 저장하면 BOM 이 붙는다 — DictReader 의 첫 컬럼명이
+        '﻿query_id' 가 되어 ann["query_id"] 가 KeyError 로 죽는다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            ragec, docs, queries = _fixture(tmp)
+            raw = pathlib.Path(ragec).read_text(encoding="utf-8")
+            pathlib.Path(ragec).write_text("﻿" + raw, encoding="utf-8")
+            out = {k: str(tmp / f"out_{k}.jsonl") for k in ("corpus", "qa", "key")}
+            stats = build(ragec, docs, queries, out["corpus"], out["qa"], out["key"])
+        self.assertEqual(stats["QA"], 4)
+
     def test_other_languages_are_excluded(self):
         """언어를 섞으면 좌표계가 무의미해진다 — 영어만 싣는다."""
         docs = [json.loads(l) for l in open(self.out["corpus"], encoding="utf-8") if l.strip()]
@@ -172,6 +184,27 @@ class LocateTest(unittest.TestCase):
     def test_short_prefix_does_not_match_by_accident(self):
         """40자 미만 접두는 우연히 맞을 수 있어 인정하지 않는다."""
         self.assertIsNone(locate("Alpha zzz", "Alpha. Beta."))
+
+    def test_prefix_fallback_never_runs_past_the_document(self):
+        """접두 폴백은 원문과 참조가 다를 때만 오므로 start+len(ref) 가 문서를 넘을 수 있다.
+
+        넘으면 좌표 자체가 무효고, 다음 문장을 삼키면 gold span 이 부풀어 span_recall
+        판정이 어긋난다.
+        """
+        content = "The board approved the merger in June after review."
+        ref = "The board approved the merger in June after review, and the CFO resigned later."
+        found = locate(ref, content)
+        self.assertIsNotNone(found)
+        self.assertLessEqual(found[1], len(content))
+
+    def test_prefix_fallback_stops_at_the_sentence_end(self):
+        """뒤 문장을 통째로 삼키면 그 문장이 골드가 아닌데 골드로 채점된다."""
+        content = ("The board approved the merger in June after a long review. "
+                   "The CFO resigned in December for unrelated reasons entirely.")
+        ref = "The board approved the merger in June after a long review, per the filing."
+        start, end = locate(ref, content)
+        self.assertEqual(content[start:end],
+                         "The board approved the merger in June after a long review.")
 
 
 class QtypeMappingTest(unittest.TestCase):

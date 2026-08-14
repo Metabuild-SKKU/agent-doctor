@@ -45,7 +45,7 @@ Chunking 77(20%) · Retrieval 161(43%) · Reranking 46(12%) · Generation 93(25%
 
 ## 대조표
 
-`?` 는 실제 사례를 봐야 갈리는 자리다. 1:N 이 많은 것은 우리가 31개, RAGEC 이 16개라
+`?` 는 실제 사례를 봐야 갈리는 자리다. 1:N 이 많은 것은 우리가 32개, RAGEC 이 16개라
 **우리가 더 잘게 쪼개 처방을 붙였기** 때문이다 — 그 자체가 결함은 아니다.
 
 ### Chunking
@@ -133,16 +133,21 @@ retrieval_semantic_mismatch       벡터·키워드 둘 다 못 찾음
 
 ---
 
-## 우리 라벨 기준 커버리지 — 14/31
+## 우리 라벨 기준 커버리지 — 16/32
 
-RAGEC 으로 **검증할 수 있는 것은 14개뿐**이다. 나머지 17개는 정답지에 대응 사례가 없다.
+RAGEC 으로 **검증할 수 있는 것은 16개뿐**이다. 나머지 16개는 정답지에 대응 사례가 없다.
+
+아래 표는 손으로 세지 않고 `RAGEC_TO_OURS` 와 정답지 분포에서 **계산한 값**이다 —
+사례가 0건인 카테고리(E2·E11·E15)에만 대응하는 라벨은 검증 불가로 친다. 대조표를 넓히거나
+라벨이 신설되면 이 표도 다시 계산해야 한다(직전 개정에서 E4 매핑 확대와 E15 신설이
+반영되지 않아 14/31 로 남아 있었다).
 
 | 그룹 | 검증 가능 | 검증 불가 |
 |---|---|---|
-| A 검색 | 8/15 | `rank_fusion_loss` · `duplicate_crowding` · `reranker_demotion` · `reranker_ineffective` · `lexical_mismatch` · `incomplete_enumeration` · `missing_bridge_dependency` |
-| B 생성 | 5/9 | `contradiction` · `hop_binding_error` · `wrongful_abstention` · `parametric_overreliance` |
+| A 검색 | 11/15 | `rank_fusion_loss` · `duplicate_crowding` · `missing_bridge_dependency` · `underchunking` |
+| B 생성 | 5/10 | `contradiction` · `hop_binding_error` · `chronological_error` · `wrongful_abstention` · `parametric_overreliance` |
 | **C 컨텍스트** | **0/3** | `too_long_context` · `lost_in_the_middle` · `context_noise_interference` |
-| D 데이터 | 1/4 | `corpus_gap_partial_hop` · `bad_gold_answer` · `bad_gold_chunk` |
+| **D 데이터** | **0/4** | `corpus_gap` · `corpus_gap_partial_hop` · `bad_gold_answer` · `bad_gold_chunk` |
 
 **C그룹이 통째로 0인 이유**는 RAGEC 택소노미에 "컨텍스트 구성" 단계가 없기 때문이다(4단계가
 Chunking/Retrieval/Reranking/Generation). 우리 C그룹은 근거도 있고 검색도 됐는데 **컨텍스트를
@@ -200,7 +205,7 @@ E2·E11 도 같은 이유로 0건인데 우리는 그 라벨을 이미 갖고 �
 | Irrelevant Unsolvable | 25 | 0 |
 | Summary | 13 | 0 |
 
-우리 31개 중 19개가 미발화하는 이유가 여기 있다 — 멀티홉 질문이 0이면 멀티홉 라벨은
+우리 32개 중 상당수가 미발화하는 이유가 여기 있다 — 멀티홉 질문이 0이면 멀티홉 라벨은
 **원리적으로** 못 나온다. **정답지를 얻는 것이자 질문 유형을 얻는 것이다.**
 
 > `Summarization Question`(30)과 `Summary Question`(13)이 따로 존재한다. 같은 개념을 다르게 적은
