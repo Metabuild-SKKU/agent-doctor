@@ -77,6 +77,38 @@ DEFAULT_OUT_KEY = "data/ragec_answer_key.jsonl"
 # 그래도 접두를 붙여 둔다 — 다른 코퍼스와 섞였을 때 doc_id 하나로 출처를 알 수 있어야 한다.
 DOC_PREFIX = "ragec_"
 
+# DragonBall 질문 유형 → 우리 Probe.qtype.
+#
+# **이 값을 안 실으면 진단이 '근거가 몇 개 필요한 질문인지' 를 모른 채 판정한다.**
+# retrieval_incomplete_enumeration 은 qtype=aggregation 일 때만 확정이라, 없으면 예비로
+# 강등돼 확정 라벨(retrieval_low_rank)에게 슬롯을 뺏긴다. 실측으로 확인했다 — 18건 자체
+# 라벨링에서 사람이 '나열형 슬롯 부족' 이라 본 5건(gold span 8~23개인데 top_k=5)을 전부
+# retrieval_low_rank 로 냈다. 처방이 정반대다: "검색 개수를 늘려라" ↔ "리랭커를 켜라".
+#
+# 매핑 근거는 실제 질문 문장이다(유형 이름이 아니라):
+#   · Time Sequence 는 이름과 달리 "Compare the change times of A and B. Which company…"
+#     라 비교 질문이다 → comparison
+#   · Multi-hop Reasoning 은 "How did X in April lead to Y by August?" 처럼 양쪽 사건이
+#     질문에 다 적혀 있어 **bridge 가 아니다**(bridge 는 1단계 답을 알아야 2단계 근거를
+#     찾을 수 있는 경우). bridge 로 넣으면 semantic/lexical mismatch 가 양보해 버려
+#     50건의 검색 진단이 통째로 침묵한다 → aggregation
+_QTYPE_BY_QUERY_TYPE = {
+    "Multi-document Information Integration Question": "aggregation",
+    "Summarization Question": "aggregation",
+    "Summary Question": "aggregation",
+    "Multi-hop Reasoning Question": "aggregation",
+    "Multi-document Comparison Question": "comparison",
+    "Multi-document Time Sequence Question": "comparison",
+    # 단일 사실·무응답 질문은 멀티홉이 아니다 → None(미표시)
+    "Factual Question": None,
+    "Irrelevant Unsolvable Question": None,
+}
+
+
+def _qtype_of(query_type: str) -> str | None:
+    """DragonBall query_type → Probe.qtype. 모르는 유형은 None(미표시)."""
+    return _QTYPE_BY_QUERY_TYPE.get((query_type or "").strip())
+
 LANGUAGE = "en"     # RAGEC 은 영어 DragonBall 만 라벨링했다
 
 # DragonBall 이 '답할 수 없는 질문'(Irrelevant Unsolvable Question)의 정답으로 쓰는 문구.
@@ -239,6 +271,7 @@ def build(ragec_path: str, docs_path: str, queries_path: str,
                 [f"{DOC_PREFIX}{d}_0" for d in gold_doc_ids] if answerable else []
             ),
             "answer_exists": answerable,
+            "qtype": _qtype_of(ann["query_type"]),
             "source_qa": {"dataset": "dragonball-en", "cleaned_by": "tools/build_ragec_dataset.py"},
         })
         stats["무응답 질문" if not answerable else "답 있는 질문"] += 1

@@ -20,7 +20,8 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from tools.build_ragec_dataset import build, locate
+from agents.eval.datasets.korquad import _as_qtype
+from tools.build_ragec_dataset import _QTYPE_BY_QUERY_TYPE, _qtype_of, build, locate
 
 
 def _write(path, rows):
@@ -171,6 +172,111 @@ class LocateTest(unittest.TestCase):
     def test_short_prefix_does_not_match_by_accident(self):
         """40자 미만 접두는 우연히 맞을 수 있어 인정하지 않는다."""
         self.assertIsNone(locate("Alpha zzz", "Alpha. Beta."))
+
+
+class QtypeMappingTest(unittest.TestCase):
+    """질문 유형을 안 실으면 진단이 '근거가 몇 개 필요한 질문인지' 를 모른 채 판정한다.
+
+    retrieval_incomplete_enumeration 은 qtype=aggregation 일 때만 확정이라, 없으면 예비로
+    강등돼 확정 라벨(retrieval_low_rank)에게 슬롯을 뺏긴다. 실측: 18건 자체 라벨링에서
+    사람이 '나열형 슬롯 부족' 이라 본 5건(gold span 8~23개인데 top_k=5)을 전부 놓쳤다.
+    처방이 정반대다 — "검색 개수를 늘려라" ↔ "리랭커를 켜라".
+    """
+
+    def test_multi_evidence_types_become_aggregation(self):
+        for query_type in ("Multi-document Information Integration Question",
+                           "Summarization Question", "Summary Question"):
+            self.assertEqual(_qtype_of(query_type), "aggregation", query_type)
+
+    def test_comparison_types_become_comparison(self):
+        """Time Sequence 는 이름과 달리 'Compare A and B. Which…' 형태의 비교 질문이다."""
+        for query_type in ("Multi-document Comparison Question",
+                           "Multi-document Time Sequence Question"):
+            self.assertEqual(_qtype_of(query_type), "comparison", query_type)
+
+    def test_multi_hop_is_not_mapped_to_bridge(self):
+        """bridge 는 1단계 답을 알아야 2단계 근거를 찾는 경우다.
+
+        DragonBall 의 multi-hop 은 "How did X in April lead to Y by August?" 처럼 양쪽
+        사건이 질문에 다 적혀 있어 해당하지 않는다. bridge 로 넣으면 semantic/lexical
+        mismatch 가 양보해(diagnose 의 qtype=='bridge' 게이트) 50건의 검색 진단이
+        통째로 침묵한다.
+        """
+        self.assertEqual(_qtype_of("Multi-hop Reasoning Question"), "aggregation")
+
+    def test_single_hop_types_have_no_qtype(self):
+        for query_type in ("Factual Question", "Irrelevant Unsolvable Question"):
+            self.assertIsNone(_qtype_of(query_type), query_type)
+
+    def test_unknown_type_is_none_not_a_guess(self):
+        """모르는 유형을 임의로 매핑하면 진단 경로가 조용히 바뀐다."""
+        self.assertIsNone(_qtype_of("Brand New Question Type"))
+        self.assertIsNone(_qtype_of(""))
+
+    def test_build_actually_writes_qtype(self):
+        """매핑 함수만 맞아도 **배선이 빠지면 아무 효과가 없다.**
+
+        실제로 뮤테이션(어댑터에서 qtype 줄 삭제)이 매핑 테스트를 그대로 통과했다.
+        같은 유형의 사고가 이 프로젝트에서 두 번째다(observations 배선 누락).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            out = {k: str(tmp / f"{k}.jsonl") for k in ("corpus", "qa", "key")}
+            build(*_fixture(tmp), out["corpus"], out["qa"], out["key"])
+            rows = {r["qa_id"]: r for r in
+                    (json.loads(l) for l in open(out["qa"], encoding="utf-8") if l.strip())}
+        self.assertEqual(rows["13"]["qtype"], "aggregation")   # Summary Question
+        self.assertIsNone(rows["10"]["qtype"])                 # Factual Question
+
+    def test_every_query_type_in_the_answer_key_is_mapped(self):
+        """정답지에 있는 유형이 표에 없으면 그 건들이 조용히 qtype 없이 나간다."""
+        path = pathlib.Path("data/ragec_answer_key.jsonl")
+        if not path.exists():
+            self.skipTest("data/ragec_answer_key.jsonl 없음")
+        types = {
+            json.loads(line)["query_type"].strip()
+            for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+        }
+        self.assertEqual(types - set(_QTYPE_BY_QUERY_TYPE), set())
+
+
+class LoaderQtypeTest(unittest.TestCase):
+    """어댑터가 실어도 로더가 안 읽으면 그대로 끊긴다 — 양쪽을 함께 고정한다."""
+
+    def test_known_values_pass_through(self):
+        for value in ("aggregation", "comparison", "bridge"):
+            self.assertEqual(_as_qtype(value), value)
+
+    def test_case_and_padding_are_absorbed(self):
+        self.assertEqual(_as_qtype("  Aggregation "), "aggregation")
+
+    def test_unknown_or_missing_is_none(self):
+        """오타 하나가 진단 경로를 바꾸는 것보다 '미표시' 로 떨어지는 쪽이 안전하다."""
+        for value in ("aggregatoin", "", None, 3, True):
+            self.assertIsNone(_as_qtype(value), repr(value))
+
+    def test_loader_puts_qtype_on_the_probe(self):
+        """어댑터가 실어도 로더가 안 읽으면 그대로 끊긴다 — 실제 Probe 까지 가서 확인한다."""
+        from agents.eval.datasets.korquad import load_taxonomy_probes
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            _write(tmp / "corpus.jsonl", [{
+                "doc_id": "d1", "chunk_id": "d1_0", "title": "T",
+                "text": "Acme opened a factory in March 2020.", "char_start": 0, "char_end": 36,
+            }])
+            _write(tmp / "qa.jsonl", [
+                {"qa_id": "1", "question": "When?", "answer_text": "March 2020",
+                 "doc_id": "d1", "qtype": "aggregation",
+                 "gold_spans": [{"doc_id": "d1", "start": 0, "end": 36}],
+                 "positive_chunk_ids": ["d1_0"], "answer_exists": True},
+                {"qa_id": "2", "question": "When?", "answer_text": "March 2020",
+                 "doc_id": "d1", "gold_spans": [{"doc_id": "d1", "start": 0, "end": 36}],
+                 "positive_chunk_ids": ["d1_0"], "answer_exists": True},
+            ])
+            probes = load_taxonomy_probes(str(tmp / "qa.jsonl"), str(tmp / "corpus.jsonl"))
+        by_id = {p.metadata["qa_id"]: p for p in probes}
+        self.assertEqual(by_id["1"].qtype, "aggregation")
+        self.assertIsNone(by_id["2"].qtype)     # 미표시 데이터셋(KorQuAD)은 그대로 None
 
 
 if __name__ == "__main__":

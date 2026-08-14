@@ -127,6 +127,24 @@ def _as_bool(value, *, default: bool) -> bool:
     return bool(value)
 
 
+# core/schema.Probe.qtype 가 받는 값. 그 밖은 조용히 무시한다 — 오타 하나가 진단 경로를
+# 바꾸는 것보다 '멀티홉 표시 없음'(None)으로 떨어지는 쪽이 안전하다.
+_QTYPES = frozenset({"bridge", "comparison", "aggregation"})
+
+
+def _as_qtype(value) -> str | None:
+    """JSONL 의 질문 유형을 Probe.qtype 으로 읽는다. 모르는 값이면 None.
+
+    이 값이 진단 세 곳을 연다: 나열형 확정(incomplete_enumeration), 멀티홉 판정
+    (_is_multi_hop → hop_binding·corpus_gap_partial_hop), bridge 전용 경로. 그래서
+    임의 문자열을 통과시키면 안 된다.
+    """
+    if not isinstance(value, str):
+        return None
+    key = value.strip().lower()
+    return key if key in _QTYPES else None
+
+
 def _gold_spans_of(qa: dict, doc_id: str, span_of: dict) -> list[dict]:
     """골드 좌표. 명시 gold_spans 가 있으면 그걸 쓰고, 없으면 청크 id 로 환산한다.
 
@@ -185,7 +203,13 @@ def load_taxonomy_probes(qa_path: str = DEFAULT_QA, corpus_path: str = DEFAULT_C
             gold_chunk_ids=[],           # resync 가 현재 청크 기준으로 채운다
             gold_doc_id=did,
             gold_spans=gold_spans,
-            qtype=None,
+            # KorQuAD 는 단일홉이라 없는 게 맞고(기본 None), 멀티홉 유형이 표시된
+            # 데이터셋은 이 필드를 실어야 한다. 없으면 진단이 '이 질문에 근거가 몇 개
+            # 필요한지' 를 모르는 채로 판정한다 — retrieval_incomplete_enumeration 이
+            # 예비로 강등돼 확정 라벨(retrieval_low_rank)에 슬롯을 뺏기고,
+            # generation_hop_binding_error 의 카운트 폴백도 열리지 않는다.
+            # (실측: DragonBall 18건 라벨링에서 사람이 나열형이라 본 5건을 전부 놓쳤다)
+            qtype=_as_qtype(o.get("qtype")),
             metadata={"qa_id": str(o.get("qa_id")), "dataset": "korquad2.1"},
         ))
         if limit is not None and len(probes) >= limit:
