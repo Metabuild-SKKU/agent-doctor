@@ -1,0 +1,94 @@
+{
+  "amendment": "v2 (2026-08-14) — v1 잣대 비대칭 수정. v1 결과는 judge_summary.json / ours_verdicts.json 에 보존.",
+  "rule": "1차 지표 평균이 none 대비 15.0pt 이상 지정 방향 이동 (양쪽 동일)",
+  "none_health": {
+    "ragchecker": {
+      "claim_recall>=60": true,
+      "context_precision>=60": false,
+      "hallucination<=15": true
+    },
+    "ours": {
+      "context_recall>=60": true,
+      "context_precision>=60": true,
+      "faithfulness>=85": true
+    }
+  },
+  "sides": [
+    {
+      "side": "ragchecker",
+      "verdicts": [
+        {
+          "defect": "starve",
+          "delta_primary": 22.2,
+          "deltas": {
+            "starve": 22.2,
+            "offtopic": -10.0,
+            "hallucinate": 16.6
+          },
+          "caught": true,
+          "localized": true
+        },
+        {
+          "defect": "offtopic",
+          "delta_primary": 10.0,
+          "deltas": {
+            "starve": 52.8,
+            "offtopic": 10.0,
+            "hallucinate": 6.1
+          },
+          "caught": false,
+          "localized": null
+        },
+        {
+          "defect": "hallucinate",
+          "delta_primary": 49.9,
+          "deltas": {
+            "starve": 72.2,
+            "offtopic": 40.0,
+            "hallucinate": 49.9
+          },
+          "caught": true,
+          "localized": false
+        }
+      ]
+    },
+    {
+      "side": "ours",
+      "verdicts": [
+        {
+          "defect": "starve",
+          "delta_primary": 41.7,
+          "deltas": {
+            "starve": 41.7,
+            "offtopic": 42.3,
+            "hallucinate": -2.9
+          },
+          "caught": true,
+          "localized": false
+        },
+        {
+          "defect": "offtopic",
+          "delta_primary": 75.6,
+          "deltas": {
+            "starve": 75.0,
+            "offtopic": 75.6,
+            "hallucinate": -7.1
+          },
+          "caught": true,
+          "localized": true
+        },
+        {
+          "defect": "hallucinate",
+          "delta_primary": 46.7,
+          "deltas": {
+            "starve": null,
+            "offtopic": null,
+            "hallucinate": 46.7
+          },
+          "caught": true,
+          "localized": true
+        }
+      ]
+    }
+  ]
+}

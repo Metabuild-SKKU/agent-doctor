@@ -1,0 +1,38 @@
+{
+  "preregistered_rule": "v1: 대응 ext_ 라벨 소견 >=3/6건이면 잡음. hallucinate 는 예비 인정. none 은 critical confirmed 0건이어야 통과. (노션 §8, 2026-08-13 사전 등록 — HR판과 동일 규칙을 세금판에 그대로 적용)",
+  "source_logs": "bench/out/ragchecker/tax/ours_{none,starve,hallucinate,offtopic}.log (2026-08-14, 세금 가이드 PDF 코퍼스)",
+  "verdicts": [
+    {
+      "defect": "none",
+      "critical_confirmed": 2,
+      "findings": {
+        "ext_retrieval_irrelevant": {"confirmed": 2},
+        "ext_grounded_but_wrong": {"confirmed": 1, "tentative": 2}
+      },
+      "false_positive_by_rule": true,
+      "note": "v1 규칙상 '오탐'. 단 실전 통짜 PDF 라 대조군 자체가 유기적으로 아픔(우리 67/100, RAGChecker 도 context_precision 40 으로 건강 범위 밖) — '결함 미주입'이지 '무결함'이 아니다. 통제된 오탐 검사는 HR판(소견 0건)이 담당."
+    },
+    {
+      "defect": "starve",
+      "target_label": "ext_retrieval_starved_abstention",
+      "target_count": 2,
+      "caught": false,
+      "note": "확정 2/6 < 3 — v1 놓침. 소견 3종 모두 검색/데이터 축(축 방향은 맞음)"
+    },
+    {
+      "defect": "hallucinate",
+      "target_label": "ext_generation_hallucination",
+      "target_count": 2,
+      "target_grade": "예비(gold 없음)",
+      "caught": false,
+      "note": "예비 2/6 < 3 — v1 놓침. 단 환각 단일 축만 지목, faithfulness 0.878→0.474"
+    },
+    {
+      "defect": "offtopic",
+      "target_label": "ext_retrieval_irrelevant",
+      "target_count": 6,
+      "caught": true,
+      "note": "확정 6/6 — v1 유일한 '잡음'. 종합점수 6/100 붕괴 + grounded_but_wrong 예비 6건 동반"
+    }
+  ]
+}

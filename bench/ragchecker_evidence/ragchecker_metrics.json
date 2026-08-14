@@ -1,0 +1,78 @@
+{
+  "hallucinate": {
+    "overall_metrics": {
+      "precision": 4.8,
+      "recall": 0.0,
+      "f1": 0.0
+    },
+    "retriever_metrics": {
+      "claim_recall": 0.0,
+      "context_precision": 0.0
+    },
+    "generator_metrics": {
+      "context_utilization": 0.0,
+      "noise_sensitivity_in_relevant": 0.0,
+      "noise_sensitivity_in_irrelevant": 20.7,
+      "hallucination": 54.1,
+      "self_knowledge": 0.0,
+      "faithfulness": 45.9
+    }
+  },
+  "none": {
+    "overall_metrics": {
+      "precision": 45.8,
+      "recall": 66.7,
+      "f1": 50.7
+    },
+    "retriever_metrics": {
+      "claim_recall": 72.2,
+      "context_precision": 40.0
+    },
+    "generator_metrics": {
+      "context_utilization": 77.8,
+      "noise_sensitivity_in_relevant": 33.3,
+      "noise_sensitivity_in_irrelevant": 16.7,
+      "hallucination": 4.2,
+      "self_knowledge": 0.0,
+      "faithfulness": 95.8
+    }
+  },
+  "offtopic": {
+    "overall_metrics": {
+      "precision": 11.1,
+      "recall": 19.4,
+      "f1": 0.0
+    },
+    "retriever_metrics": {
+      "claim_recall": 19.4,
+      "context_precision": 30.0
+    },
+    "generator_metrics": {
+      "context_utilization": 33.3,
+      "noise_sensitivity_in_relevant": 13.3,
+      "noise_sensitivity_in_irrelevant": 65.3,
+      "hallucination": 10.3,
+      "self_knowledge": 0.0,
+      "faithfulness": 89.7
+    }
+  },
+  "starve": {
+    "overall_metrics": {
+      "precision": 16.7,
+      "recall": 33.3,
+      "f1": 22.2
+    },
+    "retriever_metrics": {
+      "claim_recall": 50.0,
+      "context_precision": 50.0
+    },
+    "generator_metrics": {
+      "context_utilization": 33.3,
+      "noise_sensitivity_in_relevant": 29.2,
+      "noise_sensitivity_in_irrelevant": 33.3,
+      "hallucination": 20.8,
+      "self_knowledge": 0.0,
+      "faithfulness": 79.2
+    }
+  }
+}

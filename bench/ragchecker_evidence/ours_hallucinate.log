@@ -1,0 +1,32 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  probe 6개 RAGAS 채점 병렬 (동시성 10)
+Loading weights:   0%|          | 0/391 [00:00<?, ?it/s]Loading weights: 100%|██████████| 391/391 [00:00<00:00, 30303.65it/s]
+[Eval] EVAL_LLM_PROVIDER=anthropic 는 임베딩 엔드포인트가 없고 OPENAI_API_KEY 도 없어 로컬 임베딩(BGE-M3)으로 계산합니다 - 비용 0, 외부 호출 없음. 참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요. 로컬 GPU 가 좁으면(리랭커와 VRAM 경합) EVAL_EMBED_PROVIDER=openrouter 권장.
+[Index] 임베딩을 로컬 CPU(BAAI/bge-m3)로 계산합니다 - 비용 0, 외부 호출 없음.
+  종합점수 50/100 [부분 - 신뢰도 미측정] (품질 50 / 신뢰도 -) · overall 0.5011 · gate_pass ✗
+  · gate reason: composite_below_threshold (composite=50.0/90.0)
+  가중 타입분포 {'generation': 2.0}
+  가중 라벨분포 {'ext_generation_hallucination': 2.0}
+  예비 2개는 더 깊은 모드(EVAL_MODE=deep/full)에서 확정 가능
+적재: 정상 6건 / 오류 0건 / 진단 수준 triad
+골든셋: 없음 (--no-golden) — 검색축 라벨 3종 침묵, 환각은 예비 고정
+- faithfulness(환각 없음)    : 0.462
+- answer relevancy(동문서답 없음): 0.559
+- context precision(검색 정밀): 미측정 (정답 텍스트 필요)
+- context recall(검색 재현)  : 미측정 (정답 텍스트 필요)
+- 규칙 char F1               : 미측정 (정답 텍스트 필요)
+overall_score: 0.501
+종합점수: 50/100 [부분 - 신뢰도 미측정] (품질 50 / 신뢰도 -)
+소견:
+  [critical] ext_generation_hallucination (예비 2건)
+      faithfulness 0.00 - 근거 없는 답변. 검색 탓/생성 탓 분리는 정답 근거 문단(gold_contexts) 필요
+권고:
+  [critical] 답변이 검색된 근거에 기반하지 않습니다(환각) (예비 2건)
+    · 생성 온도를 낮추세요
+        temperature 를 내리면 모델이 근거에서 벗어나 지어낼 여지가 줄어듭니다.
+    · 기권 조건을 강화하세요
+        근거가 부족하면 '모른다'고 답하도록 프롬프트에 기권 규칙을 넣습니다. 틀린 답보다 모른다는 답이 낫습니다.
+    · 인용을 강제하세요
+        답변에 사용한 컨텍스트 문장을 함께 제시하도록 요구하면, 근거 없는 문장이 생성 단계에서 걸러집니다.
+    · 더 강한 생성 모델로 올리세요
+        근거를 읽고 종합하는 능력이 모자라 환각이 나는 경우입니다. 프롬프트 조정이 듣지 않으면 마지막으로 검토하세요.

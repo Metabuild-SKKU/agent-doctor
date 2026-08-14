@@ -1,0 +1,40 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  probe 6개 RAGAS 채점 병렬 (동시성 10)
+Loading weights:   0%|          | 0/391 [00:00<?, ?it/s]Loading weights: 100%|██████████| 391/391 [00:00<00:00, 23696.98it/s]
+[Eval] EVAL_LLM_PROVIDER=anthropic 는 임베딩 엔드포인트가 없고 OPENAI_API_KEY 도 없어 로컬 임베딩(BGE-M3)으로 계산합니다 - 비용 0, 외부 호출 없음. 참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요. 로컬 GPU 가 좁으면(리랭커와 VRAM 경합) EVAL_EMBED_PROVIDER=openrouter 권장.
+[Index] 임베딩을 로컬 CPU(BAAI/bge-m3)로 계산합니다 - 비용 0, 외부 호출 없음.
+  종합점수 6/100 (품질 42 / 신뢰도 3) · overall 0.4166 · gate_pass ✗
+  · gate reason: composite_below_threshold (composite=6.0/90.0)
+  정답매칭(관측) F1=0.276  EM=0.000  판정점수=0.173
+  가중 타입분포 {'retrieval': 3.0, 'data': 3.0}
+  가중 라벨분포 {'ext_retrieval_irrelevant': 3.0, 'ext_grounded_but_wrong': 3.0}
+  예비 6개는 더 깊은 모드(EVAL_MODE=deep/full)에서 확정 가능
+적재: 정상 6건 / 오류 0건 / 진단 수준 triad
+골든셋: 파일 없음 · 로그 인라인 사용 (정답 6건 · 근거문단 6건)
+- faithfulness(환각 없음)    : 1.000
+- answer relevancy(동문서답 없음): 0.583
+- context precision(검색 정밀): 0.000 (정답 텍스트 필요)
+- context recall(검색 재현)  : 0.000 (정답 텍스트 필요)
+- 규칙 char F1               : 0.276 (정답 텍스트 필요)
+overall_score: 0.417
+종합점수: 6/100 (품질 42 / 신뢰도 3)
+소견:
+  [critical] ext_retrieval_irrelevant (확정 6건)
+      gold 근거 겹침 0.26 - 검색 결과가 질문과 무관
+  [warning] ext_grounded_but_wrong (예비 6건)
+      correctness 0.14인데 faithfulness 1.00 - 답은 근거에 충실하나 근거 자체가 틀렸거나 부족(코퍼스/검색 문제) (gold 근거 겹침 0.26 - 검색 실패의 여파일 수 있음)
+권고:
+  [critical] 검색이 질문과 무관한 문서를 가져옵니다 (확정 6건)
+    · 임베딩 모델을 교체하세요 [재색인 필요]
+        질문과 문서를 같은 뜻으로 이어주지 못하는 상황입니다. 다국어·도메인에 맞는 모델로 바꾸면 검색이 개선됩니다. 재색인이 필요합니다.
+    · 청크 크기를 줄이세요 — 현재 chunk_size=512 → 낮추기 [재색인 필요]
+        청크 하나가 커서 컨텍스트가 넘칩니다. 재색인이 필요합니다.
+    · 문장 단위 청킹으로 바꾸세요 [재색인 필요]
+        청크가 문장 중간에서 잘려 의미가 흩어지면 검색이 빗나갑니다.
+    · 문서 구조를 살린 청킹으로 바꾸세요 [재색인 필요]
+        제목·절 경계를 따라 나누면 한 청크가 한 주제를 담아 검색이 정확해집니다.
+  [warning] 답변은 근거에 충실하나 근거 자체가 틀렸거나 부족합니다 (예비 6건)
+    · 코퍼스에서 빠진 근거를 특정 [수동 조치]
+        해당 질문의 정답 근거가 담긴 원본 문서 중 코퍼스에 없는 것을 확인한다. 누락 gold의 원본 문서(gold_doc_id)와 질문을 함께 제시한다.
+    · 그 문서를 수집·추가한 뒤 재색인 [수동 조치]
+        특정된 주제/문서를 소스에서 추가 수집해 코퍼스에 넣고 재색인한 뒤 다시 진단을 실행한다.

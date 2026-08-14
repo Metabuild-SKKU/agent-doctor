@@ -1,0 +1,17 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+  probe 6개 RAGAS 채점 병렬 (동시성 10)
+Loading weights:   0%|          | 0/391 [00:00<?, ?it/s]Loading weights: 100%|██████████| 391/391 [00:00<00:00, 32415.66it/s]
+[Eval] EVAL_LLM_PROVIDER=anthropic 는 임베딩 엔드포인트가 없고 OPENAI_API_KEY 도 없어 로컬 임베딩(BGE-M3)으로 계산합니다 - 비용 0, 외부 호출 없음. 참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요. 로컬 GPU 가 좁으면(리랭커와 VRAM 경합) EVAL_EMBED_PROVIDER=openrouter 권장.
+[Index] 임베딩을 로컬 CPU(BAAI/bge-m3)로 계산합니다 - 비용 0, 외부 호출 없음.
+  종합점수 60/100 [부분 - 신뢰도 미측정] (품질 60 / 신뢰도 -) · overall 0.6 · gate_pass ✗
+  · gate reason: composite_below_threshold (composite=60.0/90.0)
+적재: 정상 6건 / 오류 0건 / 진단 수준 triad
+골든셋: 없음 (--no-golden) — 검색축 라벨 3종 침묵, 환각은 예비 고정
+- faithfulness(환각 없음)    : 1.000
+- answer relevancy(동문서답 없음): 0.000
+- context precision(검색 정밀): 미측정 (정답 텍스트 필요)
+- context recall(검색 재현)  : 미측정 (정답 텍스트 필요)
+- 규칙 char F1               : 미측정 (정답 텍스트 필요)
+overall_score: 0.600
+종합점수: 60/100 [부분 - 신뢰도 미측정] (품질 60 / 신뢰도 -)
+소견: 없음 (지표 미측정이거나 문턱 이상)

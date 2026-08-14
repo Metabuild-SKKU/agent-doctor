@@ -1,0 +1,40 @@
+{
+  "preregistered": {
+    "delta_pt": 15.0,
+    "none_healthy": {
+      "retriever.claim_recall": ">= 60.0",
+      "retriever.context_precision": ">= 60.0",
+      "generator.hallucination": "<= 15.0"
+    }
+  },
+  "baseline_ok": false,
+  "verdicts": [
+    {
+      "defect": "starve",
+      "metric": "retriever.claim_recall",
+      "value": 50.0,
+      "none": 72.2,
+      "delta": 22.2,
+      "caught": true,
+      "localized": true
+    },
+    {
+      "defect": "offtopic",
+      "metric": "retriever.context_precision",
+      "value": 30.0,
+      "none": 40.0,
+      "delta": 10.0,
+      "caught": false,
+      "localized": false
+    },
+    {
+      "defect": "hallucinate",
+      "metric": "generator.hallucination",
+      "value": 54.1,
+      "none": 4.2,
+      "delta": 49.9,
+      "caught": true,
+      "localized": false
+    }
+  ]
+}
