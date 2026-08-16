@@ -357,17 +357,49 @@ def _embed_provider_override() -> str:
     192초 → 31분+ 로 열화됐다. OPENROUTER_API_KEY 가 있는 환경이라면
     EVAL_EMBED_PROVIDER=openrouter 로 로컬 경로 자체를 피하는 것이 낫다($0.01/1M).
 
-    미지원 값은 경고 1회 후 무시한다 — 오타 때문에 임베딩 의존 지표(response_relevancy)
-    와 bad_gold_answer 라벨이 조용히 죽으면 안 된다."""
+    미지원 값은 무시하고 폴백 사슬을 탄다 — 오타 때문에 임베딩 의존 지표
+    (response_relevancy)와 bad_gold_answer 라벨이 조용히 죽으면 안 된다. 위의 강제값
+    정책은 **받는 값을 적었는데 그 경로를 못 쓸 때**의 이야기다.
+
+    경고는 여기서 찍지 않는다 — embedding_route() 가 귀착지까지 정한 뒤에 찍는다
+    (_warn_unusable_embed_provider_once). 목적지를 모르는 자리에서 찍으면 "그래서 이번
+    실행은 어디로 갔나" 를 말할 수 없다."""
     raw = normalize_provider(os.getenv("EVAL_EMBED_PROVIDER", ""))
-    if not raw:
-        return ""
-    if raw not in _EMBED_PROVIDER_CHOICES:
-        _notify_embed_once(
-            f"[Eval] EVAL_EMBED_PROVIDER='{raw}' 는 지원하지 않는 값입니다"
-            f"(openrouter|openai|gemini|local) - 기본 폴백 사슬을 씁니다.")
-        return ""
-    return raw
+    return raw if raw in _EMBED_PROVIDER_CHOICES else ""
+
+
+def _unsupported_embed_provider() -> str:
+    """EVAL_EMBED_PROVIDER 에 적혔지만 받을 수 없는 값. 없으면 "".
+
+    오타와 "심판으로는 되지만 임베딩 엔드포인트가 없는 값"(anthropic·github) 둘 다다 —
+    고치는 방법은 다르지만(철자 / 축 선택) 동작은 같다: 설정을 무시하고 폴백 사슬."""
+    raw = normalize_provider(os.getenv("EVAL_EMBED_PROVIDER", ""))
+    return "" if not raw or raw in _EMBED_PROVIDER_CHOICES else raw
+
+
+def _warn_unusable_embed_provider_once(raw: str, route: str) -> None:
+    """받을 수 없는 EVAL_EMBED_PROVIDER 값 경고. **귀착지를 이름으로 찍는다.**
+
+    유효값 목록만 알려주면 "그래서 이번 실행은 어디로 갔나" 가 안 남는다. 이 축은
+    미지원 값을 폴백 사슬로 되돌리므로 그 끝이 API provider 면 오타 한 번이 과금
+    경로로 이어진다. 형제 축(qdrant_store)은 방향을 local 로 틀어 그걸 막는데, 이쪽은
+    방향 대신 '조용히' 를 없앤다 — 경로를 바꾸면 코사인 분포가 달라져 실행 간 비교가
+    깨지기 때문이다(AGENTS.md "임베딩 provider" 절).
+
+    귀착지는 embedding_route() 가 정한 값을 그대로 받는다. 여기서 _provider() 를 다시
+    읽으면 심판이 anthropic·github 일 때 거짓말이 된다 — 그 둘은 임베딩 엔드포인트가
+    없어 실제로는 openai(또는 local)로 나간다(리뷰 지적)."""
+    where = (f"이번 실행은 '{route}' 로 임베딩합니다"
+             + (" - 키가 있으면 API 과금이 발생합니다" if route not in ("local", "none") else "")
+             if route != "none" else
+             "이번 실행은 임베딩 의존 지표(response_relevancy)를 건너뜁니다")
+    # 사유를 둘로 가른다 - 오타와 "심판으로는 되지만 임베딩은 안 되는 값"은 고치는
+    # 방법이 다르다(전자는 철자, 후자는 축 선택).
+    why = ("는 임베딩 엔드포인트가 없는 provider 라 이 축에서는 지원하지 않는 값입니다"
+           if raw in _KNOWN_PROVIDERS else "는 지원하지 않는 값입니다")
+    _notify_embed_once(
+        f"[Eval] EVAL_EMBED_PROVIDER='{raw}'{why} - 설정을 무시하고 기본 폴백 사슬을 "
+        f"씁니다 · {where} (받는 값: openrouter|openai|gemini|local).")
 
 
 def _local_embeddings_available() -> bool:
@@ -405,11 +437,20 @@ def embedding_route() -> str:
         return "local" if _local_embeddings_available() else "none"
     if override:
         return override if _embed_api_key_ready(override) else "none"
+
     if _api_embeddings_available():
         provider = _provider()
         # anthropic·github 은 임베딩 엔드포인트가 없어 openai 로 흡수(기존 else 분기).
-        return provider if provider in ("gemini", "openrouter") else "openai"
-    return "local" if _local_embeddings_available() else "none"
+        route = provider if provider in ("gemini", "openrouter") else "openai"
+    else:
+        route = "local" if _local_embeddings_available() else "none"
+
+    # 받을 수 없는 값을 적어 사슬로 되돌아온 실행이면, 그 사실과 **귀착지**를 여기서
+    # 알린다 - 경로가 정해진 뒤라야 목적지를 사실대로 말할 수 있다.
+    unusable = _unsupported_embed_provider()
+    if unusable:
+        _warn_unusable_embed_provider_once(unusable, route)
+    return route
 
 
 def embeddings_available() -> bool:
@@ -447,12 +488,18 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
         if override:
             # 명시 경로를 못 쓰는 상황 — 다른 provider 로 새지 않는다(embedding_route
             # 주석의 정책). 이번 사고의 원인이 조용한 폴백이었으므로 결측을 택한다.
+            # 사유도 고칠 방법도 local 이면 다르다. local 을 못 박은 실행에는 "키"
+            # 얘기가 성립하지 않는다 - 이 경로는 키를 아예 안 본다(embedding_route).
+            # 뭉쳐 적으면 로컬 모델을 못 올린 사람이 있지도 않은 키를 찾는다.
+            why, fix = (("로컬 임베딩 모델을 쓸 수 없습니다",
+                         "로컬 모델을 쓸 수 있게 하거나")
+                        if override == "local" else
+                        (f"{override} 의 임베딩 키가 없습니다", "키를 채우거나"))
             _notify_embed_once(
-                f"[Eval] EVAL_EMBED_PROVIDER={override} 를 쓸 수 없습니다"
-                f"({'로컬 모델 로드 불가' if override == 'local' else '해당 provider 키 없음'}) "
+                f"[Eval] EVAL_EMBED_PROVIDER={override} 인데 {why} "
                 f"- 명시 경로는 다른 provider 로 폴백하지 않습니다. 임베딩 의존 지표"
                 f"(response_relevancy)와 bad_gold_answer 라벨을 건너뜁니다. "
-                f"키를 채우거나 EVAL_EMBED_PROVIDER 를 지우세요.")
+                f"{fix} EVAL_EMBED_PROVIDER 를 지우세요.")
         else:
             _notify_embed_once(
                 f"[Eval] EVAL_LLM_PROVIDER={_provider()} 의 임베딩 키도, OPENAI_API_KEY 도, "
@@ -488,8 +535,15 @@ def embed_texts(texts: list[str], model: str | None = None) -> list[list[float]]
             "[Eval] EVAL_EMBED_PROVIDER=local - 로컬 임베딩(BGE-M3)으로 계산합니다 "
             "(비용 0, 외부 호출 없음).")
     else:
+        # 사유를 둘로 가른다. 이 분기에 오는 경우는 "엔드포인트가 없다" 와 "키가 없다"
+        # 두 가지인데, 뭉쳐서 전자로 적으면 심판이 openai/gemini/openrouter 인 실행에
+        # **거짓 사유**가 찍힌다 - 그 provider 들은 임베딩 엔드포인트가 있고, 없는 건
+        # 키다. 읽는 사람이 키가 아니라 provider 선택을 의심하게 된다.
+        judge = _provider()
+        why = (f"는 임베딩 엔드포인트가 없고 OPENAI_API_KEY 도 없어"
+               if judge in ("anthropic", "github") else "의 임베딩 키가 없어")
         _notify_embed_once(
-            f"[Eval] EVAL_LLM_PROVIDER={_provider()} 는 임베딩 엔드포인트가 없어 "
+            f"[Eval] EVAL_LLM_PROVIDER={judge} {why} "
             f"로컬 임베딩(BGE-M3)으로 계산합니다 - 비용 0, 외부 호출 없음. "
             f"참고: 임베딩 모델이 바뀌면 코사인 분포가 달라지므로 "
             f"response_relevancy 값을 API 임베딩 실행과 직접 비교하지 마세요. "

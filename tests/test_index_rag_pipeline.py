@@ -8,6 +8,7 @@ from agents.rag.generator import answer_question
 from agents.rag.retriever import build_retriever, reset_retriever_cache
 from core.schema import Document
 from core.state import AgentDoctorState
+from tests.embedding_env import pin_local_embedding
 
 
 # Smoke test에서는 실제 embedding 모델 대신 고정 벡터를 써서 API 없이 검색 방향만 고정한다.
@@ -40,6 +41,12 @@ def _index_tools(get_retriever: Mock) -> IndexTools:
 
 
 class IndexRagPipelineSmokeTest(unittest.TestCase):
+    def setUp(self):
+        # 질의축이 openrouter 로 열려 있고 키가 없는 머신에서는 search_with_details 의
+        # 설정 preflight 가 RuntimeError 로 끊는다 — 이 테스트가 코드가 아니라 .env 를
+        # 재게 된다. 질의 임베딩 자체는 아래에서 대역으로 바꾸므로 실제 호출은 없다.
+        pin_local_embedding(self)
+
     def tearDown(self):
         reset_retriever_cache()
 
