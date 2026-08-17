@@ -1517,3 +1517,70 @@ class PlannerCandidateListTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MarginFloorWiringTest(unittest.TestCase):
+    """하한선이 planner.plan() 경로에 실제로 배선돼 있는가.
+
+    action_aggregator 단위 테스트(test_action_aggregator.MarginReachabilityTest)는
+    함수를 직접 부르므로, planner 가 annotate_margin_reachability 를 호출하지 않아도
+    전부 통과한다. 배선이 조용히 빠지는 것을 막으려면 plan() 을 통과하는 검사가
+    따로 있어야 한다.
+
+    구성: 검색(A) 라벨은 probe 1개, 생성(B) 라벨은 probe 20개.
+      - tier 만 보면 A 가 이긴다(A > B 는 점수보다 먼저다).
+      - 그런데 A 후보의 상한은 질문 100개 중 1개라 마진에 못 닿는다.
+      → 배선이 살아 있으면 B 가 선택된다.
+    """
+
+    _A_LABEL = "retrieval_lexical_mismatch"      # → retriever.search_type:hybrid
+    _B_LABEL = "generation_abstention_failure"   # → generation.abstention_strict
+
+    def _state(self, *, composite=(50, 40), probe_total=100):
+        findings = [make_finding("a0", self._A_LABEL)]
+        findings += [make_finding(f"b{i}", self._B_LABEL) for i in range(20)]
+
+        report = DiagnosticReport(
+            report_id="report",
+            findings=findings,
+            overall_score=45.0,
+            pass_threshold=False,
+        )
+        if composite is not None:
+            report.composite_score = {
+                "total": 45,
+                "components": [
+                    {"key": "quality", "label": "품질", "score": composite[0]},
+                    {"key": "reliability", "label": "신뢰도", "score": composite[1]},
+                ],
+            }
+        return AgentDoctorState(
+            report=report,
+            probes=[Probe(probe_id=f"p{i}", question="q", source="taxonomy")
+                    for i in range(probe_total)],
+            index_config={"chunk_size": 512, "chunk_overlap": 50, "top_k": 5},
+            iteration=0, max_iterations=3,
+        )
+
+    def test_plan_demotes_below_margin_a_group(self):
+        request, decision = planner.plan(self._state())
+        self.assertEqual(decision.mode, "apply_optimize")
+        self.assertIsNotNone(request, "처방이 서지 않았다 — 전제 구성 실패")
+        self.assertEqual(request.action_key, "generation.abstention_strict:enable")
+
+    def test_plan_keeps_tier_order_when_ceiling_is_unmeasurable(self):
+        """종합점수를 못 재면 판단을 보류하고 기존 tier 순서를 지킨다.
+
+        위 테스트와 짝이다 — 이게 A 를 고르지 않으면 위 테스트가 하한선 때문이
+        아니라 다른 이유로 B 를 골랐다는 뜻이 된다.
+        """
+        request, _decision = planner.plan(self._state(composite=None))
+        self.assertIsNotNone(request)
+        self.assertEqual(request.action_key, "retriever.search_type:replace")
+
+    def test_plan_reports_demoted_action_for_logging(self):
+        """강등 사유가 요청에 실려야 로그·리포트가 설명할 수 있다."""
+        request, _decision = planner.plan(self._state())
+        demoted = request.metadata.get("margin_demoted_actions") or []
+        self.assertIn("retriever.search_type:replace",
+                      [d["action_key"] for d in demoted])
