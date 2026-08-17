@@ -170,10 +170,10 @@ def findings_from_report(report, probes: list | None = None) -> list[dict]:
     원문까지 실어서 대조표(format_detail)가 **왜 어긋났는지**를 같이 보여준다 — 라벨만
     보면 대조표를 고쳐야 할지 진단을 고쳐야 할지 갈리지 않는다.
 
-    [한계] 생성 답변은 실패 probe 만 실린다. EvalRecord 는 Eval 이 끝나면 사라지고,
-    report 가 답변 원문을 남기는 곳은 `failed_questions` 뿐이라서다(성공 probe 는 애초에
-    '실패 목록' 이 아니라 빠진다). 성공 probe 는 채점 대상도 아니므로 질문·정답만으로
-    충분하다고 보고 여기서 넓히지 않는다.
+    [한계] 생성 답변은 **진단이 나온 probe** 만 실린다. EvalRecord 는 Eval 이 끝나면
+    사라지고, report 가 답변 원문을 남기는 곳은 `diagnosed_probes` 뿐이라서다(성공 probe 는
+    findings 가 없어 애초에 안 들어간다). 성공 probe 는 채점 대상도 라벨링 대상도 아니라
+    질문·정답만으로 충분하다고 보고 여기서 넓히지 않는다.
     """
     # **순서를 보존한다.** report.findings 는 diagnose 의 처방 우선순위(확정 우선, 그룹
     # D→A→C→B)로 정렬돼 있고, 그 첫 원소를 두 곳이 '진단 1순위'로 읽는다:
@@ -190,10 +190,12 @@ def findings_from_report(report, probes: list | None = None) -> list[dict]:
             if finding.label not in by_probe[probe_id]:   # 순서 보존 dedup
                 by_probe[probe_id].append(finding.label)
 
-    # 실패 판정은 report 가 소유한다 — findings 유무로 추론하지 않는다. 골드 오류 probe 는
-    # findings 는 있지만 failed_questions 에서 빠지므로(평가셋 결함이라 '실패한 검증 질문'
-    # 이 아니다) 둘이 다르다.
-    answers = {
+    # **diagnosed_probes 를 쓴다 — failed_questions 가 아니다.** 후자는 '사람이 고칠 실패
+    # 목록'이라 골드 오류 probe 를 뺀다. 그걸 라벨 시트 원자료로 쓰면 우리가 bad_gold_* 로
+    # 진단한 probe 만 답변·지표·순위가 통째로 빈 채 나가고(실측 qa_2168), 라벨러는 '판단불가'
+    # 밖에 쓸 수 없다 — 즉 **우리 진단이 자기를 검증할 증거를 지운다.**
+    # 구버전 덤프(diagnosed_probes 이전)를 위해 failed_questions 로 폴백한다.
+    answers = getattr(report, "diagnosed_probes", None) or {
         row.get("probe_id", ""): row
         for row in (getattr(report, "failed_questions", []) or [])
     }

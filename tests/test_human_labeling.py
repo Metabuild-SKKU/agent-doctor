@@ -152,6 +152,71 @@ class EndToEndFromRealReportTest(unittest.TestCase):
 
         self.assertEqual(to_entry(rows[0])["정답청크_순위"], "d_chunk_5=검색안됨(전체 13위)")
 
+    def test_gold_error_probe_still_carries_its_evidence(self):
+        """**우리 진단이 라벨러의 증거를 지우면 안 된다.**
+
+        bad_gold_* 로 진단한 probe 는 failed_questions 에서 빠진다(사람이 고칠 실패 목록이
+        아니므로 옳다). 그런데 라벨 시트가 그 목록을 원자료로 쓰는 바람에, 하필 그 진단이
+        맞는지 검증하려던 probe 만 답변·지표·순위가 통째로 빈 채 시트에 나갔다 — 실측 30건의
+        qa_2168 은 로그에 답변까지 남았는데 시트는 전 항목이 null 이라 '판단불가' 외에는
+        쓸 수가 없었다. 그러면 D 그룹은 원리적으로 검증 불가가 된다.
+
+        라벨을 가리는 건 블라인딩이지만 증거를 가리는 건 그 반대다.
+        """
+        from agents.eval.report import build_report, is_gold_labeling_error
+        from agents.eval.types import EvalRecord
+        from core.schema import Finding, Probe
+        from tools.score_ragec import findings_from_report
+
+        probe = Probe(probe_id="probe_qa_9", question="질문?", source="taxonomy",
+                      ground_truth="정답", gold_chunk_ids=["d_chunk_3"])
+        record = EvalRecord(
+            probe=probe,
+            generated_answer="근거대로 답했지만 골드가 틀렸다",
+            retrieved_chunk_ids=["d_chunk_3", "d_chunk_7"],
+            retrieval_details={"search_mode": "dense", "reranker_status": "disabled"},
+            findings=[Finding(finding_id="f1", type="data_failure", severity="warning",
+                              description="근거 문구", label="bad_gold_answer",
+                              confirmed=True, affected_probes=["probe_qa_9"])],
+        )
+        report = build_report([record], iteration=1, mode=1)
+
+        # 전제: 이 probe 는 실제로 실패 목록에서 빠진다(그 동작은 유지한다).
+        self.assertTrue(is_gold_labeling_error(record))
+        self.assertEqual(report.failed_questions, [])
+
+        rows = findings_from_report(report, [probe])
+        entry = to_entry(rows[0])
+        self.assertEqual(entry["우리_답변"], "근거대로 답했지만 골드가 틀렸다")
+        self.assertEqual(entry["정답청크_검색됨"], "1/1")
+        self.assertEqual(entry["검색방식"], "dense")
+        # 증거는 실렸어도 진단은 여전히 가려져 있어야 한다.
+        self.assertNotIn("bad_gold_answer", json.dumps(entry, ensure_ascii=False))
+
+    def test_failed_questions_is_a_view_of_diagnosed_probes(self):
+        """두 목록이 같은 항목 객체를 가리킨다 — 복제하면 한쪽에만 필드가 붙는다.
+
+        관측이 갈리면 리포트 화면과 라벨 시트가 **다른 근거**를 보여주고, 라벨 불일치가
+        진단 오류인지 표시 차이인지 가릴 수 없게 된다.
+        """
+        from agents.eval.report import build_report
+        from agents.eval.types import EvalRecord
+        from core.schema import Finding, Probe
+
+        probe = Probe(probe_id="probe_qa_10", question="질문?", source="taxonomy",
+                      ground_truth="정답", gold_chunk_ids=["d_chunk_1"])
+        record = EvalRecord(
+            probe=probe, generated_answer="틀린 답", retrieved_chunk_ids=["d_chunk_1"],
+            findings=[Finding(finding_id="f1", type="retrieval_failure",
+                              severity="warning", description="근거",
+                              label="retrieval_low_rank",
+                              affected_probes=["probe_qa_10"])],
+        )
+        report = build_report([record], iteration=1, mode=1)
+
+        self.assertIs(report.failed_questions[0],
+                      report.diagnosed_probes["probe_qa_10"])
+
 
 class StratifiedSamplingTest(unittest.TestCase):
     """무작위로 뽑으면 실측처럼 한 라벨로 쏠려(10건 중 5건이 low_rank) 희귀 라벨을 영영 못 잰다."""

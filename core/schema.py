@@ -133,6 +133,14 @@ class DiagnosticReport:
     # 실패한 검증 질문의 원문 비교 데이터. EvalRecord는 실행 중에만 존재하므로
     # 리포트 페이지가 질문·기대 정답·실제 답변을 보여주려면 여기 보존해야 한다.
     failed_questions: list[dict] = field(default_factory=list)
+    # probe_id → failed_questions 와 **같은 모양**의 항목. 다른 건 범위뿐이다:
+    # failed_questions 는 사람이 고칠 실패 목록이라 골드 오류 probe 를 빼고, 여기는 진단이
+    # 나온 probe 를 하나도 빼지 않는다(failed_questions 는 이걸 거른 뷰다).
+    #
+    # 나눠 둔 이유: 라벨 시트가 failed_questions 를 재활용하는 바람에 **우리가 bad_gold_* 로
+    # 진단한 probe 가 시트에 빈 칸으로 나갔다.** 우리 진단이 라벨러가 볼 증거를 고르면
+    # 그 진단을 검증할 수 없다 — 라벨을 가리는 건 블라인딩이지만 증거를 가리는 건 그 반대다.
+    diagnosed_probes: dict = field(default_factory=dict)
     findings_summary: dict = field(default_factory=dict)  # 확정/예비·라벨 집계(진단 모드 포함). Optimize 소비용
     ragas_scores: dict = field(default_factory=dict)
     # Eval이 관측한 검색 runtime 실행 결과. 품질 지표와 섞지 않고 Optimize가

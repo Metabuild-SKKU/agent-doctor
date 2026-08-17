@@ -183,10 +183,15 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     else:
         overall_val, pass_thr = round(overall, 4), overall >= PASS_SCORE_THRESHOLD
 
+    # 한 번만 만들고 failed_questions 는 그 **뷰**로 낸다 — 따로 만들면 한쪽에만 필드가
+    # 붙었을 때 라벨 시트와 리포트가 다른 관측을 보여준다.
+    diagnosed = _diagnosed_probes(records)
+
     report = DiagnosticReport(
         report_id=f"report_{uuid.uuid4().hex[:8]}",
         findings=findings,
-        failed_questions=_failed_questions(records),
+        failed_questions=_failed_questions(records, diagnosed),
+        diagnosed_probes=diagnosed,
         findings_summary=_findings_summary(records, mode),
         ragas_scores=scores,
         runtime_summary={"reranker": reranker_runtime,
@@ -204,7 +209,36 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
 
 # ── 집계 헬퍼 ─────────────────────────────────────────────────────
 
-def _failed_questions(records: list[EvalRecord]) -> list[dict]:
+def _diagnosed_probes(records: list[EvalRecord]) -> dict[str, dict]:
+    """probe_id → 질문·정답·답변·recall·관측. **진단이 나온 probe 를 하나도 빼지 않는다.**
+
+    `_failed_questions` 는 사람이 고칠 실패 목록이라 골드 오류 probe 를 의도적으로 뺀다.
+    라벨 시트가 그 목록을 재활용하는 바람에, **우리가 bad_gold_* 로 진단한 probe 는 시트에
+    빈 칸으로 나갔다** — 답변도 지표도 순위도 없이. 라벨러는 '판단불가' 말고 쓸 수가 없다.
+
+    그러면 우리 진단이 라벨러가 볼 증거를 고르는 셈이라, 하필 그 진단이 맞는지 검증하려던
+    D 그룹(bad_gold_answer·bad_gold_chunk)이 **원리적으로 검증 불가**가 된다. 라벨을 가리는
+    블라인딩은 필요하지만 증거를 가리는 건 그 반대다.
+
+    실측(30건, qa_2168): 로그에는 답변까지 남았는데 시트는 전 항목이 null 이었다.
+    """
+    return {
+        record.probe.probe_id: {
+            "probe_id": record.probe.probe_id,
+            "question": record.probe.question,
+            "expected_answer": record.probe.ground_truth or "",
+            "actual_answer": record.generated_answer or "",
+            "recall_at_k": record.recall_at_k,
+            "recall_basis": record.recall_basis,
+            "observations": _observations(record),
+        }
+        for record in records
+        if record.findings
+    }
+
+
+def _failed_questions(records: list[EvalRecord],
+                      diagnosed: dict[str, dict]) -> list[dict]:
     """실패한 probe의 질문·기대 정답·실제 답변을 리포트에 보존한다.
 
     EvalRecord는 Eval 실행이 끝나면 사라지므로 UI가 재구성하지 않고 실제 생성 답변을
@@ -222,16 +256,10 @@ def _failed_questions(records: list[EvalRecord]) -> list[dict]:
     측정값으로 판정할 수 있다(우리 라벨로 판정하면 '다르니까 봐준다' 는 순환이 된다).
     basis 를 함께 싣는 건 span/chunk 가 같은 1.0 이라도 강도가 달라서다.
     """
+    # **_diagnosed_probes 의 뷰다.** 항목을 여기서 다시 만들지 않는다 — 복제하면 한쪽에만
+    # 필드가 붙었을 때 리포트와 라벨 시트가 다른 관측을 보여준다.
     return [
-        {
-            "probe_id": record.probe.probe_id,
-            "question": record.probe.question,
-            "expected_answer": record.probe.ground_truth or "",
-            "actual_answer": record.generated_answer or "",
-            "recall_at_k": record.recall_at_k,
-            "recall_basis": record.recall_basis,
-            "observations": _observations(record),
-        }
+        diagnosed[record.probe.probe_id]
         for record in records
         if record.findings and not is_gold_labeling_error(record)
     ]
