@@ -198,13 +198,40 @@ class LocateTest(unittest.TestCase):
         self.assertLessEqual(found[1], len(content))
 
     def test_prefix_fallback_stops_at_the_sentence_end(self):
-        """뒤 문장을 통째로 삼키면 그 문장이 골드가 아닌데 골드로 채점된다."""
+        """참조 꼬리가 문서에 없으면 문장 끝까지만 — 단어 중간에서 자르면 안 된다."""
         content = ("The board approved the merger in June after a long review. "
                    "The CFO resigned in December for unrelated reasons entirely.")
         ref = "The board approved the merger in June after a long review, per the filing."
         start, end = locate(ref, content)
         self.assertEqual(content[start:end],
                          "The board approved the merger in June after a long review.")
+
+    def test_prefix_fallback_does_not_truncate_a_two_sentence_reference(self):
+        """반대 방향 — 근거가 두 문장에 걸치면 뒷문장을 버리면 안 된다.
+
+        문장부호에서 무조건 자르면 gold 가 절반이 되어, 부풀림이 축소로 바뀔 뿐
+        span_recall 은 여전히 어긋난다(리뷰 지적). 꼬리를 문서에서 다시 찾아 끝을 잡는다.
+        이 폴백에 온 이유가 원문·참조 불일치라 꼬리 매칭도 대소문자를 무시한다.
+        """
+        content = ("Alpha beta gamma delta epsilon zeta eta theta. "
+                   "Iota kappa lambda mu nu xi omicron pi rho sigma")
+        ref = ("Alpha beta gamma delta epsilon zeta eta theta. "
+               "Iota kappa lambda mu nu XI omicron pi rho sigma")
+        start, end = locate(ref, content)
+        self.assertEqual(content[start:end], content)
+
+    def test_prefix_fallback_tolerates_case_at_the_very_end(self):
+        """꼬리 **끝** 토큰이 대소문자만 다르면 마지막 3토큰 폴백도 못 잡는다.
+
+        그 경우 문장 경계로 떨어져 두 번째 문장이 통째로 날아간다. 이 폴백에 온 이유가
+        원문·참조 불일치라 매칭은 대소문자를 무시해야 한다.
+        """
+        content = ("Alpha beta gamma delta epsilon zeta eta theta. "
+                   "Iota kappa lambda mu nu xi omicron pi rho sigma")
+        ref = ("Alpha beta gamma delta epsilon zeta eta theta. "
+               "Iota kappa lambda mu nu xi omicron PI RHO SIGMA")
+        start, end = locate(ref, content)
+        self.assertEqual(content[start:end], content)
 
 
 class QtypeMappingTest(unittest.TestCase):

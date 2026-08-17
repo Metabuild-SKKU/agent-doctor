@@ -145,6 +145,23 @@ class CodeFenceTest(unittest.TestCase):
         """상한 절단으로 닫는 펜스가 없어도 본문은 살린다."""
         self.assertEqual(_strip_code_fence('```json\n{"verdict": 1}'), '{"verdict": 1}')
 
+    def test_trailing_text_after_the_closing_fence(self):
+        """닫는 펜스 뒤에 설명이 붙는 경우 — 한 줄 펜스보다 **흔하다.**
+
+        게으른 매칭 + 선택적 닫는 펜스로 고치면 그룹이 펜스까지 삼켜 파싱이 깨진다.
+        탐욕 매칭으로 마지막 펜스를 잡아야 양쪽이 다 닫힌다(리뷰 지적).
+        """
+        raw = '```json\n{"verdict": 1}\n```\n설명: 이 응답은 기권입니다.'
+        self.assertEqual(_strip_code_fence(raw), '{"verdict": 1}')
+
+    def test_one_line_fence_still_works(self):
+        """탐욕 매칭으로 바꿔도 개행 없는 펜스가 다시 깨지면 안 된다."""
+        self.assertEqual(_strip_code_fence('```json{"verdict": 1}```'), '{"verdict": 1}')
+
+    def test_fence_inside_the_body_is_kept(self):
+        """마지막 펜스를 잡으므로 본문 안의 펜스는 살아야 한다."""
+        self.assertEqual(_strip_code_fence('```json\n{"a":"```"}\n```'), '{"a":"```"}')
+
     def test_empty_input_is_safe(self):
         self.assertEqual(_strip_code_fence(""), "")
         self.assertEqual(_strip_code_fence(None), "")

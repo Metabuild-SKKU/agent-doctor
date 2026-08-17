@@ -143,7 +143,13 @@ def _rank_note(obs: dict) -> str:
             # 재검색 100위 안에도 없다 — 순위 문제가 아니라 표현이 안 맞는 쪽이다.
             notes.append(f"{cid}=검색안됨(100위 밖)")
         else:
-            notes.append(f"{cid}=검색안됨")
+            # 재검색 자체가 안 돌았다. gold_ranks 는 진단 규칙이 그 값을 필요로 할 때만
+            # 캐시에 생기므로(agents/eval/metrics_search._gold_ranks), 규칙이 안 탄 probe 는
+            # 순위를 알 수 없다. 실측(30건)에서는 **놓친 gold 가 있는 probe 는 전부 채워져
+            # 있었지만**(빈 3건은 gold 를 다 찾았거나 gold 자체가 없는 경우) 보장은 아니다.
+            # '순위가 없다' 와 '측정을 안 했다' 를 같은 문구로 쓰면 라벨러가 후자를 전자로
+            # 읽어 missing_gold 를 고르게 된다 — 이 수정이 겨냥한 바로 그 실패다.
+            notes.append(f"{cid}=검색안됨(순위 미측정)")
     return ", ".join(notes)
 
 

@@ -660,8 +660,8 @@ def _has_hangul(text: str) -> bool:
     복제해 두면 한쪽만 한글 블록을 넓혔을 때 혼합 문자 질문에서 생성 언어와 채점 단위가
     갈리고, 이 파일이 고친 f1=0 오진이 그 부분집합에서 조용히 재현된다(어떤 테스트도 못 잡음).
     """
-    from agents.eval.metrics_basic import _has_hangul as _shared
-    return _shared(text)
+    from agents.eval.metrics_basic import has_hangul
+    return has_hangul(text)
 
 
 def _build_prompt(

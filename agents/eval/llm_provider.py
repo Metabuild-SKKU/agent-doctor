@@ -197,15 +197,22 @@ def _strip_code_fence(raw: str) -> str:
     text = (raw or "").strip()
     if not text.startswith("```"):
         return text
-    # 여는 펜스(``` 또는 ```json)와 닫는 펜스를 한 번에 벗긴다.
+    # 여는 펜스(``` 또는 ```json)를 벗기고 **마지막** 닫는 펜스까지를 본문으로 본다.
     #
-    # 줄 단위(partition("\n"))로 하면 **개행 없는 한 줄 펜스**에서 본문을 통째로 버린다
-    # (```json{"verdict": 1}``` → ''). 최종 결과는 {} 로 같아 회귀는 아니지만, 이 함수가
-    # 흡수한다고 선언한 실패 모드가 그대로 남는다. 닫는 펜스는 절단 응답을 위해 선택이다.
-    # 언어 태그는 낱말 문자만 — `[^\s\`]*` 로 두면 개행 없는 응답에서 태그가 본문까지
+    # 두 실패 모드를 동시에 닫아야 한다.
+    #   · 줄 단위(partition("\n"))는 **개행 없는 한 줄 펜스**에서 본문을 통째로 버린다
+    #     (```json{"v":1}``` → '')
+    #   · 게으른 `(.*?)` + 선택적 닫는 펜스는 **닫는 펜스 뒤에 설명이 붙으면** 그룹이
+    #     펜스까지 삼킨다(```json\n{"a":1}\n```\n설명… → 파싱 실패). 이쪽이 더 흔하다.
+    # 그래서 탐욕 매칭으로 마지막 펜스를 잡고, 닫는 펜스가 없는 절단 응답만 폴백한다.
+    #
+    # 언어 태그는 낱말 문자만 — `[^\s`]*` 로 두면 개행 없는 응답에서 태그가 본문까지
     # 먹어(```json{"v":1}``` 의 `json{"v":1}` 전체) 결과가 빈 문자열이 된다.
-    match = re.match(r"^```[A-Za-z0-9_+-]*\s*(.*?)\s*(?:```)?$", text, re.DOTALL)
-    return match.group(1).strip() if match else text
+    closed = re.match(r"^```[A-Za-z0-9_+-]*\s*(.*)```", text, re.DOTALL)
+    if closed:
+        return closed.group(1).strip()
+    truncated = re.match(r"^```[A-Za-z0-9_+-]*\s*(.*)$", text, re.DOTALL)
+    return truncated.group(1).strip() if truncated else text
 
 
 def chat_json(

@@ -68,7 +68,7 @@ class SheetHidesOurDiagnosisTest(unittest.TestCase):
                             retrieved_chunk_ids=["a", "b", "g1"]))
         self.assertEqual(hit["정답청크_순위"], "g1=3위")
         miss = to_entry(_row("1", "x", gold_chunk_ids=["g1"], retrieved_chunk_ids=["a"]))
-        self.assertEqual(miss["정답청크_순위"], "g1=검색안됨")
+        self.assertEqual(miss["정답청크_순위"], "g1=검색안됨(순위 미측정)")
 
     def test_fill_field_is_present_and_empty(self):
         self.assertEqual(to_entry(self.ROW)[PRIMARY_FIELD], "")
@@ -313,10 +313,17 @@ class WideRankInSheetTest(unittest.TestCase):
                               retrieved_chunk_ids=["a", "g1"], gold_wide_ranks={"g1": 2}))
         self.assertEqual(entry["정답청크_순위"], "g1=2위")
 
-    def test_without_wide_ranks_it_falls_back_quietly(self):
-        """구버전 덤프(재검색 미측정)에서도 시트가 나가야 한다."""
+    def test_unmeasured_rank_is_labelled_as_such(self):
+        """'순위가 없다' 와 '측정을 안 했다' 를 같은 문구로 쓰면 라벨러가 후자를 전자로
+        읽어 missing_gold 를 고른다 — 이 수정이 겨냥한 바로 그 실패다.
+
+        gold_ranks 는 진단 규칙이 그 값을 필요로 할 때만 캐시에 생기므로, 규칙이 안 탄
+        probe 는 순위를 알 수 없다(실측 30건에서는 놓친 gold 가 있는 probe 가 전부
+        채워져 있었지만 보장은 아니다).
+        """
         entry = to_entry(_row("1", "x", gold_chunk_ids=["g1"], retrieved_chunk_ids=["a"]))
-        self.assertEqual(entry["정답청크_순위"], "g1=검색안됨")
+        self.assertEqual(entry["정답청크_순위"], "g1=검색안됨(순위 미측정)")
+        self.assertNotEqual(entry["정답청크_순위"], "g1=검색안됨(100위 밖)")
 
 
 class ReportTableAlignmentTest(unittest.TestCase):

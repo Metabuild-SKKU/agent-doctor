@@ -174,15 +174,41 @@ def locate(reference: str, content: str) -> tuple[int, int] | None:
         flexible_head = r"\s+".join(re.escape(tok) for tok in head.split())
         match = re.search(flexible_head, content)
         if match:
-            # end 는 **문서 안에서** 끝나야 한다. 이 경로는 애초에 원문과 참조가 그대로
-            # 일치하지 않을 때만 오므로(공백·따옴표 차이) start+len(ref) 가 실제 문장 끝을
-            # 넘거나 문서 밖으로 나갈 수 있다. 넘으면 gold span 이 다음 문장을 삼켜
-            # span_recall 판정이 어긋나고, 문서 밖이면 좌표 자체가 무효다.
-            # 문서 끝에서 자르고, 마지막 문장부호까지만 인정해 다음 문장 침범을 줄인다.
-            end = min(len(content), match.start() + len(ref))
-            tail = content.rfind(".", match.end(), end)
-            return match.start(), (tail + 1) if tail != -1 else end
+            return match.start(), _prefix_end(ref, content, match)
     return None
+
+
+def _prefix_end(ref: str, content: str, match) -> int:
+    """접두 폴백의 end 좌표. **양방향으로 어긋날 수 있어** 따로 뺐다.
+
+    이 경로는 원문과 참조가 그대로 일치하지 않을 때만 온다(공백·따옴표·오탈자 차이).
+
+      · `start + len(ref)` 를 그대로 쓰면 **부풀 수 있다** — 실제 문장 끝을 넘어 다음
+        문장을 삼키거나 문서 밖으로 나간다(좌표 자체가 무효).
+      · 그렇다고 첫 문장부호에서 자르면 **줄어든다** — 근거가 두 문장에 걸치면 뒷문장이
+        통째로 사라져 gold 가 절반이 된다. 방향만 바뀌고 span_recall 은 여전히 어긋난다.
+
+    그래서 접두 **뒤쪽을 문서에서 다시 유연 매칭**해 실제 끝을 찾는다. 못 찾을 때만
+    길이 추정으로 폴백하고, 그 값도 문서 끝에서 자른다.
+    """
+    # 꼬리를 문서에서 다시 찾는다. **관대하게** 찾아야 한다 — 이 폴백에 온 이유가 애초에
+    # 원문과 참조가 어긋나서다(대소문자·따옴표·오탈자). 전체 꼬리로 실패하면 **마지막 몇
+    # 토큰**으로 다시 시도한다. 끝 좌표만 필요하므로 뒤쪽이 맞으면 충분하다.
+    tokens = ref[40:].split()
+    for take in (len(tokens), 5, 3):
+        if take < 2 or take > len(tokens):
+            continue
+        piece = r"\s+".join(re.escape(tok) for tok in tokens[-take:])
+        found = re.compile(piece, re.IGNORECASE).search(content, match.end())
+        if found:
+            return found.end()
+
+    # 뒤쪽을 못 찾았다 = 참조 뒷부분이 문서에 없는 것이다(추가 설명이 붙은 참조 등).
+    # 길이 추정을 그대로 쓰면 단어 중간에서 잘리므로, 그 범위 안의 **마지막 문장 끝**까지만
+    # 인정한다. 문장부호가 없으면 길이 추정으로 떨어진다.
+    bound = min(len(content), match.start() + len(ref))
+    sentence_end = max(content.rfind(mark, match.end(), bound) for mark in ".!?")
+    return sentence_end + 1 if sentence_end != -1 else bound
 
 
 def build(ragec_path: str, docs_path: str, queries_path: str,

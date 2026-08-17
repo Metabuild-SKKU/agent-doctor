@@ -96,6 +96,12 @@ def _has_hangul(text: str) -> bool:
     return any(lo <= c <= hi for c in text for lo, hi in _HANGUL_BLOCKS)
 
 
+# 공개 별칭 — 생성 프롬프트(agents/rag/generator)가 **같은 판정**을 쓰도록 묶는 계약이다.
+# 사본이 생기면 혼합 문자 질문에서 생성 언어와 채점 단위가 갈려, 이 파일이 고친 f1=0 오진이
+# 그 부분집합에서 조용히 재현된다.
+has_hangul = _has_hangul
+
+
 def scoring_unit(reference: str) -> str:
     """이 정답을 무엇 단위로 채점할지: `"char"`(한국어·숫자형) | `"word"`(영어).
 
