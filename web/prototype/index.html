@@ -30,20 +30,20 @@
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    --bg: #fbfbfc;
-    --bg-2: #f5f6f8;
+    --bg: #f7f8ff;
+    --bg-2: #eef1ff;
     --surface: #ffffff;
-    --surface-2: #f6f7f9;
-    --border: rgba(12,14,22,.10);
-    --border-strong: rgba(12,14,22,.17);
+    --surface-2: #f7f8fd;
+    --border: rgba(26,31,54,.10);
+    --border-strong: rgba(26,31,54,.17);
     --hi: rgba(255,255,255,.6);
-    --ink: #14161a;
-    --muted: #565b64;
-    --faint: #8b909a;
-    --accent: #4a52d4;
-    --accent-2: #5f67e0;
-    --accent-ink: #363cad;
-    --accent-glow: rgba(74,82,212,.12);
+    --ink: #111827;
+    --muted: #667085;
+    --faint: #98a2b3;
+    --accent: #5b5ce2;
+    --accent-2: #7c3aed;
+    --accent-ink: #4338ca;
+    --accent-glow: rgba(91,92,226,.16);
     --good: #1f9d4d;
     --warning: #b07d15;
     --critical: #d24a3d;
@@ -52,20 +52,24 @@
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
   body {
-    margin: 0; background: var(--bg); color: var(--ink);
+    margin: 0; background:
+      radial-gradient(circle at 14% 4%, rgba(124,58,237,.13), transparent 32%),
+      radial-gradient(circle at 92% 8%, rgba(91,92,226,.12), transparent 30%),
+      linear-gradient(180deg, #ffffff 0%, var(--bg) 38%, #ffffff 100%);
+    color: var(--ink);
     font-family: var(--sans); line-height: 1.55; letter-spacing: -.006em;
     -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
-  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 32px; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 34px; }
   ::selection { background: var(--accent-glow); }
 
   /* ── top bar ── */
   .topbar {
     position: sticky; top: 0; z-index: 20;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 17px 0; border-bottom: 1px solid var(--border);
-    background: color-mix(in srgb, var(--bg) 82%, transparent);
-    backdrop-filter: blur(12px);
+    padding: 20px 0; border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, #fff 76%, transparent);
+    backdrop-filter: blur(18px);
   }
   .brand { display: flex; align-items: center; gap: 9px; }
   .brand-mark { width: 26px; height: 26px; flex: none; }
@@ -87,15 +91,19 @@
   .theme-toggle:hover { color: var(--ink); border-color: var(--border-strong); }
 
   /* ── hero ── */
-  .hero { position: relative; padding: 92px 0 60px; overflow: hidden; }
+  .hero {
+    position: relative; padding: 88px 0 58px; overflow: hidden;
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 460px);
+    gap: 58px; align-items: center;
+  }
   .hero-glow {
     position: absolute; top: -180px; left: 50%; transform: translateX(-58%);
     width: 780px; height: 560px; z-index: 0; pointer-events: none;
     background: radial-gradient(50% 50% at 50% 50%, var(--accent-glow), transparent 72%);
     filter: blur(8px);
   }
-  .hero-ecg { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 190px; z-index: 0; opacity: .5; pointer-events: none; }
-  .hero-inner { position: relative; z-index: 1; max-width: 720px; }
+  .hero-ecg { position: absolute; left: 0; right: 0; bottom: -26px; width: 100%; height: 190px; z-index: 0; opacity: .26; pointer-events: none; }
+  .hero-inner { position: relative; z-index: 1; max-width: 780px; }
   .brand-lockup { display: inline-flex; align-items: center; gap: 11px; }
   .brand-lockup .bl-mark { width: 30px; height: 30px; flex: none; }
   .brand-lockup .wm { font-size: 23px; font-weight: 670; letter-spacing: -.035em; }
@@ -122,17 +130,178 @@
   }
   .claim .cl-lg b { color: var(--accent); font-weight: 640; }
 
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+  .btn-primary, .btn-secondary {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    min-height: 46px; padding: 0 18px; border-radius: 999px;
+    font-size: 14px; font-weight: 720; letter-spacing: -.015em; text-decoration: none;
+    transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease, background .16s ease;
+  }
+  .btn-primary {
+    color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 18px 38px -18px rgba(91,92,226,.62);
+  }
+  .btn-secondary {
+    color: var(--accent-ink); background: rgba(255,255,255,.72);
+    border: 1px solid var(--border-strong);
+  }
+  .btn-primary:hover, .btn-secondary:hover { transform: translateY(-1px); }
+  .btn-secondary:hover { background: #fff; border-color: color-mix(in srgb, var(--accent) 32%, var(--border-strong)); }
+  .hero-proof { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 28px; max-width: 620px; }
+  .proof-card {
+    padding: 14px 15px; border: 1px solid var(--border); border-radius: 16px;
+    background: color-mix(in srgb, #fff 72%, transparent);
+    box-shadow: 0 14px 34px -28px rgba(17,24,39,.45);
+  }
+  .proof-card b { display: block; font-size: 20px; line-height: 1.05; letter-spacing: -.035em; }
+  .proof-card span { display: block; margin-top: 6px; color: var(--muted); font-size: 12.5px; line-height: 1.35; }
+
+  .hero-preview { position: relative; z-index: 1; }
+  .preview-card {
+    position: relative; overflow: hidden; padding: 24px; border-radius: 30px;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.96), rgba(255,255,255,.82)),
+      radial-gradient(circle at 82% 12%, rgba(91,92,226,.16), transparent 32%);
+    border: 1px solid rgba(91,92,226,.16);
+    box-shadow: 0 32px 84px -40px rgba(31,41,55,.42), inset 0 1px 0 rgba(255,255,255,.86);
+  }
+  .preview-card::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: linear-gradient(rgba(91,92,226,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(91,92,226,.06) 1px, transparent 1px);
+    background-size: 28px 28px; mask-image: linear-gradient(180deg, rgba(0,0,0,.55), transparent 68%);
+  }
+  .preview-top, .preview-score, .preview-metrics, .preview-rx { position: relative; z-index: 1; }
+  .preview-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .preview-badge {
+    display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px;
+    border-radius: 999px; background: color-mix(in srgb, var(--accent) 10%, #fff);
+    color: var(--accent-ink); font-size: 12px; font-weight: 720;
+  }
+  .preview-top .preview-doc { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+  .preview-score { margin: 30px 0 24px; display: flex; align-items: flex-end; gap: 10px; }
+  .preview-score strong { font-size: 72px; line-height: .86; letter-spacing: -.075em; }
+  .preview-score span { color: var(--muted); font-weight: 700; padding-bottom: 8px; }
+  .preview-metrics { display: grid; gap: 12px; }
+  .mini-metric {
+    display: grid; grid-template-columns: 112px 1fr 68px; gap: 12px; align-items: center;
+    padding: 12px; border: 1px solid var(--border); border-radius: 16px;
+    background: rgba(255,255,255,.64);
+  }
+  .mini-metric .name { font-size: 12.5px; color: var(--muted); }
+  .mini-metric .bar { height: 7px; border-radius: 999px; background: #e5e7eb; overflow: hidden; }
+  .mini-metric .bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--good)); }
+  .mini-metric .value { font-family: var(--mono); font-size: 12px; font-weight: 760; text-align: right; color: var(--ink); }
+  .preview-rx {
+    margin-top: 16px; padding: 15px; border-radius: 18px;
+    background: #111827; color: #fff; box-shadow: 0 18px 32px -24px rgba(17,24,39,.75);
+  }
+  .preview-rx .rx-title { font-size: 12px; color: rgba(255,255,255,.62); margin-bottom: 7px; }
+  .preview-rx .rx-text { font-weight: 720; letter-spacing: -.018em; }
+
+  .trust-strip {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: center;
+    margin: 10px 0 22px; padding: 14px;
+    border: 1px solid var(--border); border-radius: 999px;
+    background: rgba(255,255,255,.68);
+    box-shadow: 0 18px 42px -36px rgba(17,24,39,.45);
+  }
+  .trust-strip .eyebrow { color: var(--faint); font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; margin-right: 4px; }
+  .trust-pill { padding: 6px 11px; border-radius: 999px; background: #fff; border: 1px solid var(--border); color: var(--muted); font-size: 12.5px; font-weight: 650; }
+
+  .landing-section { padding: 76px 0 22px; }
+  .section-kicker {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .08em;
+    color: var(--accent); text-transform: uppercase; margin-bottom: 18px;
+  }
+  .section-kicker::before { content: ""; width: 18px; height: 1px; background: var(--accent); }
+  .section-heading {
+    display: grid; grid-template-columns: minmax(0, .95fr) minmax(280px, .55fr);
+    gap: 48px; align-items: end; margin-bottom: 28px;
+  }
+  .section-heading h2 {
+    margin: 0; font-size: clamp(34px, 5vw, 64px); line-height: .98;
+    letter-spacing: -.06em; font-weight: 760;
+  }
+  .section-heading p { margin: 0; color: var(--muted); font-size: 15.5px; line-height: 1.7; }
+  .bento-grid {
+    display: grid; grid-template-columns: 1.15fr .85fr; gap: 16px;
+  }
+  .bento-card {
+    position: relative; overflow: hidden; min-height: 220px; padding: 28px;
+    border: 1px solid var(--border); border-radius: 28px;
+    background: rgba(255,255,255,.74);
+    box-shadow: 0 22px 64px -44px rgba(17,24,39,.48), inset 0 1px 0 rgba(255,255,255,.86);
+  }
+  .bento-card.dark {
+    color: #fff; background:
+      radial-gradient(circle at 80% 0%, rgba(124,58,237,.42), transparent 38%),
+      linear-gradient(135deg, #111827, #1f1f46 58%, #3b2a78);
+    border-color: rgba(255,255,255,.12);
+  }
+  .bento-card.tall { min-height: 456px; }
+  .bento-card.wide { grid-column: span 2; min-height: 250px; }
+  .bento-label { font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: .08em; text-transform: uppercase; }
+  .bento-card.dark .bento-label { color: rgba(255,255,255,.58); }
+  .bento-title { margin-top: 14px; font-size: 24px; font-weight: 760; letter-spacing: -.04em; line-height: 1.14; }
+  .bento-copy { margin-top: 12px; color: var(--muted); font-size: 14px; line-height: 1.68; max-width: 48ch; }
+  .bento-card.dark .bento-copy { color: rgba(255,255,255,.72); }
+  .label-stack { position: absolute; right: 24px; bottom: 22px; display: grid; gap: 8px; min-width: 210px; }
+  .label-pill {
+    display: flex; justify-content: space-between; gap: 12px; padding: 11px 13px;
+    border-radius: 14px; background: rgba(255,255,255,.84); border: 1px solid rgba(255,255,255,.38);
+    color: #111827; box-shadow: 0 12px 24px -20px rgba(17,24,39,.75);
+    font-family: var(--mono); font-size: 11px;
+  }
+  .label-pill b { color: var(--accent-ink); }
+  .rx-mini {
+    margin-top: 26px; display: grid; gap: 12px;
+  }
+  .rx-mini-row {
+    display: grid; grid-template-columns: 88px 1fr 72px; gap: 12px; align-items: center;
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  }
+  .rx-mini-row .rail { height: 8px; border-radius: 999px; background: rgba(255,255,255,.16); overflow: hidden; }
+  .rx-mini-row .rail i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #a5b4fc, #4ade80); }
+  .rx-mini-row strong { color: var(--good); text-align: right; font-weight: 700; }
+  .bento-card.dark .rx-mini-row { color: rgba(255,255,255,.72); }
+  .bento-card.dark .rx-mini-row strong { color: #fff; }
+  .bento-card:not(.dark) .rx-mini-row .rail { background: #e5e7eb; }
+  .workflow-strip {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 18px;
+  }
+  .workflow-step {
+    padding: 14px 12px; border-radius: 18px; background: #fff; border: 1px solid var(--border);
+    font-size: 12.5px; color: var(--muted); box-shadow: 0 16px 36px -34px rgba(17,24,39,.45);
+  }
+  .workflow-step b { display: block; color: var(--ink); font-size: 14px; margin-bottom: 4px; }
+  .console-intro {
+    display: flex; justify-content: space-between; gap: 24px; align-items: end;
+    margin: 72px 0 -12px;
+  }
+  .console-intro h2 { margin: 0; font-size: clamp(32px, 4.8vw, 58px); line-height: 1.02; letter-spacing: -.055em; }
+  .console-intro p { margin: 0; color: var(--muted); max-width: 48ch; font-size: 15px; line-height: 1.7; }
+
+  body.motion-ready .reveal {
+    opacity: 0; transform: translateY(34px);
+    transition: opacity .82s cubic-bezier(.2,.8,.2,1), transform .82s cubic-bezier(.2,.8,.2,1);
+  }
+  body.motion-ready .reveal.in-view { opacity: 1; transform: translateY(0); }
+  body.motion-ready .reveal:nth-of-type(2) { transition-delay: .04s; }
+  body.motion-ready .reveal:nth-of-type(3) { transition-delay: .08s; }
+
   /* ── steps ── */
   .steps {
     display: grid; grid-template-columns: repeat(3, 1fr);
-    margin-top: 68px; border-top: 1px solid var(--border);
+    gap: 16px; margin-top: 28px; border-top: 0;
   }
-  .step { padding: 26px 30px 4px 0; position: relative; }
-  .step + .step { padding-left: 30px; }
-  .step + .step::before {
-    content: ""; position: absolute; left: 0; top: 26px; bottom: 12px;
-    width: 1px; background: var(--border);
+  .step {
+    padding: 24px; position: relative; border: 1px solid var(--border);
+    border-radius: 22px; background: color-mix(in srgb, #fff 74%, transparent);
+    box-shadow: 0 18px 44px -34px rgba(17,24,39,.42);
   }
+  .step + .step { padding-left: 24px; }
+  .step + .step::before { display: none; }
   .step-n {
     font-family: var(--mono); font-size: 11px; color: var(--accent);
     letter-spacing: .05em;
@@ -144,9 +313,9 @@
 
   /* ── console ── */
   .console {
-    margin: 34px 0 40px; background: var(--surface);
-    border: 1px solid var(--border); border-radius: 16px;
-    box-shadow: inset 0 1px 0 var(--hi), 0 24px 60px -30px rgba(0,0,0,.6);
+    margin: 42px 0 48px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 30px;
+    box-shadow: inset 0 1px 0 var(--hi), 0 32px 84px -44px rgba(17,24,39,.5);
     overflow: hidden;
   }
   .console-bar {
@@ -381,7 +550,33 @@
   .foot span { font-size: 12px; color: var(--faint); }
   .foot .foot-mono { font-family: var(--mono); letter-spacing: .04em; }
 
+  @media (max-width: 980px) {
+    .hero { grid-template-columns: 1fr; gap: 34px; padding-top: 62px; }
+    .hero-preview { max-width: 560px; width: 100%; }
+    .hero-proof { grid-template-columns: 1fr; }
+    .section-heading { grid-template-columns: 1fr; gap: 18px; }
+    .bento-grid { grid-template-columns: 1fr; }
+    .bento-card.wide { grid-column: auto; }
+    .workflow-strip { grid-template-columns: repeat(2, 1fr); }
+    .console-intro { flex-direction: column; align-items: flex-start; margin-top: 56px; }
+    .steps { grid-template-columns: 1fr; }
+  }
   @media (max-width: 760px) {
+    .wrap { padding: 0 18px; }
+    .topbar { padding: 14px 0; }
+    .topbar-link { display: none; }
+    .hero { padding: 48px 0 36px; }
+    .hero-actions { flex-direction: column; align-items: stretch; }
+    .btn-primary, .btn-secondary { width: 100%; }
+    .preview-card { padding: 18px; border-radius: 22px; }
+    .preview-score strong { font-size: 58px; }
+    .mini-metric { grid-template-columns: 1fr; gap: 8px; }
+    .mini-metric .value { text-align: left; }
+    .trust-strip { justify-content: flex-start; border-radius: 20px; }
+    .landing-section { padding-top: 52px; }
+    .bento-card { padding: 22px; border-radius: 22px; }
+    .label-stack { position: static; margin-top: 22px; min-width: 0; }
+    .workflow-strip { grid-template-columns: 1fr; }
     .steps { grid-template-columns: 1fr; }
     .step + .step { padding-left: 0; padding-top: 22px; }
     .step + .step::before { display: none; }
@@ -411,6 +606,7 @@
     </div>
     <div class="topbar-right">
       <a class="topbar-link" href="#how">작동 방식</a>
+      <a class="topbar-link" href="#insight">분석 리포트</a>
       <a class="topbar-link" href="#run">진단하기</a>
       <button class="theme-toggle" id="themeToggle" aria-label="테마 전환" title="테마 전환">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -418,7 +614,7 @@
     </div>
   </header>
 
-  <section class="hero" id="how">
+  <section class="hero reveal" id="how">
     <div class="hero-glow"></div>
     <canvas class="hero-ecg" id="ecg" aria-hidden="true"></canvas>
     <div class="hero-inner">
@@ -441,10 +637,111 @@
         <span class="cl-sm">RAG 점수만 매기는 도구가 아닙니다</span>
         <span class="cl-lg">직접 고쳐서, 나아졌다는 걸 <b>전후로 증명합니다.</b></span>
       </div>
+      <div class="hero-actions">
+        <a class="btn-primary" href="#run">문서 진단 시작하기</a>
+        <a class="btn-secondary" href="report.html">결과 리포트 미리보기</a>
+      </div>
+      <div class="hero-proof" aria-label="AgentDoctor 핵심 기능">
+        <div class="proof-card"><b>5단계</b><span>수집·색인·질문 생성·진단·최적화</span></div>
+        <div class="proof-card"><b>라벨 기반</b><span>검색/청킹/생성 실패 원인 분류</span></div>
+        <div class="proof-card"><b>Rx 추적</b><span>처방 전후 지표 변화 기록</span></div>
+      </div>
+    </div>
+    <div class="hero-preview" aria-label="AgentDoctor 리포트 미리보기">
+      <div class="preview-card">
+        <div class="preview-top">
+          <span class="preview-badge">Live diagnosis</span>
+          <span class="preview-doc">corpus.pdf</span>
+        </div>
+        <div class="preview-score">
+          <strong>84</strong><span>/100 composite</span>
+        </div>
+        <div class="preview-metrics">
+          <div class="mini-metric">
+            <span class="name">faithfulness</span>
+            <span class="bar"><i style="width:89%"></i></span>
+            <span class="value">0.72 → 0.89</span>
+          </div>
+          <div class="mini-metric">
+            <span class="name">context recall</span>
+            <span class="bar"><i style="width:88%"></i></span>
+            <span class="value">0.60 → 0.88</span>
+          </div>
+          <div class="mini-metric">
+            <span class="name">precision</span>
+            <span class="bar"><i style="width:79%"></i></span>
+            <span class="value">0.66 → 0.79</span>
+          </div>
+        </div>
+        <div class="preview-rx">
+          <div class="rx-title">추천 처방</div>
+          <div class="rx-text">검색 후보 범위 확대 · 재정렬 강화</div>
+        </div>
+      </div>
     </div>
   </section>
 
-  <section class="steps">
+  <section class="trust-strip reveal" aria-label="AgentDoctor 분석 범위">
+    <span class="eyebrow">covers</span>
+    <span class="trust-pill">RAGAS 지표</span>
+    <span class="trust-pill">검색 순위</span>
+    <span class="trust-pill">Gold span</span>
+    <span class="trust-pill">처방 전후 비교</span>
+    <span class="trust-pill">롤백 검증</span>
+  </section>
+
+  <section class="landing-section reveal" id="insight">
+    <div class="section-kicker">Product story</div>
+    <div class="section-heading">
+      <h2>점수표가 아니라,<br>고칠 수 있는 진단서.</h2>
+      <p>
+        RAG가 틀렸다는 사실만 보여주면 다음 행동이 막힙니다.
+        AgentDoctor는 실패 지점을 라벨로 분해하고, 각 처방이 지표를 어떻게 바꿨는지
+        전후 수치로 남겨 팀이 바로 의사결정할 수 있게 합니다.
+      </p>
+    </div>
+    <div class="bento-grid">
+      <article class="bento-card dark tall">
+        <div class="bento-label">Failure taxonomy</div>
+        <div class="bento-title">검색 실패, 청킹 문제, 생성 오류를 같은 점수로 뭉개지 않습니다.</div>
+        <p class="bento-copy">
+          probe별 Q/A/R, gold span, 검색 순위, judge 결과를 함께 보고
+          실패 원인을 처방 가능한 단위로 분류합니다.
+        </p>
+        <div class="label-stack">
+          <span class="label-pill"><span>retrieval_low_rank</span><b>A</b></span>
+          <span class="label-pill"><span>chunking_context_mismatch</span><b>C</b></span>
+          <span class="label-pill"><span>generation_partial_answer</span><b>B</b></span>
+        </div>
+      </article>
+      <article class="bento-card">
+        <div class="bento-label">Before / After</div>
+        <div class="bento-title">처방 한 번마다 지표가 얼마나 움직였는지 봅니다.</div>
+        <p class="bento-copy">
+          전체 최적화 결과뿐 아니라 Rx1, Rx2처럼 개별 처방 단위로
+          faithfulness, recall, precision, composite 변화를 비교합니다.
+        </p>
+        <div class="rx-mini">
+          <div class="rx-mini-row"><span>faith</span><span class="rail"><i style="width:89%"></i></span><strong>+0.17</strong></div>
+          <div class="rx-mini-row"><span>recall</span><span class="rail"><i style="width:88%"></i></span><strong>+0.28</strong></div>
+          <div class="rx-mini-row"><span>precision</span><span class="rail"><i style="width:79%"></i></span><strong>+0.13</strong></div>
+        </div>
+      </article>
+      <article class="bento-card wide">
+        <div class="bento-label">Pipeline workflow</div>
+        <div class="bento-title">문서 하나를 올리면 진단부터 롤백 검증까지 한 흐름으로 이어집니다.</div>
+        <div class="workflow-strip">
+          <div class="workflow-step"><b>Ingest</b>문서 읽기</div>
+          <div class="workflow-step"><b>Index</b>청크·임베딩</div>
+          <div class="workflow-step"><b>Probe</b>검증 질문 생성</div>
+          <div class="workflow-step"><b>Diagnose</b>실패 라벨링</div>
+          <div class="workflow-step"><b>Optimize</b>처방·롤백</div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="steps reveal">
     <div class="step">
       <div class="step-n">01</div>
       <div class="step-title">
@@ -471,7 +768,15 @@
     </div>
   </section>
 
-  <section class="console" id="run">
+  <div class="console-intro reveal">
+    <h2>문서를 넣고,<br>진단서를 바로 확인하세요.</h2>
+    <p>
+      데모에서는 텍스트 추출 가능한 PDF 또는 기존 RAG 실행 로그를 넣어
+      파이프라인 진행 상황과 결과 리포트를 확인할 수 있습니다.
+    </p>
+  </div>
+
+  <section class="console reveal" id="run">
     <div class="console-bar">
       <span class="glyph"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 8 4 4-4 4M12 16h7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       <span class="label"><span class="path">agentdoctor/</span>새 진단</span>
@@ -773,6 +1078,29 @@
     if (!cur) cur = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
     root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
   });
+
+  function initReveal() {
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var els = Array.prototype.slice.call(document.querySelectorAll('.reveal'));
+    if (!els.length) return;
+    if (reduce || !('IntersectionObserver' in window)) {
+      els.forEach(function (el) { el.classList.add('in-view'); });
+      return;
+    }
+    document.body.classList.add('motion-ready');
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add('in-view');
+        observer.unobserve(entry.target);
+      });
+    }, { threshold: 0.14, rootMargin: '0px 0px -10% 0px' });
+    els.forEach(function (el) { observer.observe(el); });
+    requestAnimationFrame(function () {
+      els.slice(0, 2).forEach(function (el) { el.classList.add('in-view'); });
+    });
+  }
+  initReveal();
 
   var tabs = [document.getElementById('tab-doc'), document.getElementById('tab-conn')];
   var panels = { 'tab-doc': 'panel-doc', 'tab-conn': 'panel-conn' };

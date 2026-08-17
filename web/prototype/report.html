@@ -19,21 +19,31 @@
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    --bg: #fbfbfc; --bg-2: #f5f6f8; --surface: #ffffff; --surface-2: #f6f7f9;
-    --border: rgba(12,14,22,.10); --border-strong: rgba(12,14,22,.17); --hi: rgba(255,255,255,.6);
-    --ink: #14161a; --muted: #565b64; --faint: #8b909a;
-    --accent: #4a52d4; --accent-2: #5f67e0; --accent-ink: #363cad; --accent-glow: rgba(74,82,212,.12);
+    --bg: #f7f8ff; --bg-2: #eef1ff; --surface: #ffffff; --surface-2: #f7f8fd;
+    --border: rgba(26,31,54,.10); --border-strong: rgba(26,31,54,.17); --hi: rgba(255,255,255,.7);
+    --ink: #111827; --muted: #667085; --faint: #98a2b3;
+    --accent: #5b5ce2; --accent-2: #7c3aed; --accent-ink: #4338ca; --accent-glow: rgba(91,92,226,.16);
     --good: #1f9d4d; --good-glow: rgba(31,157,77,.12);
     --warning: #b07d15; --warning-glow: rgba(176,125,21,.12);
     --critical: #d24a3d; --critical-glow: rgba(210,74,61,.12);
   }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.55; letter-spacing: -.006em; -webkit-font-smoothing: antialiased; }
-  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 32px; }
+  body {
+    margin: 0; color: var(--ink); font-family: var(--sans); line-height: 1.55; letter-spacing: -.006em; -webkit-font-smoothing: antialiased;
+    background:
+      radial-gradient(circle at 12% 0%, rgba(124,58,237,.12), transparent 34%),
+      radial-gradient(circle at 86% 6%, rgba(91,92,226,.14), transparent 32%),
+      linear-gradient(180deg, #fff 0%, var(--bg) 42%, #fff 100%);
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 34px; }
   ::selection { background: var(--accent-glow); }
   h2 { font-size: 20px; font-weight: 600; letter-spacing: -.02em; margin: 0; }
-  .section { padding: 42px 0; border-top: 1px solid var(--border); }
+  .section {
+    margin: 28px 0; padding: 34px; border: 1px solid var(--border); border-radius: 30px;
+    background: rgba(255,255,255,.76);
+    box-shadow: 0 24px 70px -48px rgba(17,24,39,.42), inset 0 1px 0 rgba(255,255,255,.88);
+  }
   .section-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 24px; }
   /* 모드 안내 — 일부 섹션이 원리적으로 없을 때 그 이유를 밝힌다(외부 RAG 로그 진단 등) */
   .mode-notice { margin: 0 0 20px; padding: 12px 16px; border-radius: 8px;
@@ -43,7 +53,7 @@
   .section-head .sub { font-size: 13px; color: var(--faint); margin-left: auto; }
 
   /* top bar */
-  .topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; justify-content: space-between; padding: 15px 0; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(12px); }
+  .topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; justify-content: space-between; padding: 18px 0; border-bottom: 1px solid var(--border); background: color-mix(in srgb, #fff 76%, transparent); backdrop-filter: blur(18px); }
   .brand { display: flex; align-items: center; gap: 9px; }
   .brand-mark { width: 25px; height: 25px; }
   .brand-name { font-weight: 660; font-size: 16px; letter-spacing: -.02em; }
@@ -55,7 +65,20 @@
   .theme-toggle:hover { color: var(--ink); border-color: var(--border-strong); }
 
   /* report header */
-  .rhead { padding: 34px 0 8px; }
+  .rhead {
+    position: relative; overflow: hidden; margin-top: 30px; padding: 42px;
+    border: 1px solid var(--border); border-radius: 34px;
+    background:
+      radial-gradient(circle at 82% 12%, rgba(91,92,226,.20), transparent 32%),
+      linear-gradient(135deg, rgba(255,255,255,.92), rgba(255,255,255,.70));
+    box-shadow: 0 28px 80px -52px rgba(17,24,39,.48), inset 0 1px 0 rgba(255,255,255,.9);
+  }
+  .rhead::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: linear-gradient(rgba(91,92,226,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(91,92,226,.055) 1px, transparent 1px);
+    background-size: 30px 30px; mask-image: linear-gradient(100deg, transparent 20%, rgba(0,0,0,.5), transparent 78%);
+  }
+  .rhead > * { position: relative; z-index: 1; }
   .rhead .lockup { display: inline-flex; align-items: center; gap: 10px; margin-bottom: 20px; }
   .rhead .lockup .lm { width: 27px; height: 27px; flex: none; }
   .rhead .lockup .wm { font-size: 21px; font-weight: 670; letter-spacing: -.035em; }
@@ -63,11 +86,15 @@
   .rhead .meta { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 12px; color: var(--faint); flex-wrap: wrap; }
   .rhead .meta .chip { padding: 3px 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); }
   .rhead .meta .chip b { color: var(--ink); font-weight: 500; }
-  .rhead h1 { font-size: clamp(24px, 3.4vw, 31px); font-weight: 600; letter-spacing: -.03em; margin: 14px 0 0; color: var(--muted); }
+  .rhead h1 { font-size: clamp(42px, 6vw, 82px); line-height: .96; font-weight: 780; letter-spacing: -.07em; margin: 18px 0 0; color: var(--muted); }
   .rhead h1 b { color: var(--ink); font-weight: 600; }
 
   /* hero: score */
-  .hero { display: grid; grid-template-columns: 260px 1fr; gap: 36px; align-items: center; padding: 30px 0 44px; }
+  .hero {
+    display: grid; grid-template-columns: 300px 1fr; gap: 42px; align-items: center;
+    padding: 34px; margin: 28px 0; border: 1px solid var(--border); border-radius: 32px;
+    background: rgba(255,255,255,.78); box-shadow: 0 28px 74px -54px rgba(17,24,39,.48);
+  }
   .gauge-wrap { position: relative; width: 240px; height: 240px; }
   .gauge-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
   .gauge-center .big { font-size: 56px; font-weight: 640; letter-spacing: -.04em; font-variant-numeric: tabular-nums; line-height: 1; }
@@ -83,9 +110,21 @@
   .hero-stat .n.up { color: var(--good); } .hero-stat .n.warn { color: var(--warning); } .hero-stat .n.error { color: var(--critical); }
   .hero-stat .l { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 3px; }
 
+  .report-nav {
+    position: sticky; top: 65px; z-index: 15; display: flex; gap: 8px; flex-wrap: wrap;
+    margin: 18px 0 8px; padding: 10px; border: 1px solid var(--border); border-radius: 999px;
+    background: color-mix(in srgb, #fff 76%, transparent); backdrop-filter: blur(16px);
+    box-shadow: 0 18px 46px -38px rgba(17,24,39,.5);
+  }
+  .report-nav a {
+    text-decoration: none; color: var(--muted); font-family: var(--mono); font-size: 11px;
+    padding: 8px 12px; border-radius: 999px; transition: color .18s ease, background .18s ease, transform .18s ease;
+  }
+  .report-nav a:hover { color: var(--accent-ink); background: var(--accent-glow); transform: translateY(-1px); }
+
   /* priority top3 */
   .prio { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-  .prio-card { position: relative; padding: 18px 18px 18px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .prio-card { position: relative; padding: 22px 22px 22px 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 22px; overflow: hidden; box-shadow: 0 18px 44px -36px rgba(17,24,39,.42); }
   .prio-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
   .prio-card.sev-critical::before { background: var(--critical); }
   .prio-card.sev-warning::before { background: var(--warning); }
@@ -103,7 +142,7 @@
   .badge.prelim { color: var(--faint); background: var(--surface-2); border: 1px solid var(--border); }
 
   /* metrics dumbbell */
-  .metric-panel { border: 1px solid var(--border); border-radius: 18px; background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 94%, var(--accent-glow)), var(--surface)); box-shadow: 0 18px 50px rgba(15, 23, 42, .06), inset 0 1px 0 var(--hi); overflow: hidden; }
+  .metric-panel { border: 1px solid var(--border); border-radius: 26px; background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 94%, var(--accent-glow)), var(--surface)); box-shadow: 0 22px 58px rgba(15, 23, 42, .08), inset 0 1px 0 var(--hi); overflow: hidden; }
   .metric-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px 12px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface-2) 70%, transparent); }
   .metric-scope { display: flex; flex-wrap: wrap; gap: 8px; }
   .metric-tab { border: 1px solid var(--border); background: var(--surface); color: var(--muted); border-radius: 999px; padding: 7px 11px; font-family: var(--mono); font-size: 11px; cursor: pointer; transition: border-color .18s ease, color .18s ease, background .18s ease, transform .18s ease; }
@@ -153,7 +192,7 @@
   .rule-note b { color: var(--ink); font-weight: 550; }
 
   .rx { display: flex; flex-direction: column; gap: 10px; }
-  .rx-card { border: 1px solid var(--border); border-radius: 13px; background: var(--surface); overflow: hidden; }
+  .rx-card { border: 1px solid var(--border); border-radius: 22px; background: var(--surface); overflow: hidden; box-shadow: 0 18px 44px -38px rgba(17,24,39,.42); }
   .rx-main { display: grid; grid-template-columns: 30px 1fr auto; gap: 15px; align-items: start; padding: 17px 20px; cursor: pointer; }
   .rx-num { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font-family: var(--mono); font-size: 12px; border: 1px solid var(--border); color: var(--muted); }
   .rx-card.kept .rx-num { border-color: transparent; background: var(--good-glow); color: var(--good); }
@@ -296,6 +335,12 @@
   }
   .term:hover::after, .term:focus-visible::after { opacity: 1; visibility: visible; transform: translateY(0); }
 
+  body.motion-ready .reveal {
+    opacity: 0; transform: translateY(32px);
+    transition: opacity .82s cubic-bezier(.2,.8,.2,1), transform .82s cubic-bezier(.2,.8,.2,1);
+  }
+  body.motion-ready .reveal.in-view { opacity: 1; transform: translateY(0); }
+
   @media (max-width: 860px) {
     .hero { grid-template-columns: 1fr; justify-items: start; }
     .prio, .dx { grid-template-columns: 1fr; }
@@ -307,6 +352,9 @@
     .rx-metric-track, .rx-metrics-head span:nth-child(2), .rx-metrics-head span:nth-child(3), .rx-metrics-val.before { display: none; }
     .qa-ans { grid-template-columns: 1fr; }
     .qa-ans .col.before { border-right: none; border-bottom: 1px solid var(--border); }
+    .section { padding: 22px; border-radius: 24px; }
+    .rhead { padding: 28px; border-radius: 26px; }
+    .report-nav { position: static; border-radius: 22px; }
   }
   @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .rx-drill { transition: none; } }
 </style>
@@ -350,6 +398,15 @@
     <h1><b>진단 리포트</b></h1>
   </div>
 
+  <nav class="report-nav" aria-label="리포트 섹션 이동">
+    <a href="#priority">01 문제</a>
+    <a href="#metrics-section">02 지표</a>
+    <a href="#course-section">03 처방</a>
+    <a href="#detail-section">04 근거</a>
+    <a href="#qa-section">05 실패 QA</a>
+    <a href="#recommend-section">06 권고</a>
+  </nav>
+
   <!-- MODE NOTICE: 외부 RAG 로그 진단처럼 일부 섹션이 원리적으로 없는 경우에만 표시 -->
   <div id="modeNotice" style="display:none"></div>
 
@@ -385,7 +442,7 @@
   </section>
 
   <!-- PRIORITY -->
-  <section class="section">
+  <section class="section" id="priority">
     <div class="section-head"><span class="idx">01</span><h2>가장 시급한 문제</h2><span class="sub">심각도·영향 질문 수 기준</span></div>
     <div class="prio" id="prioList">
       <div class="prio-card sev-critical">
@@ -410,7 +467,7 @@
   </section>
 
   <!-- METRICS before/after -->
-  <section class="section" data-section="metrics">
+  <section class="section" id="metrics-section" data-section="metrics">
     <div class="section-head"><span class="idx">02</span><h2>품질 지표 · 처방 전후</h2><span class="sub">RAGAS 4개 지표</span></div>
     <!-- 전후 비교가 없는 모드(외부 로그 진단)에서는 renderMetrics 가 숨긴다 -->
     <div class="metric-panel">
@@ -427,7 +484,7 @@
   </section>
 
   <!-- TREATMENT COURSE -->
-  <section class="section" data-section="course">
+  <section class="section" id="course-section" data-section="course">
     <div class="section-head"><span class="idx">03</span><h2>치료 경과</h2><span class="sub">처방을 시도하고 · 검증하고 · 되돌린 과정</span></div>
 
     <div class="course-chart">
@@ -451,19 +508,19 @@
   </section>
 
   <!-- DIAGNOSIS DETAIL -->
-  <section class="section" data-section="dxs">
+  <section class="section" id="detail-section" data-section="dxs">
     <div class="section-head"><span class="idx">04</span><h2>진단 상세</h2><span class="sub">원인 분류 · A 검색 / B 생성 / C 컨텍스트 / D 데이터</span></div>
     <div class="dx" id="dxList"></div>
   </section>
 
   <!-- FAILED QA -->
-  <section class="section">
+  <section class="section" id="qa-section">
     <div class="section-head"><span class="idx">05</span><h2>실패한 검증 질문</h2><span class="sub">질문 · 기대 정답 · 실제 답변</span></div>
     <div class="qa" id="qaList"></div>
   </section>
 
   <!-- RECOMMENDATIONS -->
-  <section class="section" data-section="recommendations">
+  <section class="section" id="recommend-section" data-section="recommendations">
     <div class="section-head"><span class="idx">06</span><h2>남은 권고</h2><span class="sub">자동 처방으로 끝나지 않는 항목</span></div>
     <div class="rec" id="recList"></div>
   </section>
@@ -488,6 +545,29 @@
     if (!cur) cur = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
     root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
   });
+
+  function initReveal() {
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var els = Array.prototype.slice.call(document.querySelectorAll('.rhead, .report-nav, .hero, .section'));
+    els.forEach(function (el) { el.classList.add('reveal'); });
+    if (reduce || !('IntersectionObserver' in window)) {
+      els.forEach(function (el) { el.classList.add('in-view'); });
+      return;
+    }
+    document.body.classList.add('motion-ready');
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add('in-view');
+        observer.unobserve(entry.target);
+      });
+    }, { threshold: 0.12, rootMargin: '0px 0px -10% 0px' });
+    els.forEach(function (el) { observer.observe(el); });
+    requestAnimationFrame(function () {
+      els.slice(0, 3).forEach(function (el) { el.classList.add('in-view'); });
+    });
+  }
+  initReveal();
 
   var WEB_API_BASE = 'http://localhost:8767';
   var DUMMY_METRICS = [
