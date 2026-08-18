@@ -11,6 +11,7 @@ import os
 from typing import Any, Optional
 
 from agents.eval.scoring import unmeasured_components
+from agents.eval.label_catalog import diagnosis_label_catalog
 from agents.optimize import gate
 from agents.optimize.score_display import DisplayScores, display_scores_from_metadata
 from core.state import AgentDoctorState
@@ -154,6 +155,7 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
         "rxs": _build_rxs(history),
         "dxs": _build_dxs(findings),
         "qas": _build_qas(state, findings),
+        "label_catalog": diagnosis_label_catalog(),
         "recommendations": _build_recommendations(state, findings),
         "transparency": {
             "duration_label": "",
@@ -934,6 +936,7 @@ def build_ext_report_view(
         # 로그에도 질문·답변·정답이 있으므로 실패 질문은 채운다 — "어떤 질문에서
         # 무너졌나"가 상대에게 넘길 진단서의 핵심이다.
         "qas": _ext_qas(report, findings),
+        "label_catalog": diagnosis_label_catalog(),
         "recommendations": _ext_recommendation_cards(cards),
         # 화면이 "없음"과 "할 수 없음"을 구분할 수 있게 한다. 빈 치료경과를 그대로
         # 그리면 "최적화를 안 했나"로 읽히는데, 실제로는 남의 인덱스라 못 하는 것이다.
@@ -955,8 +958,6 @@ def build_ext_report_view(
                  "sub": "RAGAS 4개 지표 (실측)"},
                 {"section": "recommendations", "title": "처방 추천",
                  "sub": "우리가 적용할 수 없어 상대 팀이 직접 적용할 항목"},
-                {"section": "transparency", "title": "진단 범위",
-                 "sub": "무엇을 근거로 어디까지 쟀나"},
             ],
             # 권고는 이 진단서의 결론이다 — 꼬리(06)가 아니라 지표 다음 자리로 올린다.
             "move_before": [{"section": "recommendations", "before": "dxs"}],

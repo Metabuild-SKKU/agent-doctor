@@ -276,22 +276,31 @@
   .course-chart .cc-title { font-size: 13.5px; font-weight: 560; }
   .course-chart .cc-legend { font-family: var(--mono); font-size: 11px; color: var(--faint); display: flex; gap: 14px; }
   .course-chart .cc-legend i { font-style: normal; display: inline-flex; align-items: center; gap: 5px; }
+  .course-segment-hit { cursor: pointer; }
+  .course-segment-hit circle { transition: transform .16s ease, filter .16s ease; transform-box: fill-box; transform-origin: center; }
+  .course-segment-hit:hover circle { transform: scale(1.08); filter: drop-shadow(0 5px 10px rgba(17,24,39,.16)); }
   .rule-note { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 10px 14px; margin-bottom: 22px; }
   .rule-note svg { color: var(--accent); flex: none; }
   .rule-note b { color: var(--ink); font-weight: 550; }
 
   .rx { display: flex; flex-direction: column; gap: 10px; }
   .rx-card { position: relative; border: 1px solid var(--border); border-radius: 22px; background: var(--surface); overflow: hidden; box-shadow: 0 18px 44px -38px rgba(17,24,39,.42); }
+  .rx-card.active { border-color: rgba(17,24,39,.34); box-shadow: 0 20px 52px -38px rgba(17,24,39,.58), inset 0 0 0 1px rgba(17,24,39,.06); }
   .rx-main { display: grid; grid-template-columns: 30px 1fr auto; gap: 15px; align-items: start; padding: 17px 20px; cursor: pointer; }
   .rx-num { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font-family: var(--mono); font-size: 12px; border: 1px solid var(--border); color: var(--muted); }
   .rx-card.kept .rx-num { border-color: transparent; background: var(--good-glow); color: var(--good); }
   .rx-card.rolled .rx-num { border-color: transparent; background: var(--surface-2); color: var(--faint); }
   .rx-card.error .rx-num { border-color: transparent; background: var(--critical-glow); color: var(--critical); }
   .rx-body .rx-change { font-family: var(--mono); font-size: 13.5px; font-weight: 500; }
+  .rx-body .rx-change .rx-key-ko { font-family: var(--sans); font-size: 17px; font-weight: 650; color: var(--ink); letter-spacing: -.02em; }
+  .rx-body .rx-change .rx-key-code { color: var(--faint); font-size: 11px; margin-left: 8px; }
   .rx-body .rx-change .arrow { color: var(--accent); margin: 0 5px; }
   .rx-body .rx-target { font-size: 12.5px; color: var(--muted); margin-top: 5px; }
   .rx-body .rx-reason { font-size: 12.5px; color: var(--faint); margin-top: 8px; display: flex; align-items: baseline; gap: 7px; }
   .rx-body .rx-reason .rl { font-family: var(--mono); color: var(--accent); font-size: 10.5px; flex: none; }
+  .rx-label-list { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; margin-top: 11px; }
+  .rx-label-term { display: inline-flex; width: fit-content; max-width: 100%; color: #343a46; border-bottom-color: #9aa1ad; font-size: 13px; line-height: 1.45; }
+  .rx-label-term::after { white-space: normal; width: 290px; max-width: min(290px, 72vw); }
   .rx-right { text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
   .rx-scoredelta { font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; color: var(--muted); }
   .rx-scoredelta b.up { color: var(--good); } .rx-scoredelta b.down { color: var(--critical); }
@@ -1030,7 +1039,7 @@
   }
   .label-bar-row {
     display: grid;
-    grid-template-columns: 170px 1fr 28px;
+    grid-template-columns: minmax(180px, 240px) 1fr 34px;
     gap: 10px;
     align-items: center;
     padding: 7px 0;
@@ -1041,7 +1050,7 @@
   }
   .label-bar-row span {
     font: 12px/1.35 var(--mono);
-    color: #333;
+    color: #222;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1058,13 +1067,20 @@
     display: block;
     height: 100%;
     border-radius: inherit;
-    background: var(--bar, #555);
+    background: #111;
   }
   .label-bar-row b {
-    color: #555;
+    color: #222;
     text-align: right;
     font: 12px/1.2 var(--mono);
     font-weight: 500;
+  }
+  .label-bar-row.zero span,
+  .label-bar-row.zero b {
+    color: #555;
+  }
+  .label-bar-row.zero em i {
+    width: 0 !important;
   }
   .group-share {
     height: 8px;
@@ -1088,6 +1104,9 @@
   .evidence-summary.compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  #diagnosisSummary {
+    display: block;
+  }
   .summary-line {
     min-height: 86px;
     padding: 16px 17px;
@@ -1097,6 +1116,19 @@
     color: #333;
     font-size: 13.5px;
     line-height: 1.6;
+  }
+  #diagnosisSummary .summary-line {
+    min-height: 0;
+    padding: 17px 18px;
+    color: #111;
+    font-size: 14.5px;
+    line-height: 1.72;
+  }
+  #diagnosisSummary .summary-line p {
+    margin: 0;
+  }
+  #diagnosisSummary .summary-line p + p {
+    margin-top: 6px;
   }
   .summary-line b {
     color: #111;
@@ -1140,13 +1172,13 @@
     font-weight: 650;
   }
   .diagnosis-card-title span {
-    color: #666;
+    color: #333;
     font: 12px/1.4 var(--mono);
   }
   .diagnosis-count {
     text-align: right;
     font-family: var(--mono);
-    color: #555;
+    color: #333;
     font-size: 12px;
     white-space: nowrap;
   }
@@ -1169,13 +1201,29 @@
     min-width: 12px;
     height: var(--h, 10%);
     border-radius: 3px 3px 1px 1px;
-    background: var(--c, #555);
-    opacity: .9;
+    background: #111;
+    opacity: .82;
   }
   .diagnosis-card-desc {
-    color: #555;
+    color: #333;
     font-size: 13px;
     line-height: 1.55;
+  }
+  .diagnosis-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 12px;
+    border-bottom: 1px solid #111;
+    color: #111;
+    font: 12px/1.45 var(--mono);
+  }
+  .diagnosis-toggle::after {
+    content: "열기";
+    color: #444;
+  }
+  .diagnosis-group-card.active .diagnosis-toggle::after {
+    content: "닫기";
   }
   .diagnosis-detail-panel {
     display: none;
@@ -1196,7 +1244,7 @@
     font-weight: 650;
   }
   .diagnosis-detail-title span {
-    color: #777;
+    color: #333;
     font: 11px/1.2 var(--mono);
     font-weight: 400;
   }
@@ -1351,8 +1399,8 @@
     <div class="meta">
       <span class="chip">코퍼스 <b id="metaCorpus">사내 제품 문서</b></span>
       <span class="chip">진단 깊이 <b id="metaDepth">표준 검진</b></span>
-      <span class="chip">테스트 질문 <b id="metaQuestionCount">47</b></span>
-      <span class="chip" id="metaCreatedAt">2026-07-20 14:32</span>
+      <span class="chip">테스트 질문 <b id="metaQuestionCount">-</b></span>
+      <span class="chip" id="metaCreatedAt">-</span>
     </div>
     <h1><b>진단 리포트</b></h1>
   </div>
@@ -1385,13 +1433,13 @@
       </div>
     </div>
     <div class="hero-side">
-      <div class="score-date" id="scoreDate">2026-07-20 14:32</div>
+      <div class="score-date" id="scoreDate">-</div>
       <span class="verdict pass" id="verdictBadge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg> <span id="verdictText">처방 후 기준선 통과</span></span>
       <h3 id="heroHeadline">3건을 처방했고, 종합점수가 <span style="color:var(--good)">62에서 84로</span> 올랐습니다.</h3>
       <div class="hero-meta-chips" id="heroSummary" aria-label="진단 메타 정보">
         <span class="hero-meta-chip">코퍼스 <b>사내 제품 문서</b></span>
-        <span class="hero-meta-chip">테스트 질문 <b>47</b></span>
-        <span class="hero-meta-chip"><b>2026-07-20 14:32</b></span>
+        <span class="hero-meta-chip">테스트 질문 <b>-</b></span>
+        <span class="hero-meta-chip"><b>-</b></span>
       </div>
       <div class="hero-stats" id="heroStats" hidden></div>
       <div class="score-explain" id="scoreExplain">
@@ -1413,7 +1461,7 @@
           <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--faint)" stroke-width="2" stroke-dasharray="3 3"/></svg> 롤백 복구</i>
         </span>
       </div>
-      <svg viewBox="0 0 660 220" width="100%" height="220" id="courseSvg" aria-label="종합 점수 추이 차트"></svg>
+      <svg viewBox="0 0 660 220" width="100%" height="220" id="courseSvg" data-course-svg aria-label="종합 점수 추이 차트"></svg>
     </div>
   </section>
 
@@ -1463,12 +1511,16 @@
   <section class="section" id="course-section" data-section="course" data-report-panel="treatment">
     <div class="section-head"><span class="idx">03</span><h2>치료 경과</h2><span class="sub"></span></div>
 
-    <div class="rx-change-matrix" id="rxMatrix"></div>
-    <div class="matrix-legend" id="rxMatrixLegend">
-      <span><i class="baseline"></i>기준</span>
-      <span><i></i>반영</span>
-      <span><i class="rollback"></i>롤백</span>
-      <span><i class="error"></i>실패</span>
+    <div class="course-chart">
+      <div class="cc-head">
+        <span class="cc-title">종합 점수 추이</span>
+        <span class="cc-legend">
+          <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--accent)" stroke-width="2"/></svg> 상승·유지</i>
+          <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--critical)" stroke-width="2"/></svg> 실패 점수</i>
+          <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--faint)" stroke-width="2" stroke-dasharray="3 3"/></svg> 롤백 복구</i>
+        </span>
+      </div>
+      <svg viewBox="0 0 660 220" width="100%" height="220" id="treatmentCourseSvg" data-course-svg aria-label="치료 경과 종합 점수 추이 차트"></svg>
     </div>
 
     <div class="rule-note" hidden>
@@ -1594,54 +1646,84 @@
   ];
   var DUMMY_RXS = [
     {
-      state: 'kept', num: '01', change: ['top_k', '5', '12'], target: '나열형 정답 누락을 겨냥',
-      reason: ['retrieval_incomplete_enumeration', '나열형 정답 누락 3건을 줄이기 위해 검색 후보 범위를 넓혔습니다.'],
-      score: ['62', '70', 'up'], verdict: ['keep', '유지'],
+      state: 'kept', num: '01', change: ['use_reranker', 'False', 'True'], target: '정답 청크 순위가 낮은 문제를 먼저 확인',
+      reason: ['retrieval_low_rank', '정답 청크가 후보에는 있었지만 상위 컷 밖에 있어 리랭커를 켰습니다.'],
+      score: ['41.0', '51.0', 'up'], verdict: ['keep', '유지'],
       metrics: [
-        { key: 'context_recall', name: '정답 회수율', before: .60, after: .78 },
-        { key: 'context_precision', name: '검색 정확도', before: .66, after: .64 },
-        { key: 'faithfulness', name: '충실도', before: .72, after: .75 },
-        { key: 'response_relevancy', name: '답변 관련성', before: .70, after: .73 }
+        { key: 'context_recall', name: '정답 회수율', before: .48, after: .61 },
+        { key: 'context_precision', name: '검색 정확도', before: .51, after: .60 },
+        { key: 'faithfulness', name: '충실도', before: .55, after: .64 },
+        { key: 'response_relevancy', name: '답변 관련성', before: .50, after: .58 }
       ],
-      drill: { label: '판정 근거', rows: [
-        { k: 'top_k = 8', val: '65.4', w: 62 }, { k: 'top_k = 12', val: '70.1', w: 100, win: true }, { k: 'top_k = 15', val: '68.9', w: 88 }
-      ], notes: [
-        ['라벨', 'retrieval_incomplete_enumeration 3건, retrieval_low_rank 2건'],
-        ['해결', '정답 회수율이 0.60에서 0.78로 상승'],
+      drill: { label: '전후 변화', rows: [], notes: [
+        ['라벨', 'retrieval_low_rank 1건'],
+        ['해결', '정답 청크가 상위 후보로 올라와 종합점수가 10.0점 상승'],
+        ['판정', '점수 상승 폭이 충분해 유지']
+      ], caption: '검색 후보 안에 있던 정답을 리랭커가 상위로 끌어올렸습니다.' }
+    },
+    {
+      state: 'rolled', num: '02', change: ['abstention_strict', 'False', 'True'], target: '근거 없는 답변 생성을 줄이려는 시도',
+      reason: ['generation_abstention_failure', 'generation_hallucination', 'generation_parametric_overreliance'],
+      score: ['51.0', '44.0', 'down'], verdict: ['roll', '롤백'],
+      metrics: [
+        { key: 'context_recall', name: '정답 회수율', before: .61, after: .60 },
+        { key: 'context_precision', name: '검색 정확도', before: .60, after: .57 },
+        { key: 'faithfulness', name: '충실도', before: .64, after: .50 },
+        { key: 'response_relevancy', name: '답변 관련성', before: .58, after: .44 }
+      ],
+      drill: { label: '전후 변화', rows: [], notes: [
+        ['라벨', 'generation_abstention_failure 10건, generation_hallucination 3건, generation_parametric_overreliance 1건'],
+        ['부작용', '기권 기준을 너무 강하게 잡아 답해야 할 질문까지 회피'],
+        ['판정', '종합점수가 하락해 이전 설정으로 롤백']
+      ], caption: '기권을 강화했지만 답변 관련성이 떨어져 최종 설정에는 반영하지 않았습니다.' }
+    },
+    {
+      state: 'kept', num: '03', change: ['restate_question', 'False', 'True'], target: '질문 조건을 잘못 읽는 문제 보정',
+      reason: ['generation_misinterpretation', '질문 관계를 다시 말하게 해 조건 오해를 줄였습니다.'],
+      score: ['51.0', '56.0', 'up'], verdict: ['keep', '유지'],
+      metrics: [
+        { key: 'context_recall', name: '정답 회수율', before: .61, after: .63 },
+        { key: 'context_precision', name: '검색 정확도', before: .60, after: .62 },
+        { key: 'faithfulness', name: '충실도', before: .64, after: .69 },
+        { key: 'response_relevancy', name: '답변 관련성', before: .58, after: .66 }
+      ],
+      drill: { label: '전후 변화', rows: [], notes: [
+        ['라벨', 'generation_misinterpretation 2건'],
+        ['해결', '질문 조건을 재진술한 뒤 답변 관련성이 상승'],
         ['판정', '종합점수가 상승해 유지']
-      ], caption: '후보 8·12·15를 실제로 재평가했고, 12에서 점수가 가장 높아 채택했습니다.' }
+      ], caption: '질문을 한 번 재정리한 뒤 답하게 해 조건을 놓치는 사례를 줄였습니다.' }
     },
     {
-      state: 'rolled', num: '02', change: ['chunk_size', '512', '256'], target: '컨텍스트 과다를 겨냥',
-      reason: ['too_long_context', '컨텍스트가 길어지는 문제를 줄이기 위해 청크 크기 축소를 시도했습니다.'],
-      score: ['70', '66', 'down'], verdict: ['roll', '롤백'],
+      state: 'rolled', num: '04', change: ['abstention_strict', 'False', 'True'], target: '기권 기준 강화 재시도',
+      reason: ['generation_abstention_failure', 'generation_parametric_overreliance', 'generation_hallucination'],
+      score: ['56.0', '57.0', 'up'], verdict: ['roll', '롤백'],
       metrics: [
-        { key: 'context_recall', name: '정답 회수율', before: .78, after: .52 },
-        { key: 'context_precision', name: '검색 정확도', before: .64, after: .71 },
-        { key: 'faithfulness', name: '충실도', before: .75, after: .68 },
-        { key: 'response_relevancy', name: '답변 관련성', before: .73, after: .69 }
+        { key: 'context_recall', name: '정답 회수율', before: .63, after: .63 },
+        { key: 'context_precision', name: '검색 정확도', before: .62, after: .61 },
+        { key: 'faithfulness', name: '충실도', before: .69, after: .70 },
+        { key: 'response_relevancy', name: '답변 관련성', before: .66, after: .64 }
       ],
-      drill: { label: '판정 근거', rows: [], notes: [
-        ['라벨', 'too_long_context 1건'],
-        ['부작용', '정답 회수율이 0.78에서 0.52로 하락'],
-        ['판정', '점수가 내려가 이전 설정으로 롤백']
-      ], caption: '청크를 줄이자 정답이 청크 경계에서 잘려 회수율이 떨어졌습니다. 최종 설정에는 반영하지 않았습니다.' }
+      drill: { label: '전후 변화', rows: [], notes: [
+        ['라벨', 'generation_abstention_failure 10건, generation_parametric_overreliance 1건, generation_hallucination 3건'],
+        ['부작용', '상승 폭이 작고 같은 축 재시도라 안정적인 개선으로 보기 어려움'],
+        ['판정', '최종 설정에는 반영하지 않고 이전 상태로 복구']
+      ], caption: '점수는 소폭 올랐지만 마진을 충분히 넘지 못해 롤백된 예시입니다.' }
     },
     {
-      state: 'kept', num: '03', change: ['리랭커', 'off', 'on'], target: '정답 순위 낮음을 겨냥',
-      reason: ['retrieval_low_rank', '정답은 검색됐지만 순위가 낮아 리랭커를 켰습니다.'],
-      score: ['70', '84', 'up'], verdict: ['keep', '유지 · 최종'],
+      state: 'kept', num: '05', change: ['use_hybrid', 'False', 'True'], target: '표현이 다른 질문을 키워드 검색으로 보강',
+      reason: ['retrieval_lexical_mismatch', '벡터 검색만으로 놓친 근거를 키워드 검색과 함께 찾도록 바꿨습니다.'],
+      score: ['56.0', '59.0', 'up'], verdict: ['keep', '유지'],
       metrics: [
-        { key: 'context_recall', name: '정답 회수율', before: .78, after: .88 },
-        { key: 'context_precision', name: '검색 정확도', before: .64, after: .79 },
-        { key: 'faithfulness', name: '충실도', before: .75, after: .89 },
-        { key: 'response_relevancy', name: '답변 관련성', before: .73, after: .85 }
+        { key: 'context_recall', name: '정답 회수율', before: .63, after: .70 },
+        { key: 'context_precision', name: '검색 정확도', before: .62, after: .65 },
+        { key: 'faithfulness', name: '충실도', before: .69, after: .71 },
+        { key: 'response_relevancy', name: '답변 관련성', before: .66, after: .68 }
       ],
-      drill: { label: '판정 근거', rows: [], notes: [
-        ['라벨', 'retrieval_low_rank 2건'],
-        ['해결', '검색 정확도와 충실도가 함께 상승'],
-        ['판정', '최종 점수가 가장 높아 유지']
-      ], caption: 'top_k를 더 키우지 않고 순위만 조정해 노이즈 증가 없이 정답을 상위로 이동시켰습니다.' }
+      drill: { label: '전후 변화', rows: [], notes: [
+        ['라벨', 'retrieval_lexical_mismatch 1건'],
+        ['해결', '키워드 신호를 함께 써 정답 회수율이 상승'],
+        ['판정', '종합점수가 56.0에서 59.0으로 올라 유지']
+      ], caption: '의미 검색과 키워드 검색을 함께 사용해 표현 차이로 놓친 근거를 보강했습니다.' }
     }
   ];
   var DUMMY_DXS = [
@@ -1733,13 +1815,14 @@
     var qas = isLive ? (data.qas || []) : DUMMY_QAS;
     var priority = isLive ? (data.priority || []) : DUMMY_PRIORITY;
     var recs = isLive ? (data.recommendations || []) : DUMMY_RECS;
-    var score = isLive ? (data.score || DUMMY_SCORE) : DUMMY_SCORE;
-    var meta = isLive ? (data.meta || DUMMY_META) : DUMMY_META;
+    var score = isLive ? (data.score || {}) : DUMMY_SCORE;
+    var meta = isLive ? (data.meta || {}) : DUMMY_META;
+    setActiveLabelCatalog(isLive ? (data.label_catalog || data.diagnosis_catalog || data.taxonomy || data.labels) : null);
 
-    renderDxs(dxs);
+    renderDxs(dxs, score, meta, recs, qas, rxs);
     renderLabelDistributions(dxs);
     renderMetrics(metrics, rxs, score);
-    renderCourse(data.course);
+    renderCourse(data.course, !isLive);
     renderRxMatrix(rxs);
     renderRxs(rxs);
     renderQas(qas);
@@ -1749,17 +1832,21 @@
     renderHero(score, meta, isLive ? data.mode : null);
     renderScoreExplain(score, isLive ? data.mode : null);
     renderMeta(meta);
-    renderTransparency(isLive ? data.transparency : null);
+    renderTransparency(isLive ? data.transparency : null, !isLive);
     renderMode(isLive ? data.mode : null);
   }
 
   /* ── 진단 내역 ──
      실데이터로 그린다. 내부 모드는 질문·처방·청크 수, 외부(로그 리플레이) 모드는
      그 개념이 없으므로 "무엇을 근거로 어디까지 쟀나"(레코드·수준·정답 보유량)를 쓴다. */
-  function renderTransparency(t) {
+  function renderTransparency(t, allowPreview) {
     var el = document.getElementById('transList');
     if (!el) return;
-    var cells = t ? transCells(t) : DUMMY_TRANS;
+    var cells = t ? transCells(t) : (allowPreview ? DUMMY_TRANS : []);
+    if (!cells.length) {
+      el.innerHTML = '<div class="trans-cell"><div class="tn">-</div><div class="tl">진단 범위 데이터 없음</div></div>';
+      return;
+    }
     el.innerHTML = cells.map(function (c) {
       return '<div class="trans-cell"><div class="tn">' + esc(c[0]) +
         '</div><div class="tl">' + esc(c[1]) + '</div></div>';
@@ -1886,8 +1973,8 @@
   }
 
   function renderHeroMetaChips(meta) {
-    var corpus = meta && meta.corpus ? meta.corpus : '사내 제품 문서';
-    var questionCount = meta && meta.question_count != null ? meta.question_count : 0;
+    var corpus = meta && meta.corpus ? meta.corpus : '코퍼스 정보 없음';
+    var questionCount = meta && meta.question_count != null ? meta.question_count : '-';
     var dateText = formatMetaDate(meta);
     var chips = [
       '<span class="hero-meta-chip">코퍼스 <b>' + esc(corpus) + '</b></span>',
@@ -1909,6 +1996,14 @@
     // (외부 → 내부) 숨긴 채로 남지 않게. 첫 렌더만 보면 안 드러나는 종류다.
     badge.style.display = 'none';
     if (external) { renderHeroExternal(score, meta, mode); return; }
+    if (score.after == null) {
+      document.getElementById('heroHeadline').textContent = '리포트 데이터를 불러오면 진단 결과가 표시됩니다.';
+      var emptySummary = document.getElementById('heroSummary');
+      emptySummary.className = 'hero-meta-chips';
+      emptySummary.innerHTML = renderHeroMetaChips(meta);
+      document.getElementById('heroStats').innerHTML = '';
+      return;
+    }
     var before = score.before != null ? score.before : 0;
     var after = score.after != null ? score.after : 0;
     var rxCount = (score.kept || 0) + (score.rolled || 0) + (score.errors || 0) + (score.pending || 0);
@@ -2120,17 +2215,40 @@
 
   /* ── course line chart ── */
   var DUMMY_COURSE = [
-    { label: '0', step: 0, score: 62, kept: true, kind: 'baseline' },
-    { label: '1', step: 1, score: 70, kept: true, kind: 'kept' },
-    { label: '2', step: 2, score: 66, kept: false, kind: 'failed' },
-    { label: '2', step: 2, score: 70, kept: true, kind: 'rollback' },
-    { label: '3', step: 3, score: 84, kept: true, kind: 'kept' }
+    { label: '기준선', step: 0, score: 41, kept: true, kind: 'baseline' },
+    { label: '1', step: 1, score: 51, kept: true, kind: 'kept' },
+    { label: '2', step: 2, score: 44, kept: false, kind: 'failed' },
+    { label: '2', step: 2, score: 51, kept: true, kind: 'rollback' },
+    { label: '3', step: 3, score: 56, kept: true, kind: 'kept' },
+    { label: '4', step: 4, score: 57, kept: false, kind: 'failed' },
+    { label: '4', step: 4, score: 56, kept: true, kind: 'rollback' },
+    { label: '5', step: 5, score: 59, kept: true, kind: 'kept' }
   ];
-  function renderCourse(coursePoints) {
-    var raw = coursePoints && coursePoints.length ? coursePoints : DUMMY_COURSE;
-    var svg = document.getElementById('courseSvg');
+  function renderCourse(coursePoints, allowPreview) {
+    var raw = coursePoints && coursePoints.length ? coursePoints : (allowPreview ? DUMMY_COURSE : []);
+    var svgs = Array.prototype.slice.call(document.querySelectorAll('[data-course-svg]'));
+    if (!svgs.length) {
+      var fallback = document.getElementById('courseSvg');
+      if (fallback) svgs = [fallback];
+    }
+    svgs.forEach(function (svg) {
+      renderCourseSvg(svg, raw);
+    });
+  }
+  function renderCourseSvg(svg, raw) {
     svg.innerHTML = '';
     var NS = 'http://www.w3.org/2000/svg';
+    if (!raw.length) {
+      var empty = document.createElementNS(NS, 'text');
+      empty.setAttribute('x', '330');
+      empty.setAttribute('y', '112');
+      empty.setAttribute('text-anchor', 'middle');
+      empty.setAttribute('fill', 'var(--faint)');
+      empty.setAttribute('font-size', '13');
+      empty.textContent = '치료 경과 데이터 없음';
+      svg.appendChild(empty);
+      return;
+    }
     var L = 46, R = 634, T = 24, B = 178;
     var scores = raw.map(function (p) { return p.score; });
     var sMin = Math.max(0, Math.min.apply(null, scores) - 10);
@@ -2144,7 +2262,7 @@
       return {
         x: L + (R - L) * ((step - stepMin) / (stepMax - stepMin)),
         step: step,
-        axisLabel: String((step - stepMin) + 1),
+        axisLabel: step === stepMin ? '기준' : String(p.label || step),
         label: p.label, score: p.score, kept: p.kept, kind: p.kind || (p.kept ? 'kept' : 'pending')
       };
     });
@@ -2171,7 +2289,7 @@
       var prev = pts[i];
       var isFailed = point.kind === 'failed';
       var isRollback = point.kind === 'rollback';
-      svg.appendChild(el('path', {
+      var segPath = el('path', {
         d: 'M' + prev.x + ' ' + y(prev.score) + ' L' + point.x + ' ' + y(point.score),
         fill: 'none',
         stroke: isFailed ? 'var(--critical)' : (isRollback ? 'var(--faint)' : 'var(--accent)'),
@@ -2179,7 +2297,37 @@
         'stroke-dasharray': isRollback ? '4 4' : 'none',
         'stroke-linejoin': 'round',
         'stroke-linecap': 'round'
-      }));
+      });
+      svg.appendChild(segPath);
+      if (!isRollback && point.label && point.label !== '기준선') {
+        var mx = (prev.x + point.x) / 2;
+        var my = (y(prev.score) + y(point.score)) / 2;
+        var hit = el('g', { class: 'course-segment-hit', 'data-rx-num': point.label, tabindex: '0', role: 'button', 'aria-label': point.label + '번 처방 보기' });
+        hit.appendChild(el('circle', {
+          cx: mx, cy: my, r: 11,
+          fill: 'var(--surface)',
+          stroke: isFailed ? 'var(--critical)' : 'var(--accent)',
+          'stroke-width': 1.8
+        }));
+        var badgeText = el('text', {
+          x: mx, y: my + 3.8,
+          'text-anchor': 'middle',
+          fill: isFailed ? 'var(--critical)' : 'var(--accent)',
+          'font-size': 10.5,
+          'font-weight': 760,
+          'font-family': 'var(--mono)'
+        });
+        badgeText.textContent = point.label;
+        hit.appendChild(badgeText);
+        hit.addEventListener('click', function () { activateRxByNum(point.label, true); });
+        hit.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            activateRxByNum(point.label, true);
+          }
+        });
+        svg.appendChild(hit);
+      }
     });
 
     // points + labels
@@ -2386,8 +2534,150 @@
         '</div>';
       }).join('');
   }
+  var CONFIG_NAME_KO = {
+    top_k: '검색 후보 개수',
+    chunk_size: '청크 크기',
+    chunk_overlap: '청크 겹침',
+    use_reranker: '리랭커 사용',
+    'reranker.enabled': '리랭커 사용',
+    reranker_enabled: '리랭커 사용',
+    use_hybrid: '하이브리드 검색 사용',
+    'retriever.search_type': '검색 방식',
+    search_type: '검색 방식',
+    abstention_strict: '기권 기준 강화',
+    'generation.abstention_strict': '기권 기준 강화',
+    abstention_relaxed: '기권 기준 완화',
+    'generation.abstention_relaxed': '기권 기준 완화',
+    restate_question: '질문 재진술',
+    'generation.restate_question': '질문 재진술',
+    require_citation: '인용 요구',
+    'generation.require_citation': '인용 요구',
+    temperature: '생성 온도',
+    'generation.temperature': '생성 온도',
+    use_mmr: '중복 제거 검색',
+    'retriever.mmr': '중복 제거 검색',
+    hybrid_dense_weight: '의미 검색 가중치',
+    'retriever.hybrid_dense_weight': '의미 검색 가중치',
+    'context.compression.enabled': '컨텍스트 압축'
+  };
+  var VALUE_NAME_KO = {
+    true: '켜짐',
+    false: '꺼짐',
+    on: '켜짐',
+    off: '꺼짐',
+    enable: '켜짐',
+    disable: '꺼짐',
+    enabled: '켜짐',
+    disabled: '꺼짐',
+    replace: '교체'
+  };
+  function normalizeActionKey(key) {
+    key = String(key || '').trim();
+    if (key.indexOf(':') >= 0) key = key.split(':')[0];
+    return key;
+  }
+  function configNameKo(key) {
+    key = normalizeActionKey(key);
+    if (CONFIG_NAME_KO[key]) return CONFIG_NAME_KO[key];
+    var shortKey = key.split('.').pop();
+    if (CONFIG_NAME_KO[shortKey]) return CONFIG_NAME_KO[shortKey];
+    return key.replace(/_/g, ' ');
+  }
+  function valueNameKo(value) {
+    var raw = String(value == null ? '' : value).trim();
+    var key = raw.toLowerCase();
+    return VALUE_NAME_KO[key] || raw;
+  }
+  function labelEntry(code) {
+    code = String(code || '').trim();
+    var catalog = currentDiagLabelCatalog();
+    for (var group in catalog) {
+      var found = (catalog[group] || []).filter(function (item) { return item[0] === code; })[0];
+      if (found) return found;
+    }
+    return [code, code, '', ''];
+  }
+  function labelTitle(code) {
+    var entry = labelEntry(code);
+    return entry[1] || code;
+  }
+  function labelTip(code) {
+    var entry = labelEntry(code);
+    var parts = [];
+    if (entry[2]) parts.push('상황: ' + entry[2]);
+    if (entry[3]) parts.push('처방: ' + entry[3]);
+    return parts.join('\n') || (entry[1] || code);
+  }
+  function addUniqueLabel(out, code) {
+    code = String(code || '').trim();
+    if (!code) return;
+    code = code.replace(/[()]/g, '').replace(/\s*\d+건.*$/, '').trim();
+    if (!code || out.indexOf(code) >= 0) return;
+    out.push(code);
+  }
+  function addLabelsFromText(out, text) {
+    text = String(text || '');
+    var known = [];
+    DIAG_GROUP_ORDER.forEach(function (key) {
+      (currentDiagLabelCatalog()[key] || []).forEach(function (item) { known.push(item[0]); });
+    });
+    var hit = false;
+    known.forEach(function (code) {
+      if (text.indexOf(code) >= 0) {
+        addUniqueLabel(out, code);
+        hit = true;
+      }
+    });
+    if (!hit) {
+      text.split(/[,，\n]/).forEach(function (part) {
+        var m = String(part).trim().match(/[a-z]+(?:_[a-z0-9]+)+/i);
+        if (m) addUniqueLabel(out, m[0]);
+      });
+    }
+  }
+  function rxLabels(r, drill) {
+    var out = [];
+    if (Array.isArray(r.labels)) r.labels.forEach(function (label) { addLabelsFromText(out, label); });
+    if (Array.isArray(r.support_labels)) r.support_labels.forEach(function (label) { addLabelsFromText(out, label); });
+    if (Array.isArray(r.reason)) r.reason.forEach(function (part) { addLabelsFromText(out, part); });
+    (drill.notes || []).forEach(function (note) {
+      if (/라벨|label/i.test(String(note[0] || ''))) addLabelsFromText(out, note[1]);
+    });
+    return out;
+  }
+  function rxLabelListHtml(labels) {
+    if (!labels.length) return '<div class="rx-label-list"><span class="rx-label-term">관련 라벨 없음</span></div>';
+    return '<div class="rx-label-list">' + labels.map(function (code) {
+      return '<span class="rx-label-term term" tabindex="0" data-tip="' + esc(labelTip(code)) + '">' + esc(labelTitle(code)) + '</span>';
+    }).join('') + '</div>';
+  }
+  function rxChangeHtml(r) {
+    var change = r.change || ['처방', '', ''];
+    var code = normalizeActionKey(change[0]);
+    var ko = configNameKo(code);
+    var before = valueNameKo(change[1]);
+    var after = valueNameKo(change[2]);
+    return '<span class="rx-key-ko">' + esc(ko) + '</span>' +
+      (ko !== code ? '<span class="rx-key-code">' + esc(code) + '</span>' : '') +
+      ' <span style="color:var(--faint)">' + esc(before) + '</span><span class="arrow">→</span>' + esc(after);
+  }
+  function activateRxByNum(num, scrollIntoView) {
+    num = String(num || '').padStart(2, '0');
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.rx-card'));
+    var target = cards.filter(function (card) { return card.getAttribute('data-rx-num') === num; })[0];
+    if (!target) return;
+    cards.forEach(function (card) {
+      var active = card === target;
+      card.classList.toggle('active', active);
+      card.classList.toggle('open', active);
+    });
+    if (scrollIntoView) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
   function rxCard(r) {
     var drill = r.drill || { label: '상세 지표', rows: [], notes: [], caption: '' };
+    var labels = rxLabels(r, drill);
     var metrics = normalizeRxMetrics(r);
     var hasScore = Array.isArray(r.score);
     var scoreCls = hasScore && r.score[2] === 'up' ? 'up' : 'down';
@@ -2411,13 +2701,14 @@
       return '<div class="drill-note"><span class="dn-k">' + esc(n[0]) + '</span>' +
         '<span class="dn-v">' + esc(n[1]) + '</span></div>';
     }).join('') + '</div>' : '';
-    return '<div class="rx-card ' + r.state + '">' +
+    return '<div class="rx-card ' + r.state + '" data-rx-num="' + esc(String(r.num || '').padStart(2, '0')) + '">' +
       '<div class="rx-main">' +
         '<div class="rx-num">' + esc(r.num) + '</div>' +
         '<div class="rx-body">' +
-          '<div class="rx-change">' + esc(r.change[0]) + ' <span style="color:var(--faint)">' + esc(r.change[1]) + '</span><span class="arrow">→</span>' + esc(r.change[2]) + '</div>' +
+          '<div class="rx-change">' + rxChangeHtml(r) + '</div>' +
           '<div class="rx-target">' + esc(r.target) + '</div>' +
-          '<div class="rx-reason">' + esc(r.reason[1]) + '</div>' +
+          rxLabelListHtml(labels) +
+          '<div class="rx-reason">' + esc(Array.isArray(r.reason) ? (r.reason[1] || r.reason[0]) : r.reason || '') + '</div>' +
           metricChipsHtml +
         '</div>' +
         '<div class="rx-right">' +
@@ -2431,10 +2722,21 @@
     '</div>';
   }
   function renderRxs(rxs) {
-  document.getElementById('rxList').innerHTML = rxs.map(rxCard).join('');
-  document.querySelectorAll('.rx-main').forEach(function (m) {
-    m.addEventListener('click', function () { m.parentElement.classList.toggle('open'); });
-  });
+    document.getElementById('rxList').innerHTML = rxs.map(rxCard).join('');
+    document.querySelectorAll('.rx-main').forEach(function (m) {
+      m.addEventListener('click', function () {
+        var card = m.parentElement;
+        var willOpen = !card.classList.contains('open');
+        document.querySelectorAll('.rx-card').forEach(function (other) {
+          other.classList.remove('active');
+          other.classList.remove('open');
+        });
+        if (willOpen) {
+          card.classList.add('active');
+          card.classList.add('open');
+        }
+      });
+    });
   }
 
   /* ── diagnosis detail ── */
@@ -2448,13 +2750,199 @@
       return LABEL_NAME_LOOKUP[label] || label;
     }).join(', ');
   }
+  function groupKeyFromLabelCode(code) {
+    code = String(code || '');
+    var catalog = currentDiagLabelCatalog();
+    for (var key in catalog) {
+      if ((catalog[key] || []).some(function (item) { return item[0] === code; })) return key;
+    }
+    if (/^retrieval_|^chunking_|^reranker_/.test(code)) return 'A';
+    if (/^generation_/.test(code)) return 'B';
+    if (/^context_|^too_long_context$|^lost_in_the_middle$/.test(code)) return 'C';
+    if (/^corpus_|^bad_gold_/.test(code)) return 'D';
+    return 'D';
+  }
   var DIAG_GROUP_META = {
-    A: { name: '검색', hint: '정답 근거를 찾거나 상위에 올리는 단계', color: '#3b6ea8' },
-    B: { name: '생성', hint: '근거를 보고 답변을 만드는 단계', color: '#7a5d9f' },
-    C: { name: '컨텍스트', hint: '청크 경계·노이즈·길이 문제', color: '#b7791f' },
-    D: { name: '데이터', hint: '코퍼스·QA·골드 답변 자체의 문제', color: '#5f7f52' }
+    A: { name: '검색', hint: '정답 근거를 찾거나 상위에 올리는 단계' },
+    B: { name: '생성', hint: '근거를 보고 답변을 만드는 단계' },
+    C: { name: '컨텍스트', hint: '청크 경계·노이즈·길이 문제' },
+    D: { name: '데이터', hint: '코퍼스·QA·골드 답변 자체의 문제' }
   };
   var DIAG_GROUP_ORDER = ['A', 'B', 'C', 'D'];
+  var BASE_DIAG_LABEL_CATALOG = {
+    A: [
+      ['retrieval_low_rank', '정답 순위가 낮음'],
+      ['retrieval_rank_fusion_loss', '검색 결합 과정에서 순위 손실'],
+      ['retrieval_duplicate_crowding', '중복 청크가 상위 점유'],
+      ['retrieval_rerank_candidate_miss', '리랭커 후보에 정답 없음'],
+      ['retrieval_reranker_demotion', '리랭커가 정답을 강등'],
+      ['retrieval_reranker_ineffective', '리랭커가 정답을 못 올림'],
+      ['retrieval_lexical_mismatch', '키워드 검색 필요'],
+      ['retrieval_semantic_mismatch', '의미 검색 연결 실패'],
+      ['retrieval_missing_gold', '정답 청크 검색 누락'],
+      ['retrieval_incomplete_enumeration', '나열형 답변 일부 누락'],
+      ['retrieval_missing_bridge_dependency', '단계별 검색 근거 누락'],
+      ['chunking_overchunking', '근거가 여러 청크로 쪼개짐'],
+      ['chunking_context_mismatch', '청크 경계에서 근거가 잘림'],
+      ['chunking_underchunking', '청크가 너무 커서 노이즈 유입'],
+      ['reranker_low_precision', '리랭커가 무관 청크를 상위 배치']
+    ],
+    B: [
+      ['generation_hallucination', '근거 없는 답변 생성'],
+      ['generation_partial_answer', '부분 답변'],
+      ['generation_contradiction', '근거와 모순'],
+      ['generation_misinterpretation', '질문 조건 오해'],
+      ['generation_numerical_error', '수치 오류'],
+      ['generation_hop_binding_error', '여러 근거를 잘못 연결'],
+      ['generation_chronological_error', '시간 순서 오류'],
+      ['generation_abstention_failure', '기권해야 하는데 답변'],
+      ['generation_wrongful_abstention', '근거가 있는데 기권'],
+      ['generation_parametric_overreliance', '모델 지식에 과의존']
+    ],
+    C: [
+      ['too_long_context', '컨텍스트가 너무 김'],
+      ['lost_in_the_middle', '정답이 중간에 묻힘'],
+      ['context_noise_interference', '노이즈 근거에 영향받음']
+    ],
+    D: [
+      ['corpus_gap', '코퍼스에 근거 없음'],
+      ['corpus_gap_partial_hop', '일부 단계 근거 없음'],
+      ['bad_gold_answer', '정답셋 오류'],
+      ['bad_gold_chunk', '골드 청크 지정 오류']
+    ]
+  };
+  var LABEL_DETAIL_TEXT = {
+    retrieval_low_rank: ['정답 청크가 후보에는 있지만 순위가 낮아 상위 k개 밖으로 밀렸습니다.', '리랭커를 켭니다.'],
+    retrieval_rank_fusion_loss: ['벡터 검색이나 키워드 검색 중 한쪽은 정답을 상위에 뒀지만, 결합 과정에서 순위가 깎였습니다.', '하이브리드 가중치를 유리한 쪽으로 옮깁니다.'],
+    retrieval_duplicate_crowding: ['거의 같은 내용의 청크들이 상위 자리를 차지해 정답이 밀렸습니다.', '중복을 접는 MMR을 사용합니다.'],
+    retrieval_rerank_candidate_miss: ['정답 청크가 리랭커 후보 목록에 없어 리랭커가 보지도 못했습니다.', '리랭커 후보 목록을 넓힙니다.'],
+    retrieval_reranker_demotion: ['리랭커가 정답 청크를 후보로 받고도 아래로 떨어뜨렸습니다.', '리랭커를 되돌리거나 모델을 바꿉니다.'],
+    retrieval_reranker_ineffective: ['리랭커가 정답 청크를 봤지만 상위로 끌어올리지 못했습니다.', '리랭커 모델을 바꿉니다.'],
+    retrieval_lexical_mismatch: ['벡터 검색은 놓쳤지만 키워드로는 찾아지는 표현 차이 문제입니다.', '키워드 검색을 함께 쓰는 하이브리드 검색을 켭니다.'],
+    retrieval_semantic_mismatch: ['벡터·키워드 검색이 모두 질문과 근거를 연결하지 못했습니다.', '임베딩 모델이나 청킹 전략을 바꿉니다.'],
+    retrieval_missing_gold: ['정답 청크가 코퍼스에는 있지만 검색 결과에 들어오지 않았습니다.', '검색 개수를 늘리거나 청크 겹침·크기를 조정합니다.'],
+    retrieval_incomplete_enumeration: ['여러 근거가 필요한 질문인데 일부 근거만 가져왔습니다.', '질문에 따라 검색 개수를 늘립니다.'],
+    retrieval_missing_bridge_dependency: ['2단계 질문에서 두 번째 근거가 첫 단계 답을 알아야 검색됩니다.', '질문을 단계별로 쪼개 검색합니다.'],
+    chunking_overchunking: ['정답 근거가 청크 하나에 담기기엔 너무 길어 여러 조각으로 쪼개졌습니다.', '청크 크기를 키웁니다.'],
+    chunking_context_mismatch: ['정답 근거가 청크 경계에 걸쳐 잘렸습니다.', '청크 겹침이나 크기를 늘리고 문장 경계로 자릅니다.'],
+    chunking_underchunking: ['청크가 근거보다 훨씬 커서 무관한 내용이 함께 들어왔습니다.', '청크 크기를 줄입니다.'],
+    reranker_low_precision: ['리랭커가 질문과 무관한 청크를 상위로 올렸습니다.', '리랭커 모델을 바꾸거나 문턱을 조입니다.'],
+    retrieval_failure: ['구체 원인은 못 짚었지만 검색 단계 실패로 분류됐습니다.', '검색 설정과 코퍼스 범위를 우선 확인합니다.'],
+    generation_hallucination: ['정답 근거를 줬는데도 근거에 없는 내용을 지어냈습니다.', '온도를 낮추고 인용을 요구하거나 생성 모델을 올립니다.'],
+    generation_partial_answer: ['답의 일부만 말하고 나머지 요소를 빠뜨렸습니다.', '빠짐없이 답하도록 프롬프트를 고칩니다.'],
+    generation_contradiction: ['근거와 정면으로 어긋나는 답을 냈습니다.', '답을 근거와 대조하는 검증 단계를 넣습니다.'],
+    generation_misinterpretation: ['질문의 관계나 조건을 잘못 읽었습니다.', '질문을 다시 진술하게 합니다.'],
+    generation_numerical_error: ['수치를 잘못 읽거나 잘못 계산했습니다.', '수치 인용을 요구하고 계산을 검산합니다.'],
+    generation_hop_binding_error: ['여러 근거를 찾았지만 서로 잘못 엮었습니다.', '단계별 근거를 답에 묶어 쓰게 합니다.'],
+    generation_chronological_error: ['날짜·사건은 옮겼지만 무엇이 먼저인지 뒤바꿨습니다.', '답에 나온 시점을 근거의 시간축과 대조합니다.'],
+    generation_abstention_failure: ['근거가 없는 질문인데 모른다고 하지 않고 답을 지어냈습니다.', '근거 없을 때 기권하도록 강화하고 인용을 요구합니다.'],
+    generation_wrongful_abstention: ['근거가 검색됐는데도 알 수 없다고 회피했습니다.', '기권 조건을 완화합니다.'],
+    generation_parametric_overreliance: ['답은 맞았지만 검색 근거가 아니라 모델 지식에 기대어 답했습니다.', '인용을 요구하고 온도를 낮춥니다.'],
+    generation_failure: ['구체 원인은 못 짚었지만 생성 단계 실패로 분류됐습니다.', '프롬프트·기권 조건·생성 모델을 확인합니다.'],
+    too_long_context: ['컨텍스트가 너무 길어 모델이 근거를 제대로 못 썼습니다.', '검색 개수를 줄이거나 컨텍스트를 압축합니다.'],
+    lost_in_the_middle: ['정답 청크가 컨텍스트 가운데 묻혀 참조되지 않았습니다.', '검색 개수를 줄이거나 정답을 양끝으로 재배치합니다.'],
+    context_noise_interference: ['정답이 아닌 청크의 상충 정보에 끌려 답이 틀어졌습니다.', '노이즈를 걸러내거나 충돌 처리를 지시합니다.'],
+    context_failure: ['구체 원인은 못 짚었지만 컨텍스트 구성 실패로 분류됐습니다.', '컨텍스트 길이·순서·노이즈를 확인합니다.'],
+    corpus_gap: ['답에 필요한 문서가 코퍼스에 없습니다.', '해당 주제 문서를 수집해 인덱싱합니다.'],
+    corpus_gap_partial_hop: ['여러 단계 질문에서 중간 단계를 뒷받침하는 문서가 빠졌습니다.', '빠진 단계의 문서를 수집합니다.'],
+    bad_gold_answer: ['파이프라인이 아니라 정답셋이 틀렸거나 모호합니다.', '검증 질문과 정답을 다시 만듭니다.'],
+    bad_gold_chunk: ['정답 텍스트는 맞지만 근거로 지정된 청크가 엉뚱한 곳입니다.', '골드 청크를 다시 지정합니다.']
+  };
+  var ACTIVE_DIAG_LABEL_CATALOG = BASE_DIAG_LABEL_CATALOG;
+  function cloneLabelCatalog(base) {
+    var out = {};
+    DIAG_GROUP_ORDER.forEach(function (key) {
+      out[key] = (base[key] || []).map(function (item) {
+        var detail = LABEL_DETAIL_TEXT[item[0]] || [];
+        return [item[0], item[1], item[2] || detail[0] || '', item[3] || detail[1] || ''];
+      });
+    });
+    return out;
+  }
+  function normalizeCatalogGroupKey(key) {
+    key = String(key || '').trim();
+    if (DIAG_GROUP_META[key]) return key;
+    if (/검색|retrieval|chunking|reranker/i.test(key)) return 'A';
+    if (/생성|generation/i.test(key)) return 'B';
+    if (/컨텍스트|context|middle|noise/i.test(key)) return 'C';
+    if (/데이터|gap|gold|corpus|qa/i.test(key)) return 'D';
+    return groupKeyFromLabelCode(key);
+  }
+  function normalizeCatalogItem(item) {
+    if (Array.isArray(item)) {
+      var codeFromArray = String(item[0] || '').trim();
+      if (!codeFromArray) return null;
+      return [
+        codeFromArray,
+        String(item[1] || item[0]).trim(),
+        String(item[2] || '').trim(),
+        String(item[3] || '').trim()
+      ];
+    }
+    if (typeof item === 'string') {
+      var codeFromString = item.trim();
+      return codeFromString ? [codeFromString, codeFromString, '', ''] : null;
+    }
+    if (item && typeof item === 'object') {
+      var code = String(item.code || item.label || item.id || item.key || '').trim();
+      if (!code) return null;
+      return [
+        code,
+        String(item.title || item.name || item.label_name || code).trim(),
+        String(item.situation || item.desc || item.description || item.reason || '').trim(),
+        String(item.prescription || item.repair || item.fix || item.action || '').trim()
+      ];
+    }
+    return null;
+  }
+  function addCatalogItem(catalog, groupKey, item) {
+    var normalized = normalizeCatalogItem(item);
+    if (!normalized) return;
+    var key = normalizeCatalogGroupKey(groupKey || normalized[0]);
+    if (!catalog[key]) catalog[key] = [];
+    var existing = catalog[key].filter(function (row) { return row[0] === normalized[0]; })[0];
+    if (!existing) {
+      var detail = LABEL_DETAIL_TEXT[normalized[0]] || [];
+      catalog[key].push([
+        normalized[0],
+        normalized[1],
+        normalized[2] || detail[0] || '',
+        normalized[3] || detail[1] || ''
+      ]);
+      return;
+    }
+    if (normalized[1] && normalized[1] !== normalized[0]) existing[1] = normalized[1];
+    if (normalized[2]) existing[2] = normalized[2];
+    if (normalized[3]) existing[3] = normalized[3];
+  }
+  function normalizeLabelCatalog(raw) {
+    var catalog = cloneLabelCatalog(BASE_DIAG_LABEL_CATALOG);
+    if (!raw) return catalog;
+    if (Array.isArray(raw)) {
+      raw.forEach(function (item) {
+        var groupKey = item && typeof item === 'object' ? (item.group || item.grp || item.stage || item.type) : '';
+        addCatalogItem(catalog, groupKey, item);
+      });
+      return catalog;
+    }
+    if (typeof raw === 'object') {
+      Object.keys(raw).forEach(function (groupKey) {
+        var value = raw[groupKey];
+        if (Array.isArray(value)) {
+          value.forEach(function (item) { addCatalogItem(catalog, groupKey, item); });
+        } else {
+          addCatalogItem(catalog, groupKey, value);
+        }
+      });
+    }
+    return catalog;
+  }
+  function setActiveLabelCatalog(raw) {
+    ACTIVE_DIAG_LABEL_CATALOG = normalizeLabelCatalog(raw);
+  }
+  function currentDiagLabelCatalog() {
+    return ACTIVE_DIAG_LABEL_CATALOG || BASE_DIAG_LABEL_CATALOG;
+  }
   function diagnosisAffectedCount(d) {
     if (d.count != null) return Number(d.count) || 0;
     if (d.affected != null) return Number(d.affected) || 0;
@@ -2469,7 +2957,6 @@
         key: key,
         name: DIAG_GROUP_META[key].name,
         hint: DIAG_GROUP_META[key].hint,
-        color: DIAG_GROUP_META[key].color,
         total: 0,
         labels: []
       };
@@ -2490,66 +2977,206 @@
     });
     return groups;
   }
-  function renderDiagnosisSummary(dxs) {
-    var el = document.getElementById('diagnosisSummary');
-    if (!el) return;
-    var groups = buildDiagnosisGroups(dxs);
+  function catalogRowsForGroup(group) {
+    var found = {};
+    (group.labels || []).forEach(function (label) {
+      var code = label.code || label.title || 'unknown';
+      if (!found[code]) {
+        found[code] = Object.assign({}, label, { count: 0 });
+      }
+      found[code].count += Number(label.count) || 0;
+      if (label.title && label.title !== code) found[code].title = label.title;
+      if (label.desc) found[code].desc = label.desc;
+    });
+    var rows = (currentDiagLabelCatalog()[group.key] || []).map(function (item) {
+      var code = item[0];
+      var seen = found[code];
+      if (seen) {
+        delete found[code];
+        return Object.assign({ catalog: true }, seen, {
+          code: code,
+          title: seen.title || item[1],
+          desc: seen.desc || item[2] || '',
+          rx: seen.rx || item[3] || '',
+          count: seen.count || 0
+        });
+      }
+      return {
+        catalog: true,
+        code: code,
+        title: item[1],
+        desc: item[2] || '',
+        rx: item[3] || '',
+        count: 0
+      };
+    });
+    Object.keys(found).sort().forEach(function (code) {
+      rows.push(Object.assign({ catalog: false }, found[code], {
+        code: code,
+        title: found[code].title || code
+      }));
+    });
+    return rows;
+  }
+  function detectedLabelCount(rows) {
+    return rows.filter(function (row) { return row.count > 0; }).length;
+  }
+  function firstFiniteNumber() {
+    for (var i = 0; i < arguments.length; i += 1) {
+      var n = numOrNull(arguments[i]);
+      if (n !== null) return n;
+    }
+    return null;
+  }
+  function diagnosisScoreValue(score) {
+    score = score || {};
+    return firstFiniteNumber(
+      score.after,
+      score.composite,
+      score.composite_total,
+      score.total,
+      score.score,
+      score.overall_score != null && Math.abs(Number(score.overall_score)) <= 1
+        ? Number(score.overall_score) * 100
+        : score.overall_score
+    );
+  }
+  function diagnosisScoreThreshold(score) {
+    score = score || {};
+    var gate = score.gate || score.gate_summary || {};
+    return firstFiniteNumber(
+      score.threshold,
+      score.target,
+      score.gate_threshold,
+      score.composite_threshold,
+      gate.composite_threshold,
+      gate.threshold
+    );
+  }
+  function diagnosisGatePass(score, value, threshold) {
+    score = score || {};
+    var gate = score.gate || score.gate_summary || {};
+    if (typeof score.gate_pass === 'boolean') return score.gate_pass;
+    if (typeof score.pass === 'boolean') return score.pass;
+    if (typeof score.pass_threshold === 'boolean') return score.pass_threshold;
+    if (typeof gate.pass === 'boolean') return gate.pass;
+    if (value !== null && threshold !== null) return value >= threshold;
+    return null;
+  }
+  function topDiagnosisLabels(groups, limit) {
     var all = [];
     DIAG_GROUP_ORDER.forEach(function (key) {
-      all = all.concat(groups[key].labels.map(function (l) {
-        return Object.assign({ group: groups[key].name }, l);
+      all = all.concat(groups[key].labels.map(function (label) {
+        return Object.assign({ group: groups[key].name }, label);
       }));
     });
     all.sort(function (a, b) { return b.count - a.count; });
-    var top = all[0];
-    var groupRank = DIAG_GROUP_ORDER.map(function (key) { return groups[key]; }).sort(function (a, b) { return b.total - a.total; })[0];
-    var lines = [
-      top
-        ? '<b>' + esc(top.title) + '</b> 라벨이 가장 많이 반복됐습니다. 로그 기준 ' + esc(top.count) + '개 질문에서 같은 유형이 확인됐습니다.'
-        : '<b>확정 라벨</b>이 아직 없습니다. 검증 질문이 더 쌓이면 이 영역에 원인 요약이 표시됩니다.',
-      groupRank && groupRank.total
-        ? '<b>' + esc(groupRank.name) + '</b> 그룹 비중이 가장 큽니다. 검색·생성·컨텍스트·데이터 중 어느 단계에서 실패가 몰리는지 먼저 확인합니다.'
-        : '<b>그룹 분포</b>는 검색·생성·컨텍스트·데이터 네 단계로 나누어 집계합니다.',
-      '아래 카드를 클릭하면 그룹 안의 라벨 분포표가 펼쳐집니다. 각 막대는 해당 라벨이 영향을 준 질문 수를 뜻합니다.'
-    ];
-    el.innerHTML = lines.map(function (line) {
-      return '<div class="summary-line">' + line + '</div>';
-    }).join('');
+    return all.slice(0, limit || 3);
   }
-  function renderDxs(dxs) {
+  function diagnosisSummaryLine1(score, meta, qas) {
+    var value = diagnosisScoreValue(score);
+    var threshold = diagnosisScoreThreshold(score);
+    var pass = diagnosisGatePass(score, value, threshold);
+    var qCount = meta && meta.question_count != null ? Number(meta.question_count) : ((qas || []).length || 0);
+    if (value === null) {
+      return '검증 질문 ' + qCount + '건을 기준으로 진단했지만, 비교 가능한 종합점수는 아직 산출되지 않았습니다.';
+    }
+    var line = '검증 질문 ' + qCount + '건 기준 종합점수는 ' + Math.round(value) + '/100입니다.';
+    if (threshold !== null) {
+      line += ' 기준 ' + Math.round(threshold) + '점 대비 ' + (pass === true ? '통과했습니다.' : pass === false ? '미달했습니다.' : '판정 대기 상태입니다.');
+    } else if (pass !== null) {
+      line += ' 현재 gate 판정은 ' + (pass ? '통과' : '미달') + '입니다.';
+    }
+    return line;
+  }
+  function diagnosisSummaryLine2(groups) {
+    var rankedGroups = DIAG_GROUP_ORDER.map(function (key) { return groups[key]; })
+      .sort(function (a, b) { return b.total - a.total; });
+    var topGroup = rankedGroups[0];
+    var topLabels = topDiagnosisLabels(groups, 3);
+    if (!topGroup || !topGroup.total || !topLabels.length) {
+      return '검색·생성·컨텍스트·데이터 중 뚜렷하게 반복된 실패 라벨은 아직 없습니다.';
+    }
+    return '실패 신호는 ' + topGroup.name + '에 가장 많이 몰렸습니다. 주요 라벨은 ' +
+      topLabels.map(function (label) {
+        return label.title + ' ' + label.count + '건';
+      }).join(', ') + '입니다.';
+  }
+  function diagnosisSummaryLine3(recs, qas, rxs) {
+    var manualCount = (recs || []).filter(function (r) {
+      return r.kind === 'manual' || /corpus|gold|qa|qar/i.test(r.code || '');
+    }).length;
+    var wrongCount = (qas || []).filter(function (q) { return !qaIsCorrect(q); }).length;
+    var latestRx = (rxs || []).length ? rxs[(rxs || []).length - 1] : null;
+    if (manualCount) {
+      return '남은 권고 ' + manualCount + '건은 자동 처방보다 코퍼스·QA·QAR·골드 답변 검수가 먼저 필요한 항목입니다.';
+    }
+    if (latestRx && latestRx.change) {
+      var verdict = latestRx.verdict && latestRx.verdict[1] ? latestRx.verdict[1] : '판정됨';
+      return '마지막 처방은 ' + latestRx.change[0] + ' 조정이며, 치료 경과에서 ' + verdict + ' 결과와 점수 변화를 함께 확인할 수 있습니다.';
+    }
+    if (wrongCount) {
+      return '틀린 검증 질문 ' + wrongCount + '건은 아래 검증 질문 목록에서 Q·A·R을 함께 대조해 확인합니다.';
+    }
+    return '현재 리포트에는 자동 처방 뒤에 남은 수동 권고가 없습니다.';
+  }
+  function renderDiagnosisSummary(dxs, score, meta, recs, qas, rxs) {
+    var el = document.getElementById('diagnosisSummary');
+    if (!el) return;
+    var groups = buildDiagnosisGroups(dxs);
+    var lines = [
+      diagnosisSummaryLine1(score, meta, qas),
+      diagnosisSummaryLine2(groups),
+      diagnosisSummaryLine3(recs, qas, rxs)
+    ];
+    el.innerHTML = '<div class="summary-line">' + lines.map(function (line) {
+      return '<p>' + esc(line) + '</p>';
+    }).join('') + '</div>';
+  }
+  function renderDxs(dxs, score, meta, recs, qas, rxs) {
     LABEL_NAME_LOOKUP = {};
+    DIAG_GROUP_ORDER.forEach(function (key) {
+      (currentDiagLabelCatalog()[key] || []).forEach(function (item) {
+        LABEL_NAME_LOOKUP[item[0]] = item[1];
+      });
+    });
     (dxs || []).forEach(function (d) {
       if (d.code) LABEL_NAME_LOOKUP[d.code] = d.title || d.code;
     });
-    renderDiagnosisSummary(dxs);
+    renderDiagnosisSummary(dxs, score, meta, recs, qas, rxs);
     var el = document.getElementById('dxList');
     var groups = buildDiagnosisGroups(dxs);
     var maxTotal = Math.max.apply(null, DIAG_GROUP_ORDER.map(function (key) { return groups[key].total; }).concat([1]));
-    var firstActiveKey = DIAG_GROUP_ORDER.filter(function (key) { return groups[key].labels.length; })[0] || 'A';
     el.innerHTML = DIAG_GROUP_ORDER.map(function (key) {
       var group = groups[key];
-      var labels = group.labels.slice().sort(function (a, b) { return b.count - a.count; });
-      var labelMax = Math.max.apply(null, labels.map(function (l) { return l.count; }).concat([1]));
-      var bars = labels.length ? labels.map(function (label, i) {
+      var rows = catalogRowsForGroup(group);
+      var detected = detectedLabelCount(rows);
+      var labelMax = Math.max.apply(null, rows.map(function (l) { return l.count; }).concat([1]));
+      var bars = rows.length ? rows.map(function (label) {
+        var opacity = label.count > 0 ? .86 : .12;
         return '<i title="' + esc(label.title) + ' ' + esc(label.count) + '건" style="--h:' +
-          Math.max(12, label.count / labelMax * 100) + '%;--c:' + esc(group.color) + ';opacity:' + (0.96 - i * 0.08) + '"></i>';
-      }).join('') : '<i style="--h:8%;--c:#d0d0d0"></i>';
-      var detail = labels.length ? labels.map(function (label) {
-        return '<div class="label-bar-row">' +
-          '<span title="' + esc(label.code) + '">' + esc(label.title) + '</span>' +
-          '<em><i style="width:' + Math.max(7, label.count / labelMax * 100) + '%;background:' + esc(group.color) + '"></i></em>' +
+          Math.max(8, label.count / labelMax * 100) + '%;opacity:' + opacity + '"></i>';
+      }).join('') : '<i style="--h:8%;opacity:.12"></i>';
+      var detail = rows.length ? rows.map(function (label) {
+        var zero = label.count > 0 ? '' : ' zero';
+        var width = label.count > 0 ? Math.max(7, label.count / labelMax * 100) : 0;
+        var tip = [label.desc ? '상황: ' + label.desc : '', label.rx ? '처방: ' + label.rx : '']
+          .filter(Boolean).join('\n') || label.code;
+        return '<div class="label-bar-row' + zero + '">' +
+          '<span class="term" tabindex="0" data-tip="' + esc(tip) + '">' + esc(label.title) + '</span>' +
+          '<em><i style="width:' + width + '%"></i></em>' +
           '<b>' + esc(label.count) + '</b>' +
         '</div>';
       }).join('') : '<div class="label-bar-row"><span>감지된 라벨 없음</span><em><i style="width:0"></i></em><b>0</b></div>';
-      var active = key === firstActiveKey ? ' active' : '';
-      return '<button type="button" class="diagnosis-group-card' + active + '" data-dx-group="' + esc(key) + '">' +
+      return '<button type="button" class="diagnosis-group-card" data-dx-group="' + esc(key) + '">' +
         '<div class="diagnosis-card-head">' +
           '<div class="diagnosis-card-title"><b>' + esc(group.name) + '</b><span>' + esc(group.hint) + '</span></div>' +
-          '<div class="diagnosis-count"><b>' + esc(labels.length) + '</b>라벨<br>질문 ' + esc(group.total) + '건</div>' +
+          '<div class="diagnosis-count"><b>' + esc(detected) + '/' + esc(rows.length) + '</b>라벨<br>질문 ' + esc(group.total) + '건</div>' +
         '</div>' +
         '<div class="diagnosis-mini-bars" aria-hidden="true">' + bars + '</div>' +
-        '<div class="group-share"><i style="width:' + Math.max(5, group.total / maxTotal * 100) + '%;background:' + esc(group.color) + '"></i></div>' +
-        '<div class="diagnosis-card-desc">그룹 안에서 어떤 라벨이 반복됐는지 클릭해서 확인합니다.</div>' +
+        '<div class="group-share"><i style="width:' + Math.max(5, group.total / maxTotal * 100) + '%"></i></div>' +
+        '<div class="diagnosis-card-desc">전체 라벨 축에서 실제로 나온 라벨과 질문 수를 확인합니다.</div>' +
+        '<div class="diagnosis-toggle">라벨 분포</div>' +
         '<div class="diagnosis-detail-panel">' +
           '<div class="diagnosis-detail-title">라벨 분포표 <span>' + esc(group.name) + ' 그룹</span></div>' +
           detail +
@@ -2558,9 +3185,11 @@
     }).join('');
     el.querySelectorAll('.diagnosis-group-card').forEach(function (card) {
       card.addEventListener('click', function () {
+        var wasActive = card.classList.contains('active');
         el.querySelectorAll('.diagnosis-group-card').forEach(function (other) {
-          other.classList.toggle('active', other === card);
+          other.classList.remove('active');
         });
+        if (!wasActive) card.classList.add('active');
       });
     });
   }
@@ -2568,8 +3197,8 @@
   function diagnosisGroupKey(d) {
     var group = String((d && d.grp) || '');
     var m = group.match(/^([A-D])\s*[·.]\s*(.*)$/);
-    var key = m ? m[1] : '기타';
-    var name = m ? (m[2] || group) : group;
+    var key = m ? m[1] : groupKeyFromLabelCode(d && (d.code || d.label || d.type));
+    var name = m ? (m[2] || group) : (DIAG_GROUP_META[key] ? DIAG_GROUP_META[key].name : group);
     return { key: key, name: cleanGroupName(name || group) };
   }
   function renderLabelDistributions(dxs) {
@@ -2792,8 +3421,28 @@
     });
   }
 
-  /* ── run_id 가 있으면 실제 리포트를 fetch, 없으면 더미 데이터로 정적 프리뷰 ── */
-  var runId = new URLSearchParams(location.search).get('run_id');
+  function showReportNotice(message, actionLabel, actionHref) {
+    var wrap = document.querySelector('.wrap');
+    if (!wrap) return;
+    var banner = document.createElement('div');
+    banner.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:16px;margin:20px 0;padding:14px 18px;border:1px solid var(--border);border-radius:10px;color:var(--muted);font-size:13.5px;background:var(--surface);';
+    var text = document.createElement('span');
+    text.textContent = message;
+    banner.appendChild(text);
+    if (actionLabel && actionHref) {
+      var link = document.createElement('a');
+      link.href = actionHref;
+      link.textContent = actionLabel;
+      link.style.cssText = 'flex:none;color:var(--ink);text-decoration:none;border:1px solid var(--border);border-radius:8px;padding:7px 10px;background:#fff;font-size:13px;';
+      banner.appendChild(link);
+    }
+    wrap.insertBefore(banner, wrap.firstChild.nextSibling);
+  }
+
+  /* ── run_id 가 있으면 실제 리포트를 fetch. 샘플 데이터는 ?sample=1 일 때만 쓴다. ── */
+  var params = new URLSearchParams(location.search);
+  var runId = params.get('run_id');
+  var sampleMode = params.get('sample') === '1';
   if (runId) {
     fetch(WEB_API_BASE + '/runs/' + runId + '/report')
       .then(function (res) {
@@ -2804,15 +3453,14 @@
         renderReport(data, true);
       })
       .catch(function (err) {
-        var wrap = document.querySelector('.wrap');
-        var banner = document.createElement('div');
-        banner.style.cssText = 'margin:20px 0;padding:14px 18px;border:1px solid var(--critical);border-radius:10px;color:var(--critical);font-size:13.5px;';
-        banner.textContent = '리포트를 불러오지 못했습니다: ' + err.message + ' (더미 데이터로 표시합니다)';
-        wrap.insertBefore(banner, wrap.firstChild.nextSibling);
-        renderReport({}, false);
+        showReportNotice('리포트를 불러오지 못했습니다: ' + err.message + ' 실제 데이터 대신 샘플을 자동으로 표시하지 않습니다.');
+        renderReport({}, true);
       });
-  } else {
+  } else if (sampleMode) {
     renderReport({}, false);
+  } else {
+    showReportNotice('run_id가 없어 실제 리포트 데이터가 연결되지 않았습니다. UI 확인용 샘플 화면을 열어 볼 수 있습니다.', '샘플 리포트 보기', 'report.html?sample=1');
+    renderReport({}, true);
   }
 })();
 </script>

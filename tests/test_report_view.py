@@ -64,6 +64,22 @@ class ReportViewCompositeTest(unittest.TestCase):
         self.assertEqual(view["score"]["before"], view["score"]["after"])
         self.assertEqual(view["score"]["delta"], 0.0)
 
+    def test_label_catalog_is_served_with_report(self):
+        """라벨 분포 축은 프론트 샘플값이 아니라 서버 카탈로그를 정본으로 쓴다."""
+        view = build_report_view(make_state(make_report()))
+        catalog = view["label_catalog"]
+        self.assertIn("retrieval", catalog)
+        self.assertIn("generation", catalog)
+        self.assertIn("context", catalog)
+        self.assertIn("data", catalog)
+        self.assertIn(
+            "retrieval_rerank_candidate_miss",
+            {row["code"] for row in catalog["retrieval"]},
+        )
+        low_rank = next(row for row in catalog["retrieval"] if row["code"] == "retrieval_low_rank")
+        self.assertIn("상위 k개 밖", low_rank["situation"])
+        self.assertIn("리랭커", low_rank["prescription"])
+
     def test_pass_badge_uses_optimize_gate_not_eval_threshold(self):
         report = make_report(overall=0.95, composite_total=12, pass_threshold=True)
         report.ragas_scores["mean_recall_at_k"] = 0.9
