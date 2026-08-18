@@ -26,6 +26,7 @@ from agents.rag.generator import (
     _generation_temperature,
 )
 from core.schema import Chunk
+from tests.embedding_env import pin_local_embedding
 
 
 class ChunkFromDictTests(unittest.TestCase):
@@ -69,6 +70,11 @@ class ChunkFromDictTests(unittest.TestCase):
 
 
 class RetrieverTests(unittest.TestCase):
+    def setUp(self):
+        # dense 경로를 타는 테스트들은 질의축이 openrouter 로 열려 있고 키가 없는
+        # 머신에서 search_with_details 의 설정 preflight 에 걸려 죽는다.
+        pin_local_embedding(self)
+
     def tearDown(self):
         reset_retriever_cache()
 

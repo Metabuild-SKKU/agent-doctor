@@ -27,6 +27,26 @@ from agents.eval.replay import _main, apply_golden_set
 def _no_llm():
     return patch.object(replay, "llm_eval_enabled", return_value=False)
 
+
+# 같은 override 가 이 파일 밖으로도 번진다. _main 이 부르는 load_dotenv(override=True) 는
+# 실사용 .env 를 os.environ 에 그대로 밀어 넣고, 그 흔적은 프로세스가 끝날 때까지 남는다 -
+# 뒤에 도는 다른 파일의 테스트가 코드가 아니라 이 머신의 .env 를 재게 된다.
+# 실측(pytest, 알파벳 순서라 이 파일이 앞): 이 파일 뒤로 INDEX_QUERY_EMBED_PROVIDER 가
+# local(conftest 가 박은 값) → openrouter(.env 값)로 바뀌어 검색 경로 테스트 4건이 깨졌다.
+# conftest 의 세션 fixture 로는 못 막는다 - 그건 첫 테스트 전에 한 번 박을 뿐이고,
+# 여기서 덮는 건 그 뒤다.
+# 파일 안에서는 그대로 둔다(이 파일의 테스트들은 _main 이 .env 를 읽는 것 자체를 본다).
+_env_snapshot: dict[str, str] = {}
+
+
+def setUpModule():
+    _env_snapshot.update(os.environ)
+
+
+def tearDownModule():
+    os.environ.clear()
+    os.environ.update(_env_snapshot)
+
 GOLD = "입사 1년 이상 직원은 연 15일의 연차 휴가가 부여되며, 3년 이상 근속 시 추가된다."
 
 
