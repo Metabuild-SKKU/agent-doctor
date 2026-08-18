@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AgentDoctor — 진단 리포트</title>
+<title>RAG Doctor — 진단 리포트</title>
 <style>
   :root {
     color-scheme: dark;
@@ -63,12 +63,12 @@
 
   /* top bar */
   .topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; justify-content: space-between; padding: 18px 0; border-bottom: 1px solid var(--border); background: color-mix(in srgb, #fff 76%, transparent); backdrop-filter: blur(18px); }
-  .brand { display: flex; align-items: center; gap: 9px; }
-  .brand-mark { width: 25px; height: 25px; }
-  .brand-name { font-weight: 660; font-size: 16px; letter-spacing: -.02em; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-mark { width: 34px; height: 34px; }
+  .brand-name { font-weight: 690; font-size: 23px; letter-spacing: -.035em; }
   .brand-name .doc { color: var(--muted); }
   .topbar-right { display: flex; align-items: center; gap: 6px; }
-  .back-link { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); text-decoration: none; padding: 7px 11px; border-radius: 8px; }
+  .back-link { display: inline-flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 620; color: var(--ink); text-decoration: none; padding: 9px 13px; border-radius: 10px; }
   .back-link:hover { color: var(--ink); background: var(--surface-2); }
   .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: 1px solid var(--border); background: var(--surface); border-radius: 8px; cursor: pointer; color: var(--muted); }
   .theme-toggle:hover { color: var(--ink); border-color: var(--border-strong); }
@@ -136,6 +136,15 @@
   .verdict.fail { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 40%, transparent); background: var(--critical-glow); }
   .hero-side h3 { font-size: 21px; font-weight: 600; letter-spacing: -.02em; margin: 16px 0 0; line-height: 1.35; }
   .hero-side p { color: var(--muted); font-size: 14.5px; margin: 12px 0 0; max-width: 52ch; }
+  .hero-meta-chips { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+  .hero-meta-chip {
+    display: inline-flex; align-items: center; gap: 8px; min-height: 38px;
+    padding: 8px 14px; border: 1px solid var(--line); border-radius: 6px;
+    background: #f7f7f7; color: #555; font-family: var(--mono); font-size: 13px;
+    line-height: 1; white-space: nowrap;
+  }
+  .hero-meta-chip b { color: var(--ink); font-weight: 650; }
+  .hero-summary-text { color: var(--muted); font-size: 14.5px; margin: 12px 0 0; max-width: 58ch; line-height: 1.7; }
   .hero-stats { display: flex; gap: 28px; margin-top: 24px; }
   .hero-stat .n { font-size: 22px; font-weight: 620; font-variant-numeric: tabular-nums; }
   .hero-stat .n.up { color: var(--good); } .hero-stat .n.warn { color: var(--warning); } .hero-stat .n.error { color: var(--critical); }
@@ -148,6 +157,11 @@
     font-size: 13px;
     line-height: 1.65;
     max-width: 62ch;
+  }
+  .gauge-center .cap { cursor: default; }
+  .gauge-center .cap::after { content: none; display: none; }
+  .hero-stats {
+    display: none !important;
   }
   .score-explain b {
     color: var(--ink);
@@ -165,6 +179,9 @@
     margin: 18px 0 8px; padding: 10px; border: 1px solid var(--border); border-radius: 999px;
     background: color-mix(in srgb, #fff 76%, transparent); backdrop-filter: blur(16px);
     box-shadow: 0 18px 46px -38px rgba(17,24,39,.5);
+  }
+  .section-head .sub {
+    display: none !important;
   }
   .report-nav a {
     text-decoration: none; color: var(--muted); font-family: var(--mono); font-size: 11px;
@@ -365,6 +382,14 @@
 
   /* recommendations */
   .rec { display: flex; flex-direction: column; gap: 10px; }
+  .rec-summary {
+    margin: 0 0 18px;
+    color: var(--ink);
+    font-size: 16px;
+    line-height: 1.65;
+    font-weight: 520;
+    max-width: 76ch;
+  }
   .rec-item { display: grid; grid-template-columns: 34px 1fr auto; gap: 14px; align-items: center; padding: 16px 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
   .rec-ic { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: var(--surface-2); color: var(--muted); }
   .rec-item { align-items: start; }
@@ -783,6 +808,521 @@
     }
     .matrix-verdict { text-align: left; }
   }
+
+  /* product review cleanup: Notion-like information density, color only where it carries data */
+  .brand-name { font-size: 28px; letter-spacing: -.045em; }
+  .brand-mark { width: 42px; height: 42px; }
+  .rhead .lockup,
+  .rhead .meta,
+  #gaugeMark,
+  .gauge-center .delta,
+  .hero-side .verdict,
+  .metric-focus,
+  .metric-toolbar,
+  .metric-legend,
+  .metric-scope,
+  .rx-metric-strip,
+  .rule-note {
+    display: none !important;
+  }
+  .rhead {
+    padding: 24px 0 10px;
+  }
+  .rhead h1 {
+    margin-top: 0;
+    font-size: clamp(30px, 4.4vw, 48px);
+    font-weight: 640;
+  }
+  .hero {
+    grid-template-columns: 230px 1fr;
+    align-items: start;
+    overflow: visible;
+  }
+  .gauge-wrap,
+  .gauge-wrap svg {
+    width: 210px;
+    height: 210px;
+  }
+  .gauge-center .big {
+    font-size: 58px;
+    font-variant-numeric: tabular-nums;
+  }
+  .gauge-center .big small {
+    font-size: 18px;
+    color: #777;
+    font-weight: 520;
+    letter-spacing: -.02em;
+    margin-left: 3px;
+  }
+  .gauge-center .cap {
+    margin-top: 8px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: var(--sans);
+    font-size: 13px;
+    color: #555;
+  }
+  .score-date {
+    display: none;
+  }
+  .score-explain {
+    max-width: 72ch;
+    color: #333;
+    display: block !important;
+    border-top: 0;
+    padding-top: 0;
+    margin-top: 18px;
+    font-size: 14.5px;
+  }
+  .score-explain .score-note {
+    color: #777;
+  }
+  #priority,
+  #metrics-section {
+    display: none !important;
+  }
+  .section-head .sub {
+    max-width: 56ch;
+    line-height: 1.55;
+    text-align: right;
+  }
+  .rx {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 18px;
+  }
+  .rx-card {
+    border-radius: 6px;
+    border-color: #dcdcdc;
+  }
+  .rx-main {
+    grid-template-columns: 42px 1fr auto;
+  }
+  .rx-num {
+    border-radius: 4px;
+    color: #111;
+    background: #f6f6f6;
+    border: 1px solid #dcdcdc;
+    box-shadow: none;
+  }
+  .rx-change,
+  .rx-target {
+    font-size: 14px;
+  }
+  .rx-reason {
+    color: #666;
+  }
+  .rx-reason .rl {
+    display: none;
+  }
+  .rx-expand {
+    color: #666;
+  }
+  .rx-metrics {
+    display: none;
+  }
+  .rx-drill {
+    background: #fff;
+  }
+  .drill-label {
+    color: #555;
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: var(--sans);
+    font-weight: 620;
+  }
+  .drill-notes {
+    border-top: 1px solid #eee;
+    padding-top: 12px;
+  }
+  .course-chart .cc-legend { display: flex; }
+  .matrix-head,
+  .matrix-row {
+    grid-template-columns: 190px minmax(320px, 1fr) 160px 110px;
+  }
+  .matrix-title span {
+    display: none;
+  }
+  .matrix-dot {
+    background: #fff;
+    border-color: #1c7c54;
+  }
+  .matrix-dot.step,
+  .matrix-dot.kept {
+    border-color: #1c7c54;
+  }
+  .matrix-dot.rollback,
+  .matrix-legend .rollback {
+    border-color: #c07a2c;
+  }
+  .matrix-dot.failed,
+  .matrix-dot.error,
+  .matrix-legend .error {
+    border-color: #b24a3a;
+  }
+  .matrix-dot span {
+    top: 15px;
+  }
+  .dx {
+    grid-template-columns: 1fr;
+  }
+  .dx-card {
+    display: grid;
+    grid-template-columns: 150px 180px 1fr 130px;
+    gap: 16px;
+    align-items: start;
+    border-radius: 6px;
+  }
+  .dx-top {
+    display: block;
+  }
+  .dx-top .badge {
+    display: none;
+  }
+  .dx-grp {
+    color: #111;
+    font-family: var(--sans);
+    font-size: 14px;
+    font-weight: 620;
+    letter-spacing: -.01em;
+    text-transform: none;
+  }
+  .dx-title {
+    margin: 0;
+  }
+  .dx-code {
+    margin: 0;
+    color: #666;
+  }
+  .dx-desc {
+    margin: 0 !important;
+  }
+  .dx-foot {
+    justify-content: flex-end;
+    margin: 0;
+    color: #666;
+  }
+  .label-dist {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+  }
+  .label-group {
+    border: 1px solid #dcdcdc;
+    border-radius: 6px;
+    padding: 16px;
+    background: #fff;
+  }
+  .label-group-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 12px;
+  }
+  .label-group-head b {
+    font-size: 15px;
+  }
+  .label-group-head span {
+    color: #777;
+    font: 12px/1.2 var(--mono);
+  }
+  .label-bar-row {
+    display: grid;
+    grid-template-columns: 170px 1fr 28px;
+    gap: 10px;
+    align-items: center;
+    padding: 7px 0;
+    border-top: 1px solid #f0f0f0;
+  }
+  .label-bar-row:first-of-type {
+    border-top: 0;
+  }
+  .label-bar-row span {
+    font: 12px/1.35 var(--mono);
+    color: #333;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .label-bar-row em {
+    position: relative;
+    height: 7px;
+    background: #efefef;
+    border-radius: 999px;
+    overflow: hidden;
+    display: block;
+  }
+  .label-bar-row em i {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--bar, #555);
+  }
+  .label-bar-row b {
+    color: #555;
+    text-align: right;
+    font: 12px/1.2 var(--mono);
+    font-weight: 500;
+  }
+  .group-share {
+    height: 8px;
+    border-radius: 999px;
+    background: #ededed;
+    overflow: hidden;
+    margin-bottom: 10px;
+  }
+  .group-share i {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: #111;
+  }
+  .evidence-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin: 2px 0 18px;
+  }
+  .evidence-summary.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .summary-line {
+    min-height: 86px;
+    padding: 16px 17px;
+    border: 1px solid #dcdcdc;
+    border-radius: 6px;
+    background: #fff;
+    color: #333;
+    font-size: 13.5px;
+    line-height: 1.6;
+  }
+  .summary-line b {
+    color: #111;
+    font-weight: 650;
+  }
+  .diagnosis-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+  }
+  .diagnosis-group-card {
+    border: 1px solid #dcdcdc;
+    border-radius: 6px;
+    background: #fff;
+    padding: 17px;
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    transition: border-color .16s ease, background .16s ease, box-shadow .16s ease;
+  }
+  .diagnosis-group-card:hover,
+  .diagnosis-group-card.active {
+    border-color: #111;
+    box-shadow: 0 12px 28px -24px rgba(0, 0, 0, .55);
+  }
+  .diagnosis-card-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 18px;
+    align-items: flex-start;
+  }
+  .diagnosis-card-title {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .diagnosis-card-title b {
+    font-size: 18px;
+    letter-spacing: -.025em;
+    font-weight: 650;
+  }
+  .diagnosis-card-title span {
+    color: #666;
+    font: 12px/1.4 var(--mono);
+  }
+  .diagnosis-count {
+    text-align: right;
+    font-family: var(--mono);
+    color: #555;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .diagnosis-count b {
+    display: block;
+    color: #111;
+    font-size: 24px;
+    line-height: 1.1;
+    font-weight: 650;
+  }
+  .diagnosis-mini-bars {
+    display: flex;
+    gap: 4px;
+    align-items: end;
+    height: 36px;
+    margin: 18px 0 10px;
+  }
+  .diagnosis-mini-bars i {
+    flex: 1;
+    min-width: 12px;
+    height: var(--h, 10%);
+    border-radius: 3px 3px 1px 1px;
+    background: var(--c, #555);
+    opacity: .9;
+  }
+  .diagnosis-card-desc {
+    color: #555;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .diagnosis-detail-panel {
+    display: none;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid #eee;
+  }
+  .diagnosis-group-card.active .diagnosis-detail-panel {
+    display: block;
+  }
+  .diagnosis-detail-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 8px;
+    color: #111;
+    font-size: 13px;
+    font-weight: 650;
+  }
+  .diagnosis-detail-title span {
+    color: #777;
+    font: 11px/1.2 var(--mono);
+    font-weight: 400;
+  }
+  .qa-search-label {
+    display: block;
+    margin-bottom: 7px;
+    color: #555;
+    font-size: 12px;
+  }
+  .qa-search {
+    width: 100%;
+    margin-bottom: 14px;
+    border: 1px solid #dcdcdc;
+    border-radius: 6px;
+    padding: 12px 13px;
+    font: 14px/1.4 var(--sans);
+    color: #111;
+    background: #fff;
+  }
+  .qa-search:focus {
+    outline: 2px solid #111;
+    outline-offset: 1px;
+  }
+  .qa-card {
+    border-radius: 6px;
+  }
+  .qa-tools {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 12px;
+    align-items: end;
+    margin-bottom: 12px;
+  }
+  .qa-filter {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .qa-filter button {
+    border: 1px solid #dcdcdc;
+    border-radius: 999px;
+    background: #fff;
+    color: #555;
+    font: 12px/1 var(--mono);
+    padding: 10px 12px;
+    cursor: pointer;
+  }
+  .qa-filter button.active {
+    border-color: #111;
+    color: #111;
+    background: #f4f4f4;
+  }
+  .qa-window {
+    max-height: 640px;
+    overflow: auto;
+    border: 1px solid #dcdcdc;
+    border-radius: 8px;
+    background: #fbfbfb;
+    padding: 12px;
+  }
+  .qa-head {
+    grid-template-columns: 30px minmax(0, 1fr) auto;
+  }
+  .qa-status {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 8px;
+    border: 1px solid #dcdcdc;
+    border-radius: 999px;
+    color: #555;
+    white-space: nowrap;
+  }
+  .qa-card.solved .qa-status {
+    color: #1c7c54;
+    border-color: color-mix(in srgb, #1c7c54 45%, #ddd);
+  }
+  .qa-card.unsolved .qa-status {
+    color: #b24a3a;
+    border-color: color-mix(in srgb, #b24a3a 45%, #ddd);
+  }
+  .qa-qar {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    border-top: 1px solid #eee;
+  }
+  .qa-qar-col {
+    padding: 13px 16px;
+    border-right: 1px solid #eee;
+    min-width: 0;
+  }
+  .qa-qar-col:last-child {
+    border-right: 0;
+  }
+  .qa-qar-col .tag {
+    display: inline-flex;
+    width: 22px;
+    height: 22px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #dcdcdc;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    color: #111;
+    font: 12px/1 var(--mono);
+    font-weight: 650;
+  }
+  .qa-qar-col p {
+    margin: 0;
+    color: #333;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .rec .badge,
+  .rec-badge-data {
+    display: none !important;
+  }
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; }
+    .dx-card { grid-template-columns: 1fr; }
+    .diagnosis-grid,
+    .label-dist,
+    .evidence-summary,
+    .evidence-summary.compact,
+    .qa-qar,
+    .qa-tools { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -794,7 +1334,7 @@
         <rect x="1" y="1" width="22" height="22" rx="6.5" stroke="var(--accent)" stroke-width="1.2" fill="color-mix(in srgb, var(--accent-glow) 60%, transparent)"/>
         <path d="M3.5 12.5h3l1.8-4.5 3 9 1.8-5.2 1.3 2.9h4.6" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" fill="none"/>
       </svg>
-      <div class="brand-name">Agent<span class="doc">Doctor</span></div>
+      <div class="brand-name">RAG <span class="doc">Doctor</span></div>
     </div>
     <div class="topbar-right">
       <a class="back-link" href="index.html">
@@ -808,13 +1348,6 @@
   </header>
 
   <div class="rhead">
-    <div class="lockup">
-      <svg class="lm" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <rect x="1" y="1" width="22" height="22" rx="6.5" stroke="var(--accent)" stroke-width="1.2" fill="color-mix(in srgb, var(--accent-glow) 60%, transparent)"/>
-        <path d="M3.5 12.5h3l1.8-4.5 3 9 1.8-5.2 1.3 2.9h4.6" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" fill="none"/>
-      </svg>
-      <span class="wm">Agent<span class="doc">Doctor</span></span>
-    </div>
     <div class="meta">
       <span class="chip">코퍼스 <b id="metaCorpus">사내 제품 문서</b></span>
       <span class="chip">진단 깊이 <b id="metaDepth">표준 검진</b></span>
@@ -826,15 +1359,15 @@
 
   <nav class="report-nav" aria-label="리포트 탭">
     <button class="report-tab active" type="button" data-report-tab="dashboard">대시보드</button>
+    <button class="report-tab" type="button" data-report-tab="evidence">진단 상세</button>
     <button class="report-tab" type="button" data-report-tab="treatment">치료 경과</button>
-    <button class="report-tab" type="button" data-report-tab="evidence">검증 상세</button>
   </nav>
 
   <!-- MODE NOTICE: 외부 RAG 로그 진단처럼 일부 섹션이 원리적으로 없는 경우에만 표시 -->
   <div id="modeNotice" style="display:none"></div>
 
   <!-- HERO: score -->
-  <section class="hero">
+  <section class="hero" data-report-panel="dashboard">
     <div class="gauge-wrap">
       <svg viewBox="0 0 240 240" width="240" height="240" aria-hidden="true">
         <circle cx="120" cy="120" r="96" fill="none" stroke="var(--border)" stroke-width="14"
@@ -848,29 +1381,44 @@
       <div class="gauge-center">
         <div class="big" id="scoreNum">84</div>
         <div class="delta"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 19V5m0 0-6 6m6-6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg> +22</div>
-        <div class="cap" id="scoreCap">종합 점수 · 100점</div>
+        <div class="cap" id="scoreCap">종합 점수</div>
       </div>
     </div>
     <div class="hero-side">
+      <div class="score-date" id="scoreDate">2026-07-20 14:32</div>
       <span class="verdict pass" id="verdictBadge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg> <span id="verdictText">처방 후 기준선 통과</span></span>
-      <h3 id="heroHeadline">문제 4건을 찾아 3번 처방했고, 종합점수가 <span style="color:var(--good)">62에서 84로</span> 올랐습니다.</h3>
-      <p id="heroSummary">검색이 나열형 정답을 놓치고 있었고, 정답 순위가 낮았습니다. top_k 확대와 리랭커로 해결했으며, 컨텍스트 축소는 오히려 품질을 떨어뜨려 되돌렸습니다.</p>
-      <div class="hero-stats" id="heroStats">
-        <div class="hero-stat"><div class="n">4</div><div class="l">발견된 문제</div></div>
-        <div class="hero-stat"><div class="n up">2</div><div class="l">채택된 처방</div></div>
-        <div class="hero-stat"><div class="n warn">1</div><div class="l">롤백</div></div>
-        <div class="hero-stat"><div class="n">1</div><div class="l">추가 확인 필요</div></div>
+      <h3 id="heroHeadline">3건을 처방했고, 종합점수가 <span style="color:var(--good)">62에서 84로</span> 올랐습니다.</h3>
+      <div class="hero-meta-chips" id="heroSummary" aria-label="진단 메타 정보">
+        <span class="hero-meta-chip">코퍼스 <b>사내 제품 문서</b></span>
+        <span class="hero-meta-chip">테스트 질문 <b>47</b></span>
+        <span class="hero-meta-chip"><b>2026-07-20 14:32</b></span>
       </div>
+      <div class="hero-stats" id="heroStats" hidden></div>
       <div class="score-explain" id="scoreExplain">
-        <b>종합 점수는 검색·답변·검증 결과를 함께 본 표시값입니다.</b>
-        정답 근거를 제대로 가져왔는지, 답변이 그 근거와 맞는지, 처방 후 실제 지표가 좋아졌는지를 한 화면에서 보기 쉽게 묶었습니다.
-        <span class="score-note">한 번의 숫자만으로 확정하지 않고, 아래 치료 경과에서 처방별 변화와 롤백 여부를 함께 확인합니다.</span>
+        <b>종합 점수는 검색·답변·검증 결과를 함께 본 참고용 점수입니다.</b>
+        정답 근거를 가져왔는지, 답변이 그 근거와 맞는지, 처방 후 품질이 유지됐는지를 함께 봅니다.
+        이 프로젝트는 종합 점수 80점을 기준으로 보고, 그보다 낮으면 추가 처방이나 데이터 확인이 필요한 상태로 봅니다.
       </div>
     </div>
   </section>
 
+  <section class="section" id="dashboard-course-section" data-report-panel="dashboard">
+    <div class="section-head"><span class="idx">01</span><h2>종합 점수 추이</h2><span class="sub"></span></div>
+    <div class="course-chart">
+      <div class="cc-head">
+        <span class="cc-title">종합 점수 추이</span>
+        <span class="cc-legend">
+          <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--accent)" stroke-width="2"/></svg> 상승·유지</i>
+          <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--critical)" stroke-width="2"/></svg> 실패 점수</i>
+          <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--faint)" stroke-width="2" stroke-dasharray="3 3"/></svg> 롤백 복구</i>
+        </span>
+      </div>
+      <svg viewBox="0 0 660 220" width="100%" height="220" id="courseSvg" aria-label="종합 점수 추이 차트"></svg>
+    </div>
+  </section>
+
   <!-- PRIORITY -->
-  <section class="section" id="priority" data-report-panel="dashboard">
+  <section class="section" id="priority" data-report-panel="dashboard" hidden>
     <div class="section-head"><span class="idx">01</span><h2>가장 시급한 문제</h2><span class="sub">심각도·영향 질문 수 기준</span></div>
     <div class="prio" id="prioList">
       <div class="prio-card sev-critical">
@@ -895,7 +1443,7 @@
   </section>
 
   <!-- METRICS before/after -->
-  <section class="section" id="metrics-section" data-section="metrics" data-report-panel="dashboard">
+  <section class="section" id="metrics-section" data-section="metrics" data-report-panel="treatment" hidden>
     <div class="section-head"><span class="idx">02</span><h2>품질 지표 · 처방 전후</h2><span class="sub">RAGAS 4개 지표</span></div>
     <!-- 전후 비교가 없는 모드(외부 로그 진단)에서는 renderMetrics 가 숨긴다 -->
     <div class="metric-panel">
@@ -913,7 +1461,7 @@
 
   <!-- TREATMENT COURSE -->
   <section class="section" id="course-section" data-section="course" data-report-panel="treatment">
-    <div class="section-head"><span class="idx">03</span><h2>치료 경과</h2><span class="sub">처방별 지표 변화</span></div>
+    <div class="section-head"><span class="idx">03</span><h2>치료 경과</h2><span class="sub"></span></div>
 
     <div class="rx-change-matrix" id="rxMatrix"></div>
     <div class="matrix-legend" id="rxMatrixLegend">
@@ -923,19 +1471,7 @@
       <span><i class="error"></i>실패</span>
     </div>
 
-    <div class="course-chart">
-      <div class="cc-head">
-        <span class="cc-title">종합 점수 추이</span>
-        <span class="cc-legend">
-          <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--accent)" stroke-width="2"/></svg> 유지</i>
-          <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--critical)" stroke-width="2"/></svg> 실패 점수</i>
-          <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--faint)" stroke-width="2" stroke-dasharray="3 3"/></svg> 롤백 복구</i>
-        </span>
-      </div>
-      <svg viewBox="0 0 660 220" width="100%" height="220" id="courseSvg" aria-label="종합 점수 추이 차트"></svg>
-    </div>
-
-    <div class="rule-note">
+    <div class="rule-note" hidden>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3h.01" stroke-linecap="round"/></svg>
       <span><b>판정 규칙</b> — 처방 후 종합점수가 오르면 그대로 두고, 떨어지면 되돌린 뒤 다른 방법을 시도합니다.</span>
     </div>
@@ -945,31 +1481,41 @@
 
   <!-- DIAGNOSIS DETAIL -->
   <section class="section" id="detail-section" data-section="dxs" data-report-panel="evidence">
-    <div class="section-head"><span class="idx">04</span><h2>진단 상세</h2><span class="sub">원인 분류 · A 검색 / B 생성 / C 컨텍스트 / D 데이터</span></div>
-    <div class="dx" id="dxList"></div>
+    <div class="section-head"><span class="idx">02</span><h2>진단 상세 내역</h2><span class="sub"></span></div>
+    <div class="evidence-summary" id="diagnosisSummary"></div>
+    <div class="diagnosis-grid" id="dxList"></div>
   </section>
 
   <!-- FAILED QA -->
   <section class="section" id="qa-section" data-report-panel="evidence">
-    <div class="section-head"><span class="idx">05</span><h2>실패한 검증 질문</h2><span class="sub">질문 · 기대 정답 · 실제 답변</span></div>
-    <div class="qa" id="qaList"></div>
+    <div class="section-head"><span class="idx">03</span><h2>검증 질문</h2><span class="sub"></span></div>
+    <div class="evidence-summary compact" id="qaSummary"></div>
+    <div class="qa-tools">
+      <div>
+        <label class="qa-search-label" for="qaSearch">질문 검색</label>
+        <input class="qa-search" id="qaSearch" type="search" placeholder="Q, A, R, 라벨로 검색">
+      </div>
+      <div class="qa-filter" aria-label="검증 질문 필터">
+        <button type="button" class="active" data-qa-filter="all">전체</button>
+        <button type="button" data-qa-filter="wrong">틀린 질문</button>
+        <button type="button" data-qa-filter="correct">맞은 질문</button>
+      </div>
+    </div>
+    <div class="qa-window">
+      <div class="qa" id="qaList"></div>
+    </div>
   </section>
 
   <!-- RECOMMENDATIONS -->
   <section class="section" id="recommend-section" data-section="recommendations" data-report-panel="dashboard">
-    <div class="section-head"><span class="idx">06</span><h2>남은 권고</h2><span class="sub">자동 처방으로 끝나지 않는 항목</span></div>
+    <div class="section-head"><span class="idx">07</span><h2>남은 권고</h2><span class="sub"></span></div>
+    <p class="rec-summary" id="recSummary">자동 처방으로 해결할 수 없는 항목입니다. 코퍼스나 QA 셋 자체에 근거가 없거나 QAR·골드 답변이 어긋난 경우라, 검색 파라미터를 바꾸기보다 데이터를 먼저 확인해야 합니다.</p>
     <div class="rec" id="recList"></div>
   </section>
 
-  <!-- TRANSPARENCY -->
-  <section class="section" data-section="transparency" data-report-panel="evidence">
-    <div class="section-head"><span class="idx">07</span><h2>진단 내역</h2><span class="sub">이 리포트가 만들어진 근거</span></div>
-    <div class="trans" id="transList"></div>
-  </section>
-
   <footer class="foot">
-    <span>AgentDoctor — RAG 진단·처방 파이프라인</span>
-    <span class="foot-mono">Ingest · Index · Eval · Optimize</span>
+    <span>SKKU</span>
+    <span class="foot-mono">Metabuild</span>
   </footer>
 </div>
 
@@ -1049,7 +1595,7 @@
   var DUMMY_RXS = [
     {
       state: 'kept', num: '01', change: ['top_k', '5', '12'], target: '나열형 정답 누락을 겨냥',
-      reason: ['GOLD_RANK', '정답이 최대 12위까지 흩어져 있어, 다 담으려면 top_k ≥ 12 필요'],
+      reason: ['retrieval_incomplete_enumeration', '나열형 정답 누락 3건을 줄이기 위해 검색 후보 범위를 넓혔습니다.'],
       score: ['62', '70', 'up'], verdict: ['keep', '유지'],
       metrics: [
         { key: 'context_recall', name: '정답 회수율', before: .60, after: .78 },
@@ -1057,13 +1603,17 @@
         { key: 'faithfulness', name: '충실도', before: .72, after: .75 },
         { key: 'response_relevancy', name: '답변 관련성', before: .70, after: .73 }
       ],
-      drill: { label: '후보 실측 (sweep) — 8·12·15를 돌려 최선을 선택', rows: [
+      drill: { label: '판정 근거', rows: [
         { k: 'top_k = 8', val: '65.4', w: 62 }, { k: 'top_k = 12', val: '70.1', w: 100, win: true }, { k: 'top_k = 15', val: '68.9', w: 88 }
-      ], caption: '무릎 분석으로 8·12·15를 후보로 좁힌 뒤 실제로 재평가 — 12에서 종합점수가 가장 높아 채택했습니다. 15는 노이즈가 늘어 오히려 하락.' }
+      ], notes: [
+        ['라벨', 'retrieval_incomplete_enumeration 3건, retrieval_low_rank 2건'],
+        ['해결', '정답 회수율이 0.60에서 0.78로 상승'],
+        ['판정', '종합점수가 상승해 유지']
+      ], caption: '후보 8·12·15를 실제로 재평가했고, 12에서 점수가 가장 높아 채택했습니다.' }
     },
     {
       state: 'rolled', num: '02', change: ['chunk_size', '512', '256'], target: '컨텍스트 과다를 겨냥',
-      reason: ['기하 사전검증', '청크를 줄이면 노이즈가 줄 것으로 예상'],
+      reason: ['too_long_context', '컨텍스트가 길어지는 문제를 줄이기 위해 청크 크기 축소를 시도했습니다.'],
       score: ['70', '66', 'down'], verdict: ['roll', '롤백'],
       metrics: [
         { key: 'context_recall', name: '정답 회수율', before: .78, after: .52 },
@@ -1071,11 +1621,15 @@
         { key: 'faithfulness', name: '충실도', before: .75, after: .68 },
         { key: 'response_relevancy', name: '답변 관련성', before: .73, after: .69 }
       ],
-      drill: { label: '왜 되돌렸나', rows: [], caption: '청크를 절반으로 줄이자 정답이 청크 경계에서 잘려 오히려 회수율이 떨어졌고, 종합점수가 70→66으로 하락했습니다. 판정 규칙에 따라 이전 설정으로 되돌리고 이 처방을 블랙리스트에 넣었습니다.' }
+      drill: { label: '판정 근거', rows: [], notes: [
+        ['라벨', 'too_long_context 1건'],
+        ['부작용', '정답 회수율이 0.78에서 0.52로 하락'],
+        ['판정', '점수가 내려가 이전 설정으로 롤백']
+      ], caption: '청크를 줄이자 정답이 청크 경계에서 잘려 회수율이 떨어졌습니다. 최종 설정에는 반영하지 않았습니다.' }
     },
     {
       state: 'kept', num: '03', change: ['리랭커', 'off', 'on'], target: '정답 순위 낮음을 겨냥',
-      reason: ['처방 규칙', '정답이 검색은 되므로, 순위를 재정렬해 앞으로 끌어올림'],
+      reason: ['retrieval_low_rank', '정답은 검색됐지만 순위가 낮아 리랭커를 켰습니다.'],
       score: ['70', '84', 'up'], verdict: ['keep', '유지 · 최종'],
       metrics: [
         { key: 'context_recall', name: '정답 회수율', before: .78, after: .88 },
@@ -1083,7 +1637,11 @@
         { key: 'faithfulness', name: '충실도', before: .75, after: .89 },
         { key: 'response_relevancy', name: '답변 관련성', before: .73, after: .85 }
       ],
-      drill: { label: '효과', rows: [], caption: 'top_k를 더 키우는 대신 리랭커로 순위만 올려 노이즈 없이 정답을 상위로 이동시켰습니다. 검색 정확도 0.66→0.79, 종합점수 70→84로 최종 채택되었습니다.' }
+      drill: { label: '판정 근거', rows: [], notes: [
+        ['라벨', 'retrieval_low_rank 2건'],
+        ['해결', '검색 정확도와 충실도가 함께 상승'],
+        ['판정', '최종 점수가 가장 높아 유지']
+      ], caption: 'top_k를 더 키우지 않고 순위만 조정해 노이즈 증가 없이 정답을 상위로 이동시켰습니다.' }
     }
   ];
   var DUMMY_DXS = [
@@ -1094,32 +1652,46 @@
   ];
   var DUMMY_QAS = [
     { label: 'A · 나열형 누락',
+      status: 'wrong',
       q: '결제 모듈에서 지원하는 결제 수단을 모두 알려줘',
       gold: '카드 · 계좌이체 · 간편결제 · 포인트 · 상품권 (5종)',
       actual: '신용카드, 계좌이체, 간편결제를 지원합니다.',
       diagnosis: '포인트·상품권 2종이 누락되어 기대 정답을 충족하지 못했습니다.',
       fix: '정답이 3·7·12위에 흩어져 있어 top_k=5로는 뒤쪽을 놓침 → top_k 12로 확대해 전부 회수' },
     { label: 'A · 순위 낮음',
+      status: 'wrong',
       q: '관리자 권한을 다른 사용자에게 위임하는 절차는?',
       gold: '설정 → 멤버 → 역할 변경 → 승인 요청',
       actual: '제공된 문서에서 관련 정보를 찾을 수 없습니다.',
       diagnosis: '정답 청크가 11위라 상위 5개 컨텍스트에 포함되지 않았습니다.',
       fix: '정답이 검색은 됐으나 11위 → 리랭커로 2위까지 끌어올려 답변에 반영' },
     { label: 'C · 컨텍스트 김',
+      status: 'wrong',
       q: '무료 체험 기간은 며칠인가요?',
       gold: '14일',
       actual: '플랜에 따라 30일 또는 14일이며, 전환 조건과 결제 수단에 따라 달라질 수 있습니다.',
       diagnosis: '정답이 긴 컨텍스트 중간에 묻혀 답변이 불명확합니다.',
-      fix: '다른 처방 후보(컨텍스트 재정렬 등)를 다음 반복에서 시도할 예정' }
+      fix: '다른 처방 후보(컨텍스트 재정렬 등)를 다음 반복에서 시도할 예정' },
+    { label: '통과',
+      status: 'correct',
+      q: '무료 체험을 해지하면 결제는 언제 중단되나요?',
+      gold: '해지 즉시 자동 결제가 중단됩니다.',
+      actual: '해지 즉시 자동 결제가 중단됩니다.',
+      diagnosis: '기대 정답과 실제 답변이 일치합니다.',
+      fix: '추가 처방 없음' }
   ];
   var DUMMY_RECS = [
     { kind: 'prelim', code: 'generation_partial_answer', badge: ['prelim', '의심'],
-      title: '부분 답변 · 질문 1건', desc: '표준 검진으로는 원인을 확정할 수 없어 정밀 검진이 필요합니다.',
-      cta: '정밀 검진 실행 →', steps: [],
+      title: '부분 답변 · 질문 1건',
+      desc: '검색 설정을 바꿔도 바로 해결된다고 보기 어렵습니다. 근거는 들어왔지만 답변이 조건 일부를 빠뜨린 경우라, 생성 단계의 판단을 한 번 더 확인해야 합니다.',
+      cta: '정밀 확인 필요', steps: [
+        { action: '누락된 조건을 답변과 대조', detail: '정답 근거가 컨텍스트에 있었는지, 있었는데 답변만 빠뜨렸는지 확인합니다.' },
+        { action: '생성 프롬프트 또는 검증 기준 보강', detail: '같은 유형이 반복되면 답변 생성 지시나 후처리 검증을 강화합니다.' }
+      ],
       items: [{ q: '무료 체험 기간과 전환 조건을 모두 알려줘', where: '', gold: '' }] },
     { kind: 'manual', code: 'corpus_gap', badge: ['data', 'D · 데이터'],
       title: '코퍼스에 근거가 없는 질문 2건',
-      desc: '질문에 답할 근거 문서가 코퍼스에 없습니다. 해당 주제를 다루는 문서를 추가로 수집·인덱싱해 주세요.',
+      desc: '질문에 답할 근거 문서가 코퍼스나 QA 셋 안에 없습니다. 검색 범위나 청크 크기를 조정해도 없는 근거를 만들 수 없으므로 데이터 보강이 먼저입니다.',
       cta: '문서 보강 필요',
       steps: [
         { action: '코퍼스에서 빠진 근거를 특정', detail: '해당 질문의 정답 근거가 담긴 원본 문서 중 코퍼스에 없는 것을 확인합니다.' },
@@ -1130,7 +1702,14 @@
         { q: 'SSO 강제 적용 정책은?', where: '근거 문서: security_policy', gold: '' }
       ] }
   ];
-  var DUMMY_SCORE = { before: 62, after: 84 };
+  var DUMMY_SCORE = {
+    before: 62,
+    after: 84,
+    findings_count: 4,
+    kept: 2,
+    rolled: 1,
+    pending: 1
+  };
   /* 데이터 없이 템플릿만 열었을 때의 미리보기 값. 실데이터가 오면 renderTransparency 가
      transparency 로 덮어쓴다 — 예전엔 이 숫자들이 마크업에 박혀 있어 실제 진단서에도
      그대로 나갔다(47문항·218청크가 어느 코퍼스든 똑같이 표시됨). */
@@ -1157,11 +1736,12 @@
     var score = isLive ? (data.score || DUMMY_SCORE) : DUMMY_SCORE;
     var meta = isLive ? (data.meta || DUMMY_META) : DUMMY_META;
 
+    renderDxs(dxs);
+    renderLabelDistributions(dxs);
     renderMetrics(metrics, rxs, score);
     renderCourse(data.course);
     renderRxMatrix(rxs);
     renderRxs(rxs);
-    renderDxs(dxs);
     renderQas(qas);
     renderGauge(score, isLive ? data.mode : null);
     renderPriority(priority);
@@ -1291,21 +1871,32 @@
         '<span class="score-note">내부 최적화 실행의 종합 점수와 같은 기준선으로 직접 비교하지 않고, 어떤 실패 유형이 반복되는지 확인하는 용도로 봅니다.</span>';
       return;
     }
-    var before = score && score.before != null ? score.before : null;
-    var after = score && score.after != null ? score.after : null;
-    var delta = (before != null && after != null) ? (after - before) : null;
-    var note = '한 번의 숫자만으로 확정하지 않고, 아래 치료 경과에서 처방별 변화와 롤백 여부를 함께 확인합니다.';
-    if (delta !== null) {
-      if (delta > 0) note = '점수 상승분은 실제로 유지된 처방만 반영합니다. 떨어진 처방은 롤백으로 표시해 최종 점수에 섞이지 않게 했습니다.';
-      else if (delta < 0) note = '점수가 내려간 처방은 원인 후보로 남기되, 최종 설정에는 반영하지 않는 흐름으로 확인합니다.';
-    }
     el.innerHTML =
-      '<b>종합 점수는 검색·답변·검증 결과를 함께 본 표시값입니다.</b> ' +
-      '정답 근거를 제대로 가져왔는지, 답변이 그 근거와 맞는지, 처방 후 실제 지표가 좋아졌는지를 한 화면에서 보기 쉽게 묶었습니다. ' +
-      '<span class="score-note">' + esc(note) + '</span>';
+      '<b>종합 점수는 검색·답변·검증 결과를 함께 본 참고용 표시값입니다.</b> ' +
+      '정답 근거를 가져왔는지, 답변이 그 근거와 맞는지, 처방 후 품질이 유지됐는지를 함께 봅니다. ' +
+      '<span class="score-note">이 프로젝트는 종합 점수 80점을 기준으로 보고, 그보다 낮으면 추가 처방이나 데이터 확인이 필요한 상태로 봅니다.</span>';
   }
 
   /* ── hero summary/stats ── */
+  function formatMetaDate(meta) {
+    var d = meta && meta.created_at ? new Date(meta.created_at) : null;
+    if (!d || isNaN(d)) return '';
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' +
+      String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
+  function renderHeroMetaChips(meta) {
+    var corpus = meta && meta.corpus ? meta.corpus : '사내 제품 문서';
+    var questionCount = meta && meta.question_count != null ? meta.question_count : 0;
+    var dateText = formatMetaDate(meta);
+    var chips = [
+      '<span class="hero-meta-chip">코퍼스 <b>' + esc(corpus) + '</b></span>',
+      '<span class="hero-meta-chip">테스트 질문 <b>' + esc(questionCount) + '</b></span>'
+    ];
+    if (dateText) chips.push('<span class="hero-meta-chip"><b>' + esc(dateText) + '</b></span>');
+    return chips.join('');
+  }
+
   function renderHero(score, meta, mode) {
     var external = !!(mode && mode.kind === 'external');
     var badge = document.getElementById('verdictBadge');
@@ -1316,30 +1907,18 @@
     // "없음"과 "할 수 없음"을 구분하는 이 진단서의 다른 자리와 같은 판단이다.
     // display 는 양쪽 분기에서 반드시 정한다 — 한 페이지에서 run 을 바꿔 다시 렌더할 때
     // (외부 → 내부) 숨긴 채로 남지 않게. 첫 렌더만 보면 안 드러나는 종류다.
-    if (external || score.pass_threshold == null) {
-      badge.style.display = 'none';
-    } else {
-      badge.style.display = '';
-      var pass = !!score.pass_threshold;
-      badge.className = 'verdict ' + (pass ? 'pass' : 'fail');
-      document.getElementById('verdictText').textContent =
-        pass ? '처방 후 기준선 통과' : '기준선 미달';
-    }
+    badge.style.display = 'none';
     if (external) { renderHeroExternal(score, meta, mode); return; }
     var before = score.before != null ? score.before : 0;
     var after = score.after != null ? score.after : 0;
     var rxCount = (score.kept || 0) + (score.rolled || 0) + (score.errors || 0) + (score.pending || 0);
     var trend = after > before ? '올랐습니다.' : (after < before ? '내려갔습니다.' : '변화가 없었습니다.');
     document.getElementById('heroHeadline').innerHTML =
-      '문제 ' + (score.findings_count || 0) + '건을 찾아 ' + rxCount + '번 처방했고, 종합점수가 ' +
-      '<span style="color:var(--good)">' + before + '에서 ' + after + '로</span> ' + trend;
-    document.getElementById('heroSummary').textContent = meta.corpus ? (meta.corpus + ' 문서를 ' + (meta.question_count || 0) + '개 질문으로 진단한 결과입니다.') : '';
-    document.getElementById('heroStats').innerHTML =
-      '<div class="hero-stat"><div class="n">' + (score.findings_count || 0) + '</div><div class="l">발견된 문제</div></div>' +
-      '<div class="hero-stat"><div class="n up">' + (score.kept || 0) + '</div><div class="l">채택된 처방</div></div>' +
-      '<div class="hero-stat"><div class="n warn">' + (score.rolled || 0) + '</div><div class="l">롤백</div></div>' +
-      ((score.errors || 0) ? '<div class="hero-stat"><div class="n error">' + score.errors + '</div><div class="l">실험 오류</div></div>' : '') +
-      '<div class="hero-stat"><div class="n">' + (score.pending || 0) + '</div><div class="l">추가 확인 필요</div></div>';
+      rxCount + '건을 처방했고, 종합점수는 <span style="color:var(--ink)">' + after + '</span>/100입니다.';
+    var heroSummary = document.getElementById('heroSummary');
+    heroSummary.className = 'hero-meta-chips';
+    heroSummary.innerHTML = renderHeroMetaChips(meta);
+    document.getElementById('heroStats').innerHTML = '';
   }
 
   /* 외부(로그 리플레이) 모드 hero — 처방 전후가 없으므로 단일 점수와 증거 수준을 쓴다.
@@ -1363,7 +1942,9 @@
     document.getElementById('heroHeadline').innerHTML = head;
     // 점수가 있으면 사람은 비교하려 든다. 어느 축이 다른지를 점수 바로 옆에 붙인다 —
     // 상단 안내에만 적어두면 숫자를 먼저 보고 안내는 안 읽는다.
-    document.getElementById('heroSummary').textContent =
+    var heroSummary = document.getElementById('heroSummary');
+    heroSummary.className = 'hero-summary-text';
+    heroSummary.textContent =
       (score.score_unavailable_reason ? score.score_unavailable_reason + ' '
         : '외부 RAG 실행 로그를 진단한 결과입니다. 처방은 상대 팀이 직접 적용합니다. ')
       + ((mode && mode.score_note && score.after != null) ? mode.score_note : '');
@@ -1371,21 +1952,22 @@
     if (score.confirmed != null) cells.push(['up', score.confirmed, '확정 소견']);
     if (score.tentative != null) cells.push(['warn', score.tentative, '예비 소견']);
     if (meta.tier) cells.push(['', meta.tier, '진단 수준']);
-    document.getElementById('heroStats').innerHTML = cells.map(function (c) {
-      return '<div class="hero-stat"><div class="n' + (c[0] ? ' ' + c[0] : '') + '">' +
-        esc(c[1]) + '</div><div class="l">' + esc(c[2]) + '</div></div>';
-    }).join('');
+    document.getElementById('heroStats').innerHTML = '';
   }
 
   /* ── header meta chips ── */
   function renderMeta(meta) {
-    document.getElementById('metaCorpus').textContent = meta.corpus || '-';
-    document.getElementById('metaDepth').textContent = meta.depth || '-';
-    document.getElementById('metaQuestionCount').textContent = meta.question_count || 0;
-    var d = meta.created_at ? new Date(meta.created_at) : null;
-    document.getElementById('metaCreatedAt').textContent = (d && !isNaN(d)) ?
-      (d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' +
-       String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')) : '';
+    var corpusEl = document.getElementById('metaCorpus');
+    var depthEl = document.getElementById('metaDepth');
+    var questionEl = document.getElementById('metaQuestionCount');
+    if (corpusEl) corpusEl.textContent = meta.corpus || '-';
+    if (depthEl) depthEl.textContent = meta.depth || '-';
+    if (questionEl) questionEl.textContent = meta.question_count || 0;
+    var dateText = formatMetaDate(meta);
+    var metaDate = document.getElementById('metaCreatedAt');
+    if (metaDate) metaDate.textContent = dateText;
+    var scoreDate = document.getElementById('scoreDate');
+    if (scoreDate) scoreDate.textContent = dateText ? ('진단일 ' + dateText) : '';
   }
 
   /* ── metrics dumbbell ── */
@@ -1538,11 +2120,11 @@
 
   /* ── course line chart ── */
   var DUMMY_COURSE = [
-    { label: '기준선', score: 62, kept: true, kind: 'baseline' },
-    { label: 'top_k 확대', score: 70, kept: true, kind: 'kept' },
-    { label: '청크 축소 실패', score: 66, kept: false, kind: 'failed' },
-    { label: '원상 복구', score: 70, kept: true, kind: 'rollback' },
-    { label: '리랭커 활성화', score: 84, kept: true, kind: 'kept' }
+    { label: '0', step: 0, score: 62, kept: true, kind: 'baseline' },
+    { label: '1', step: 1, score: 70, kept: true, kind: 'kept' },
+    { label: '2', step: 2, score: 66, kept: false, kind: 'failed' },
+    { label: '2', step: 2, score: 70, kept: true, kind: 'rollback' },
+    { label: '3', step: 3, score: 84, kept: true, kind: 'kept' }
   ];
   function renderCourse(coursePoints) {
     var raw = coursePoints && coursePoints.length ? coursePoints : DUMMY_COURSE;
@@ -1553,9 +2135,16 @@
     var scores = raw.map(function (p) { return p.score; });
     var sMin = Math.max(0, Math.min.apply(null, scores) - 10);
     var sMax = Math.min(100, Math.max.apply(null, scores) + 10);
+    var steps = raw.map(function (p, i) { return p.step == null ? i : Number(p.step); });
+    var stepMin = Math.min.apply(null, steps);
+    var stepMax = Math.max.apply(null, steps);
+    if (stepMin === stepMax) stepMax = stepMin + 1;
     var pts = raw.map(function (p, i) {
+      var step = p.step == null ? i : Number(p.step);
       return {
-        x: raw.length > 1 ? L + (R - L) * (i / (raw.length - 1)) : L,
+        x: L + (R - L) * ((step - stepMin) / (stepMax - stepMin)),
+        step: step,
+        axisLabel: String((step - stepMin) + 1),
         label: p.label, score: p.score, kept: p.kept, kind: p.kind || (p.kept ? 'kept' : 'pending')
       };
     });
@@ -1594,6 +2183,14 @@
     });
 
     // points + labels
+    var axisLabels = {};
+    pts.forEach(function (p) { axisLabels[p.step] = p.axisLabel; });
+    Object.keys(axisLabels).forEach(function (step) {
+      var x = L + (R - L) * ((Number(step) - stepMin) / (stepMax - stepMin));
+      var axis = el('text', { x: x, y: B + 22, 'text-anchor': Number(step) === stepMin ? 'start' : (Number(step) === stepMax ? 'end' : 'middle'), fill: 'var(--faint)', 'font-size': 10.5, 'font-family': 'var(--mono)' });
+      axis.textContent = axisLabels[step];
+      svg.appendChild(axis);
+    });
     pts.forEach(function (p, i) {
       var isBase = i === 0;
       var isFailed = p.kind === 'failed';
@@ -1613,8 +2210,16 @@
           'font-size': 12, 'font-weight': isBase ? 400 : 600, 'font-family': 'var(--mono)'
         })).textContent = p.score;
       }
-      var t = el('text', { x: p.x, y: B + 20, 'text-anchor': i === 0 ? 'start' : (i === pts.length - 1 ? 'end' : 'middle'), fill: 'var(--faint)', 'font-size': 10.5, 'font-family': 'var(--mono)' });
-      t.textContent = p.label; svg.appendChild(t);
+      if (isRollback) {
+        svg.appendChild(el('text', {
+          x: p.x + 8, y: y(p.score) + 22,
+          'text-anchor': 'start',
+          fill: 'var(--warning)',
+          'font-size': 11.5,
+          'font-weight': 650,
+          'font-family': 'var(--sans)'
+        })).textContent = '롤백';
+      }
     });
   }
 
@@ -1709,9 +2314,8 @@
     '</div>';
   }
   function rxStepLabel(r, index) {
-    var key = Array.isArray(r.change) && r.change[0] ? r.change[0] : ('step ' + (index + 1));
-    var verdict = Array.isArray(r.verdict) && r.verdict[1] ? r.verdict[1] : '';
-    return verdict ? key + ' · ' + verdict : key;
+    var n = parseInt(r.num, 10);
+    return Number.isFinite(n) ? String(n) : String(index + 1);
   }
   function buildRxMatrixRows(rxs) {
     var map = {};
@@ -1720,15 +2324,17 @@
       normalizeRxMetrics(r).forEach(function (m) {
         var key = m.key || m.name || 'metric';
         if (!map[key]) {
+          if (key === 'composite') return;
           map[key] = {
             key: key,
             name: m.name || key,
             unit: m.unit || '',
-            points: [{ label: '기준', value: m.before, kind: 'baseline' }],
+            points: [{ label: '0', value: m.before, kind: 'baseline' }],
             labels: []
           };
           order.push(key);
         }
+        if (key === 'composite') return;
         map[key].points.push({
           label: rxStepLabel(r, rxIndex),
           value: m.after,
@@ -1764,7 +2370,7 @@
     }
     if (legend) legend.hidden = false;
     el.innerHTML =
-      '<div class="matrix-head"><span>지표 / 라벨</span><span>변화 흐름</span><span>기준 → 최종</span><span>판정</span></div>' +
+      '<div class="matrix-head"><span>지표</span><span>처방별 변화</span><span>처방 전후</span><span>판정</span></div>' +
       rows.map(function (row) {
         var range = matrixValueRange(row.points, row);
         var dots = row.points.map(function (p) {
@@ -1773,7 +2379,7 @@
         }).join('');
         var verdict = row.points.some(function (p) { return p.kind === 'rollback'; }) ? '롤백 포함' : '최종 반영';
         return '<div class="matrix-row">' +
-          '<div class="matrix-title"><b>' + esc(row.name) + '</b><span>' + esc(row.key) + (row.labels.length ? ' · ' + esc(row.labels.join(', ')) : '') + '</span></div>' +
+          '<div class="matrix-title"><b>' + esc(row.name) + '</b><span>' + esc(labelKoreanSummary(row.labels)) + '</span></div>' +
           '<div class="matrix-track">' + dots + '</div>' +
           '<div class="matrix-values">' + esc(range.first) + ' → ' + esc(range.last) + '<br>' + esc(range.delta) + '</div>' +
           '<div class="matrix-verdict">' + esc(verdict) + '</div>' +
@@ -1791,7 +2397,7 @@
     var scoreHtml = hasScore ?
       '<div class="rx-scoredelta">종합 ' + esc(r.score[0]) + ' <b class="' + scoreCls + '">→ ' + esc(r.score[1]) + (arrowUp ? ' ↑' : ' ↓') + '</b></div>' :
       '<div class="rx-scoredelta error">종합 점수 측정 안 됨</div>';
-    var metricChipsHtml = renderMetricChips(metrics);
+    var metricChipsHtml = '';
     var metricTableHtml = renderRxMetricTable(metrics);
     var rows = drill.rows || [];
     var rowsHtml = rows.length ? '<div class="sweep">' + rows.map(function (s) {
@@ -1811,7 +2417,7 @@
         '<div class="rx-body">' +
           '<div class="rx-change">' + esc(r.change[0]) + ' <span style="color:var(--faint)">' + esc(r.change[1]) + '</span><span class="arrow">→</span>' + esc(r.change[2]) + '</div>' +
           '<div class="rx-target">' + esc(r.target) + '</div>' +
-          '<div class="rx-reason"><span class="rl">' + esc(r.reason[0]) + '</span> ' + esc(r.reason[1]) + '</div>' +
+          '<div class="rx-reason">' + esc(r.reason[1]) + '</div>' +
           metricChipsHtml +
         '</div>' +
         '<div class="rx-right">' +
@@ -1832,17 +2438,175 @@
   }
 
   /* ── diagnosis detail ── */
+  function cleanGroupName(group) {
+    return String(group || '').replace(/^[A-D]\s*[·.]\s*/, '').trim() || '기타';
+  }
+  var LABEL_NAME_LOOKUP = {};
+  function labelKoreanSummary(labels) {
+    if (!labels || !labels.length) return '관련 라벨 없음';
+    return labels.map(function (label) {
+      return LABEL_NAME_LOOKUP[label] || label;
+    }).join(', ');
+  }
+  var DIAG_GROUP_META = {
+    A: { name: '검색', hint: '정답 근거를 찾거나 상위에 올리는 단계', color: '#3b6ea8' },
+    B: { name: '생성', hint: '근거를 보고 답변을 만드는 단계', color: '#7a5d9f' },
+    C: { name: '컨텍스트', hint: '청크 경계·노이즈·길이 문제', color: '#b7791f' },
+    D: { name: '데이터', hint: '코퍼스·QA·골드 답변 자체의 문제', color: '#5f7f52' }
+  };
+  var DIAG_GROUP_ORDER = ['A', 'B', 'C', 'D'];
+  function diagnosisAffectedCount(d) {
+    if (d.count != null) return Number(d.count) || 0;
+    if (d.affected != null) return Number(d.affected) || 0;
+    if (d.probe_count != null) return Number(d.probe_count) || 0;
+    var m = String(d.foot || '').match(/(\d+)\s*건/);
+    return m ? Number(m[1]) : 1;
+  }
+  function buildDiagnosisGroups(dxs) {
+    var groups = {};
+    DIAG_GROUP_ORDER.forEach(function (key) {
+      groups[key] = {
+        key: key,
+        name: DIAG_GROUP_META[key].name,
+        hint: DIAG_GROUP_META[key].hint,
+        color: DIAG_GROUP_META[key].color,
+        total: 0,
+        labels: []
+      };
+    });
+    (dxs || []).forEach(function (d) {
+      var g = diagnosisGroupKey(d);
+      var key = DIAG_GROUP_META[g.key] ? g.key : 'D';
+      var count = Math.max(1, diagnosisAffectedCount(d));
+      groups[key].total += count;
+      groups[key].labels.push({
+        code: d.code || d.title || 'unknown',
+        title: d.title || d.code || '라벨',
+        desc: d.desc || '',
+        count: count,
+        foot: d.foot || '',
+        rx: d.rx || ''
+      });
+    });
+    return groups;
+  }
+  function renderDiagnosisSummary(dxs) {
+    var el = document.getElementById('diagnosisSummary');
+    if (!el) return;
+    var groups = buildDiagnosisGroups(dxs);
+    var all = [];
+    DIAG_GROUP_ORDER.forEach(function (key) {
+      all = all.concat(groups[key].labels.map(function (l) {
+        return Object.assign({ group: groups[key].name }, l);
+      }));
+    });
+    all.sort(function (a, b) { return b.count - a.count; });
+    var top = all[0];
+    var groupRank = DIAG_GROUP_ORDER.map(function (key) { return groups[key]; }).sort(function (a, b) { return b.total - a.total; })[0];
+    var lines = [
+      top
+        ? '<b>' + esc(top.title) + '</b> 라벨이 가장 많이 반복됐습니다. 로그 기준 ' + esc(top.count) + '개 질문에서 같은 유형이 확인됐습니다.'
+        : '<b>확정 라벨</b>이 아직 없습니다. 검증 질문이 더 쌓이면 이 영역에 원인 요약이 표시됩니다.',
+      groupRank && groupRank.total
+        ? '<b>' + esc(groupRank.name) + '</b> 그룹 비중이 가장 큽니다. 검색·생성·컨텍스트·데이터 중 어느 단계에서 실패가 몰리는지 먼저 확인합니다.'
+        : '<b>그룹 분포</b>는 검색·생성·컨텍스트·데이터 네 단계로 나누어 집계합니다.',
+      '아래 카드를 클릭하면 그룹 안의 라벨 분포표가 펼쳐집니다. 각 막대는 해당 라벨이 영향을 준 질문 수를 뜻합니다.'
+    ];
+    el.innerHTML = lines.map(function (line) {
+      return '<div class="summary-line">' + line + '</div>';
+    }).join('');
+  }
   function renderDxs(dxs) {
-  document.getElementById('dxList').innerHTML = dxs.map(function (d) {
-    return '<div class="dx-card">' +
-      '<div class="dx-top"><span class="dx-grp">' + esc(d.grp) + '</span><span class="badge ' + d.badge[0] + '">' +
-        (d.badge[0] === 'confirm' ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>' : '') + esc(d.badge[1]) + '</span></div>' +
-      '<div class="dx-title">' + esc(d.title) + '</div>' +
-      '<div class="dx-code">' + esc(d.code) + '</div>' +
-      '<div class="dx-desc" style="margin-top:9px">' + esc(d.desc) + '</div>' +
-      '<div class="dx-foot">' + esc(d.foot) + '<span class="rx-link">' + esc(d.rx) + '</span></div>' +
-    '</div>';
-  }).join('');
+    LABEL_NAME_LOOKUP = {};
+    (dxs || []).forEach(function (d) {
+      if (d.code) LABEL_NAME_LOOKUP[d.code] = d.title || d.code;
+    });
+    renderDiagnosisSummary(dxs);
+    var el = document.getElementById('dxList');
+    var groups = buildDiagnosisGroups(dxs);
+    var maxTotal = Math.max.apply(null, DIAG_GROUP_ORDER.map(function (key) { return groups[key].total; }).concat([1]));
+    var firstActiveKey = DIAG_GROUP_ORDER.filter(function (key) { return groups[key].labels.length; })[0] || 'A';
+    el.innerHTML = DIAG_GROUP_ORDER.map(function (key) {
+      var group = groups[key];
+      var labels = group.labels.slice().sort(function (a, b) { return b.count - a.count; });
+      var labelMax = Math.max.apply(null, labels.map(function (l) { return l.count; }).concat([1]));
+      var bars = labels.length ? labels.map(function (label, i) {
+        return '<i title="' + esc(label.title) + ' ' + esc(label.count) + '건" style="--h:' +
+          Math.max(12, label.count / labelMax * 100) + '%;--c:' + esc(group.color) + ';opacity:' + (0.96 - i * 0.08) + '"></i>';
+      }).join('') : '<i style="--h:8%;--c:#d0d0d0"></i>';
+      var detail = labels.length ? labels.map(function (label) {
+        return '<div class="label-bar-row">' +
+          '<span title="' + esc(label.code) + '">' + esc(label.title) + '</span>' +
+          '<em><i style="width:' + Math.max(7, label.count / labelMax * 100) + '%;background:' + esc(group.color) + '"></i></em>' +
+          '<b>' + esc(label.count) + '</b>' +
+        '</div>';
+      }).join('') : '<div class="label-bar-row"><span>감지된 라벨 없음</span><em><i style="width:0"></i></em><b>0</b></div>';
+      var active = key === firstActiveKey ? ' active' : '';
+      return '<button type="button" class="diagnosis-group-card' + active + '" data-dx-group="' + esc(key) + '">' +
+        '<div class="diagnosis-card-head">' +
+          '<div class="diagnosis-card-title"><b>' + esc(group.name) + '</b><span>' + esc(group.hint) + '</span></div>' +
+          '<div class="diagnosis-count"><b>' + esc(labels.length) + '</b>라벨<br>질문 ' + esc(group.total) + '건</div>' +
+        '</div>' +
+        '<div class="diagnosis-mini-bars" aria-hidden="true">' + bars + '</div>' +
+        '<div class="group-share"><i style="width:' + Math.max(5, group.total / maxTotal * 100) + '%;background:' + esc(group.color) + '"></i></div>' +
+        '<div class="diagnosis-card-desc">그룹 안에서 어떤 라벨이 반복됐는지 클릭해서 확인합니다.</div>' +
+        '<div class="diagnosis-detail-panel">' +
+          '<div class="diagnosis-detail-title">라벨 분포표 <span>' + esc(group.name) + ' 그룹</span></div>' +
+          detail +
+        '</div>' +
+      '</button>';
+    }).join('');
+    el.querySelectorAll('.diagnosis-group-card').forEach(function (card) {
+      card.addEventListener('click', function () {
+        el.querySelectorAll('.diagnosis-group-card').forEach(function (other) {
+          other.classList.toggle('active', other === card);
+        });
+      });
+    });
+  }
+
+  function diagnosisGroupKey(d) {
+    var group = String((d && d.grp) || '');
+    var m = group.match(/^([A-D])\s*[·.]\s*(.*)$/);
+    var key = m ? m[1] : '기타';
+    var name = m ? (m[2] || group) : group;
+    return { key: key, name: cleanGroupName(name || group) };
+  }
+  function renderLabelDistributions(dxs) {
+    var el = document.getElementById('labelDistList');
+    if (!el) return;
+    var groups = {};
+    (dxs || []).forEach(function (d) {
+      var g = diagnosisGroupKey(d);
+      if (!groups[g.key]) groups[g.key] = { name: g.name, total: 0, labels: {} };
+      groups[g.key].total += 1;
+      var label = d.code || d.title || 'unknown';
+      groups[g.key].labels[label] = (groups[g.key].labels[label] || 0) + 1;
+    });
+    var order = ['A', 'B', 'C', 'D', '기타'].filter(function (key) { return groups[key]; });
+    if (!order.length) {
+      el.innerHTML = '<div class="label-group"><div class="label-group-head"><b>라벨 없음</b><span>0건</span></div></div>';
+      return;
+    }
+    var maxTotal = Math.max.apply(null, order.map(function (key) { return groups[key].total; }));
+    el.innerHTML = order.map(function (key) {
+      var group = groups[key];
+      var labels = Object.keys(group.labels).sort(function (a, b) { return group.labels[b] - group.labels[a]; });
+      return '<div class="label-group">' +
+        '<div class="label-group-head"><b>' + esc(group.name) + '</b><span>' + group.total + '건</span></div>' +
+        '<div class="group-share"><i style="width:' + Math.max(5, group.total / maxTotal * 100) + '%"></i></div>' +
+        labels.map(function (label) {
+          var count = group.labels[label];
+          var found = (dxs || []).filter(function (d) { return d.code === label; })[0];
+          var title = found ? found.title : label;
+          return '<div class="label-bar-row">' +
+            '<span>' + esc(title) + '</span>' +
+            '<em><i style="width:' + Math.max(6, count / group.total * 100) + '%"></i></em>' +
+            '<b>' + count + '</b>' +
+          '</div>';
+        }).join('') +
+      '</div>';
+    }).join('');
   }
 
   /* ── 남은 권고 (D그룹 매뉴얼 + 예비) ── */
@@ -1850,6 +2614,16 @@
   var RECIC_BOX = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2M4 7h16M4 7v12a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7M9 11h6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   function renderRecommendations(recs) {
     var el = document.getElementById('recList');
+    var summary = document.getElementById('recSummary');
+    if (summary) {
+      if (!recs || !recs.length) {
+        summary.textContent = '현재 추가 확인이 필요한 남은 권고는 없습니다.';
+      } else if (recs.some(function (r) { return r.kind === 'manual' || /corpus|gold|qa/i.test(r.code || ''); })) {
+        summary.textContent = '자동 처방으로 해결할 수 없는 항목입니다. 코퍼스나 QA 셋 자체에 근거가 없거나 QAR·골드 답변이 어긋난 경우라, 검색 파라미터를 바꾸기보다 데이터를 먼저 확인해야 합니다.';
+      } else {
+        summary.textContent = '자동 처방만으로 끝나지 않는 항목입니다. 검색 설정이 아니라 답변 생성 과정에서 조건을 빠뜨렸는지 사람이 한 번 더 확인해야 합니다.';
+      }
+    }
     if (!recs || !recs.length) {
       el.innerHTML = '<div class="rec-item"><div class="rec-ic">' + RECIC_BULB + '</div><div class="rec-body"><div class="rd">사람 개입이 필요한 남은 권고가 없습니다.</div></div></div>';
       return;
@@ -1886,23 +2660,99 @@
   /* ── failed validation QA ── */
   var xIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12M18 6 6 18" stroke-linecap="round"/></svg>';
   var dashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 12h12" stroke-linecap="round"/></svg>';
+  var CURRENT_QAS = [];
+  var QA_FILTER = 'all';
   function renderQas(qas) {
-  var list = document.getElementById('qaList');
-  if (!qas.length) {
-    list.innerHTML = '<p style="color:var(--faint);font-size:13px">실패한 검증 질문이 없습니다.</p>';
-    return;
+    CURRENT_QAS = qas || [];
+    var input = document.getElementById('qaSearch');
+    if (input && !input.dataset.bound) {
+      input.dataset.bound = '1';
+      input.addEventListener('input', applyQaFilters);
+    }
+    if (input) input.value = '';
+    document.querySelectorAll('[data-qa-filter]').forEach(function (btn) {
+      if (!btn.dataset.bound) {
+        btn.dataset.bound = '1';
+        btn.addEventListener('click', function () {
+          QA_FILTER = btn.getAttribute('data-qa-filter') || 'all';
+          document.querySelectorAll('[data-qa-filter]').forEach(function (other) {
+            other.classList.toggle('active', other === btn);
+          });
+          applyQaFilters();
+        });
+      }
+      btn.classList.toggle('active', btn.getAttribute('data-qa-filter') === QA_FILTER);
+    });
+    renderQaSummary(CURRENT_QAS);
+    applyQaFilters();
   }
-  list.innerHTML = qas.map(function (x) {
-    return '<div class="qa-card unsolved">' +
-      '<div class="qa-head"><span class="qm">Q</span><span class="qt">' + esc(x.q || '-') + '</span><span class="ql">' + esc(x.label) + '</span></div>' +
-      '<div class="qa-gold"><span class="gl">기대 정답</span><b>' + esc(x.gold || '-') + '</b></div>' +
-      '<div class="qa-ans">' +
-        '<div class="col before"><div class="tag">' + xIcon + ' 실제 답변</div><div class="atext">"' + esc(x.actual || '(답변 없음)') + '"</div></div>' +
-        '<div class="col after"><div class="tag">' + dashIcon + ' 진단 결과</div><div class="atext">' + esc(x.diagnosis) + '</div></div>' +
-      '</div>' +
-      '<div class="qa-fix"><span class="fl">처방</span><span>' + esc(x.fix || '미처방') + '</span></div>' +
-    '</div>';
-  }).join('');
+  function qaText(x) {
+    return [x.q, x.label, x.gold, x.expected, x.actual, x.rag_answer, x.answer, x.diagnosis, x.fix].join(' ').toLowerCase();
+  }
+  function cleanQaLabel(label) {
+    return String(label || '').replace(/^[A-D]\s*[·.]\s*/, '').trim();
+  }
+  function qaExpected(x) {
+    return x.gold || x.expected || x.reference_answer || x.answer_gold || '-';
+  }
+  function qaResponse(x) {
+    return x.rag_answer || x.actual || x.answer || x.generated_answer || x.response || '(답변 없음)';
+  }
+  function qaIsCorrect(x) {
+    if (x.correct === true || x.passed === true || x.ok === true) return true;
+    if (x.correct === false || x.passed === false || x.ok === false) return false;
+    var status = String(x.status || x.result || x.outcome || '').toLowerCase();
+    if (/pass|correct|success|ok|맞음|통과/.test(status)) return true;
+    if (/fail|wrong|error|miss|incorrect|틀림|실패|오답/.test(status)) return false;
+    return false;
+  }
+  function renderQaSummary(qas) {
+    var el = document.getElementById('qaSummary');
+    if (!el) return;
+    var total = (qas || []).length;
+    var correct = (qas || []).filter(qaIsCorrect).length;
+    var wrong = Math.max(0, total - correct);
+    var lines = [
+      '<b>' + esc(total) + '개</b> 검증 질문을 Q/A/R 형식으로 모았습니다. 질문·기대 정답·실제 답변을 한 줄에서 대조할 수 있습니다.',
+      '<b>' + esc(wrong) + '개</b>는 기대 답변과 어긋났고, <b>' + esc(correct) + '개</b>는 통과했습니다. 위 필터로 맞은 질문과 틀린 질문만 따로 볼 수 있습니다.'
+    ];
+    el.innerHTML = lines.map(function (line) {
+      return '<div class="summary-line">' + line + '</div>';
+    }).join('');
+  }
+  function filterQas(query) {
+    var q = String(query || '').trim().toLowerCase();
+    return CURRENT_QAS.filter(function (item) {
+      var correct = qaIsCorrect(item);
+      if (QA_FILTER === 'correct' && !correct) return false;
+      if (QA_FILTER === 'wrong' && correct) return false;
+      if (!q) return true;
+      return qaText(item).indexOf(q) >= 0;
+    });
+  }
+  function applyQaFilters() {
+    var input = document.getElementById('qaSearch');
+    renderQaList(filterQas(input ? input.value : ''));
+  }
+  function renderQaList(qas) {
+    var list = document.getElementById('qaList');
+    if (!list) return;
+    if (!qas.length) {
+      list.innerHTML = '<p style="color:var(--faint);font-size:13px">조건에 맞는 검증 질문이 없습니다.</p>';
+      return;
+    }
+    list.innerHTML = qas.map(function (x) {
+      var correct = qaIsCorrect(x);
+      return '<div class="qa-card ' + (correct ? 'solved' : 'unsolved') + '">' +
+        '<div class="qa-head"><span class="qm">Q</span><span class="qt">' + esc(x.q || '-') + '</span><span class="qa-status">' + (correct ? '맞음' : '틀림') + '</span></div>' +
+        '<div class="qa-qar">' +
+          '<div class="qa-qar-col"><span class="tag">Q</span><p>' + esc(x.q || '-') + '</p></div>' +
+          '<div class="qa-qar-col"><span class="tag">A</span><p>' + esc(qaExpected(x)) + '</p></div>' +
+          '<div class="qa-qar-col"><span class="tag">R</span><p>' + esc(qaResponse(x)) + '</p></div>' +
+        '</div>' +
+        '<div class="qa-fix"><span class="fl">' + esc(cleanQaLabel(x.label) || '진단') + '</span><span>' + esc(x.diagnosis || x.fix || (correct ? '기대 답변과 일치합니다.' : '추가 확인이 필요합니다.')) + '</span></div>' +
+      '</div>';
+    }).join('');
   }
 
   /* gauge animate */
@@ -1914,8 +2764,13 @@
     // 총점을 못 낸 실행(성분 미측정)은 0 이 아니라 '-' 를 그린다. 0 은 "재봤더니
     // 바닥"이라는 뜻인데, 여기서는 아예 재지 못한 것이다. 게이지 호(arc)도 비운다.
     var noScore = score.after == null;
-    document.getElementById('scoreCap').textContent =
-      noScore ? (label + ' · 측정 불가') : (label + ' · 100점');
+    var scoreCap = document.getElementById('scoreCap');
+    scoreCap.textContent = noScore ? (label + ' · 측정 불가') : label;
+    var scoreTip = noScore
+      ? '이 실행은 비교 가능한 종합 점수를 만들 만큼의 신호가 부족합니다.'
+      : '검색 근거 회수, 답변 정확도, 검증 결과를 함께 묶은 참고용 점수입니다. 처방 효과는 치료 경과에서 함께 확인합니다.';
+    scoreCap.removeAttribute('data-tip');
+    scoreCap.setAttribute('aria-label', scoreTip);
     // 처방 전후 증감은 외부 모드에 없다. 0 을 그대로 그리면 '+0 = 처방했는데 변화
     // 없음'으로 읽힌다 — 처방을 적용할 수 없어 애초에 비교 대상이 없는 것이다.
     var deltaEl = document.querySelector('.gauge-center .delta');
@@ -1929,7 +2784,7 @@
         var ARC = 452.4;            // length of the 270° usable sweep
         var frac = noScore ? 0 : (score.after || 0) / 100;
         arc.setAttribute('stroke-dashoffset', ARC * (1 - frac));
-        document.getElementById('scoreNum').textContent = noScore ? '–' : Math.round(score.after || 0);
+        document.getElementById('scoreNum').innerHTML = noScore ? '–' : (Math.round(score.after || 0) + '<small>/100</small>');
         if (external || noScore) return;
         var delta = Math.round((score.after || 0) - (score.before || 0));
         deltaEl.lastChild.textContent = ' ' + (delta >= 0 ? '+' : '') + delta;
