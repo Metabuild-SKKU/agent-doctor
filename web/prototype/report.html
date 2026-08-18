@@ -350,9 +350,18 @@
   .rx-verdict.roll { color: var(--warning); background: var(--warning-glow); }
   .rx-verdict.error { color: var(--critical); background: var(--critical-glow); }
   .rx-drill { border-top: 1px solid var(--border); padding: 0 20px; max-height: 0; overflow: hidden; transition: max-height .3s ease, padding .3s ease; background: var(--bg-2); }
-  /* 선택 근거(notes)가 sweep 막대 위에 더 얹히므로 고정 높이로는 잘린다.
-     overflow:hidden 은 접힘 애니메이션용이라 펼친 상태에서만 스크롤을 허용한다. */
-  .rx-card.open .rx-drill { max-height: 760px; overflow-y: auto; padding: 18px 20px; }
+  /* 펼친 카드의 라벨 툴팁이 카드·상세 영역 경계에 잘리지 않도록 카드부터 상세
+     영역까지 clipping을 해제한다. 닫힌 상태는 위 규칙의 hidden으로 접힘을 유지한다. */
+  .rx-card.open { z-index: 4; overflow: visible; }
+  .rx-card.open .rx-drill { max-height: 2000px; overflow: visible; padding: 18px 20px; }
+  .rx-card.open .rx-label-term { position: relative; z-index: 20; }
+  .rx-card.open .rx-label-term:hover,
+  .rx-card.open .rx-label-term:focus-visible { z-index: 30; }
+  .rx-card.open .rx-label-term::after {
+    top: calc(100% + 8px);
+    bottom: auto;
+    z-index: 100;
+  }
   .drill-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-bottom: 12px; }
   .rx-detail-summary { margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
   .rx-detail-summary .rx-target { margin-top: 0; font-size: 13px; color: #333; line-height: 1.55; }
@@ -458,6 +467,7 @@
     opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .16s, transform .16s; z-index: 8; pointer-events: none;
   }
   .term:hover::after, .term:focus-visible::after { opacity: 1; visibility: visible; transform: translateY(0); }
+  #course-section { overflow: visible; }
 
   body.motion-ready .reveal {
     opacity: 0; transform: translateY(32px);
@@ -1618,6 +1628,13 @@
       <svg viewBox="0 0 660 220" width="100%" height="220" id="treatmentCourseSvg" data-course-svg aria-label="치료 경과 종합 점수 추이 차트"></svg>
     </div>
 
+    <div class="rule-note" hidden>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3h.01" stroke-linecap="round"/></svg>
+      <span><b>판정 규칙</b> — 처방 후 종합점수가 오르면 그대로 두고, 떨어지면 되돌린 뒤 다른 방법을 시도합니다.</span>
+    </div>
+
+    <div class="rx" id="rxList"></div>
+
     <div class="rx-ragas-panel" id="rxRagasPanel">
       <div class="rx-ragas-head">
         <span class="idx">02</span>
@@ -1636,12 +1653,6 @@
       </div>
     </div>
 
-    <div class="rule-note" hidden>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3h.01" stroke-linecap="round"/></svg>
-      <span><b>판정 규칙</b> — 처방 후 종합점수가 오르면 그대로 두고, 떨어지면 되돌린 뒤 다른 방법을 시도합니다.</span>
-    </div>
-
-    <div class="rx" id="rxList"></div>
   </section>
 
   <!-- DIAGNOSIS DETAIL -->
