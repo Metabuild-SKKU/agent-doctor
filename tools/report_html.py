@@ -26,12 +26,17 @@ INJECT_MARKER = "/* injected by tools/report_html.py */"
 def inject_view(view: dict[str, Any], template_html: str) -> str:
     """템플릿의 데이터 로딩 분기를 '심어둔 데이터로 렌더'로 갈아끼운다.
 
-    템플릿은 run_id 쿼리스트링이 있으면 서버로 fetch, 없으면 더미를 그린다.
-    서버가 없으므로 그 분기 전체(fetch 체인 + else 더미)를 한 줄로 바꾼다 —
+    템플릿은 run_id 쿼리스트링이 있으면 서버로 fetch 하고, 샘플은 ?sample=1 일 때만
+    그린다. 서버가 없으므로 그 분기 전체(fetch 체인 + 샘플/빈 상태)를 한 줄로 바꾼다 —
     분기를 통째로 들어내야 fetch 가 남아 실패 배너를 띄우는 일이 없다.
     """
-    start = "  var runId = new URLSearchParams(location.search).get('run_id');"
-    end = "  } else {\n    renderReport({}, false);\n  }\n"
+    start = "  var params = new URLSearchParams(location.search);"
+    end = (
+        "  } else {\n"
+        "    showReportNotice('run_id가 없어 실제 리포트 데이터가 연결되지 않았습니다. UI 확인용 샘플 화면을 열어 볼 수 있습니다.', '샘플 리포트 보기', 'report.html?sample=1');\n"
+        "    renderReport({}, true);\n"
+        "  }\n"
+    )
     s_at = template_html.find(start)
     e_at = template_html.find(end, s_at)
     if s_at == -1 or e_at == -1:

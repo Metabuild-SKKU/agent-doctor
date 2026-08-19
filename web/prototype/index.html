@@ -3,7 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AgentDoctor — RAG 진단·처방</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="stylesheet" as="style" crossorigin
+      href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<title>RAG Doctor — RAG 진단·처방</title>
 <style>
   :root {
     color-scheme: dark;
@@ -25,25 +28,25 @@
     --warning: #d6a12a;
     --critical: #f0675c;
     --radius: 12px;
-    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+    --sans: 'Pretendard Variable', Pretendard, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
     --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, monospace;
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    --bg: #fbfbfc;
-    --bg-2: #f5f6f8;
+    --bg: #f7f8ff;
+    --bg-2: #eef1ff;
     --surface: #ffffff;
-    --surface-2: #f6f7f9;
-    --border: rgba(12,14,22,.10);
-    --border-strong: rgba(12,14,22,.17);
+    --surface-2: #f7f8fd;
+    --border: rgba(26,31,54,.10);
+    --border-strong: rgba(26,31,54,.17);
     --hi: rgba(255,255,255,.6);
-    --ink: #14161a;
-    --muted: #565b64;
-    --faint: #8b909a;
-    --accent: #4a52d4;
-    --accent-2: #5f67e0;
-    --accent-ink: #363cad;
-    --accent-glow: rgba(74,82,212,.12);
+    --ink: #111827;
+    --muted: #667085;
+    --faint: #98a2b3;
+    --accent: #5b5ce2;
+    --accent-2: #7c3aed;
+    --accent-ink: #4338ca;
+    --accent-glow: rgba(91,92,226,.16);
     --good: #1f9d4d;
     --warning: #b07d15;
     --critical: #d24a3d;
@@ -52,32 +55,30 @@
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
   body {
-    margin: 0; background: var(--bg); color: var(--ink);
+    margin: 0; background:
+      radial-gradient(circle at 14% 4%, rgba(124,58,237,.13), transparent 32%),
+      radial-gradient(circle at 92% 8%, rgba(91,92,226,.12), transparent 30%),
+      linear-gradient(180deg, #ffffff 0%, var(--bg) 38%, #ffffff 100%);
+    color: var(--ink);
     font-family: var(--sans); line-height: 1.55; letter-spacing: -.006em;
     -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
-  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 32px; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 34px; }
   ::selection { background: var(--accent-glow); }
 
   /* ── top bar ── */
   .topbar {
     position: sticky; top: 0; z-index: 20;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 17px 0; border-bottom: 1px solid var(--border);
-    background: color-mix(in srgb, var(--bg) 82%, transparent);
-    backdrop-filter: blur(12px);
+    padding: 20px 0; border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, #fff 76%, transparent);
+    backdrop-filter: blur(18px);
   }
-  .brand { display: flex; align-items: center; gap: 9px; }
-  .brand-mark { width: 26px; height: 26px; flex: none; }
-  .brand-name { font-weight: 660; font-size: 16.5px; letter-spacing: -.02em; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-name { font-weight: 690; font-size: 23px; letter-spacing: -.035em; }
   .brand-name .sep { color: var(--faint); font-weight: 400; margin: 0 1px; }
   .brand-name .doc { color: var(--muted); }
   .topbar-right { display: flex; align-items: center; gap: 6px; }
-  .topbar-link {
-    font-size: 13px; color: var(--muted); text-decoration: none;
-    padding: 7px 11px; border-radius: 8px;
-  }
-  .topbar-link:hover { color: var(--ink); background: var(--surface-2); }
   .theme-toggle {
     display: inline-flex; align-items: center; justify-content: center;
     width: 32px; height: 32px; border: 1px solid var(--border);
@@ -87,16 +88,20 @@
   .theme-toggle:hover { color: var(--ink); border-color: var(--border-strong); }
 
   /* ── hero ── */
-  .hero { position: relative; padding: 92px 0 60px; overflow: hidden; }
+  .hero {
+    position: relative; padding: 88px 0 58px; overflow: hidden;
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 460px);
+    gap: 58px; align-items: center;
+  }
   .hero-glow {
     position: absolute; top: -180px; left: 50%; transform: translateX(-58%);
     width: 780px; height: 560px; z-index: 0; pointer-events: none;
     background: radial-gradient(50% 50% at 50% 50%, var(--accent-glow), transparent 72%);
     filter: blur(8px);
   }
-  .hero-ecg { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 190px; z-index: 0; opacity: .5; pointer-events: none; }
-  .hero-inner { position: relative; z-index: 1; max-width: 720px; }
-  .brand-lockup { display: inline-flex; align-items: center; gap: 11px; }
+  .hero-ecg { position: absolute; left: 0; right: 0; bottom: -26px; width: 100%; height: 190px; z-index: 0; opacity: .26; pointer-events: none; }
+  .hero-inner { position: relative; z-index: 1; max-width: 780px; }
+  .brand-lockup { display: none; }
   .brand-lockup .bl-mark { width: 30px; height: 30px; flex: none; }
   .brand-lockup .wm { font-size: 23px; font-weight: 670; letter-spacing: -.035em; }
   .brand-lockup .wm .doc { color: var(--muted); }
@@ -107,7 +112,15 @@
     letter-spacing: -.03em; text-wrap: balance; margin: 30px 0 0;
   }
   h1 .fade { color: var(--muted); }
-  h1 .accent { color: var(--accent); }
+  h1 .accent {
+    color: transparent;
+    background: linear-gradient(90deg, #4338ca, #7c3aed, #06b6d4, #4338ca);
+    background-size: 220% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    animation: gradientText 6s linear infinite;
+  }
+  @keyframes gradientText { to { background-position: 220% center; } }
   .lede { font-size: 17px; color: var(--muted); margin: 22px 0 0; max-width: 56ch; line-height: 1.6; }
   .claim { margin-top: 34px; display: flex; flex-direction: column; gap: 10px; }
   .claim .cl-sm {
@@ -122,17 +135,103 @@
   }
   .claim .cl-lg b { color: var(--accent); font-weight: 640; }
 
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+  .btn-primary {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    min-height: 46px; padding: 0 18px; border-radius: 999px;
+    font-size: 14px; font-weight: 720; letter-spacing: -.015em; text-decoration: none;
+    transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease, background .16s ease;
+  }
+  .btn-primary {
+    color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 18px 38px -18px rgba(91,92,226,.62);
+  }
+  .btn-primary:hover { transform: translateY(-1px); }
+
+  .hero-preview { position: relative; z-index: 1; }
+  .preview-card {
+    position: relative; overflow: hidden; padding: 24px; border-radius: 30px;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.96), rgba(255,255,255,.82)),
+      radial-gradient(circle at 82% 12%, rgba(91,92,226,.16), transparent 32%);
+    border: 1px solid rgba(91,92,226,.16);
+    box-shadow: 0 32px 84px -40px rgba(31,41,55,.42), inset 0 1px 0 rgba(255,255,255,.86);
+  }
+  .preview-card::after,
+  .bento-card::after,
+  .console::after {
+    content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px;
+    background: linear-gradient(115deg, transparent 0 18%, rgba(124,58,237,.55) 32%, rgba(6,182,212,.55) 42%, transparent 56% 100%);
+    background-size: 240% 240%;
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    pointer-events: none; opacity: .0; animation: borderBeam 7.5s linear infinite;
+  }
+  .preview-card::after { opacity: .95; }
+  .bento-card:hover::after, .console:hover::after { opacity: .9; }
+  @keyframes borderBeam { to { background-position: 240% 0; } }
+  .preview-card::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: linear-gradient(rgba(91,92,226,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(91,92,226,.06) 1px, transparent 1px);
+    background-size: 28px 28px; mask-image: linear-gradient(180deg, rgba(0,0,0,.55), transparent 68%);
+  }
+
+
+  .landing-section { padding: 76px 0 22px; }
+  .section-kicker {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .08em;
+    color: var(--accent); text-transform: uppercase; margin-bottom: 18px;
+  }
+  .section-kicker::before { content: ""; width: 18px; height: 1px; background: var(--accent); }
+  .section-heading {
+    display: grid; grid-template-columns: minmax(0, .95fr) minmax(280px, .55fr);
+    gap: 48px; align-items: end; margin-bottom: 28px;
+  }
+  .section-heading h2 {
+    margin: 0; font-size: clamp(34px, 5vw, 64px); line-height: .98;
+    letter-spacing: -.06em; font-weight: 760;
+  }
+  .section-heading p { margin: 0; color: var(--muted); font-size: 15.5px; line-height: 1.7; }
+  .bento-grid {
+    display: grid; grid-template-columns: 1fr; gap: 16px;
+  }
+  .bento-card {
+    position: relative; overflow: hidden; min-height: 220px; padding: 28px;
+    border: 1px solid var(--border); border-radius: 28px;
+    background: rgba(255,255,255,.74);
+    box-shadow: 0 22px 64px -44px rgba(17,24,39,.48), inset 0 1px 0 rgba(255,255,255,.86);
+  }
+  .bento-card::before {
+    content: ""; position: absolute; inset: -1px; pointer-events: none;
+    background:
+      radial-gradient(circle at var(--mx, 80%) var(--my, 18%), rgba(124,58,237,.16), transparent 32%),
+      linear-gradient(180deg, rgba(255,255,255,.20), transparent 40%);
+    opacity: .65; transition: opacity .18s ease;
+  }
+  .bento-card > * { position: relative; z-index: 1; }
+  .bento-label { font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: .08em; text-transform: uppercase; }
+  .bento-title { margin-top: 14px; font-size: 24px; font-weight: 760; letter-spacing: -.04em; line-height: 1.14; }
+  .bento-copy { margin-top: 12px; color: var(--muted); font-size: 14px; line-height: 1.68; max-width: 48ch; }
+  .console-intro {
+    display: flex; justify-content: space-between; gap: 24px; align-items: end;
+    margin: 72px 0 -12px;
+  }
+  .console-intro h2 { margin: 0; font-size: clamp(32px, 4.8vw, 58px); line-height: 1.02; letter-spacing: -.055em; }
+
+
   /* ── steps ── */
   .steps {
     display: grid; grid-template-columns: repeat(3, 1fr);
-    margin-top: 68px; border-top: 1px solid var(--border);
+    gap: 16px; margin-top: 28px; border-top: 0;
   }
-  .step { padding: 26px 30px 4px 0; position: relative; }
-  .step + .step { padding-left: 30px; }
-  .step + .step::before {
-    content: ""; position: absolute; left: 0; top: 26px; bottom: 12px;
-    width: 1px; background: var(--border);
+  .step {
+    padding: 24px; position: relative; border: 1px solid var(--border);
+    border-radius: 22px; background: color-mix(in srgb, #fff 74%, transparent);
+    box-shadow: 0 18px 44px -34px rgba(17,24,39,.42);
   }
+  .step + .step { padding-left: 24px; }
+  .step + .step::before { display: none; }
   .step-n {
     font-family: var(--mono); font-size: 11px; color: var(--accent);
     letter-spacing: .05em;
@@ -144,20 +243,18 @@
 
   /* ── console ── */
   .console {
-    margin: 34px 0 40px; background: var(--surface);
-    border: 1px solid var(--border); border-radius: 16px;
-    box-shadow: inset 0 1px 0 var(--hi), 0 24px 60px -30px rgba(0,0,0,.6);
+    position: relative;
+    margin: 42px 0 48px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 30px;
+    box-shadow: inset 0 1px 0 var(--hi), 0 32px 84px -44px rgba(17,24,39,.5);
     overflow: hidden;
   }
   .console-bar {
-    display: flex; align-items: center; gap: 10px;
-    padding: 13px 20px; border-bottom: 1px solid var(--border); background: var(--bg-2);
+    display: flex; align-items: center; gap: 12px;
+    padding: 18px 24px; border-bottom: 1px solid var(--border); background: var(--bg-2);
   }
-  .console-bar .glyph { color: var(--accent); display: inline-flex; }
-  .console-bar .label { font-family: var(--mono); font-size: 12px; color: var(--muted); letter-spacing: .01em; }
-  .console-bar .label .path { color: var(--faint); }
   .console-bar .spacer { flex: 1; }
-  .console-bar .env { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .console-bar .env { font-size: 11.5px; color: var(--faint); }
   .console-body { padding: 28px; }
 
   /* tabs */
@@ -205,7 +302,7 @@
   .field-label { display: block; font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--faint); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 9px; }
   .field-optional { font-family: var(--sans); font-size: 12px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted); margin-left: 6px; }
 
-  /* 골든셋 옵트아웃 — 기본은 막고 명시 선택으로만 통과 (CLI 의 --no-golden 과 같은 구조) */
+  /* QA셋 옵트아웃 — 기본은 막고 명시 선택으로만 통과 (CLI 의 --no-golden 과 같은 구조) */
   .optout { margin-top: 11px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
   .optout[hidden] { display: none; }
   .optout-check { display: flex; align-items: center; gap: 9px; cursor: pointer; font-size: 13.2px; font-weight: 600; color: var(--ink); }
@@ -243,7 +340,7 @@
   .help-guide ul { margin: 6px 0 0 19px; padding: 0; }
   .help-guide li { margin: 5px 0; }
 
-  /* 도움말 안쪽 탭 — 실행 로그 / 골든셋은 출처도 채우는 사람도 다른 파일이라
+  /* 도움말 안쪽 탭 — 실행 로그 / QA셋은 출처도 채우는 사람도 다른 파일이라
      한 화면에 붙여 놓으면 어느 필드가 어느 파일 것인지 섞여 읽힌다. */
   .help-tabs { display: flex; gap: 5px; padding: 4px; margin: 14px 0 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; }
   .help-tab { flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 10px; font-family: var(--sans); font-size: 12.8px; font-weight: 620; letter-spacing: -.01em; border: none; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
@@ -286,22 +383,8 @@
   .text-input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
   .conn-row { display: grid; grid-template-columns: 1fr 148px; gap: 12px; }
 
-  .depth { margin-top: 26px; }
-  .segmented { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 9px; }
-  .seg { text-align: left; cursor: pointer; padding: 13px 15px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); transition: border-color .14s, background .14s; }
-  .seg:hover { border-color: var(--border-strong); }
-  .seg[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent-glow) 30%, var(--surface)); }
-  .seg .seg-name { font-weight: 560; font-size: 13.5px; display: flex; align-items: center; gap: 8px; }
-  .seg .seg-meta { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 6px; letter-spacing: .02em; }
-  .seg .seg-bars { display: inline-flex; gap: 2px; align-items: flex-end; }
-  .seg .seg-bars i { width: 3px; border-radius: 1px; background: var(--border-strong); display: inline-block; }
-  .seg .seg-bars i:nth-child(1) { height: 6px; } .seg .seg-bars i:nth-child(2) { height: 9px; } .seg .seg-bars i:nth-child(3) { height: 12px; }
-  .seg .seg-bars i.on { background: var(--muted); }
-  .seg[aria-pressed="true"] .seg-bars i.on { background: var(--accent); }
 
   .run-row { display: flex; align-items: center; justify-content: space-between; margin-top: 28px; gap: 18px; }
-  .run-note { font-family: var(--mono); font-size: 12px; color: var(--faint); }
-  .run-note b { color: var(--muted); font-weight: 500; }
   .btn-run {
     display: inline-flex; align-items: center; gap: 8px;
     font-family: var(--sans); font-size: 14px; font-weight: 560; letter-spacing: -.01em;
@@ -366,36 +449,353 @@
   .btn-report:hover { border-color: var(--accent); color: var(--accent); }
 
   /* tooltip */
-  .term { border-bottom: 1px dotted var(--faint); cursor: help; position: relative; color: var(--ink); }
-  .term::after {
-    content: attr(data-tip); position: absolute; left: 0; bottom: calc(100% + 9px);
-    width: max-content; max-width: 250px; background: var(--surface-2); color: var(--ink);
-    border: 1px solid var(--border-strong); font-family: var(--sans); font-size: 12px; line-height: 1.45;
-    letter-spacing: 0; text-transform: none; font-weight: 400;
-    padding: 9px 12px; border-radius: 9px; box-shadow: 0 12px 30px -12px rgba(0,0,0,.7);
-    opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .16s, transform .16s; z-index: 5; pointer-events: none;
-  }
-  .term:hover::after, .term:focus-visible::after { opacity: 1; visibility: visible; transform: translateY(0); }
 
   .foot { border-top: 1px solid var(--border); padding: 24px 0 44px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   .foot span { font-size: 12px; color: var(--faint); }
   .foot .foot-mono { font-family: var(--mono); letter-spacing: .04em; }
 
+  @media (max-width: 980px) {
+    .hero { grid-template-columns: 1fr; gap: 34px; padding-top: 62px; }
+    .hero-preview { max-width: 560px; width: 100%; }
+    .bento-grid { grid-template-columns: 1fr; }
+    .console-intro { flex-direction: column; align-items: flex-start; margin-top: 56px; }
+    .steps { grid-template-columns: 1fr; }
+  }
   @media (max-width: 760px) {
+    .wrap { padding: 0 18px; }
+    .topbar { padding: 14px 0; }
+    .hero { padding: 48px 0 36px; }
+    .hero h1 .nowrap { white-space: normal; }
+    .hero-actions { flex-direction: column; align-items: stretch; }
+    .btn-primary { width: 100%; }
+    .preview-card { padding: 18px; border-radius: 22px; }
+    .landing-section { padding-top: 52px; }
+    .bento-card { padding: 22px; border-radius: 22px; }
     .steps { grid-template-columns: 1fr; }
     .step + .step { padding-left: 0; padding-top: 22px; }
     .step + .step::before { display: none; }
     .step { border-bottom: 1px solid var(--border); padding-bottom: 22px; }
-    .segmented { grid-template-columns: 1fr; }
     .conn-row { grid-template-columns: 1fr; }
     .run-row { flex-direction: column; align-items: stretch; }
     .btn-run { justify-content: center; }
   }
   @media (prefers-reduced-motion: reduce) {
     html { scroll-behavior: auto; }
-    .stage-ic .spinner, .ticker-cursor { animation: none; }
+    .stage-ic .spinner, .ticker-cursor, h1 .accent, .preview-card::after, .bento-card::after, .console::after { animation: none; }
     .track-fill { transition: none; }
   }
+
+  /* anti-slop cleanup: neutral text-first product UI */
+  :root,
+  :root[data-theme="light"],
+  :root[data-theme="dark"] {
+    color-scheme: light;
+    --bg: #fff;
+    --bg-2: #f7f7f7;
+    --surface: #fff;
+    --surface-2: #f5f5f5;
+    --border: #e3e3e3;
+    --border-strong: #cfcfcf;
+    --hi: #fff;
+    --ink: #111;
+    --muted: #555;
+    --faint: #888;
+    --accent: #111;
+    --accent-2: #111;
+    --accent-ink: #111;
+    --accent-glow: transparent;
+    --good: #111;
+    --warning: #555;
+    --critical: #111;
+  }
+  body {
+    background: #fff;
+    color: #111;
+  }
+  .topbar {
+    position: static;
+    background: #fff;
+    backdrop-filter: none;
+    border-bottom-color: #e5e5e5;
+  }
+  .theme-toggle,
+  .hero-glow,
+  .hero-ecg,
+  .brand-lockup .bl-sep,
+  .brand-lockup .bl-tag {
+    display: none;
+  }
+  .hero {
+    grid-template-columns: minmax(0, .95fr) minmax(340px, 420px);
+    padding: 62px 0 46px;
+    gap: 42px;
+  }
+  h1 {
+    color: #111;
+    letter-spacing: -.045em;
+    word-break: keep-all;
+    overflow-wrap: normal;
+    max-width: 1040px;
+  }
+  h1 .nowrap {
+    white-space: nowrap;
+  }
+  h1 .fade,
+  h1 .accent {
+    color: #111;
+    background: none;
+    -webkit-background-clip: initial;
+    background-clip: initial;
+    animation: none;
+  }
+  .lede,
+  .claim .cl-lg,
+  .section-heading p,
+  .bento-copy,
+  .btn-primary,
+  .btn-run,
+  .btn-report {
+    border-radius: 5px;
+    box-shadow: none;
+    transform: none;
+  }
+  .btn-primary,
+  .btn-run {
+    background: #111;
+    color: #fff;
+  }
+  .btn-report {
+    background: #fff;
+    color: #111;
+    border-color: #d8d8d8;
+  }
+  .preview-card,
+  .trust-pill,
+  .bento-card,
+  .step,
+  .console,
+  .dropzone,
+  .ticker {
+    background: #fff;
+    border-color: #e3e3e3;
+    border-radius: 6px;
+    box-shadow: none;
+  }
+  .preview-card::before,
+  .preview-card::after,
+  .bento-card::before,
+  .bento-card::after,
+  .console::after {
+    display: none !important;
+  }
+  .bento-title,
+  .section-heading h2,
+  .console-intro h2,
+  .stage-name,
+  .tab[aria-selected="true"] {
+    color: #111;
+  }
+  .track,
+  .ticker {
+    background: #f1f1f1;
+  }
+  .track-fill,
+  .stage[data-state="done"] .stage-ic {
+    background: #111;
+  }
+  .section-kicker,
+  .step-n,
+  .claim .cl-sm {
+    display: none;
+  }
+  .steps {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-top: 1px solid #e5e5e5;
+    padding-top: 18px;
+  }
+  .step {
+    padding: 18px 0;
+    border-width: 0;
+  }
+  .step + .step {
+    border-left: 1px solid #e5e5e5;
+    padding-left: 22px;
+  }
+  /* ── report.html 정렬: 리듬·활자를 진단서와 같은 눈금으로 ──
+     값은 전부 report.html 실측치다.
+       섹션 리듬  padding 26px 0 / margin 20px 0 / 하단 헤어라인 #e3e3e3
+       h1        48px / 640      (report .rhead h1)
+       구역 제목  clamp(22px,2.6vw,34px) / 720 (report .rx-ragas-head h2)
+       소제목     18px / 650      (report .section h2)
+       본문       15px #333 / 보조 #555 / 흐림 #777                        */
+
+  .hero,
+  .landing-section,
+  .steps,
+  .console-intro {
+    margin: 20px 0;
+    padding: 26px 0;
+    border: 0;
+    border-bottom: 1px solid #e3e3e3;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  /* 콘솔이 바로 뒤에 오므로 선을 겹치지 않는다 */
+  .console-intro { border-bottom: 0; padding-bottom: 8px; }
+
+  .hero h1 {
+    font-size: clamp(30px, 4.4vw, 48px);
+    font-weight: 640;
+    letter-spacing: -.045em;
+    line-height: 1.06;
+  }
+  .section-heading h2,
+  .console-intro h2 {
+    font-size: clamp(22px, 2.6vw, 34px);
+    font-weight: 720;
+    letter-spacing: -.04em;
+    line-height: 1.14;
+  }
+  .bento-title,
+  .step-title {
+    font-size: 18px;
+    font-weight: 650;
+    letter-spacing: -.02em;
+    line-height: 1.55;
+  }
+  .lede,
+  .section-heading p,
+  .bento-copy,
+  .step p {
+    font-size: 15px;
+    line-height: 1.7;
+    color: #333;
+  }
+  .claim .cl-lg,
+  .claim .cl-lg b { color: #111; }
+  .claim .cl-lg { font-size: 18px; font-weight: 650; letter-spacing: -.02em; }
+  .step p,
+  .bento-copy { color: #555; }
+
+  /* 카드 껍데기를 벗겨 진단서와 같은 납작한 결로 맞춘다 */
+  .bento-card,
+  .step {
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .bento-card { border: 1px solid #e3e3e3; border-radius: 6px; }
+  .step { border: 0; border-top: 1px solid #e3e3e3; padding: 18px 0 0; }
+  .console { margin: 20px 0 28px; }
+
+  /* ── 미리보기 카드 = 진단서 대시보드 첫 화면 복제 ──
+     색은 report.html 실측 팔레트를 그대로 박아둔다. 랜딩은 모든 색을
+     #111 로 눌러버리는데, 차트는 상승/실패/롤백이 구분돼야 하기 때문이다.
+       상승·유지 #315f86 / 실패 #8f3f35 / 롤백 #9a5b28 / 보조선 #8a8a8a  */
+  .preview-card { padding: 22px; }
+  .pv-gauge { position: relative; width: 132px; margin: 2px auto; }
+  .pv-gauge svg { display: block; width: 100%; height: auto; }
+  .pv-gauge-c {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 2px;
+  }
+  .pv-score { font-size: 36px; font-weight: 640; letter-spacing: -.045em; color: #111; font-variant-numeric: tabular-nums; }
+  .pv-score small { font-size: 14px; font-weight: 520; color: #777; margin-left: 2px; letter-spacing: -.02em; }
+  .pv-cap { font-size: 12px; color: #555; }
+
+  .pv-headline {
+    margin: 12px 0 0; font-size: 15px; font-weight: 620;
+    letter-spacing: -.02em; line-height: 1.45; color: #111;
+  }
+
+  .pv-course { margin-top: 16px; padding-top: 14px; border-top: 1px solid #e3e3e3; }
+  .pv-course-title { font-size: 12.5px; font-weight: 650; color: #111; }
+  .pv-chart { display: block; width: 100%; height: auto; margin-top: 8px; }
+  .pv-chart text { font-family: var(--mono); }
+  .pv-chart .pv-val text { font-size: 10px; font-weight: 700; fill: #111; }
+  .pv-chart .pv-rb text { font-size: 8px; fill: #9a5b28; }
+  .pv-chart .pv-xlab text { font-size: 8px; fill: #777; font-family: var(--sans); }
+
+  .pv-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; }
+  .pv-legend span { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #666; }
+  .pv-legend i { width: 10px; height: 2px; border-radius: 2px; flex: none; }
+  .pv-legend i.rb { height: 8px; width: 8px; border-radius: 999px; background: #fff; border: 2px solid #9a5b28; }
+
+  @media (max-width: 760px) {
+    .pv-gauge { width: 128px; }
+    .pv-score { font-size: 34px; }
+  }
+
+  /* ── 히어로 좌우 균형 ──
+     proof 카드 3장이 빠지면서 왼쪽 기둥이 108px 짧아졌다. 남은 네
+     덩어리(h1 / lede / claim / CTA)의 간격을 넓혀 카드 높이에 가깝게
+     끌어올린다. 두 기둥은 align-items:center 로 서로 가운데를 맞춘다. */
+
+
+  /* ── 처방 전후 지표 (카드 2) ──
+     리포트 치료 경과 탭의 지표 패널(.metric-row)을 그대로 옮긴다.
+     실측 규격: 행 190px / 1fr / 168px, 패딩 18px 8px, 하단 헤어라인,
+     트랙 5px #e9e9e9, 개선 구간과 처방후 점 #246b45(--good),
+     처방전 점 #8a8a8a, 값 12.5px, 델타 11px/700.
+     추이 차트의 파랑(--accent #315f86)과 달리 지표 개선은 초록이다. */
+  .mx { margin-top: 18px; }
+  .mx-row {
+    display: grid; grid-template-columns: 190px 1fr 168px;
+    align-items: center; padding: 18px 8px; border-bottom: 1px solid #e3e3e3;
+  }
+  .mx-row:last-child { border-bottom: 0; padding-bottom: 4px; }
+  .mx-name { font-size: 14px; font-weight: 520; color: #111; letter-spacing: -.01em; }
+  .mx-en { margin-left: 7px; font-size: 10.5px; color: #8a8a8a; font-weight: 400; letter-spacing: 0; }
+  .mx-bell { position: relative; height: 14px; }
+  .mx-track {
+    position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%);
+    height: 5px; background: #e9e9e9; border-radius: 999px;
+  }
+  .mx-connect {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    height: 5px; background: #246b45; border-radius: 999px;
+  }
+  .mx-pt {
+    position: absolute; top: 50%; width: 14px; height: 14px;
+    border-radius: 50%; transform: translate(-50%, -50%);
+  }
+  .mx-pt.before { background: #8a8a8a; }
+  .mx-pt.after { background: #246b45; }
+  .mx-vals { text-align: right; font-size: 12.5px; color: #8a8a8a; white-space: nowrap; }
+  .mx-vals .a { color: #111; font-weight: 520; }
+  .mx-vals .d { margin-left: 9px; font-size: 11px; font-weight: 700; color: #246b45; }
+
+  @media (max-width: 860px) {
+    .lbx { grid-template-columns: 1fr; }
+    .mx-row { grid-template-columns: 1fr; gap: 8px; padding: 14px 0; }
+    .mx-vals { text-align: left; }
+  }
+
+  /* ── 진단 라벨 축 (카드 1) ──
+     리포트 진단 상세 내역의 4그룹 축을 그대로 쓴다. 개수 15/10/3/4 는
+     label_catalog.py 의 축(포괄 라벨 3개 제외)과 같은 값이다.
+     라벨 코드와 A/B/C 등급은 쓰지 않는다 — 리포트가 이미 걷어냈다. */
+  .lbx { margin-top: 22px; display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+  .lbx-row { padding: 15px 16px; border: 1px solid #e3e3e3; border-radius: 6px; background: #fcfcfc; }
+  .lbx-top { display: flex; align-items: baseline; gap: 8px; }
+  .lbx-name { font-size: 14px; font-weight: 680; color: #111; letter-spacing: -.02em; }
+  .lbx-n {
+    font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: #555;
+    padding: 1px 6px; border: 1px solid #e3e3e3; border-radius: 4px;
+  }
+  .lbx-desc { margin-top: 5px; font-size: 12.5px; color: #777; line-height: 1.6; letter-spacing: .005em; }
+  .lbx-ex { margin-top: 9px; font-size: 13px; color: #333; line-height: 1.8; letter-spacing: .015em; word-spacing: .06em; }
+  .lbx-ex span { color: #999; }
+
+  /* section-heading 을 히어로와 같은 세로 구조로 — h2 아래 설명문이 온다 */
+  .section-heading { display: block; }
+  .section-heading p { margin-top: 28px; max-width: 56ch; }
+
+  .hero .lede { margin-top: 28px; }
+  .hero .claim { margin-top: 38px; }
+  .hero .hero-actions { margin-top: 42px; }
+
 </style>
 </head>
 <body>
@@ -403,15 +803,9 @@
 <div class="wrap">
   <header class="topbar">
     <div class="brand">
-      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <rect x="1" y="1" width="22" height="22" rx="6.5" stroke="var(--accent)" stroke-width="1.2" fill="color-mix(in srgb, var(--accent-glow) 60%, transparent)"/>
-        <path d="M3.5 12.5h3l1.8-4.5 3 9 1.8-5.2 1.3 2.9h4.6" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" fill="none"/>
-      </svg>
-      <div class="brand-name">Agent<span class="doc">Doctor</span></div>
+      <div class="brand-name">RAG <span class="doc">Doctor</span></div>
     </div>
     <div class="topbar-right">
-      <a class="topbar-link" href="#how">작동 방식</a>
-      <a class="topbar-link" href="#run">진단하기</a>
       <button class="theme-toggle" id="themeToggle" aria-label="테마 전환" title="테마 전환">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
@@ -422,25 +816,193 @@
     <div class="hero-glow"></div>
     <canvas class="hero-ecg" id="ecg" aria-hidden="true"></canvas>
     <div class="hero-inner">
-      <div class="brand-lockup">
-        <svg class="bl-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <rect x="1" y="1" width="22" height="22" rx="6.5" stroke="var(--accent)" stroke-width="1.2" fill="color-mix(in srgb, var(--accent-glow) 60%, transparent)"/>
-          <path d="M3.5 12.5h3l1.8-4.5 3 9 1.8-5.2 1.3 2.9h4.6" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" fill="none"/>
-        </svg>
-        <span class="wm">Agent<span class="doc">Doctor</span></span>
-        <span class="bl-sep"></span>
-        <span class="bl-tag">RAG 파이프라인 진단·처방</span>
-      </div>
-      <h1>RAG가 왜 틀린 답을 내는지<br><span class="fade">찾아내고,</span> <span class="accent">스스로 고칩니다</span></h1>
+      <h1><span class="nowrap">RAG의 틀린 답변을</span><br><span class="fade">진단하고,</span> <span class="accent">자동으로 처방합니다.</span></h1>
       <p class="lede">
-        AgentDoctor는 검색·생성 파이프라인을 검사해 어디서 문제가 생기는지 짚어내고,
-        <span class="term" tabindex="0" data-tip="검색해 올 문서 조각의 개수(top_k), 조각의 크기 같은 검색 설정값입니다.">검색 파라미터</span>를
-        근거에 따라 자동으로 조정합니다.
+        RAG Doctor는 검색·생성 파이프라인을 검사해 어디서 문제가 생기는지 짚어내고,
+        파라미터를 근거에 따라 자동으로 조정합니다.
       </p>
       <div class="claim">
         <span class="cl-sm">RAG 점수만 매기는 도구가 아닙니다</span>
-        <span class="cl-lg">직접 고쳐서, 나아졌다는 걸 <b>전후로 증명합니다.</b></span>
+        <span class="cl-lg">QA셋이 없어도, <b>문서에서 질문을 만들어 진단할 수 있습니다.</b></span>
       </div>
+      <div class="hero-actions">
+        <a class="btn-primary" href="#run">진단 시작하기</a>
+      </div>
+    </div>
+    <div class="hero-preview" aria-label="진단서 첫 화면 미리보기">
+      <div class="preview-card">
+
+        <div class="pv-gauge">
+          <svg viewBox="0 0 240 240" aria-hidden="true">
+            <circle cx="120" cy="120" r="96" fill="none" stroke="#e3e3e3" stroke-width="14"
+                    stroke-dasharray="452.4 603.2" transform="rotate(135 120 120)" stroke-linecap="round"/>
+            <circle cx="120" cy="120" r="96" fill="none" stroke="#315f86" stroke-width="14"
+                    stroke-dasharray="452.4 603.2" stroke-dashoffset="185.48"
+                    transform="rotate(135 120 120)" stroke-linecap="round"/>
+          </svg>
+          <div class="pv-gauge-c">
+            <div class="pv-score">59<small>/100</small></div>
+            <div class="pv-cap">종합 점수</div>
+          </div>
+        </div>
+
+        <p class="pv-headline">5건을 처방했고, 종합점수는 59입니다.</p>
+
+
+        <div class="pv-course">
+          <div class="pv-course-title">종합 점수 추이</div>
+          <svg class="pv-chart" viewBox="0 0 340 132" role="img"
+               aria-label="처방 단계별 종합 점수 추이. 기준 41에서 시작해 하이브리드 검색 적용 후 59까지 올랐고, 실패한 처방 2건은 롤백으로 되돌렸습니다.">
+            <defs>
+              <linearGradient id="pvFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#315f86" stop-opacity=".12"/>
+                <stop offset="1" stop-color="#315f86" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <path d="M20 88 L81.2 54.67 L142.4 78 L142.4 54.67 L203.6 38 L264.8 34.67 L264.8 38 L326 28 L326 88 Z"
+                  fill="url(#pvFill)" stroke="none"/>
+            <path d="M20 88 L81.2 54.67" stroke="#315f86" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <path d="M81.2 54.67 L142.4 78" stroke="#8f3f35" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <path d="M142.4 78 L142.4 54.67" stroke="#8a8a8a" stroke-width="1.6" stroke-dasharray="3 3" fill="none"/>
+            <path d="M142.4 54.67 L203.6 38" stroke="#315f86" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <path d="M203.6 38 L264.8 34.67" stroke="#8f3f35" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <path d="M264.8 34.67 L264.8 38" stroke="#8a8a8a" stroke-width="1.6" stroke-dasharray="3 3" fill="none"/>
+            <path d="M264.8 38 L326 28" stroke="#315f86" stroke-width="2" fill="none" stroke-linecap="round"/>
+
+            <circle cx="20" cy="88" r="3.4" fill="#8a8a8a" stroke="#fff" stroke-width="1.5"/>
+            <circle cx="81.2" cy="54.67" r="3.4" fill="#315f86" stroke="#fff" stroke-width="1.5"/>
+            <circle cx="142.4" cy="78" r="4" fill="#8f3f35" stroke="#fff" stroke-width="1.5"/>
+            <circle cx="142.4" cy="54.67" r="3.4" fill="#fff" stroke="#9a5b28" stroke-width="2"/>
+            <circle cx="203.6" cy="38" r="3.4" fill="#315f86" stroke="#fff" stroke-width="1.5"/>
+            <circle cx="264.8" cy="34.67" r="4" fill="#8f3f35" stroke="#fff" stroke-width="1.5"/>
+            <circle cx="264.8" cy="38" r="3.4" fill="#fff" stroke="#9a5b28" stroke-width="2"/>
+            <circle cx="326" cy="28" r="3.4" fill="#315f86" stroke="#fff" stroke-width="1.5"/>
+
+            <g class="pv-val">
+              <text x="20" y="80" text-anchor="start">41</text>
+              <text x="81.2" y="46" text-anchor="middle">51</text>
+              <text x="134" y="81" text-anchor="end">44</text>
+              <text x="203.6" y="30" text-anchor="middle">56</text>
+              <text x="257" y="27" text-anchor="end">57</text>
+              <text x="326" y="20" text-anchor="end">59</text>
+            </g>
+            <g class="pv-rb">
+              <text x="147" y="62" text-anchor="start">롤백</text>
+              <text x="269" y="50" text-anchor="start">롤백</text>
+            </g>
+            <g class="pv-xlab">
+              <text x="8" y="106" text-anchor="start">기준</text>
+              <text x="81.2" y="106" text-anchor="middle">리랭커</text>
+              <text x="81.2" y="115" text-anchor="middle">활성화</text>
+              <text x="142.4" y="106" text-anchor="middle">기권 기준</text>
+              <text x="142.4" y="115" text-anchor="middle">강화</text>
+              <text x="203.6" y="106" text-anchor="middle">질문</text>
+              <text x="203.6" y="115" text-anchor="middle">재진술</text>
+              <text x="264.8" y="106" text-anchor="middle">기권 기준</text>
+              <text x="264.8" y="115" text-anchor="middle">강화</text>
+              <text x="336" y="106" text-anchor="end">하이브리드</text>
+              <text x="336" y="115" text-anchor="end">검색</text>
+            </g>
+          </svg>
+          <div class="pv-legend">
+            <span><i style="background:#315f86"></i>상승·유지</span>
+            <span><i style="background:#8f3f35"></i>실패 점수</span>
+            <span><i class="rb"></i>롤백 복구</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="landing-section" id="insight">
+    <div class="section-kicker">Product story</div>
+    <div class="section-heading">
+      <h2>틀린 이유부터 바꾼 결과까지</h2>
+      <p>
+        진단만 하면 다음 행동이 막힙니다. RAG Doctor는 답변 실패 지점을 진단 라벨로
+        분류하고, 각 처방이 성능 지표를 어떻게 바꾸는지 수치로 남겨 의사결정을 돕습니다.
+      </p>
+    </div>
+    <div class="bento-grid">
+      <article class="bento-card">
+        <div class="bento-label">진단 라벨</div>
+        <div class="bento-title">실패 원인을 32개 라벨로 분류합니다.</div>
+        <p class="bento-copy">
+          검색·생성·컨텍스트·데이터 네 갈래로 실패 원인을 가르고,
+          이번 실행에서 실제로 나온 라벨과 질문 수를 전체 축 위에 채웁니다.
+        </p>
+        <div class="lbx">
+          <div class="lbx-row">
+            <div class="lbx-top"><span class="lbx-name">검색</span><span class="lbx-n">15</span></div>
+            <div class="lbx-desc">정답 근거를 찾거나 상위에 올리는 단계</div>
+            <div class="lbx-ex">정답 순위가 낮음 · 나열형 답변 일부 누락 · 청크 경계에서 근거가 잘림 <span>외 12</span></div>
+          </div>
+          <div class="lbx-row">
+            <div class="lbx-top"><span class="lbx-name">생성</span><span class="lbx-n">10</span></div>
+            <div class="lbx-desc">근거를 보고 답변을 만드는 단계</div>
+            <div class="lbx-ex">근거 없는 답변 생성 · 부분 답변 · 근거가 있는데 기권 <span>외 7</span></div>
+          </div>
+          <div class="lbx-row">
+            <div class="lbx-top"><span class="lbx-name">컨텍스트</span><span class="lbx-n">3</span></div>
+            <div class="lbx-desc">청크 경계·노이즈·길이 문제</div>
+            <div class="lbx-ex">컨텍스트가 너무 김 · 정답이 중간에 묻힘 · 노이즈 근거에 영향받음</div>
+          </div>
+          <div class="lbx-row">
+            <div class="lbx-top"><span class="lbx-name">데이터</span><span class="lbx-n">4</span></div>
+            <div class="lbx-desc">코퍼스·QA·골드 답변 자체의 문제</div>
+            <div class="lbx-ex">코퍼스에 근거 없음 · 일부 단계 근거 없음 · 정답셋 오류 · 골드 청크 지정 오류</div>
+          </div>
+        </div>
+      </article>
+      <article class="bento-card">
+        <div class="bento-label">처방 전후</div>
+        <div class="bento-title">지표가 어디서 어디로 갔는지 봅니다.</div>
+        <p class="bento-copy">
+          처방 전후 값을 지표마다 같은 눈금 위에 올려 변화 폭을 그대로 보여줍니다.
+        </p>
+        <div class="mx">
+          <div class="mx-row">
+            <div class="mx-name">충실도<span class="mx-en">faithfulness</span></div>
+            <div class="mx-bell">
+              <div class="mx-track"></div>
+              <div class="mx-connect" style="left:55%;width:9%"></div>
+              <div class="mx-pt before" style="left:55%"></div>
+              <div class="mx-pt after" style="left:64%"></div>
+            </div>
+            <div class="mx-vals"><span class="b">55.0%</span> → <span class="a">64.0%</span><span class="d">+9.0pp</span></div>
+          </div>
+          <div class="mx-row">
+            <div class="mx-name">정답 회수율<span class="mx-en">context_recall</span></div>
+            <div class="mx-bell">
+              <div class="mx-track"></div>
+              <div class="mx-connect" style="left:48%;width:13%"></div>
+              <div class="mx-pt before" style="left:48%"></div>
+              <div class="mx-pt after" style="left:61%"></div>
+            </div>
+            <div class="mx-vals"><span class="b">48.0%</span> → <span class="a">61.0%</span><span class="d">+13.0pp</span></div>
+          </div>
+          <div class="mx-row">
+            <div class="mx-name">검색 정확도<span class="mx-en">context_precision</span></div>
+            <div class="mx-bell">
+              <div class="mx-track"></div>
+              <div class="mx-connect" style="left:51%;width:9%"></div>
+              <div class="mx-pt before" style="left:51%"></div>
+              <div class="mx-pt after" style="left:60%"></div>
+            </div>
+            <div class="mx-vals"><span class="b">51.0%</span> → <span class="a">60.0%</span><span class="d">+9.0pp</span></div>
+          </div>
+          <div class="mx-row">
+            <div class="mx-name">답변 관련성<span class="mx-en">response_relevancy</span></div>
+            <div class="mx-bell">
+              <div class="mx-track"></div>
+              <div class="mx-connect" style="left:50%;width:8%"></div>
+              <div class="mx-pt before" style="left:50%"></div>
+              <div class="mx-pt after" style="left:58%"></div>
+            </div>
+            <div class="mx-vals"><span class="b">50.0%</span> → <span class="a">58.0%</span><span class="d">+8.0pp</span></div>
+          </div>
+        </div>
+      </article>
     </div>
   </section>
 
@@ -471,12 +1033,14 @@
     </div>
   </section>
 
+  <div class="console-intro">
+    <h2>문서를 넣고,<br>진단서를 바로 확인하세요.</h2>
+  </div>
+
   <section class="console" id="run">
     <div class="console-bar">
-      <span class="glyph"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 8 4 4-4 4M12 16h7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-      <span class="label"><span class="path">agentdoctor/</span>새 진단</span>
       <span class="spacer"></span>
-      <span class="env" id="consoleLabel">idle</span>
+      <span class="env" id="consoleLabel">대기 중</span>
     </div>
     <div class="console-body">
 
@@ -513,12 +1077,12 @@
             </div>
           </div>
 
-          <label class="field-label" for="goldenInput" style="margin-top:16px">골든셋 — 시험지 (질문 · 정답 · 정답 근거)<span class="field-optional">필수 · 로그에 정답이 들어 있으면 생략 가능</span></label>
+          <label class="field-label" for="goldenInput" style="margin-top:16px">QA셋 — 시험지 (질문 · 정답 · 정답 근거)<span class="field-optional">필수 · 로그에 정답이 들어 있으면 생략 가능</span></label>
           <div class="dropzone dropzone-compact" id="goldenDropzone" tabindex="0">
             <input type="file" id="goldenInput" accept=".xlsx,.csv,.jsonl,.json" hidden>
             <svg class="dz-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 16V4m0 0 4 4m-4-4-4 4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke-linecap="round"/></svg>
             <div class="dz-text">
-              <div class="dz-main" id="goldenDzMain">골든셋 파일을 끌어다 놓거나 클릭해 선택</div>
+              <div class="dz-main" id="goldenDzMain">QA셋 파일을 끌어다 놓거나 클릭해 선택</div>
               <div class="dz-sub" id="goldenDzSub">정답 대조가 있어야 원인 7종을 다 판정합니다</div>
             </div>
             <div class="dz-formats">XLSX · CSV · JSONL · 필수</div>
@@ -528,14 +1092,14 @@
             </div>
           </div>
 
-          <!-- 골든셋 옵트아웃은 두지 않는다. 정답지가 없으면 신뢰도 축을 못 재고, 그러면
+          <!-- QA셋 옵트아웃은 두지 않는다. 정답지가 없으면 신뢰도 축을 못 재고, 그러면
                종합점수 자체가 안 나온다(report_view 가 총점을 감춘다) — 원인 7종 중 3종만
                나오는 진단서를 "점수 없음" 상태로 받아가는 건 오해만 만든다. 정답지를 아직
                못 만든 경우는 CLI 의 --no-golden 이 개발용 통로로 남아 있다.
-               로그에 정답이 인라인으로 들어 있으면 골든셋이 없는 게 아니므로 통과시킨다. -->
+               로그에 정답이 인라인으로 들어 있으면 QA셋이 없는 게 아니므로 통과시킨다. -->
           <div class="optout optout-inline" id="goldenInlineNote" hidden>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span>실행 로그 안에 정답(<code>ground_truth</code>)이 들어 있어 골든셋 파일 없이도 전체 진단이 가능합니다.</span>
+            <span>실행 로그 안에 정답(<code>ground_truth</code>)이 들어 있어 QA셋 파일 없이도 전체 진단이 가능합니다.</span>
           </div>
 
           <p class="dz-sub" style="margin-top:12px;font-size:13.2px;line-height:1.65;color:var(--muted)">이미 운영 중인 RAG의 실행 로그를 올리면, 파이프라인을 바꾸지 않고 그대로 진단합니다.
@@ -566,7 +1130,7 @@
             <div class="help-body">
               <div class="help-tabs" role="tablist" aria-label="파일 형식">
                 <button class="help-tab" type="button" role="tab" id="htab-log" aria-selected="true" aria-controls="hpanel-log">실행 로그 <span class="ht-req">필수 파일</span></button>
-                <button class="help-tab" type="button" role="tab" id="htab-golden" aria-selected="false" aria-controls="hpanel-golden">골든셋 <span class="ht-req">필수 파일</span></button>
+                <button class="help-tab" type="button" role="tab" id="htab-golden" aria-selected="false" aria-controls="hpanel-golden">QA셋 <span class="ht-req">필수 파일</span></button>
               </div>
 
               <!-- 실행 로그 -->
@@ -582,7 +1146,7 @@
                 <ul class="field-list">
                   <li>
                     <div class="fl-head"><code>question</code><span class="badge badge-req">필수</span></div>
-                    <div class="fl-desc">사용자가 실제로 던진 질문 원문. 골든셋과 짝을 맞추는 키로도 쓰입니다.</div>
+                    <div class="fl-desc">사용자가 실제로 던진 질문 원문. QA셋과 짝을 맞추는 키로도 쓰입니다.</div>
                   </li>
                   <li>
                     <div class="fl-head"><code>answer</code><span class="badge badge-req">필수</span></div>
@@ -614,9 +1178,9 @@
                     <div class="fl-gain"><b>켜지는 진단 ·</b> 불만족 케이스를 <b>우선 표본</b>으로 삼아, 사용자가 실제로 아파한 질문부터 원인을 파고듭니다.</div>
                   </li>
                   <li>
-                    <div class="fl-head"><code>ground_truth</code> <code>gold_contexts</code><span class="badge badge-opt">선택</span><span class="fl-note">골든셋을 로그 안에 직접</span></div>
+                    <div class="fl-head"><code>ground_truth</code> <code>gold_contexts</code><span class="badge badge-opt">선택</span><span class="fl-note">QA셋을 로그 안에 직접</span></div>
                     <div class="fl-desc">정답과 정답 근거를 별도 파일 대신 로그 줄에 바로 넣는 방식입니다.</div>
-                    <div class="fl-gain"><b>켜지는 진단 ·</b> 골든셋 탭과 똑같은 진단이 켜지고, <b>골든셋 파일 업로드를 생략</b>할 수 있습니다. 보통은 정답지를 따로 관리하니 골든셋 파일 쪽이 편합니다.</div>
+                    <div class="fl-gain"><b>켜지는 진단 ·</b> QA셋 탭과 똑같은 진단이 켜지고, <b>QA셋 파일 업로드를 생략</b>할 수 있습니다. 보통은 정답지를 따로 관리하니 QA셋 파일 쪽이 편합니다.</div>
                   </li>
                   <li>
                     <div class="fl-head"><code>latency_ms</code> <code>timestamp</code><span class="badge badge-opt">선택</span></div>
@@ -625,7 +1189,7 @@
                 </ul>
               </div>
 
-              <!-- 골든셋 -->
+              <!-- QA셋 -->
               <div class="help-panel" id="hpanel-golden" role="tabpanel" aria-labelledby="htab-golden" hidden>
                 <p class="help-intro">사람이 만든 정답지이고, <b>진단의 기본 입력입니다.</b> 이게 있어야 “틀렸다”를 추측이 아니라 대조로 확정합니다.
                   <code>XLSX · CSV · JSONL · JSON</code> 모두 받으니, <b>이미 쓰는 테스트셋이 있으면 그대로 주셔도 됩니다.</b></p>
@@ -637,7 +1201,7 @@
                   <li>
                     <div class="fl-head"><code>question</code><span class="badge badge-req">필수</span></div>
                     <div class="fl-desc">실행 로그의 질문과 <b>자동으로 짝지어집니다</b> — 공백·끝 문장부호·대소문자 차이는 무시하므로 토씨까지 맞출 필요는 없습니다.
-                      매칭된 건수만 골든셋 기반 진단에 들어가고, 못 맞춘 항목은 버려지지 않고 리포트에 집계됩니다.</div>
+                      매칭된 건수만 QA셋 기반 진단에 들어가고, 못 맞춘 항목은 버려지지 않고 리포트에 집계됩니다.</div>
                   </li>
                   <li>
                     <div class="fl-head"><code>ground_truth</code><span class="badge badge-req">필수</span><span class="fl-note">정답 텍스트</span></div>
@@ -679,29 +1243,7 @@
           </details>
         </div>
 
-        <!-- 로그 리플레이 모드에서는 통째로 숨긴다(updateModeCopy) — 리플레이는 색인·검색·
-             답변생성이 없어 RAGAS 채점이 유일한 작업이라 깊이를 낮춰도 시간이 거의 안 줄고,
-             대신 생성축 라벨 4종이 통째로 죽는다. 선택지가 될 수 없어 고정한다. -->
-        <div class="depth" id="depthBlock">
-          <span class="field-label">진단 깊이</span>
-          <div class="segmented" role="group" aria-label="진단 깊이">
-            <button class="seg" aria-pressed="false" data-depth="fast">
-              <div class="seg-name"><span class="seg-bars"><i class="on"></i><i></i><i></i></span> 빠른 검진</div>
-              <div class="seg-meta">규칙 기반 · ~30초</div>
-            </button>
-            <button class="seg" aria-pressed="true" data-depth="standard">
-              <div class="seg-name"><span class="seg-bars"><i class="on"></i><i class="on"></i><i></i></span> 표준 검진</div>
-              <div class="seg-meta">재검색 분석 · ~2분</div>
-            </button>
-            <button class="seg" aria-pressed="false" data-depth="full">
-              <div class="seg-name"><span class="seg-bars"><i class="on"></i><i class="on"></i><i class="on"></i></span> 정밀 검진</div>
-              <div class="seg-meta">LLM 심층 · ~6분</div>
-            </button>
-          </div>
-        </div>
-
         <div class="run-row">
-          <div class="run-note"><span id="srcNote">코퍼스 <b>1</b>개 준비됨</span> · 예상 <b id="etaNote">약 2분</b></div>
           <button class="btn-run" id="btnRun">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4.5 19 12 6 19.5V4.5z"/></svg>
             진단 시작
@@ -759,8 +1301,8 @@
   </section>
 
   <footer class="foot">
-    <span>AgentDoctor — RAG 진단·처방 파이프라인</span>
-    <span class="foot-mono">Ingest · Index · Eval · Optimize</span>
+    <span>SKKU</span>
+    <span class="foot-mono">Metabuild</span>
   </footer>
 </div>
 
@@ -774,6 +1316,21 @@
     root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
   });
 
+
+  function initMagicSpotlight() {
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.bento-card, .preview-card'));
+    cards.forEach(function (card) {
+      card.addEventListener('pointermove', function (ev) {
+        var rect = card.getBoundingClientRect();
+        var x = ((ev.clientX - rect.left) / rect.width * 100).toFixed(2) + '%';
+        var y = ((ev.clientY - rect.top) / rect.height * 100).toFixed(2) + '%';
+        card.style.setProperty('--mx', x);
+        card.style.setProperty('--my', y);
+      });
+    });
+  }
+  initMagicSpotlight();
+
   var tabs = [document.getElementById('tab-doc'), document.getElementById('tab-conn')];
   var panels = { 'tab-doc': 'panel-doc', 'tab-conn': 'panel-conn' };
   tabs.forEach(function (t) {
@@ -783,24 +1340,12 @@
         o.setAttribute('aria-selected', sel ? 'true' : 'false');
         document.getElementById(panels[o.id]).hidden = !sel;
       });
-      updateModeCopy(t.id === 'tab-conn');
       refreshRunButton();
     });
   });
 
-  /* 리플레이(로그) 모드는 남의 인덱스라 재검색이 없다 — 진단 깊이가
-     규칙·골든셋 대조 vs LLM 심층 두 단계뿐이므로 문구·선택지를 바꾼다. */
-  function updateModeCopy(isLog) {
-    // 리플레이는 깊이 선택 자체가 없다 — 블록을 통째로 숨기고 서버도 deep 으로 고정한다.
-    // (선택지를 남겨두면 '빠른 검진'을 고른 채 로그 탭으로 넘어와 생성축 라벨 4종이
-    //  죽은 진단서를 받게 된다. 실측: 6건 기준 0.03초 vs 13.8초 — 아끼는 시간도 없다.)
-    document.getElementById('depthBlock').hidden = isLog;
-    if (isLog) updateSrcNote();
-    else document.getElementById('srcNote').innerHTML = '코퍼스 <b>1</b>개 준비됨';
-    updateEta(isLog);
-  }
 
-  /* 파일 형식 안내 안쪽 탭(실행 로그 / 골든셋). details 안에 있어서 접힌 상태에선
+  /* 파일 형식 안내 안쪽 탭(실행 로그 / QA셋). details 안에 있어서 접힌 상태에선
      보이지 않으므로 초기 상태만 맞춰 두고 클릭으로 전환한다. */
   var helpTabs = [document.getElementById('htab-log'), document.getElementById('htab-golden')];
   helpTabs.forEach(function (t) {
@@ -820,32 +1365,13 @@
     });
   });
 
-  var etaMap = { fast: '약 30초', standard: '약 2분', full: '약 6분' };
-  var selectedDepth = 'standard';
 
-  /* 리플레이는 깊이 선택이 없어 seg 클릭이 안 일어나므로 ETA 를 따로 세운다.
-     문서 모드의 '약 6분'은 색인·임베딩까지 포함한 값이라 리플레이엔 안 맞는다
-     (리플레이는 RAGAS 채점만 — 실측 6건 13.8초, 레코드 단위 병렬). */
-  function updateEta(isLog) {
-    document.getElementById('etaNote').textContent =
-      isLog ? '약 1분 이내' : etaMap[selectedDepth];
-  }
-
-  document.querySelectorAll('.seg').forEach(function (s) {
-    s.addEventListener('click', function () {
-      document.querySelectorAll('.seg').forEach(function (o) { o.setAttribute('aria-pressed', 'false'); });
-      s.setAttribute('aria-pressed', 'true');
-      selectedDepth = s.dataset.depth;
-      updateEta(false);      // seg 는 문서 모드에서만 보인다
-    });
-  });
-
-  /* file upload wiring — 세 드롭존(문서/로그/골든셋)이 같은 클릭·드래그·키보드
+  /* file upload wiring — 세 드롭존(문서/로그/QA셋)이 같은 클릭·드래그·키보드
      동작을 공유하므로 헬퍼 하나로 묶는다. */
   var WEB_API_BASE = 'http://localhost:8767';
   var selectedFile = null;        // 문서 탭 — PDF
   var selectedLogFile = null;     // 로그 탭 — 실행 로그(필수)
-  var selectedGoldenFile = null;  // 로그 탭 — 골든셋(필수, 면제는 인라인 정답뿐)
+  var selectedGoldenFile = null;  // 로그 탭 — QA셋(필수, 면제는 인라인 정답뿐)
   var logHasInlineGolden = false; // 로그 줄에 ground_truth/gold_contexts 가 이미 있음
   var btnRun = document.getElementById('btnRun');
 
@@ -907,7 +1433,7 @@
   var LOG_REQUIRED_KEYS = ['question', 'answer'];
   var QA_QUESTION_KEYS = ['question', 'q', 'query'];
   var QA_GROUND_TRUTH_KEYS = ['ground_truth', 'gold_answer', 'answer', 'answers'];
-  // 로그 자체에 정답이 인라인으로 들어 있으면 골든셋이 "없는" 게 아니다 —
+  // 로그 자체에 정답이 인라인으로 들어 있으면 QA셋이 "없는" 게 아니다 —
   // web_api 의 게이트도 이 필드를 보고 통과시킨다. gold_contexts 는 여기 넣지 않는다:
   // 그것만으로는 검색축까지만 재고 답변축(ground_truth 대조)이 빠져 신뢰도 축이 통째로
   // 미측정이 되고, 진단서가 총점을 감춘다 — 게이트가 막겠다고 적어둔 그 결과다.
@@ -981,9 +1507,9 @@
     reader.readAsText(file, 'utf-8');
   }
 
-  /* 골든셋은 이 화면에서 면제가 없다. 정답지가 없으면 신뢰도 축을 못 재고, 그러면
+  /* QA셋은 이 화면에서 면제가 없다. 정답지가 없으면 신뢰도 축을 못 재고, 그러면
      종합점수 자체가 안 나온다 — 원인 7종 중 3종만 담긴 "점수 없는 진단서"를 받아가는 건
-     오해만 만든다. 면제는 하나뿐: 로그에 정답이 인라인으로 들어 있는 경우(그건 골든셋이
+     오해만 만든다. 면제는 하나뿐: 로그에 정답이 인라인으로 들어 있는 경우(그건 QA셋이
      없는 게 아니다). 정답지를 아직 못 만든 경우는 CLI 의 --no-golden 이 개발용 통로다. */
   function goldenSatisfied() {
     return !!selectedGoldenFile || logHasInlineGolden;
@@ -1011,27 +1537,19 @@
     onChange: function (f) {
       selectedLogFile = f;
       if (!f) logHasInlineGolden = false;  // 거부된 파일의 인라인 정답 판정은 무효
-      refreshGoldenGate(); updateSrcNote(); refreshRunButton();
+      refreshGoldenGate(); refreshRunButton();
     },
   });
   wireDropzone('goldenDropzone', 'goldenInput', {
     mainId: 'goldenDzMain', subId: 'goldenDzSub', pattern: /\.(xlsx|csv|jsonl|json)$/i,
     rejectMsg: 'XLSX · CSV · JSONL · JSON 형식만 지원합니다.', validate: validateGoldenFile,
-    onChange: function (f) { selectedGoldenFile = f; refreshGoldenGate(); updateSrcNote(); refreshRunButton(); },
+    onChange: function (f) { selectedGoldenFile = f; refreshGoldenGate(); refreshRunButton(); },
   });
 
   // 브라우저가 새로고침 때 체크박스 상태를 복원하는 경우가 있어 초기 상태를 맞춰 둔다.
   refreshGoldenGate();
   refreshRunButton();
 
-  function updateSrcNote() {
-    var note = document.getElementById('srcNote');
-    if (!note) return;
-    if (!selectedLogFile) { note.textContent = '실행 로그 미선택'; return; }
-    if (selectedGoldenFile) note.innerHTML = '로그 · 골든셋 <b>준비됨</b>';
-    else if (logHasInlineGolden) note.innerHTML = '로그에 정답 포함 — 골든셋 <b>불필요</b>';
-    else note.innerHTML = '골든셋 <b>필요</b> — 정답지가 없으면 종합점수를 낼 수 없습니다';
-  }
 
   /* ECG canvas — subtle oscilloscope trace */
   var cv = document.getElementById('ecg');
@@ -1099,7 +1617,7 @@
       }
       if (!goldenSatisfied()) {
         document.getElementById('goldenDzSub').textContent =
-          '골든셋은 진단의 기본 입력입니다 — 파일을 올리거나, 아래에서 없이 진행을 선택하세요.';
+          'QA셋은 진단의 기본 입력입니다 — 파일을 올리거나, 아래에서 없이 진행을 선택하세요.';
         document.getElementById('goldenDropzone').focus();
         return;
       }
@@ -1110,7 +1628,7 @@
     }
     document.getElementById('inputView').style.display = 'none';
     document.getElementById('progressView').hidden = false;
-    document.getElementById('consoleLabel').textContent = 'running';
+    document.getElementById('consoleLabel').textContent = '진단 중';
     startRun(isLog);
   });
 
@@ -1158,7 +1676,7 @@
     if (isLog) {
       form.append('mode', 'replay');
       form.append('logfile', selectedLogFile);
-      // 골든셋 옵트아웃은 이 경로에 없다 — 파일이 없으면 로그에 정답이 인라인으로
+      // QA셋 옵트아웃은 이 경로에 없다 — 파일이 없으면 로그에 정답이 인라인으로
       // 들어 있는 경우뿐이고, 그건 서버가 로그를 읽어 직접 판정한다.
       if (selectedGoldenFile) form.append('goldenfile', selectedGoldenFile);
     } else {
@@ -1166,7 +1684,7 @@
     }
     // 리플레이는 깊이 선택이 없다 — 서버도 무시하고 deep 으로 고정하지만, 보내는 값도
     // 맞춰 둔다(구버전 서버로 붙어도 얕은 진단이 안 나가게).
-    form.append('depth', isLog ? 'full' : selectedDepth);
+    form.append('depth', 'full');
 
     fetch(WEB_API_BASE + '/runs', { method: 'POST', body: form })
       .then(function (res) {
@@ -1226,7 +1744,7 @@
     var c = ticker.querySelector('.ticker-cursor');
     if (c) c.remove();
     document.querySelector('#progressView .pt').textContent = '진단이 끝났습니다';
-    document.getElementById('consoleLabel').textContent = 'done';
+    document.getElementById('consoleLabel').textContent = '완료';
     document.getElementById('doneSummary').textContent = '진단 완료 — 결과 리포트에서 자세히 확인하세요.';
     document.getElementById('btnReport').href = 'report.html?run_id=' + encodeURIComponent(runId);
     document.getElementById('doneRow').hidden = false;
