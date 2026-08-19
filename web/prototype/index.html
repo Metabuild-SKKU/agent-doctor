@@ -194,7 +194,7 @@
   }
   .section-heading p { margin: 0; color: var(--muted); font-size: 15.5px; line-height: 1.7; }
   .bento-grid {
-    display: grid; grid-template-columns: 1.15fr .85fr; gap: 16px;
+    display: grid; grid-template-columns: 1fr; gap: 16px;
   }
   .bento-card {
     position: relative; overflow: hidden; min-height: 220px; padding: 28px;
@@ -210,7 +210,6 @@
     opacity: .65; transition: opacity .18s ease;
   }
   .bento-card > * { position: relative; z-index: 1; }
-  .bento-card.tall { min-height: 456px; }
   .bento-label { font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: .08em; text-transform: uppercase; }
   .bento-title { margin-top: 14px; font-size: 24px; font-weight: 760; letter-spacing: -.04em; line-height: 1.14; }
   .bento-copy { margin-top: 12px; color: var(--muted); font-size: 14px; line-height: 1.68; max-width: 48ch; }
@@ -758,29 +757,49 @@
 
 
   /* ── 처방 전후 지표 (카드 2) ──
-     값은 리포트 치료 경과 탭의 전체 변화 그대로다.
-       종합점수 41 -> 59 (추이 차트), 충실도 55 -> 64, 정답 회수율 48 -> 61,
-       검색 정확도 51 -> 60, 답변 관련성 50 -> 58.
-     종합점수만 점수 단위라 델타를 pp 없이 적는다 — 리포트 표기와 같다. */
-  .ba { margin-top: 20px; }
-  .ba-chart { display: block; width: 100%; height: auto; }
-  .ba-chart text { font-family: var(--mono); }
-  .ba-chart text.ba-ax { font-size: 9.5px; fill: #999; }
-  .ba-chart .ba-nm { font-size: 11px; fill: #555; font-family: var(--sans); letter-spacing: .01em; }
-  .ba-chart .ba-hi { font-size: 11.5px; font-weight: 700; fill: #111; }
-  .ba-chart .ba-lo { font-size: 10px; fill: #999; }
-  .ba-chart .ba-dl { font-size: 10px; font-weight: 700; fill: #315f86; }
-  .ba-legend { display: flex; gap: 14px; margin-top: 4px; }
-  .ba-legend span { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #666; }
-  .ba-legend i { width: 9px; height: 9px; border-radius: 999px; flex: none; }
-  .ba-legend i.before { background: #fff; border: 1.8px solid #8a8a8a; }
-  .ba-legend i.after { background: #315f86; }
+     리포트 치료 경과 탭의 지표 패널(.metric-row)을 그대로 옮긴다.
+     실측 규격: 행 190px / 1fr / 168px, 패딩 18px 8px, 하단 헤어라인,
+     트랙 5px #e9e9e9, 개선 구간과 처방후 점 #246b45(--good),
+     처방전 점 #8a8a8a, 값 12.5px, 델타 11px/700.
+     추이 차트의 파랑(--accent #315f86)과 달리 지표 개선은 초록이다. */
+  .mx { margin-top: 18px; }
+  .mx-row {
+    display: grid; grid-template-columns: 190px 1fr 168px;
+    align-items: center; padding: 18px 8px; border-bottom: 1px solid #e3e3e3;
+  }
+  .mx-row:last-child { border-bottom: 0; padding-bottom: 4px; }
+  .mx-name { font-size: 14px; font-weight: 520; color: #111; letter-spacing: -.01em; }
+  .mx-en { margin-left: 7px; font-size: 10.5px; color: #8a8a8a; font-weight: 400; letter-spacing: 0; }
+  .mx-bell { position: relative; height: 14px; }
+  .mx-track {
+    position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%);
+    height: 5px; background: #e9e9e9; border-radius: 999px;
+  }
+  .mx-connect {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    height: 5px; background: #246b45; border-radius: 999px;
+  }
+  .mx-pt {
+    position: absolute; top: 50%; width: 14px; height: 14px;
+    border-radius: 50%; transform: translate(-50%, -50%);
+  }
+  .mx-pt.before { background: #8a8a8a; }
+  .mx-pt.after { background: #246b45; }
+  .mx-vals { text-align: right; font-size: 12.5px; color: #8a8a8a; white-space: nowrap; }
+  .mx-vals .a { color: #111; font-weight: 520; }
+  .mx-vals .d { margin-left: 9px; font-size: 11px; font-weight: 700; color: #246b45; }
+
+  @media (max-width: 860px) {
+    .lbx { grid-template-columns: 1fr; }
+    .mx-row { grid-template-columns: 1fr; gap: 8px; padding: 14px 0; }
+    .mx-vals { text-align: left; }
+  }
 
   /* ── 진단 라벨 축 (카드 1) ──
      리포트 진단 상세 내역의 4그룹 축을 그대로 쓴다. 개수 15/10/3/4 는
      label_catalog.py 의 축(포괄 라벨 3개 제외)과 같은 값이다.
      라벨 코드와 A/B/C 등급은 쓰지 않는다 — 리포트가 이미 걷어냈다. */
-  .lbx { margin-top: 22px; display: grid; gap: 11px; }
+  .lbx { margin-top: 22px; display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
   .lbx-row { padding: 15px 16px; border: 1px solid #e3e3e3; border-radius: 6px; background: #fcfcfc; }
   .lbx-top { display: flex; align-items: baseline; gap: 8px; }
   .lbx-name { font-size: 14px; font-weight: 680; color: #111; letter-spacing: -.02em; }
@@ -928,7 +947,7 @@
       </p>
     </div>
     <div class="bento-grid">
-      <article class="bento-card tall">
+      <article class="bento-card">
         <div class="bento-label">진단 라벨</div>
         <div class="bento-title">실패 원인을 32개 라벨로 분류합니다.</div>
         <p class="bento-copy">
@@ -960,70 +979,50 @@
       </article>
       <article class="bento-card">
         <div class="bento-label">처방 전후</div>
-        <div class="bento-title">지표 5개가 어디서 어디로 갔는지 봅니다.</div>
+        <div class="bento-title">지표가 어디서 어디로 갔는지 봅니다.</div>
         <p class="bento-copy">
-          종합점수와 RAGAS 지표 네 개를 처방 전후로 나란히 세워 비교합니다.
+          처방 전후 값을 지표마다 같은 눈금 위에 올려 변화 폭을 그대로 보여줍니다.
         </p>
-        <div class="ba">
-          <svg class="ba-chart" viewBox="0 0 380 196" role="img"
-               aria-label="처방 전후 지표 변화. 종합점수 41에서 59, 충실도 55에서 64, 정답 회수율 48에서 61, 검색 정확도 51에서 60, 답변 관련성 50에서 58로 모두 올랐습니다.">
-            <g class="ba-row">
-              <text class="ba-nm" x="86" y="28.0" text-anchor="end">종합점수</text>
-              <line x1="96.0" y1="24.0" x2="330.0" y2="24.0" stroke="#f0f0f0" stroke-width="9" stroke-linecap="round"/>
-              <line x1="191.94" y1="24.0" x2="234.06" y2="24.0" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
-              <circle cx="191.94" cy="24.0" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
-              <circle cx="234.06" cy="24.0" r="4" fill="#315f86"/>
-              <text class="ba-lo" x="183.94" y="27.4" text-anchor="end">41</text>
-              <text class="ba-hi" x="242.06" y="27.6" text-anchor="start">59</text>
-              <text class="ba-dl" x="376" y="27.4" text-anchor="end">+18.0</text>
-            </g>
-            <g class="ba-row">
-              <text class="ba-nm" x="86" y="60.0" text-anchor="end">충실도</text>
-              <line x1="96.0" y1="56.0" x2="330.0" y2="56.0" stroke="#f0f0f0" stroke-width="9" stroke-linecap="round"/>
-              <line x1="224.70" y1="56.0" x2="245.76" y2="56.0" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
-              <circle cx="224.70" cy="56.0" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
-              <circle cx="245.76" cy="56.0" r="4" fill="#315f86"/>
-              <text class="ba-lo" x="216.70" y="59.4" text-anchor="end">55</text>
-              <text class="ba-hi" x="253.76" y="59.6" text-anchor="start">64</text>
-              <text class="ba-dl" x="376" y="59.4" text-anchor="end">+9.0pp</text>
-            </g>
-            <g class="ba-row">
-              <text class="ba-nm" x="86" y="92.0" text-anchor="end">정답 회수율</text>
-              <line x1="96.0" y1="88.0" x2="330.0" y2="88.0" stroke="#f0f0f0" stroke-width="9" stroke-linecap="round"/>
-              <line x1="208.32" y1="88.0" x2="238.74" y2="88.0" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
-              <circle cx="208.32" cy="88.0" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
-              <circle cx="238.74" cy="88.0" r="4" fill="#315f86"/>
-              <text class="ba-lo" x="200.32" y="91.4" text-anchor="end">48</text>
-              <text class="ba-hi" x="246.74" y="91.6" text-anchor="start">61</text>
-              <text class="ba-dl" x="376" y="91.4" text-anchor="end">+13.0pp</text>
-            </g>
-            <g class="ba-row">
-              <text class="ba-nm" x="86" y="124.0" text-anchor="end">검색 정확도</text>
-              <line x1="96.0" y1="120.0" x2="330.0" y2="120.0" stroke="#f0f0f0" stroke-width="9" stroke-linecap="round"/>
-              <line x1="215.34" y1="120.0" x2="236.40" y2="120.0" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
-              <circle cx="215.34" cy="120.0" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
-              <circle cx="236.40" cy="120.0" r="4" fill="#315f86"/>
-              <text class="ba-lo" x="207.34" y="123.4" text-anchor="end">51</text>
-              <text class="ba-hi" x="244.40" y="123.6" text-anchor="start">60</text>
-              <text class="ba-dl" x="376" y="123.4" text-anchor="end">+9.0pp</text>
-            </g>
-            <g class="ba-row">
-              <text class="ba-nm" x="86" y="156.0" text-anchor="end">답변 관련성</text>
-              <line x1="96.0" y1="152.0" x2="330.0" y2="152.0" stroke="#f0f0f0" stroke-width="9" stroke-linecap="round"/>
-              <line x1="213.00" y1="152.0" x2="231.72" y2="152.0" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
-              <circle cx="213.00" cy="152.0" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
-              <circle cx="231.72" cy="152.0" r="4" fill="#315f86"/>
-              <text class="ba-lo" x="205.00" y="155.4" text-anchor="end">50</text>
-              <text class="ba-hi" x="239.72" y="155.6" text-anchor="start">58</text>
-              <text class="ba-dl" x="376" y="155.4" text-anchor="end">+8.0pp</text>
-            </g>
-            <line x1="96.0" y1="176.0" x2="330.0" y2="176.0" stroke="#e3e3e3"/>
-            <text class="ba-ax" x="96.0" y="189.0" text-anchor="middle">0</text>
-            <text class="ba-ax" x="330.0" y="189.0" text-anchor="middle">100</text>
-          </svg>
-          <div class="ba-legend">
-            <span><i class="before"></i>처방 전</span>
-            <span><i class="after"></i>처방 후</span>
+        <div class="mx">
+          <div class="mx-row">
+            <div class="mx-name">충실도<span class="mx-en">faithfulness</span></div>
+            <div class="mx-bell">
+              <div class="mx-track"></div>
+              <div class="mx-connect" style="left:55%;width:9%"></div>
+              <div class="mx-pt before" style="left:55%"></div>
+              <div class="mx-pt after" style="left:64%"></div>
+            </div>
+            <div class="mx-vals"><span class="b">55.0%</span> → <span class="a">64.0%</span><span class="d">+9.0pp</span></div>
+          </div>
+          <div class="mx-row">
+            <div class="mx-name">정답 회수율<span class="mx-en">context_recall</span></div>
+            <div class="mx-bell">
+              <div class="mx-track"></div>
+              <div class="mx-connect" style="left:48%;width:13%"></div>
+              <div class="mx-pt before" style="left:48%"></div>
+              <div class="mx-pt after" style="left:61%"></div>
+            </div>
+            <div class="mx-vals"><span class="b">48.0%</span> → <span class="a">61.0%</span><span class="d">+13.0pp</span></div>
+          </div>
+          <div class="mx-row">
+            <div class="mx-name">검색 정확도<span class="mx-en">context_precision</span></div>
+            <div class="mx-bell">
+              <div class="mx-track"></div>
+              <div class="mx-connect" style="left:51%;width:9%"></div>
+              <div class="mx-pt before" style="left:51%"></div>
+              <div class="mx-pt after" style="left:60%"></div>
+            </div>
+            <div class="mx-vals"><span class="b">51.0%</span> → <span class="a">60.0%</span><span class="d">+9.0pp</span></div>
+          </div>
+          <div class="mx-row">
+            <div class="mx-name">답변 관련성<span class="mx-en">response_relevancy</span></div>
+            <div class="mx-bell">
+              <div class="mx-track"></div>
+              <div class="mx-connect" style="left:50%;width:8%"></div>
+              <div class="mx-pt before" style="left:50%"></div>
+              <div class="mx-pt after" style="left:58%"></div>
+            </div>
+            <div class="mx-vals"><span class="b">50.0%</span> → <span class="a">58.0%</span><span class="d">+8.0pp</span></div>
           </div>
         </div>
       </article>
