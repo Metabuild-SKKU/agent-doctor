@@ -519,7 +519,6 @@
   @media (max-width: 980px) {
     .hero { grid-template-columns: 1fr; gap: 34px; padding-top: 62px; }
     .hero-preview { max-width: 560px; width: 100%; }
-    .section-heading { grid-template-columns: 1fr; gap: 18px; }
     .bento-grid { grid-template-columns: 1fr; }
     .bento-card.wide { grid-column: auto; }
     .workflow-strip { grid-template-columns: repeat(2, 1fr); }
@@ -827,6 +826,10 @@
      proof 카드 3장이 빠지면서 왼쪽 기둥이 108px 짧아졌다. 남은 네
      덩어리(h1 / lede / claim / CTA)의 간격을 넓혀 카드 높이에 가깝게
      끌어올린다. 두 기둥은 align-items:center 로 서로 가운데를 맞춘다. */
+  /* section-heading 을 히어로와 같은 세로 구조로 — h2 아래 설명문이 온다 */
+  .section-heading { display: block; }
+  .section-heading p { margin-top: 28px; max-width: 56ch; }
+
   .hero .lede { margin-top: 28px; }
   .hero .claim { margin-top: 38px; }
   .hero .hero-actions { margin-top: 42px; }
@@ -954,9 +957,8 @@
     <div class="section-heading">
       <h2>점수표가 아니라,<br>고칠 수 있는 진단서.</h2>
       <p>
-        RAG가 틀렸다는 사실만 보여주면 다음 행동이 막힙니다.
-        RAG Doctor는 실패 지점을 라벨로 분해하고, 각 처방이 지표를 어떻게 바꿨는지
-        전후 수치로 남겨 팀이 바로 의사결정할 수 있게 합니다.
+        진단만 하면 다음 행동이 막힙니다. RAG Doctor는 답변 실패 지점을 진단 라벨로
+        분류하고, 각 처방이 성능 지표를 어떻게 바꾸는지 수치로 남겨 의사결정을 돕습니다.
       </p>
     </div>
     <div class="bento-grid">
