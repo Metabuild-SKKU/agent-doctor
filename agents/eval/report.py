@@ -29,6 +29,7 @@ from agents.eval.types import (
 )
 from agents.eval.scoring import compute_composite, format_composite
 from agents.eval.diagnose import _oracle_ok   # oracle 통과 판정은 진단과 같은 함수를 쓴다
+from agents.eval.metrics_search import _bm25_hits_gold
 
 _RAGAS_KEYS = ("faithfulness", "context_precision", "context_recall", "response_relevancy")
 
@@ -183,10 +184,15 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
     else:
         overall_val, pass_thr = round(overall, 4), overall >= PASS_SCORE_THRESHOLD
 
+    # 한 번만 만들고 failed_questions 는 그 **뷰**로 낸다 — 따로 만들면 한쪽에만 필드가
+    # 붙었을 때 라벨 시트와 리포트가 다른 관측을 보여준다.
+    diagnosed = _diagnosed_probes(records)
+
     report = DiagnosticReport(
         report_id=f"report_{uuid.uuid4().hex[:8]}",
         findings=findings,
-        failed_questions=_failed_questions(records),
+        failed_questions=_failed_questions(records, diagnosed),
+        diagnosed_probes=diagnosed,
         findings_summary=_findings_summary(records, mode),
         ragas_scores=scores,
         runtime_summary={"reranker": reranker_runtime,
@@ -204,7 +210,36 @@ def build_report(records: list[EvalRecord], iteration: int, mode: int | None = N
 
 # ── 집계 헬퍼 ─────────────────────────────────────────────────────
 
-def _failed_questions(records: list[EvalRecord]) -> list[dict]:
+def _diagnosed_probes(records: list[EvalRecord]) -> dict[str, dict]:
+    """probe_id → 질문·정답·답변·recall·관측. **진단이 나온 probe 를 하나도 빼지 않는다.**
+
+    `_failed_questions` 는 사람이 고칠 실패 목록이라 골드 오류 probe 를 의도적으로 뺀다.
+    라벨 시트가 그 목록을 재활용하는 바람에, **우리가 bad_gold_* 로 진단한 probe 는 시트에
+    빈 칸으로 나갔다** — 답변도 지표도 순위도 없이. 라벨러는 '판단불가' 말고 쓸 수가 없다.
+
+    그러면 우리 진단이 라벨러가 볼 증거를 고르는 셈이라, 하필 그 진단이 맞는지 검증하려던
+    D 그룹(bad_gold_answer·bad_gold_chunk)이 **원리적으로 검증 불가**가 된다. 라벨을 가리는
+    블라인딩은 필요하지만 증거를 가리는 건 그 반대다.
+
+    실측(30건, qa_2168): 로그에는 답변까지 남았는데 시트는 전 항목이 null 이었다.
+    """
+    return {
+        record.probe.probe_id: {
+            "probe_id": record.probe.probe_id,
+            "question": record.probe.question,
+            "expected_answer": record.probe.ground_truth or "",
+            "actual_answer": record.generated_answer or "",
+            "recall_at_k": record.recall_at_k,
+            "recall_basis": record.recall_basis,
+            "observations": _observations(record),
+        }
+        for record in records
+        if record.findings
+    }
+
+
+def _failed_questions(records: list[EvalRecord],
+                      diagnosed: dict[str, dict]) -> list[dict]:
     """실패한 probe의 질문·기대 정답·실제 답변을 리포트에 보존한다.
 
     EvalRecord는 Eval 실행이 끝나면 사라지므로 UI가 재구성하지 않고 실제 생성 답변을
@@ -215,17 +250,78 @@ def _failed_questions(records: list[EvalRecord]) -> list[dict]:
     사람이 볼 실패 목록이 고칠 수 없는 항목으로 채워져 진짜 실패가 묻힌다. 이 probe 들은
     사라지지 않는다 — findings_summary 의 bad_gold_* 집계와 Serve 의 수동 권고(골드 재지정)가
     질문 목록과 조치 방법을 따로 싣는다.
+
+    recall 을 함께 남기는 이유: 이 값은 **진단과 무관하게, 진단보다 먼저** 계산된다(gold span
+    좌표를 검색 결과가 덮었나). 그래서 라벨을 반박할 수 있는 유일한 독립 증거다 — 외부
+    정답지와 대조할 때 "저쪽은 검색 실패라는데 우리 검색은 성공했다" 를 우리 라벨이 아니라
+    측정값으로 판정할 수 있다(우리 라벨로 판정하면 '다르니까 봐준다' 는 순환이 된다).
+    basis 를 함께 싣는 건 span/chunk 가 같은 1.0 이라도 강도가 달라서다.
     """
+    # **_diagnosed_probes 의 뷰다.** 항목을 여기서 다시 만들지 않는다 — 복제하면 한쪽에만
+    # 필드가 붙었을 때 리포트와 라벨 시트가 다른 관측을 보여준다.
     return [
-        {
-            "probe_id": record.probe.probe_id,
-            "question": record.probe.question,
-            "expected_answer": record.probe.ground_truth or "",
-            "actual_answer": record.generated_answer or "",
-        }
+        diagnosed[record.probe.probe_id]
         for record in records
         if record.findings and not is_gold_labeling_error(record)
     ]
+
+
+def _observations(record: EvalRecord) -> dict:
+    """사람이 이 probe 를 보고 **직접 라벨을 붙일 수 있을 만큼**의 관측값.
+
+    지금까지 이 값들은 콘솔 로그(_log_probe)로만 나갔다. 그런데 진단 유효성 검증은
+    "사람이 우리 관측을 보고 라벨을 붙이고, 그걸 우리 진단과 대조"하는 절차라 관측이
+    **구조화된 형태로 남아야** 한다(로그 파싱은 포맷이 계약이 아니라 깨진다).
+
+    담는 건 **관측뿐이고 판정은 없다.** finding 라벨·근거 문구는 넣지 않는다 — 라벨러가
+    그걸 보면 우리 진단을 채점하는 게 아니라 우리 진단에 동의하는지를 재게 된다.
+
+    recall 이 여기 없고 상위에 있는 건 소비처가 달라서다: recall 은 채점기가 제외 판정에
+    쓰는 입력(계약)이고, 여기는 사람이 읽는 자료다.
+    """
+    probe = record.probe
+    gold_ids = list(probe.gold_chunk_ids or [])
+    retrieved = list(record.retrieved_chunk_ids or [])
+    details = record.retrieval_details or {}
+    obs = {
+        "f1": round(record.f1_score, 4),
+        "oracle_f1": round(record.oracle_f1, 4) if record.oracle_answer is not None else None,
+        "exact_match": record.exact_match,
+        "span_precision": record.span_precision,
+        "gold_chunk_hit": len(set(gold_ids) & set(retrieved)),
+        "gold_chunk_total": len(gold_ids),
+        "gold_chunk_ids": gold_ids,
+        "retrieved_chunk_ids": retrieved,
+        # **넓은 재검색(wide_n=100) 기준 gold 순위.** top_k 안의 순위만 보여주면 그 밖은
+        # 전부 '검색안됨' 으로 뭉뚱그려져, 사람이 retrieval_low_rank(밀림)와
+        # retrieval_missing_gold(아예 없음)를 **구분할 수단이 없다**. 실측: 라벨러가 6건을
+        # 전부 missing_gold 로 봤는데 진단기는 그 청크들이 13·15·24·27위라는 걸 알고 있었다
+        # (사람 라벨 대조 0/6). 이건 측정값이라 시트에 실어도 블라인딩을 깨지 않는다.
+        "gold_wide_ranks": record.signals.get("gold_ranks") or {},
+        # **키워드(BM25) 검색이 놓친 gold 를 잡는가.** 이게 없으면 라벨러는
+        # retrieval_lexical_mismatch("키워드로는 찾아진다")와 retrieval_semantic_mismatch
+        # ("둘 다 못 찾는다")를 **원리적으로 가를 수 없다** — 시트에는 실행 검색방식(dense)만
+        # 있어서, 키워드를 돌렸을 때 어떻게 되는지는 알 방법이 없다. 실측(60건): 두 라벨이
+        # 정답인 15건을 라벨러가 하나도 맞히지 못했고, 진단 근거 문구를 본 뒤에야 15/15 가 됐다.
+        #
+        # signals 를 읽지 않고 **직접 부른다** — 이 측정은 진단이 그 라벨을 검토한 probe 에서만
+        # 계산되므로(게으른 memoize), signals 로 읽으면 "우리가 검색 원인으로 의심한 probe"
+        # 에만 값이 붙어 진단 판단이 시트에 새어 나간다(gold_ranks 에서 실제로 그랬다).
+        # 이미 계산된 건 캐시라 공짜고, 새로 재는 건 BM25 검색 1회다(LLM 없음).
+        "bm25_hits_gold": _bm25_hits_gold(record),
+        "search_mode": details.get("search_mode", "-"),
+        "reranker_status": details.get("reranker_status", "disabled"),
+        "mmr_applied": bool(details.get("mmr_applied")),
+        "answer_score": round(record.answer_score, 4) if probe.ground_truth else None,
+        "answer_semantic": record.answer_semantic,
+        "gold_coverage": record.gold_coverage,
+    }
+    for name in ("faithfulness", "context_precision", "context_recall",
+                 "response_relevancy"):
+        value = record.ragas.get(name)
+        if isinstance(value, (int, float)):
+            obs[name] = round(float(value), 4)
+    return obs
 
 
 def _findings_summary(records: list[EvalRecord], mode: int) -> dict:
