@@ -833,6 +833,86 @@
   body.motion-ready .reveal {
     transition-duration: .28s;
   }
+  /* ── report.html 정렬: 리듬·활자를 진단서와 같은 눈금으로 ──
+     값은 전부 report.html 실측치다.
+       섹션 리듬  padding 26px 0 / margin 20px 0 / 하단 헤어라인 #e3e3e3
+       h1        48px / 640      (report .rhead h1)
+       구역 제목  clamp(22px,2.6vw,34px) / 720 (report .rx-ragas-head h2)
+       소제목     18px / 650      (report .section h2)
+       본문       15px #333 / 보조 #555 / 흐림 #777                        */
+
+  .hero,
+  .trust-strip,
+  .magic-marquee,
+  .landing-section,
+  .steps,
+  .console-intro {
+    margin: 20px 0;
+    padding: 26px 0;
+    border: 0;
+    border-bottom: 1px solid #e3e3e3;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  /* 콘솔이 바로 뒤에 오므로 선을 겹치지 않는다 */
+  .console-intro { border-bottom: 0; padding-bottom: 8px; }
+
+  .hero h1 {
+    font-size: clamp(30px, 4.4vw, 48px);
+    font-weight: 640;
+    letter-spacing: -.045em;
+    line-height: 1.06;
+  }
+  .section-heading h2,
+  .console-intro h2 {
+    font-size: clamp(22px, 2.6vw, 34px);
+    font-weight: 720;
+    letter-spacing: -.04em;
+    line-height: 1.14;
+  }
+  .bento-title,
+  .step-title,
+  .proof-card b {
+    font-size: 18px;
+    font-weight: 650;
+    letter-spacing: -.02em;
+    line-height: 1.55;
+  }
+  .lede,
+  .section-heading p,
+  .console-intro p,
+  .bento-copy,
+  .step p {
+    font-size: 15px;
+    line-height: 1.7;
+    color: #333;
+  }
+  .claim .cl-lg { font-size: 18px; font-weight: 650; letter-spacing: -.02em; }
+  .step p,
+  .bento-copy { color: #555; }
+
+  /* 카드 껍데기를 벗겨 진단서와 같은 납작한 결로 맞춘다 */
+  .trust-strip,
+  .bento-card,
+  .step,
+  .workflow-step,
+  .marquee-chip,
+  .label-pill,
+  .proof-card {
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .bento-card,
+  .workflow-step,
+  .marquee-chip,
+  .proof-card { border: 1px solid #e3e3e3; border-radius: 6px; }
+  .bento-card.dark { color: #111; background: transparent; border-color: #e3e3e3; }
+  .step { border: 0; border-top: 1px solid #e3e3e3; padding: 18px 0 0; }
+  .trust-strip { border: 0; border-bottom: 1px solid #e3e3e3; padding: 26px 0; }
+  .console { margin: 20px 0 28px; }
+
 </style>
 </head>
 <body>
