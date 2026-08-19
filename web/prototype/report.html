@@ -1569,7 +1569,8 @@
   .topbar .back-link { order: -2; padding-left: 0; }
   .topbar .brand { order: -1; }
   .topbar .theme-toggle { margin-left: auto; }
-  .report-nav { position: static; display: inline-flex; width: auto; margin: 0; }
+  .topbar { column-gap: 28px; }
+  .report-nav { position: static; display: inline-flex; width: auto; margin: 0 0 0 4px; }
   .qa-tools { grid-template-columns: minmax(0, 1fr) 190px; align-items: end; }
   .qa-search { height: 44px; margin-bottom: 0; padding: 0 13px; }
   .qa-filter-field { display: block; }
@@ -1589,7 +1590,7 @@
     .topbar { padding: 12px 18px; flex-wrap: wrap; }
     .back-link { font-size: 0; }
     .back-link svg { width: 18px; height: 18px; }
-    .report-nav { width: 100%; margin-top: 12px; }
+    .report-nav { width: 100%; margin: 12px 0 0; }
     .qa-tools { grid-template-columns: 1fr; }
   }
 </style>
