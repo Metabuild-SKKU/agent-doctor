@@ -35,7 +35,7 @@ _METRIC_LABELS = {
 # "무엇을 바꿨나"를 보여준다. 축 이름 + 동작 동사로 조립하므로 catalog 에 새 action 이
 # 생겨도 표를 손보지 않아도 된다(축만 등록하면 된다).
 _AXIS_NOUNS = {
-    "retriever.top_k": "top_k",
+    "retriever.top_k": "검색 결과 개수",
     "retriever.mmr": "MMR",
     "retriever.hybrid_dense_weight": "하이브리드 가중치",
     "retriever.search_type": "하이브리드 검색",
@@ -64,6 +64,31 @@ _OPERATION_VERBS = {
     "adjust": "조정",
 }
 
+# OptimizationHistoryItem.before/after_config 는 실행 시점의 평면 설정 키를 보관한다.
+# 화면은 내부 키를 그대로 노출하지 않고 한글 축 이름을 보여준다. 정식 action_key 가
+# 있는 새 이력은 _AXIS_NOUNS 를 정본으로 쓰고, 이 표는 구버전 이력 전용 fallback 이다.
+_CONFIG_FIELD_NOUNS = {
+    "top_k": "검색 결과 개수",
+    "chunk_size": "청크 크기",
+    "chunk_overlap": "청크 겹침",
+    "chunk_strategy": "청킹 전략",
+    "use_reranker": "리랭커",
+    "rerank_candidates": "리랭커 후보군",
+    "reranker_model": "리랭커 모델",
+    "use_hybrid": "하이브리드 검색",
+    "hybrid_dense_weight": "하이브리드 가중치",
+    "use_mmr": "중복 제거 검색",
+    "embedding_model": "임베딩 모델",
+    "temperature": "생성 온도",
+    "grounding_strict": "근거 지시",
+    "require_citation": "인용 표시",
+    "restate_question": "질문 재진술",
+    "completeness_mode": "완전성 모드",
+    "abstention_strict": "기권 기준",
+    "abstention_relaxed": "기권 완화",
+    "context_compression": "컨텍스트 압축",
+}
+
 # ⚠️ 구버전 이력 fallback. 이전 실행이 저장한 항목에는 action_key 가 없어
 # 처방 id 만 남아 있다. 그 리포트도 계속 읽혀야 하므로 표를 유지한다.
 _PRESCRIPTION_POINT_LABELS = {
@@ -76,9 +101,9 @@ _PRESCRIPTION_POINT_LABELS = {
     "increase_chunk_size": "청크 확대",
     "increase_chunk_overlap": "겹침 확대",
     "switch_chunking_strategy": "청킹 전략 변경",
-    "increase_top_k": "top_k 확대",
-    "decrease_top_k": "top_k 축소",
-    "dynamic_top_k": "동적 top_k",
+    "increase_top_k": "검색 결과 개수 확대",
+    "decrease_top_k": "검색 결과 개수 축소",
+    "dynamic_top_k": "검색 결과 개수 자동 조정",
     "expand_query": "질의 확장",
     "enable_query_decomposition": "질의 분해",
     "expand_bridge_entity_query": "연결어 확장",
@@ -393,13 +418,35 @@ def _is_study_error(item) -> bool:
 
 
 def _action_point_label(action_key: str) -> str:
-    """`retriever.top_k:increase` → `top_k 확대`. 모르는 축이면 None 대신 원문 축약."""
+    """`retriever.top_k:increase` → `검색 결과 개수 확대`.
+
+    catalog 밖의 외부 action 은 내부 식별자를 화면에 노출하지 않고 일반명으로 둔다.
+    원본 action_key 는 처방 payload 의 ``action`` 필드에 그대로 보존된다.
+    """
     path, _, operation = action_key.rpartition(":")
     noun = _AXIS_NOUNS.get(path)
     verb = _OPERATION_VERBS.get(operation)
     if noun and verb:
         return f"{noun} {verb}"
-    return action_key[:18]
+    return "설정 변경"
+
+
+def _rx_change_label(item, changed_key: str, prescription_index: int) -> str:
+    """처방 카드용 한글 변경명.
+
+    새 이력은 action catalog 축과 동작으로 조립하고, action_key 가 없는 구버전은
+    평면 config 키의 축 이름으로 폴백한다. 알 수 없는 외부 키는 영문을 노출하지 않고
+    일반명으로 표시하되 원본 change 값은 payload 에 그대로 남겨 호환성을 지킨다.
+    """
+    action_key = getattr(item, "action_key", None)
+    if action_key:
+        return _action_point_label(action_key)
+    if changed_key in _CONFIG_FIELD_NOUNS:
+        return f"{_CONFIG_FIELD_NOUNS[changed_key]} 변경"
+    point_label = _course_point_label(item, prescription_index)
+    if point_label and not point_label.startswith("처방 "):
+        return point_label
+    return "설정 변경"
 
 
 def _course_point_label(item, prescription_index: int) -> str:
@@ -425,6 +472,9 @@ def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
     # baseline_score 는 이미 헤드라인 스케일(0~100) — 여기서 다시 _to_100 하지 않는다.
     points = [{
         "label": "기준선",
+        "axis_label": "기준",
+        "rx_num": "",
+        "step": 0,
         "score": baseline_score,
         "kept": True,
         "kind": "baseline",
@@ -453,12 +503,18 @@ def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
             points.extend([
                 {
                     "label": f"{label} 실패",
+                    "axis_label": label,
+                    "rx_num": f"{prescription_index:02d}",
+                    "step": prescription_index,
                     "score": after,
                     "kept": False,
                     "kind": "failed",
                 },
                 {
                     "label": "원상 복구",
+                    "axis_label": label,
+                    "rx_num": f"{prescription_index:02d}",
+                    "step": prescription_index,
                     "score": before,
                     "kept": True,
                     "kind": "rollback",
@@ -468,6 +524,9 @@ def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
 
         points.append({
             "label": label,
+            "axis_label": label,
+            "rx_num": f"{prescription_index:02d}",
+            "step": prescription_index,
             "score": after if kept else before,
             "kept": kept,
             "kind": "kept" if kept else "pending",
@@ -502,6 +561,7 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
                 "",
                 "",
             ]
+            key = ""
 
         # 헤드라인(composite)과 일관되게 처방 카드 점수도 종합점수로 표시.
         # (유지/롤백 판정 자체는 탐색 신호 기준이므로 direction 과 verdict 이 드물게
@@ -524,6 +584,7 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             "state": state_key,
             "num": f"{idx:02d}",
             "change": change,
+            "change_label": _rx_change_label(item, key, idx),
             "action": getattr(item, "action_key", None) or "",
             "target": ", ".join(supporting),
             "resolved": resolved,

@@ -182,10 +182,17 @@ class TreatmentCourseViewTest(unittest.TestCase):
                 ("kept", 84),
             ],
         )
-        self.assertEqual(course[1]["label"], "top_k 확대")
+        self.assertEqual(course[1]["label"], "검색 결과 개수 확대")
         self.assertEqual(course[2]["label"], "청크 축소 실패")
         self.assertEqual(course[3]["label"], "원상 복구")
         self.assertEqual(course[4]["label"], "리랭커 활성화")
+        # 실패와 복구는 같은 처방 회차의 두 관측값이다. 프론트가 step을 다시
+        # 추측하면 서로 다른 x축으로 벌어지고 점수 라벨도 겹친다.
+        self.assertEqual([point["step"] for point in course], [0, 1, 2, 2, 3])
+        self.assertEqual(course[2]["rx_num"], "02")
+        self.assertEqual(course[3]["rx_num"], "02")
+        self.assertEqual(course[2]["axis_label"], "청크 축소")
+        self.assertEqual(course[3]["axis_label"], "청크 축소")
         self.assertEqual(view["score"]["rolled"], 1)
         self.assertEqual(view["score"]["errors"], 0)
 
@@ -566,11 +573,23 @@ class ActionCenteredRxCardTest(unittest.TestCase):
         card = self._rxs(self._item())[0]
 
         self.assertEqual(card["action"], "retriever.top_k:increase")
+        self.assertEqual(card["change_label"], "검색 결과 개수 확대")
         # 대표 라벨 하나로 좁히면 "여러 문제가 같은 변경을 원했다"는 선택 근거가 사라진다.
         self.assertEqual(
             card["target"],
             "retrieval_missing_gold, retrieval_incomplete_enumeration",
         )
+
+    def test_card_localizes_internal_reranker_key(self):
+        card = self._rxs(self._item(
+            action_key="reranker.enabled:enable",
+            selected_prescription_id="enable_reranker",
+            before_config={"use_reranker": False},
+            after_config={"use_reranker": True},
+        ))[0]
+
+        self.assertEqual(card["change"], ["use_reranker", "False", "True"])
+        self.assertEqual(card["change_label"], "리랭커 활성화")
 
     def test_card_separates_supported_from_resolved(self):
         """지지받은 라벨을 그대로 성과로 읽으면 리포트가 실제보다 좋아 보인다."""
@@ -617,7 +636,7 @@ class ActionCenteredRxCardTest(unittest.TestCase):
 
         labels = [p["label"] for p in build_report_view(state)["course"]]
 
-        self.assertIn("top_k 확대", labels)
+        self.assertIn("검색 결과 개수 확대", labels)
 
     def test_legacy_history_without_action_still_renders(self):
         """이전 실행이 저장한 이력에는 action 필드가 없다 — 그래도 읽혀야 한다."""
@@ -642,7 +661,7 @@ class ActionCenteredRxCardTest(unittest.TestCase):
         self.assertEqual(view["rxs"][0]["target"], "retrieval_missing_gold")
         self.assertEqual(view["rxs"][0]["drill"]["notes"], [])
         # 처방 id 표를 통한 구버전 이름이 그대로 나온다.
-        self.assertIn("top_k 확대", [p["label"] for p in view["course"]])
+        self.assertIn("검색 결과 개수 확대", [p["label"] for p in view["course"]])
 
 
 if __name__ == "__main__":

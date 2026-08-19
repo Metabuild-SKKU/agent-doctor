@@ -273,7 +273,11 @@
   /* treatment course */
   .course-chart { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 22px 22px 10px; margin-bottom: 20px; box-shadow: inset 0 1px 0 var(--hi); }
   .course-chart .cc-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; }
-  .course-chart .cc-title { font-size: 13.5px; font-weight: 560; }
+  .course-chart .cc-title {
+    font-size: clamp(20px, 2vw, 24px);
+    font-weight: 700;
+    letter-spacing: -.025em;
+  }
   .course-chart .cc-legend { font-family: var(--mono); font-size: 11px; color: var(--faint); display: flex; gap: 14px; }
   .course-chart .cc-legend i { font-style: normal; display: inline-flex; align-items: center; gap: 5px; }
   .course-segment-hit { cursor: pointer; }
@@ -363,9 +367,20 @@
     z-index: 100;
   }
   .drill-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-bottom: 12px; }
-  .rx-detail-summary { margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
-  .rx-detail-summary .rx-target { margin-top: 0; font-size: 13px; color: #333; line-height: 1.55; }
-  .rx-detail-summary .rx-reason { margin-top: 11px; font-size: 13px; color: #555; line-height: 1.55; }
+  .rx-detail-summary { margin-bottom: 14px; border: 1px solid var(--border); border-radius: 10px; overflow: visible; }
+  .rx-info-row { display: grid; grid-template-columns: 118px minmax(0, 1fr); gap: 20px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
+  .rx-info-row:last-child { border-bottom: 0; }
+  .rx-info-name { color: #555; font-size: 12px; font-weight: 700; line-height: 1.6; }
+  .rx-info-name small { display: block; margin-top: 2px; color: #888; font-size: 10.5px; font-weight: 400; line-height: 1.45; }
+  .rx-info-value { min-width: 0; color: #222; font-size: 13px; line-height: 1.65; }
+  .rx-info-value .rx-label-list { margin-top: 0; }
+  .rx-info-value .rx-impact,
+  .rx-info-value .rx-reason,
+  .rx-info-value .rx-target { margin: 0; color: inherit; font-size: inherit; line-height: inherit; }
+  @media (max-width: 640px) {
+    .rx-info-row { grid-template-columns: 1fr; gap: 5px; }
+    .rx-info-name small { display: inline; margin-left: 5px; }
+  }
   .sweep { display: flex; flex-direction: column; gap: 7px; }
   .sweep-row { display: grid; grid-template-columns: 96px 1fr 54px; align-items: center; gap: 12px; }
   .sweep-k { font-family: var(--mono); font-size: 12px; color: var(--muted); }
@@ -936,20 +951,19 @@
   }
   .rx-ragas-head h2 {
     margin: 0;
-    font-size: clamp(22px, 2.6vw, 34px);
-    letter-spacing: -.04em;
-    font-weight: 720;
+    font-size: clamp(20px, 2vw, 24px);
+    letter-spacing: -.025em;
+    font-weight: 700;
+  }
+  #course-section > .section-head h2 {
+    font-size: clamp(20px, 2vw, 24px);
+    letter-spacing: -.025em;
+    font-weight: 700;
   }
   .rx-ragas-head .sub {
     margin-left: auto;
     color: #777;
     font-size: 15px;
-  }
-  .rx-ragas-selected {
-    margin: -6px 0 16px 34px;
-    color: #555;
-    font-size: 14px;
-    line-height: 1.55;
   }
   .rx-ragas-panel .metric-panel {
     border-radius: 6px;
@@ -1432,7 +1446,7 @@
   }
   .qa-qar {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr;
     border-top: 1px solid #eee;
   }
   .qa-qar-col {
@@ -1637,11 +1651,8 @@
 
     <div class="rx-ragas-panel" id="rxRagasPanel">
       <div class="rx-ragas-head">
-        <span class="idx">02</span>
         <h2>품질 지표 · 처방 전후</h2>
-        <span class="sub">RAGAS 4개 지표</span>
       </div>
-      <p class="rx-ragas-selected" id="rxRagasSelected"></p>
       <div class="metric-panel">
         <div class="metric-toolbar">
           <div class="metric-legend">
@@ -2379,35 +2390,29 @@
   function renderSelectedRxMetrics(rxs) {
     var panel = document.getElementById('rxRagasPanel');
     var rowsEl = document.getElementById('rxRagasMetrics');
-    var selectedEl = document.getElementById('rxRagasSelected');
     if (!panel || !rowsEl) return;
     var rx = selectedRx(rxs);
     if (!rx) {
       panel.hidden = false;
       rowsEl.innerHTML = '<div class="empty">처방별 RAGAS 지표 데이터가 아직 없습니다.</div>';
-      if (selectedEl) selectedEl.textContent = '';
       return;
     }
     ACTIVE_RX_NUM = String(rx.num || ACTIVE_RX_NUM || '01').padStart(2, '0');
     var rows = ragasMetricRows(normalizeRxMetrics(rx));
-    if (selectedEl) {
-      var impact = rxImpactHtml(rx, rxLabels(rx, rx.drill || {}), rx.drill || {});
-      selectedEl.innerHTML = '<b>' + esc(ACTIVE_RX_NUM) + '번 처방</b> 기준 전후 비교' + (impact ? ' · ' + impact : '') + ' · 지표 행을 누르면 전체 처방 과정 추이가 열립니다.';
-    }
     rowsEl.innerHTML = renderMetricRows(rows, true);
     bindLargeMetricRows(rowsEl);
   }
 
   /* ── course line chart ── */
   var DUMMY_COURSE = [
-    { label: '기준선', step: 0, score: 41, kept: true, kind: 'baseline' },
-    { label: '1', step: 1, score: 51, kept: true, kind: 'kept' },
-    { label: '2', step: 2, score: 44, kept: false, kind: 'failed' },
-    { label: '2', step: 2, score: 51, kept: true, kind: 'rollback' },
-    { label: '3', step: 3, score: 56, kept: true, kind: 'kept' },
-    { label: '4', step: 4, score: 57, kept: false, kind: 'failed' },
-    { label: '4', step: 4, score: 56, kept: true, kind: 'rollback' },
-    { label: '5', step: 5, score: 59, kept: true, kind: 'kept' }
+    { label: '기준선', axis_label: '기준', rx_num: '', step: 0, score: 41, kept: true, kind: 'baseline' },
+    { label: '리랭커 활성화', axis_label: '리랭커 활성화', rx_num: '01', step: 1, score: 51, kept: true, kind: 'kept' },
+    { label: '기권 기준 강화 실패', axis_label: '기권 기준 강화', rx_num: '02', step: 2, score: 44, kept: false, kind: 'failed' },
+    { label: '원상 복구', axis_label: '기권 기준 강화', rx_num: '02', step: 2, score: 51, kept: true, kind: 'rollback' },
+    { label: '질문 재진술', axis_label: '질문 재진술', rx_num: '03', step: 3, score: 56, kept: true, kind: 'kept' },
+    { label: '기권 기준 강화 실패', axis_label: '기권 기준 강화', rx_num: '04', step: 4, score: 57, kept: false, kind: 'failed' },
+    { label: '원상 복구', axis_label: '기권 기준 강화', rx_num: '04', step: 4, score: 56, kept: true, kind: 'rollback' },
+    { label: '하이브리드 검색', axis_label: '하이브리드 검색', rx_num: '05', step: 5, score: 59, kept: true, kind: 'kept' }
   ];
   function renderCourse(coursePoints, allowPreview) {
     var raw = coursePoints && coursePoints.length ? coursePoints : (allowPreview ? DUMMY_COURSE : []);
@@ -2447,7 +2452,8 @@
       return {
         x: L + (R - L) * ((step - stepMin) / (stepMax - stepMin)),
         step: step,
-        axisLabel: step === stepMin ? '기준' : String(p.label || step),
+        axisLabel: step === stepMin ? '기준' : String(p.axis_label || p.label || ('처방 ' + step)),
+        rxNum: String(p.rx_num || '').padStart(p.rx_num ? 2 : 0, '0'),
         label: p.label, score: p.score, kept: p.kept, kind: p.kind || (p.kept ? 'kept' : 'pending')
       };
     });
@@ -2484,31 +2490,22 @@
         'stroke-linecap': 'round'
       });
       svg.appendChild(segPath);
-      if (!isRollback && point.label && point.label !== '기준선') {
-        var mx = (prev.x + point.x) / 2;
-        var my = (y(prev.score) + y(point.score)) / 2;
-        var hit = el('g', { class: 'course-segment-hit', 'data-rx-num': point.label, tabindex: '0', role: 'button', 'aria-label': point.label + '번 처방 보기' });
-        hit.appendChild(el('circle', {
-          cx: mx, cy: my, r: 11,
-          fill: 'var(--surface)',
-          stroke: isFailed ? 'var(--critical)' : 'var(--accent)',
-          'stroke-width': 1.8
-        }));
-        var badgeText = el('text', {
-          x: mx, y: my + 3.8,
-          'text-anchor': 'middle',
-          fill: isFailed ? 'var(--critical)' : 'var(--accent)',
-          'font-size': 10.5,
-          'font-weight': 760,
-          'font-family': 'var(--mono)'
+      // 회차 숫자 배지는 선과 점수를 가려 제거했다. 대신 같은 선 위의 넓은 투명
+      // 클릭 영역으로 처방 카드 연결을 유지한다.
+      if (point.rxNum) {
+        var hit = el('path', {
+          class: 'course-segment-hit',
+          'data-rx-num': point.rxNum,
+          tabindex: '0', role: 'button',
+          'aria-label': point.axisLabel + ' 처방 보기',
+          d: 'M' + prev.x + ' ' + y(prev.score) + ' L' + point.x + ' ' + y(point.score),
+          fill: 'none', stroke: 'transparent', 'stroke-width': 14
         });
-        badgeText.textContent = point.label;
-        hit.appendChild(badgeText);
-        hit.addEventListener('click', function () { activateRxByNum(point.label, true); });
+        hit.addEventListener('click', function () { activateRxByNum(point.rxNum, true); });
         hit.addEventListener('keydown', function (ev) {
           if (ev.key === 'Enter' || ev.key === ' ') {
             ev.preventDefault();
-            activateRxByNum(point.label, true);
+            activateRxByNum(point.rxNum, true);
           }
         });
         svg.appendChild(hit);
@@ -2517,13 +2514,26 @@
 
     // points + labels
     var axisLabels = {};
-    pts.forEach(function (p) { axisLabels[p.step] = p.axisLabel; });
-    Object.keys(axisLabels).forEach(function (step) {
+    pts.forEach(function (p) {
+      if (!axisLabels[p.step] || p.kind !== 'rollback') axisLabels[p.step] = p.axisLabel;
+    });
+    var axisSteps = Object.keys(axisLabels).sort(function (a, b) { return Number(a) - Number(b); });
+    var axisEvery = Math.max(1, Math.ceil(axisSteps.length / 7));
+    axisSteps.forEach(function (step, axisIndex) {
+      // 처방이 많아져도 긴 이름이 겹치지 않도록 최대 7개 눈금만 표시한다.
+      // 전체 처방명과 수치는 아래 카드에 모두 남는다.
+      if (axisIndex !== 0 && axisIndex !== axisSteps.length - 1 && axisIndex % axisEvery !== 0) return;
       var x = L + (R - L) * ((Number(step) - stepMin) / (stepMax - stepMin));
-      var axis = el('text', { x: x, y: B + 22, 'text-anchor': Number(step) === stepMin ? 'start' : (Number(step) === stepMax ? 'end' : 'middle'), fill: 'var(--faint)', 'font-size': 10.5, 'font-family': 'var(--mono)' });
-      axis.textContent = axisLabels[step];
+      var axis = el('text', { x: x, y: B + 22, 'text-anchor': Number(step) === stepMin ? 'start' : (Number(step) === stepMax ? 'end' : 'middle'), fill: 'var(--faint)', 'font-size': 9.5, 'font-family': 'var(--sans)' });
+      var fullAxisLabel = String(axisLabels[step] || '');
+      axis.textContent = fullAxisLabel.length > 10 ? fullAxisLabel.slice(0, 9) + '…' : fullAxisLabel;
+      var axisTitle = el('title', {});
+      axisTitle.textContent = fullAxisLabel;
+      axis.appendChild(axisTitle);
       svg.appendChild(axis);
     });
+    var pointsPerStep = {};
+    pts.forEach(function (p) { pointsPerStep[p.step] = (pointsPerStep[p.step] || 0) + 1; });
     pts.forEach(function (p, i) {
       var isBase = i === 0;
       var isFailed = p.kind === 'failed';
@@ -2536,9 +2546,14 @@
         'stroke-width': 2
       }));
       if (isBase || p.score !== pts[i - 1].score) {
+        var sharesStep = pointsPerStep[p.step] > 1;
+        var scoreX = p.x;
+        var scoreAnchor = isBase ? 'start' : (i === pts.length - 1 ? 'end' : 'middle');
+        if (sharesStep && isFailed) { scoreX = p.x - 8; scoreAnchor = 'end'; }
+        if (sharesStep && isRollback) { scoreX = p.x + 8; scoreAnchor = 'start'; }
         svg.appendChild(el('text', {
-          x: p.x, y: y(p.score) - 12,
-          'text-anchor': isBase ? 'start' : (i === pts.length - 1 ? 'end' : 'middle'),
+          x: scoreX, y: y(p.score) - 12,
+          'text-anchor': scoreAnchor,
           fill: isFailed ? 'var(--critical)' : (isRollback ? 'var(--warning)' : (isBase ? 'var(--muted)' : 'var(--ink)')),
           'font-size': 12, 'font-weight': isBase ? 400 : 600, 'font-family': 'var(--mono)'
         })).textContent = p.score;
@@ -2830,7 +2845,7 @@
     if (CONFIG_NAME_KO[key]) return CONFIG_NAME_KO[key];
     var shortKey = key.split('.').pop();
     if (CONFIG_NAME_KO[shortKey]) return CONFIG_NAME_KO[shortKey];
-    return key.replace(/_/g, ' ');
+    return '설정 변경';
   }
   function valueNameKo(value) {
     var raw = String(value == null ? '' : value).trim();
@@ -2968,19 +2983,20 @@
     var count = rxImpactCount(r, labels, drill);
     var labelCount = rxSupportLabelCount(r, labels);
     var parts = [];
-    if (count !== null) parts.push('영향 질문 <b>' + esc(count) + '</b>개');
-    if (labelCount) parts.push('지지 라벨 <b>' + esc(labelCount) + '</b>개');
+    if (count !== null) parts.push('<span title="이 처방의 근거가 되었거나 처방 적용 후 판정에 영향을 받은 검증 질문 수입니다.">영향 질문 <b>' + esc(count) + '</b>개</span>');
+    if (labelCount) parts.push('<span title="이 처방을 선택하도록 근거를 제공한 진단 라벨 수입니다.">지지 라벨 <b>' + esc(labelCount) + '</b>개</span>');
     return parts.join(' · ');
   }
   function rxChangeHtml(r) {
     var change = r.change || ['처방', '', ''];
     var code = normalizeActionKey(change[0]);
-    var ko = configNameKo(code);
+    var ko = String(r.change_label || configNameKo(code));
     var before = valueNameKo(change[1]);
     var after = valueNameKo(change[2]);
-    return '<span class="rx-key-ko">' + esc(ko) + '</span>' +
-      (ko !== code ? '<span class="rx-key-code">' + esc(code) + '</span>' : '') +
-      ' <span style="color:var(--faint)">' + esc(before) + '</span><span class="arrow">→</span>' + esc(after);
+    var values = before || after
+      ? ' <span style="color:var(--faint)">' + esc(before) + '</span><span class="arrow">→</span>' + esc(after)
+      : '';
+    return '<span class="rx-key-ko">' + esc(ko) + '</span>' + values;
   }
   function activateRxByNum(num, scrollIntoView) {
     num = String(num || '').padStart(2, '0');
@@ -3013,11 +3029,31 @@
       '<div class="rx-scoredelta error">종합 점수 측정 안 됨</div>';
     var metricChipsHtml = '';
     var metricTableHtml = renderRxMetricTable(metrics);
+    var decisionBasis = hasScore
+      ? ('종합점수 ' + esc(r.score[0]) + '→' + esc(r.score[1]) + ' 변화와 설정된 개선 마진을 비교해 ' + esc(verdict[1]) + '로 판정했습니다.')
+      : '측정 가능한 점수와 진단 근거를 종합해 판정합니다.';
+    var observedChange = esc(Array.isArray(r.reason) ? (r.reason[1] || r.reason[0]) : r.reason || '관찰된 변화가 기록되지 않았습니다.');
     var detailHtml = '<div class="rx-detail-summary">' +
-      '<div class="rx-target">' + esc(r.target) + '</div>' +
-      rxLabelListHtml(labels) +
-      (impactHtml ? '<div class="rx-impact">' + impactHtml + '</div>' : '') +
-      '<div class="rx-reason">' + esc(Array.isArray(r.reason) ? (r.reason[1] || r.reason[0]) : r.reason || '') + '</div>' +
+      '<div class="rx-info-row">' +
+        '<div class="rx-info-name">처방 목적<small>무엇을 고치려 했는지</small></div>' +
+        '<div class="rx-info-value"><div class="rx-target">' + esc(r.target) + '</div></div>' +
+      '</div>' +
+      '<div class="rx-info-row">' +
+        '<div class="rx-info-name">진단 근거<small>처방을 선택하게 한 라벨</small></div>' +
+        '<div class="rx-info-value">' + rxLabelListHtml(labels) + '</div>' +
+      '</div>' +
+      (impactHtml ? '<div class="rx-info-row">' +
+        '<div class="rx-info-name">영향 범위<small>관련 질문과 근거 수</small></div>' +
+        '<div class="rx-info-value"><div class="rx-impact">' + impactHtml + '</div></div>' +
+      '</div>' : '') +
+      '<div class="rx-info-row">' +
+        '<div class="rx-info-name">판정 결과<small>유지·롤백을 정한 이유</small></div>' +
+        '<div class="rx-info-value"><div class="rx-reason">' + decisionBasis + '</div></div>' +
+      '</div>' +
+      '<div class="rx-info-row">' +
+        '<div class="rx-info-name">관찰된 변화<small>처방 적용 뒤 달라진 점</small></div>' +
+        '<div class="rx-info-value"><div class="rx-reason">' + observedChange + '</div></div>' +
+      '</div>' +
     '</div>';
     var rxNum = String(r.num || '').padStart(2, '0');
     var activeClass = rxNum === ACTIVE_RX_NUM ? ' active open' : '';
@@ -3718,7 +3754,6 @@
       return '<div class="qa-card ' + (correct ? 'solved' : 'unsolved') + '">' +
         '<div class="qa-head"><span class="qm">Q</span><span class="qt">' + esc(x.q || '-') + '</span><span class="qa-status">' + (correct ? '맞음' : '틀림') + '</span></div>' +
         '<div class="qa-qar">' +
-          '<div class="qa-qar-col"><span class="tag">Q</span><p>' + esc(x.q || '-') + '</p></div>' +
           '<div class="qa-qar-col"><span class="tag">A</span><p>' + esc(qaExpected(x)) + '</p></div>' +
           '<div class="qa-qar-col"><span class="tag">R</span><p>' + esc(qaResponse(x)) + '</p></div>' +
         '</div>' +
