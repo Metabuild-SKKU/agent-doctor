@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RAG Doctor — 진단 리포트</title>
 <style>
+  @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
   :root {
     color-scheme: dark;
     --bg: #08090b; --bg-2: #0b0c0f; --surface: #0f1114; --surface-2: #15171c;
@@ -14,8 +15,8 @@
     --good: #46c56a; --good-glow: rgba(70,197,106,.16);
     --warning: #d6a12a; --warning-glow: rgba(214,161,42,.16);
     --critical: #f0675c; --critical-glow: rgba(240,103,92,.16);
-    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
-    --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, monospace;
+    --sans: Pretendard, 'Pretendard Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --mono: Pretendard, 'Pretendard Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   }
   :root[data-theme="light"] {
     color-scheme: light;
@@ -62,12 +63,14 @@
   .section-head .sub { font-size: 13px; color: var(--faint); margin-left: auto; }
 
   /* top bar */
-  .topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; justify-content: space-between; padding: 18px 0; border-bottom: 1px solid var(--border); background: color-mix(in srgb, #fff 76%, transparent); backdrop-filter: blur(18px); }
+  .site-header { position: sticky; top: 0; z-index: 30; width: 100%; border-bottom: 1px solid var(--border); background: color-mix(in srgb, #fff 88%, transparent); backdrop-filter: blur(18px); }
+  .topbar { max-width: 1240px; margin: 0 auto; padding: 14px 34px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 24px; }
+  .topbar-left { display: flex; align-items: center; gap: 10px; min-width: max-content; }
   .brand { display: flex; align-items: center; gap: 12px; }
   .brand-mark { width: 34px; height: 34px; }
   .brand-name { font-weight: 690; font-size: 23px; letter-spacing: -.035em; }
   .brand-name .doc { color: var(--muted); }
-  .topbar-right { display: flex; align-items: center; gap: 6px; }
+  .topbar-right { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
   .back-link { display: inline-flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 620; color: var(--ink); text-decoration: none; padding: 9px 13px; border-radius: 10px; }
   .back-link:hover { color: var(--ink); background: var(--surface-2); }
   .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: 1px solid var(--border); background: var(--surface); border-radius: 8px; cursor: pointer; color: var(--muted); }
@@ -174,20 +177,12 @@
     font-size: 12.5px;
   }
 
-  .report-nav {
-    position: sticky; top: 65px; z-index: 15; display: flex; gap: 8px; flex-wrap: wrap;
-    margin: 18px 0 8px; padding: 10px; border: 1px solid var(--border); border-radius: 999px;
-    background: color-mix(in srgb, #fff 76%, transparent); backdrop-filter: blur(16px);
-    box-shadow: 0 18px 46px -38px rgba(17,24,39,.5);
-  }
+  .report-nav { display: flex; justify-content: center; gap: 4px; min-width: 0; }
   .section-head .sub {
     display: none !important;
   }
-  .report-nav a {
-    text-decoration: none; color: var(--muted); font-family: var(--mono); font-size: 11px;
-    padding: 8px 12px; border-radius: 999px; transition: color .18s ease, background .18s ease, transform .18s ease;
-  }
-  .report-nav a:hover { color: var(--accent-ink); background: var(--accent-glow); transform: translateY(-1px); }
+  .report-nav a { text-decoration: none; color: var(--muted); font-size: 13px; padding: 8px 12px; border-radius: 8px; transition: color .18s ease, background .18s ease; }
+  .report-nav a:hover { color: var(--ink); background: var(--surface-2); }
 
   .report-signal-strip {
     position: relative; overflow: hidden; display: flex; gap: 12px; align-items: center;
@@ -1492,6 +1487,39 @@
     .qa-qar,
     .qa-tools { grid-template-columns: 1fr; }
   }
+  /* 2026-08 UI review: one typeface, full-width header, compact controls */
+  .topbar {
+    position: sticky; top: 0; z-index: 30; max-width: none; width: 100vw; margin-left: calc(50% - 50vw);
+    padding: 14px max(34px, calc((100vw - 1172px) / 2)); display: flex; gap: 10px;
+    background: rgba(255,255,255,.96); border-bottom: 1px solid #dedede;
+  }
+  .topbar .topbar-right { display: contents; }
+  .topbar .back-link { order: -2; padding-left: 0; }
+  .topbar .brand { order: -1; }
+  .topbar .theme-toggle { margin-left: auto; }
+  .report-nav { position: static; display: inline-flex; width: auto; margin: 0; }
+  .qa-tools { grid-template-columns: minmax(0, 1fr) 190px; align-items: end; }
+  .qa-search { height: 44px; margin-bottom: 0; padding: 0 13px; }
+  .qa-filter-field { display: block; }
+  .qa-filter-field > span { display: block; margin-bottom: 7px; color: #555; font-size: 12px; }
+  .qa-filter-select { width: 100%; height: 44px; padding: 0 36px 0 12px; border: 1px solid #dcdcdc; border-radius: 6px; background: #fff; color: #111; font: 14px/1 var(--sans); cursor: pointer; }
+  .qa-filter-select:focus { outline: 2px solid #111; outline-offset: 1px; }
+  .evidence-summary.compact { margin: -4px 0 16px; padding: 0; border: 0; background: transparent; color: #333; }
+  .evidence-summary.compact .summary-line { font-size: 14px; }
+  .rx-main { grid-template-columns: 1fr auto; }
+  .rx-num { display: none; }
+  .rx-state-mark { display: inline-flex; margin-left: 9px; color: #246b45; font-size: 12px; font-weight: 650; }
+  .rx-label-human { display: block; color: #222; font-size: 13px; line-height: 1.55; }
+  .diagnosis-chart-caption { margin: 15px 0 5px; color: #333; font-size: 12px; font-weight: 650; }
+  .diagnosis-chart-caption span { display: block; color: #666; font-size: 11px; font-weight: 400; }
+  .diagnosis-mini-bars { margin-top: 8px; }
+  @media (max-width: 760px) {
+    .topbar { padding: 12px 18px; flex-wrap: wrap; }
+    .back-link { font-size: 0; }
+    .back-link svg { width: 18px; height: 18px; }
+    .report-nav { width: 100%; margin-top: 12px; }
+    .qa-tools { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -1505,6 +1533,11 @@
       </svg>
       <div class="brand-name">RAG <span class="doc">Doctor</span></div>
     </div>
+    <nav class="report-nav" aria-label="리포트 탭">
+      <button class="report-tab active" type="button" data-report-tab="dashboard">대시보드</button>
+      <button class="report-tab" type="button" data-report-tab="evidence">진단 상세</button>
+      <button class="report-tab" type="button" data-report-tab="treatment">치료 경과</button>
+    </nav>
     <div class="topbar-right">
       <a class="back-link" href="index.html">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5m6-6-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -1525,12 +1558,6 @@
     </div>
     <h1><b>진단 리포트</b></h1>
   </div>
-
-  <nav class="report-nav" aria-label="리포트 탭">
-    <button class="report-tab active" type="button" data-report-tab="dashboard">대시보드</button>
-    <button class="report-tab" type="button" data-report-tab="evidence">진단 상세</button>
-    <button class="report-tab" type="button" data-report-tab="treatment">치료 경과</button>
-  </nav>
 
   <!-- MODE NOTICE: 외부 RAG 로그 진단처럼 일부 섹션이 원리적으로 없는 경우에만 표시 -->
   <div id="modeNotice" style="display:none"></div>
@@ -1684,11 +1711,14 @@
         <label class="qa-search-label" for="qaSearch">질문 검색</label>
         <input class="qa-search" id="qaSearch" type="search" placeholder="Q, A, R, 라벨로 검색">
       </div>
-      <div class="qa-filter" aria-label="검증 질문 필터">
-        <button type="button" class="active" data-qa-filter="all">전체</button>
-        <button type="button" data-qa-filter="wrong">틀린 질문</button>
-        <button type="button" data-qa-filter="correct">맞은 질문</button>
-      </div>
+      <label class="qa-filter-field" for="qaFilter">
+        <span>결과 필터</span>
+        <select class="qa-filter-select" id="qaFilter" aria-label="검증 질문 결과 필터">
+          <option value="all">전체 질문</option>
+          <option value="wrong">확인 필요</option>
+          <option value="correct">통과</option>
+        </select>
+      </label>
     </div>
     <div class="qa-window">
       <div class="qa" id="qaList"></div>
@@ -2966,9 +2996,9 @@
     return out;
   }
   function rxLabelListHtml(labels) {
-    if (!labels.length) return '<div class="rx-label-list"><span class="rx-label-term">관련 라벨 없음</span></div>';
+    if (!labels.length) return '<div class="rx-label-list"><span class="rx-label-human">직접 연결된 진단 없음</span></div>';
     return '<div class="rx-label-list">' + labels.map(function (code) {
-      return '<span class="rx-label-term term" tabindex="0" data-tip="' + esc(labelTip(code)) + '">' + esc(code) + '</span>';
+      return '<span class="rx-label-human">' + esc(labelTitle(code)) + '</span>';
     }).join('') + '</div>';
   }
   function firstNumber() {
@@ -3046,12 +3076,10 @@
     var change = r.change || ['처방', '', ''];
     var code = normalizeActionKey(change[0]);
     var ko = String(r.change_label || configNameKo(code));
-    var before = valueNameKo(change[1]);
     var after = valueNameKo(change[2]);
-    var values = before || after
-      ? ' <span style="color:var(--faint)">' + esc(before) + '</span><span class="arrow">→</span>' + esc(after)
-      : '';
-    return '<span class="rx-key-ko">' + esc(ko) + '</span>' + values;
+    var enabled = /^(true|on|enable|enabled|켜짐|사용)$/i.test(String(change[2] == null ? '' : change[2])) || after === '켜짐';
+    return '<span class="rx-key-ko">' + esc(ko) + '</span>' +
+      (enabled ? '<span class="rx-state-mark">✓ 적용</span>' : '');
   }
   function activateRxByNum(num, scrollIntoView) {
     num = String(num || '').padStart(2, '0');
@@ -3085,9 +3113,8 @@
     var metricChipsHtml = '';
     var metricTableHtml = renderRxMetricTable(metrics);
     var decisionBasis = hasScore
-      ? ('종합점수 ' + esc(r.score[0]) + '→' + esc(r.score[1]) + ' 변화와 설정된 개선 마진을 비교해 ' + esc(verdict[1]) + '로 판정했습니다.')
-      : '측정 가능한 점수와 진단 근거를 종합해 판정합니다.';
-    var observedChange = esc(Array.isArray(r.reason) ? (r.reason[1] || r.reason[0]) : r.reason || '관찰된 변화가 기록되지 않았습니다.');
+      ? ('종합점수 ' + esc(r.score[0]) + ' → ' + esc(r.score[1]) + ' · ' + esc(verdict[1]))
+      : esc(verdict[1]);
     var detailHtml = '<div class="rx-detail-summary">' +
       '<div class="rx-info-row">' +
         '<div class="rx-info-name">처방 목적<small>무엇을 고치려 했는지</small></div>' +
@@ -3105,16 +3132,11 @@
         '<div class="rx-info-name">판정 결과<small>유지·롤백을 정한 이유</small></div>' +
         '<div class="rx-info-value"><div class="rx-reason">' + decisionBasis + '</div></div>' +
       '</div>' +
-      '<div class="rx-info-row">' +
-        '<div class="rx-info-name">관찰된 변화<small>처방 적용 뒤 달라진 점</small></div>' +
-        '<div class="rx-info-value"><div class="rx-reason">' + observedChange + '</div></div>' +
-      '</div>' +
     '</div>';
     var rxNum = String(r.num || '').padStart(2, '0');
     var activeClass = rxNum === ACTIVE_RX_NUM ? ' active open' : '';
     return '<div class="rx-card ' + r.state + activeClass + '" data-rx-num="' + esc(rxNum) + '">' +
       '<div class="rx-main">' +
-        '<div class="rx-num">' + esc(r.num) + '</div>' +
         '<div class="rx-body">' +
           '<div class="rx-change">' + rxChangeHtml(r) + '</div>' +
           metricChipsHtml +
@@ -3607,7 +3629,8 @@
           '<div class="diagnosis-card-title"><b>' + esc(group.name) + '</b><span>' + esc(group.hint) + '</span></div>' +
           '<div class="diagnosis-count"><b>' + esc(detected) + '/' + esc(rows.length) + '</b>라벨<br>질문 ' + esc(group.total) + '건</div>' +
         '</div>' +
-        '<div class="diagnosis-mini-bars" aria-hidden="true">' + bars + '</div>' +
+        '<div class="diagnosis-chart-caption">라벨별 영향 질문 수<span>막대 높이는 그룹에서 가장 많이 발견된 라벨을 기준으로 비교합니다.</span></div>' +
+        '<div class="diagnosis-mini-bars" aria-label="라벨별 영향 질문 수 비교">' + bars + '</div>' +
         '<div class="group-share"><i style="width:' + Math.max(5, group.total / maxTotal * 100) + '%"></i></div>' +
         '<div class="diagnosis-card-desc">전체 라벨 축에서 실제로 나온 라벨과 질문 수를 확인합니다.</div>' +
         '<div class="diagnosis-toggle">라벨 분포</div>' +
@@ -3733,19 +3756,15 @@
       input.addEventListener('input', applyQaFilters);
     }
     if (input) input.value = '';
-    document.querySelectorAll('[data-qa-filter]').forEach(function (btn) {
-      if (!btn.dataset.bound) {
-        btn.dataset.bound = '1';
-        btn.addEventListener('click', function () {
-          QA_FILTER = btn.getAttribute('data-qa-filter') || 'all';
-          document.querySelectorAll('[data-qa-filter]').forEach(function (other) {
-            other.classList.toggle('active', other === btn);
-          });
-          applyQaFilters();
-        });
-      }
-      btn.classList.toggle('active', btn.getAttribute('data-qa-filter') === QA_FILTER);
-    });
+    var filterSelect = document.getElementById('qaFilter');
+    if (filterSelect && !filterSelect.dataset.bound) {
+      filterSelect.dataset.bound = '1';
+      filterSelect.addEventListener('change', function () {
+        QA_FILTER = filterSelect.value || 'all';
+        applyQaFilters();
+      });
+    }
+    if (filterSelect) filterSelect.value = QA_FILTER;
     renderQaSummary(CURRENT_QAS);
     applyQaFilters();
   }
@@ -3775,13 +3794,8 @@
     var total = (qas || []).length;
     var correct = (qas || []).filter(qaIsCorrect).length;
     var wrong = Math.max(0, total - correct);
-    var lines = [
-      '<b>' + esc(total) + '개</b> 검증 질문을 Q/A/R 형식으로 모았습니다. 질문·기대 정답·실제 답변을 한 줄에서 대조할 수 있습니다.',
-      '<b>' + esc(wrong) + '개</b>는 기대 답변과 어긋났고, <b>' + esc(correct) + '개</b>는 통과했습니다. 위 필터로 맞은 질문과 틀린 질문만 따로 볼 수 있습니다.'
-    ];
-    el.innerHTML = lines.map(function (line) {
-      return '<div class="summary-line">' + line + '</div>';
-    }).join('');
+    el.innerHTML = '<div class="summary-line">검증 질문 <b>' + esc(total) + '개</b> · 통과 <b>' +
+      esc(correct) + '개</b> · 확인 필요 <b>' + esc(wrong) + '개</b></div>';
   }
   function filterQas(query) {
     var q = String(query || '').trim().toLowerCase();
