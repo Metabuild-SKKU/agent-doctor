@@ -218,7 +218,6 @@
     margin: 72px 0 -12px;
   }
   .console-intro h2 { margin: 0; font-size: clamp(32px, 4.8vw, 58px); line-height: 1.02; letter-spacing: -.055em; }
-  .console-intro p { margin: 0; color: var(--muted); max-width: 48ch; font-size: 15px; line-height: 1.7; }
 
 
   /* ── steps ── */
@@ -254,11 +253,10 @@
     display: flex; align-items: center; gap: 12px;
     padding: 18px 24px; border-bottom: 1px solid var(--border); background: var(--bg-2);
   }
-  .console-bar .glyph { color: var(--accent); display: inline-flex; transform: scale(1.12); transform-origin: center; }
   .console-bar .label { font-family: var(--sans); font-size: 18px; font-weight: 620; color: var(--ink); letter-spacing: -.02em; }
   .console-bar .label .path { color: var(--faint); }
   .console-bar .spacer { flex: 1; }
-  .console-bar .env { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .console-bar .env { font-size: 11.5px; color: var(--faint); }
   .console-body { padding: 28px; }
 
   /* tabs */
@@ -387,18 +385,6 @@
   .text-input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
   .conn-row { display: grid; grid-template-columns: 1fr 148px; gap: 12px; }
 
-  .depth { margin-top: 26px; }
-  .segmented { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 9px; }
-  .seg { text-align: left; cursor: pointer; padding: 13px 15px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); transition: border-color .14s, background .14s; }
-  .seg:hover { border-color: var(--border-strong); }
-  .seg[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent-glow) 30%, var(--surface)); }
-  .seg .seg-name { font-weight: 560; font-size: 13.5px; display: flex; align-items: center; gap: 8px; }
-  .seg .seg-meta { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 6px; letter-spacing: .02em; }
-  .seg .seg-bars { display: inline-flex; gap: 2px; align-items: flex-end; }
-  .seg .seg-bars i { width: 3px; border-radius: 1px; background: var(--border-strong); display: inline-block; }
-  .seg .seg-bars i:nth-child(1) { height: 6px; } .seg .seg-bars i:nth-child(2) { height: 9px; } .seg .seg-bars i:nth-child(3) { height: 12px; }
-  .seg .seg-bars i.on { background: var(--muted); }
-  .seg[aria-pressed="true"] .seg-bars i.on { background: var(--accent); }
 
   .run-row { display: flex; align-items: center; justify-content: space-between; margin-top: 28px; gap: 18px; }
   .run-note { font-family: var(--mono); font-size: 12px; color: var(--faint); }
@@ -493,7 +479,6 @@
     .step + .step { padding-left: 0; padding-top: 22px; }
     .step + .step::before { display: none; }
     .step { border-bottom: 1px solid var(--border); padding-bottom: 22px; }
-    .segmented { grid-template-columns: 1fr; }
     .conn-row { grid-template-columns: 1fr; }
     .run-row { flex-direction: column; align-items: stretch; }
     .btn-run { justify-content: center; }
@@ -571,9 +556,6 @@
   .claim .cl-lg,
   .section-heading p,
   .bento-copy,
-  .console-intro p {
-    color: #555;
-  }
   .btn-primary,
   .btn-run,
   .btn-report {
@@ -688,7 +670,6 @@
   }
   .lede,
   .section-heading p,
-  .console-intro p,
   .bento-copy,
   .step p {
     font-size: 15px;
@@ -1058,18 +1039,13 @@
 
   <div class="console-intro">
     <h2>문서를 넣고,<br>진단서를 바로 확인하세요.</h2>
-    <p>
-      데모에서는 텍스트 추출 가능한 PDF 또는 기존 RAG 실행 로그를 넣어
-      파이프라인 진행 상황과 결과 리포트를 확인할 수 있습니다.
-    </p>
   </div>
 
   <section class="console" id="run">
     <div class="console-bar">
-      <span class="glyph"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 8 4 4-4 4M12 16h7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       <span class="label">← 새 진단</span>
       <span class="spacer"></span>
-      <span class="env" id="consoleLabel">idle</span>
+      <span class="env" id="consoleLabel">대기 중</span>
     </div>
     <div class="console-body">
 
@@ -1272,29 +1248,8 @@
           </details>
         </div>
 
-        <!-- 로그 리플레이 모드에서는 통째로 숨긴다(updateModeCopy) — 리플레이는 색인·검색·
-             답변생성이 없어 RAGAS 채점이 유일한 작업이라 깊이를 낮춰도 시간이 거의 안 줄고,
-             대신 생성축 라벨 4종이 통째로 죽는다. 선택지가 될 수 없어 고정한다. -->
-        <div class="depth" id="depthBlock">
-          <span class="field-label">진단 깊이</span>
-          <div class="segmented" role="group" aria-label="진단 깊이">
-            <button class="seg" aria-pressed="false" data-depth="fast">
-              <div class="seg-name"><span class="seg-bars"><i class="on"></i><i></i><i></i></span> 빠른 검진</div>
-              <div class="seg-meta">규칙 기반 · ~30초</div>
-            </button>
-            <button class="seg" aria-pressed="true" data-depth="standard">
-              <div class="seg-name"><span class="seg-bars"><i class="on"></i><i class="on"></i><i></i></span> 표준 검진</div>
-              <div class="seg-meta">재검색 분석 · ~2분</div>
-            </button>
-            <button class="seg" aria-pressed="false" data-depth="full">
-              <div class="seg-name"><span class="seg-bars"><i class="on"></i><i class="on"></i><i class="on"></i></span> 정밀 검진</div>
-              <div class="seg-meta">LLM 심층 · ~6분</div>
-            </button>
-          </div>
-        </div>
-
         <div class="run-row">
-          <div class="run-note"><span id="srcNote">코퍼스 <b>1</b>개 준비됨</span> · 예상 <b id="etaNote">약 2분</b></div>
+          <div class="run-note"><span id="srcNote">코퍼스 <b>1</b>개 준비됨</span> · 예상 <b id="etaNote">약 6분</b></div>
           <button class="btn-run" id="btnRun">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4.5 19 12 6 19.5V4.5z"/></svg>
             진단 시작
@@ -1399,10 +1354,6 @@
   /* 리플레이(로그) 모드는 남의 인덱스라 재검색이 없다 — 진단 깊이가
      규칙·QA셋 대조 vs LLM 심층 두 단계뿐이므로 문구·선택지를 바꾼다. */
   function updateModeCopy(isLog) {
-    // 리플레이는 깊이 선택 자체가 없다 — 블록을 통째로 숨기고 서버도 deep 으로 고정한다.
-    // (선택지를 남겨두면 '빠른 검진'을 고른 채 로그 탭으로 넘어와 생성축 라벨 4종이
-    //  죽은 진단서를 받게 된다. 실측: 6건 기준 0.03초 vs 13.8초 — 아끼는 시간도 없다.)
-    document.getElementById('depthBlock').hidden = isLog;
     if (isLog) updateSrcNote();
     else document.getElementById('srcNote').innerHTML = '코퍼스 <b>1</b>개 준비됨';
     updateEta(isLog);
@@ -1428,25 +1379,16 @@
     });
   });
 
-  var etaMap = { fast: '약 30초', standard: '약 2분', full: '약 6분' };
-  var selectedDepth = 'standard';
+  /* 진단 깊이는 정밀 검진(full) 하나뿐이다 - 선택지를 두지 않는다. */
+  var DOC_ETA = '약 6분';
 
   /* 리플레이는 깊이 선택이 없어 seg 클릭이 안 일어나므로 ETA 를 따로 세운다.
      문서 모드의 '약 6분'은 색인·임베딩까지 포함한 값이라 리플레이엔 안 맞는다
      (리플레이는 RAGAS 채점만 — 실측 6건 13.8초, 레코드 단위 병렬). */
   function updateEta(isLog) {
     document.getElementById('etaNote').textContent =
-      isLog ? '약 1분 이내' : etaMap[selectedDepth];
+      isLog ? '약 1분 이내' : DOC_ETA;
   }
-
-  document.querySelectorAll('.seg').forEach(function (s) {
-    s.addEventListener('click', function () {
-      document.querySelectorAll('.seg').forEach(function (o) { o.setAttribute('aria-pressed', 'false'); });
-      s.setAttribute('aria-pressed', 'true');
-      selectedDepth = s.dataset.depth;
-      updateEta(false);      // seg 는 문서 모드에서만 보인다
-    });
-  });
 
   /* file upload wiring — 세 드롭존(문서/로그/QA셋)이 같은 클릭·드래그·키보드
      동작을 공유하므로 헬퍼 하나로 묶는다. */
@@ -1718,7 +1660,7 @@
     }
     document.getElementById('inputView').style.display = 'none';
     document.getElementById('progressView').hidden = false;
-    document.getElementById('consoleLabel').textContent = 'running';
+    document.getElementById('consoleLabel').textContent = '진단 중';
     startRun(isLog);
   });
 
@@ -1774,7 +1716,7 @@
     }
     // 리플레이는 깊이 선택이 없다 — 서버도 무시하고 deep 으로 고정하지만, 보내는 값도
     // 맞춰 둔다(구버전 서버로 붙어도 얕은 진단이 안 나가게).
-    form.append('depth', isLog ? 'full' : selectedDepth);
+    form.append('depth', 'full');
 
     fetch(WEB_API_BASE + '/runs', { method: 'POST', body: form })
       .then(function (res) {
@@ -1834,7 +1776,7 @@
     var c = ticker.querySelector('.ticker-cursor');
     if (c) c.remove();
     document.querySelector('#progressView .pt').textContent = '진단이 끝났습니다';
-    document.getElementById('consoleLabel').textContent = 'done';
+    document.getElementById('consoleLabel').textContent = '완료';
     document.getElementById('doneSummary').textContent = '진단 완료 — 결과 리포트에서 자세히 확인하세요.';
     document.getElementById('btnReport').href = 'report.html?run_id=' + encodeURIComponent(runId);
     document.getElementById('doneRow').hidden = false;

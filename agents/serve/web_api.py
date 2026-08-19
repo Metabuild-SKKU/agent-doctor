@@ -139,8 +139,10 @@ def _summarize_stage_event(stage: str, snapshot: AgentDoctorState) -> tuple[str,
     return (stage, "진행 중", "")
 
 
-# index.html 이 노출하는 depth 선택지(fast/standard/full) → EVAL_MODE 매핑.
-# "full"은 UI 상 가장 깊은 진단 — EVAL_MODE 쪽에서 DEEP(=LLM/RAGAS 전량)으로 접힌다.
+# depth → EVAL_MODE 매핑. 웹 UI 는 이제 깊이 선택을 두지 않고 항상 "full" 을 보낸다
+# (index.html 의 진단 깊이 세그먼트 삭제). fast/standard 는 CLI 등 다른 호출자를
+# 위해 매핑만 남겨 둔다.
+# "full"은 가장 깊은 진단 — EVAL_MODE 쪽에서 DEEP(=LLM/RAGAS 전량)으로 접힌다.
 _DEPTH_TO_EVAL_MODE = {"fast": "fast", "standard": "standard", "full": "full"}
 
 # Eval 에이전트가 EVAL_MODE/EVAL_ENABLE_LLM 을 프로세스 전역 환경변수로 읽기 때문에(agents/eval/types.py),
