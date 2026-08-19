@@ -704,8 +704,26 @@
 
   /* 카드 껍데기를 벗겨 진단서와 같은 납작한 결로 맞춘다 */
   .bento-card,
-  .step,
-  .bento-card,
+  .step {
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .bento-card { border: 1px solid #e3e3e3; border-radius: 6px; }
+  .step { border: 0; border-top: 1px solid #e3e3e3; padding: 18px 0 0; }
+  .console { margin: 20px 0 28px; }
+
+  /* ── 미리보기 카드 = 진단서 대시보드 첫 화면 복제 ──
+     색은 report.html 실측 팔레트를 그대로 박아둔다. 랜딩은 모든 색을
+     #111 로 눌러버리는데, 차트는 상승/실패/롤백이 구분돼야 하기 때문이다.
+       상승·유지 #315f86 / 실패 #8f3f35 / 롤백 #9a5b28 / 보조선 #8a8a8a  */
+  .preview-card { padding: 22px; }
+  .pv-gauge { position: relative; width: 132px; margin: 2px auto; }
+  .pv-gauge svg { display: block; width: 100%; height: auto; }
+  .pv-gauge-c {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 2px;
+  }
   .pv-score { font-size: 36px; font-weight: 640; letter-spacing: -.045em; color: #111; font-variant-numeric: tabular-nums; }
   .pv-score small { font-size: 14px; font-weight: 520; color: #777; margin-left: 2px; letter-spacing: -.02em; }
   .pv-cap { font-size: 12px; color: #555; }
