@@ -71,6 +71,21 @@ def _env_int(name: str) -> int | None:
     return n if n > 0 else None
 
 
+def effective_eval_mode(depth: str) -> str:
+    """실제로 쓸 EVAL_MODE. .env 가 정해뒀으면 그것을 따른다.
+
+    예전에는 폼의 depth 를 무조건 EVAL_MODE 로 덮어썼다. 그런데 화면에서
+    깊이 선택을 없앤 뒤로 depth 는 항상 "full" 이라, .env 에 deep 을 적어두고
+    CLI 로 재던 사람이 웹으로 같은 코퍼스를 돌리면 한 단계 위에서 돌아
+    수치가 비교되지 않았다. 운영자가 .env 에 적은 값이 우선이고, 없을 때만
+    depth 매핑으로 떨어진다.
+    """
+    from_env = (os.getenv("EVAL_MODE") or "").strip()
+    if from_env:
+        return from_env
+    return _DEPTH_TO_EVAL_MODE.get(depth, "standard")
+
+
 def corpus_config() -> dict | None:
     """서버에 코퍼스가 설정돼 있으면 그 내용을 돌려준다.
 
@@ -94,6 +109,7 @@ def corpus_config() -> dict | None:
         "qa_limit": _env_int("KORQUAD_QA_LIMIT"),
         "probe_source": (os.getenv("EVAL_PROBE_SOURCE") or "").strip() or None,
         "max_iterations": MAX_ITERATIONS,
+        "eval_mode": effective_eval_mode("full"),
     }
 
 
@@ -211,9 +227,11 @@ def _run_pipeline_background(run_id: str, source_url: str, source_type: str, dep
 
     try:
         with _PIPELINE_LOCK:
-            eval_mode = _DEPTH_TO_EVAL_MODE.get(depth, "standard")
+            eval_mode = effective_eval_mode(depth)
             os.environ["EVAL_MODE"] = eval_mode
-            os.environ["EVAL_ENABLE_LLM"] = "1" if eval_mode in ("deep", "full") else "0"
+            os.environ.setdefault(
+                "EVAL_ENABLE_LLM", "1" if eval_mode in ("deep", "full") else "0",
+            )
 
             graph = build_graph()
             initial_state = AgentDoctorState(
