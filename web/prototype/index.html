@@ -336,13 +336,6 @@
   .console-intro h2 { margin: 0; font-size: clamp(32px, 4.8vw, 58px); line-height: 1.02; letter-spacing: -.055em; }
   .console-intro p { margin: 0; color: var(--muted); max-width: 48ch; font-size: 15px; line-height: 1.7; }
 
-  body.motion-ready .reveal {
-    opacity: 0; transform: translateY(34px);
-    transition: opacity .82s cubic-bezier(.2,.8,.2,1), transform .82s cubic-bezier(.2,.8,.2,1);
-  }
-  body.motion-ready .reveal.in-view { opacity: 1; transform: translateY(0); }
-  body.motion-ready .reveal:nth-of-type(2) { transition-delay: .04s; }
-  body.motion-ready .reveal:nth-of-type(3) { transition-delay: .08s; }
 
   /* ── steps ── */
   .steps {
@@ -823,9 +816,6 @@
     justify-content: flex-start;
     border-radius: 6px;
   }
-  body.motion-ready .reveal {
-    transition-duration: .28s;
-  }
   /* ── report.html 정렬: 리듬·활자를 진단서와 같은 눈금으로 ──
      값은 전부 report.html 실측치다.
        섹션 리듬  padding 26px 0 / margin 20px 0 / 하단 헤어라인 #e3e3e3
@@ -922,7 +912,7 @@
     </div>
   </header>
 
-  <section class="hero reveal" id="how">
+  <section class="hero" id="how">
     <div class="hero-glow"></div>
     <canvas class="hero-ecg" id="ecg" aria-hidden="true"></canvas>
     <div class="hero-inner">
@@ -980,7 +970,7 @@
     </div>
   </section>
 
-  <section class="trust-strip reveal" aria-label="RAG Doctor 분석 범위">
+  <section class="trust-strip" aria-label="RAG Doctor 분석 범위">
     <span class="eyebrow">covers</span>
     <span class="trust-pill">RAGAS 지표</span>
     <span class="trust-pill">검색 순위</span>
@@ -989,7 +979,7 @@
     <span class="trust-pill">롤백 검증</span>
   </section>
 
-  <section class="magic-marquee reveal" aria-label="실시간 진단 신호">
+  <section class="magic-marquee" aria-label="실시간 진단 신호">
     <div class="marquee-track">
       <span class="marquee-chip"><i class="marquee-dot"></i><b>retrieval_low_rank</b> top_k 후보 확대</span>
       <span class="marquee-chip"><i class="marquee-dot"></i><b>chunking_context_mismatch</b> 청크 경계 재조정</span>
@@ -1004,7 +994,7 @@
     </div>
   </section>
 
-  <section class="landing-section reveal" id="insight">
+  <section class="landing-section" id="insight">
     <div class="section-kicker">Product story</div>
     <div class="section-heading">
       <h2>점수표가 아니라,<br>고칠 수 있는 진단서.</h2>
@@ -1055,7 +1045,7 @@
     </div>
   </section>
 
-  <section class="steps reveal">
+  <section class="steps">
     <div class="step">
       <div class="step-n">01</div>
       <div class="step-title">
@@ -1082,7 +1072,7 @@
     </div>
   </section>
 
-  <div class="console-intro reveal">
+  <div class="console-intro">
     <h2>문서를 넣고,<br>진단서를 바로 확인하세요.</h2>
     <p>
       데모에서는 텍스트 추출 가능한 PDF 또는 기존 RAG 실행 로그를 넣어
@@ -1090,7 +1080,7 @@
     </p>
   </div>
 
-  <section class="console reveal" id="run">
+  <section class="console" id="run">
     <div class="console-bar">
       <span class="glyph"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 8 4 4-4 4M12 16h7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       <span class="label">← 새 진단</span>
@@ -1393,28 +1383,6 @@
     root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
   });
 
-  function initReveal() {
-    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    var els = Array.prototype.slice.call(document.querySelectorAll('.reveal'));
-    if (!els.length) return;
-    if (reduce || !('IntersectionObserver' in window)) {
-      els.forEach(function (el) { el.classList.add('in-view'); });
-      return;
-    }
-    document.body.classList.add('motion-ready');
-    var observer = new IntersectionObserver(function (entries) {
-      entries.forEach(function (entry) {
-        if (!entry.isIntersecting) return;
-        entry.target.classList.add('in-view');
-        observer.unobserve(entry.target);
-      });
-    }, { threshold: 0.14, rootMargin: '0px 0px -10% 0px' });
-    els.forEach(function (el) { observer.observe(el); });
-    requestAnimationFrame(function () {
-      els.slice(0, 2).forEach(function (el) { el.classList.add('in-view'); });
-    });
-  }
-  initReveal();
 
   function initMagicSpotlight() {
     var cards = Array.prototype.slice.call(document.querySelectorAll('.bento-card, .preview-card'));
