@@ -211,18 +211,9 @@
   }
   .bento-card > * { position: relative; z-index: 1; }
   .bento-card.tall { min-height: 456px; }
-  .bento-card.wide { grid-column: span 2; min-height: 250px; }
   .bento-label { font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: .08em; text-transform: uppercase; }
   .bento-title { margin-top: 14px; font-size: 24px; font-weight: 760; letter-spacing: -.04em; line-height: 1.14; }
   .bento-copy { margin-top: 12px; color: var(--muted); font-size: 14px; line-height: 1.68; max-width: 48ch; }
-  .workflow-strip {
-    display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 18px;
-  }
-  .workflow-step {
-    padding: 14px 12px; border-radius: 18px; background: #fff; border: 1px solid var(--border);
-    font-size: 12.5px; color: var(--muted); box-shadow: 0 16px 36px -34px rgba(17,24,39,.45);
-  }
-  .workflow-step b { display: block; color: var(--ink); font-size: 14px; margin-bottom: 4px; }
   .console-intro {
     display: flex; justify-content: space-between; gap: 24px; align-items: end;
     margin: 72px 0 -12px;
@@ -486,8 +477,6 @@
     .hero { grid-template-columns: 1fr; gap: 34px; padding-top: 62px; }
     .hero-preview { max-width: 560px; width: 100%; }
     .bento-grid { grid-template-columns: 1fr; }
-    .bento-card.wide { grid-column: auto; }
-    .workflow-strip { grid-template-columns: repeat(2, 1fr); }
     .console-intro { flex-direction: column; align-items: flex-start; margin-top: 56px; }
     .steps { grid-template-columns: 1fr; }
   }
@@ -501,7 +490,6 @@
     .preview-card { padding: 18px; border-radius: 22px; }
     .landing-section { padding-top: 52px; }
     .bento-card { padding: 22px; border-radius: 22px; }
-    .workflow-strip { grid-template-columns: 1fr; }
     .steps { grid-template-columns: 1fr; }
     .step + .step { padding-left: 0; padding-top: 22px; }
     .step + .step::before { display: none; }
@@ -717,9 +705,7 @@
   /* 카드 껍데기를 벗겨 진단서와 같은 납작한 결로 맞춘다 */
   .bento-card,
   .step,
-  .workflow-step,
   .bento-card,
-  .workflow-step,
   .pv-score { font-size: 36px; font-weight: 640; letter-spacing: -.045em; color: #111; font-variant-numeric: tabular-nums; }
   .pv-score small { font-size: 14px; font-weight: 520; color: #777; margin-left: 2px; letter-spacing: -.02em; }
   .pv-cap { font-size: 12px; color: #555; }
@@ -761,11 +747,11 @@
   .ba { margin-top: 20px; }
   .ba-chart { display: block; width: 100%; height: auto; }
   .ba-chart text { font-family: var(--mono); }
-  .ba-chart .ba-ax text, .ba-chart text.ba-ax { font-size: 9px; fill: #999; }
-  .ba-chart .ba-col .ba-hi { font-size: 11px; font-weight: 700; fill: #111; }
-  .ba-chart .ba-col .ba-lo { font-size: 9.5px; fill: #999; }
-  .ba-chart .ba-name text { font-size: 9.5px; fill: #555; font-family: var(--sans); }
-  .ba-chart .ba-delta text { font-size: 9.5px; font-weight: 700; fill: #315f86; }
+  .ba-chart text.ba-ax { font-size: 9.5px; fill: #999; }
+  .ba-chart .ba-nm { font-size: 11px; fill: #555; font-family: var(--sans); letter-spacing: .01em; }
+  .ba-chart .ba-hi { font-size: 11.5px; font-weight: 700; fill: #111; }
+  .ba-chart .ba-lo { font-size: 10px; fill: #999; }
+  .ba-chart .ba-dl { font-size: 10px; font-weight: 700; fill: #315f86; }
   .ba-legend { display: flex; gap: 14px; margin-top: 4px; }
   .ba-legend span { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #666; }
   .ba-legend i { width: 9px; height: 9px; border-radius: 999px; flex: none; }
@@ -776,16 +762,16 @@
      리포트 진단 상세 내역의 4그룹 축을 그대로 쓴다. 개수 15/10/3/4 는
      label_catalog.py 의 축(포괄 라벨 3개 제외)과 같은 값이다.
      라벨 코드와 A/B/C 등급은 쓰지 않는다 — 리포트가 이미 걷어냈다. */
-  .lbx { margin-top: 22px; display: grid; gap: 10px; }
-  .lbx-row { padding: 13px 14px; border: 1px solid #e3e3e3; border-radius: 6px; background: #fcfcfc; }
+  .lbx { margin-top: 22px; display: grid; gap: 11px; }
+  .lbx-row { padding: 15px 16px; border: 1px solid #e3e3e3; border-radius: 6px; background: #fcfcfc; }
   .lbx-top { display: flex; align-items: baseline; gap: 8px; }
   .lbx-name { font-size: 14px; font-weight: 680; color: #111; letter-spacing: -.02em; }
   .lbx-n {
     font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: #555;
     padding: 1px 6px; border: 1px solid #e3e3e3; border-radius: 4px;
   }
-  .lbx-desc { margin-top: 3px; font-size: 12px; color: #777; line-height: 1.45; }
-  .lbx-ex { margin-top: 6px; font-size: 12.5px; color: #333; line-height: 1.55; }
+  .lbx-desc { margin-top: 5px; font-size: 12.5px; color: #777; line-height: 1.6; letter-spacing: .005em; }
+  .lbx-ex { margin-top: 9px; font-size: 13px; color: #333; line-height: 1.8; letter-spacing: .015em; word-spacing: .06em; }
   .lbx-ex span { color: #999; }
 
   /* section-heading 을 히어로와 같은 세로 구조로 — h2 아래 설명문이 온다 */
@@ -961,84 +947,66 @@
           종합점수와 RAGAS 지표 네 개를 처방 전후로 나란히 세워 비교합니다.
         </p>
         <div class="ba">
-          <svg class="ba-chart" viewBox="0 0 380 200" role="img"
-               aria-label="처방 전후 지표 변화. 종합점수 41에서 59, 충실도 55%에서 64%, 정답 회수율 48%에서 61%, 검색 정확도 51%에서 60%, 답변 관련성 50%에서 58%로 모두 올랐습니다.">
-            <line x1="34" y1="24" x2="370" y2="24" stroke="#e3e3e3" stroke-dasharray="3 4"/>
-            <line x1="34" y1="150" x2="370" y2="150" stroke="#e3e3e3"/>
-            <text class="ba-ax" x="28" y="28" text-anchor="end">100</text>
-            <text class="ba-ax" x="28" y="154" text-anchor="end">0</text>
-
-            <g class="ba-col">
-              <line x1="44" y1="24" x2="44" y2="150" stroke="#f0f0f0" stroke-width="10"/>
-              <line x1="44" y1="98.34" x2="44" y2="75.66" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
-              <circle cx="44" cy="98.34" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
-              <circle cx="44" cy="75.66" r="4" fill="#315f86"/>
-              <text class="ba-hi" x="44" y="67" text-anchor="middle">59</text>
-              <text class="ba-lo" x="44" y="112" text-anchor="middle">41</text>
+          <svg class="ba-chart" viewBox="0 0 380 196" role="img"
+               aria-label="처방 전후 지표 변화. 종합점수 41에서 59, 충실도 55에서 64, 정답 회수율 48에서 61, 검색 정확도 51에서 60, 답변 관련성 50에서 58로 모두 올랐습니다.">
+            <g class="ba-row">
+              <text class="ba-nm" x="86" y="28.0" text-anchor="end">종합점수</text>
+              <line x1="96.0" y1="24.0" x2="330.0" y2="24.0" stroke="#f0f0f0" stroke-width="9" stroke-linecap="round"/>
+              <line x1="191.94" y1="24.0" x2="234.06" y2="24.0" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
+              <circle cx="191.94" cy="24.0" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
+              <circle cx="234.06" cy="24.0" r="4" fill="#315f86"/>
+              <text class="ba-lo" x="183.94" y="27.4" text-anchor="end">41</text>
+              <text class="ba-hi" x="242.06" y="27.6" text-anchor="start">59</text>
+              <text class="ba-dl" x="376" y="27.4" text-anchor="end">+18.0</text>
             </g>
-            <g class="ba-col">
-              <line x1="112" y1="24" x2="112" y2="150" stroke="#f0f0f0" stroke-width="10"/>
-              <line x1="112" y1="80.7" x2="112" y2="69.36" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
-              <circle cx="112" cy="80.7" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
-              <circle cx="112" cy="69.36" r="4" fill="#315f86"/>
-              <text class="ba-hi" x="112" y="61" text-anchor="middle">64</text>
-              <text class="ba-lo" x="112" y="94" text-anchor="middle">55</text>
+            <g class="ba-row">
+              <text class="ba-nm" x="86" y="60.0" text-anchor="end">충실도</text>
+              <line x1="96.0" y1="56.0" x2="330.0" y2="56.0" stroke="#f0f0f0" stroke-width="9" stroke-linecap="round"/>
+              <line x1="224.70" y1="56.0" x2="245.76" y2="56.0" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
+              <circle cx="224.70" cy="56.0" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
+              <circle cx="245.76" cy="56.0" r="4" fill="#315f86"/>
+              <text class="ba-lo" x="216.70" y="59.4" text-anchor="end">55</text>
+              <text class="ba-hi" x="253.76" y="59.6" text-anchor="start">64</text>
+              <text class="ba-dl" x="376" y="59.4" text-anchor="end">+9.0pp</text>
             </g>
-            <g class="ba-col">
-              <line x1="180" y1="24" x2="180" y2="150" stroke="#f0f0f0" stroke-width="10"/>
-              <line x1="180" y1="89.52" x2="180" y2="73.14" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
-              <circle cx="180" cy="89.52" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
-              <circle cx="180" cy="73.14" r="4" fill="#315f86"/>
-              <text class="ba-hi" x="180" y="65" text-anchor="middle">61</text>
-              <text class="ba-lo" x="180" y="103" text-anchor="middle">48</text>
+            <g class="ba-row">
+              <text class="ba-nm" x="86" y="92.0" text-anchor="end">정답 회수율</text>
+              <line x1="96.0" y1="88.0" x2="330.0" y2="88.0" stroke="#f0f0f0" stroke-width="9" stroke-linecap="round"/>
+              <line x1="208.32" y1="88.0" x2="238.74" y2="88.0" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
+              <circle cx="208.32" cy="88.0" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
+              <circle cx="238.74" cy="88.0" r="4" fill="#315f86"/>
+              <text class="ba-lo" x="200.32" y="91.4" text-anchor="end">48</text>
+              <text class="ba-hi" x="246.74" y="91.6" text-anchor="start">61</text>
+              <text class="ba-dl" x="376" y="91.4" text-anchor="end">+13.0pp</text>
             </g>
-            <g class="ba-col">
-              <line x1="248" y1="24" x2="248" y2="150" stroke="#f0f0f0" stroke-width="10"/>
-              <line x1="248" y1="85.74" x2="248" y2="74.4" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
-              <circle cx="248" cy="85.74" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
-              <circle cx="248" cy="74.4" r="4" fill="#315f86"/>
-              <text class="ba-hi" x="248" y="66" text-anchor="middle">60</text>
-              <text class="ba-lo" x="248" y="99" text-anchor="middle">51</text>
+            <g class="ba-row">
+              <text class="ba-nm" x="86" y="124.0" text-anchor="end">검색 정확도</text>
+              <line x1="96.0" y1="120.0" x2="330.0" y2="120.0" stroke="#f0f0f0" stroke-width="9" stroke-linecap="round"/>
+              <line x1="215.34" y1="120.0" x2="236.40" y2="120.0" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
+              <circle cx="215.34" cy="120.0" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
+              <circle cx="236.40" cy="120.0" r="4" fill="#315f86"/>
+              <text class="ba-lo" x="207.34" y="123.4" text-anchor="end">51</text>
+              <text class="ba-hi" x="244.40" y="123.6" text-anchor="start">60</text>
+              <text class="ba-dl" x="376" y="123.4" text-anchor="end">+9.0pp</text>
             </g>
-            <g class="ba-col">
-              <line x1="316" y1="24" x2="316" y2="150" stroke="#f0f0f0" stroke-width="10"/>
-              <line x1="316" y1="87" x2="316" y2="76.92" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
-              <circle cx="316" cy="87" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
-              <circle cx="316" cy="76.92" r="4" fill="#315f86"/>
-              <text class="ba-hi" x="316" y="68.5" text-anchor="middle">58</text>
-              <text class="ba-lo" x="316" y="100.5" text-anchor="middle">50</text>
+            <g class="ba-row">
+              <text class="ba-nm" x="86" y="156.0" text-anchor="end">답변 관련성</text>
+              <line x1="96.0" y1="152.0" x2="330.0" y2="152.0" stroke="#f0f0f0" stroke-width="9" stroke-linecap="round"/>
+              <line x1="213.00" y1="152.0" x2="231.72" y2="152.0" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
+              <circle cx="213.00" cy="152.0" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
+              <circle cx="231.72" cy="152.0" r="4" fill="#315f86"/>
+              <text class="ba-lo" x="205.00" y="155.4" text-anchor="end">50</text>
+              <text class="ba-hi" x="239.72" y="155.6" text-anchor="start">58</text>
+              <text class="ba-dl" x="376" y="155.4" text-anchor="end">+8.0pp</text>
             </g>
-
-            <g class="ba-name">
-              <text x="44" y="170" text-anchor="middle">종합점수</text>
-              <text x="112" y="170" text-anchor="middle">충실도</text>
-              <text x="180" y="170" text-anchor="middle">정답 회수율</text>
-              <text x="248" y="170" text-anchor="middle">검색 정확도</text>
-              <text x="316" y="170" text-anchor="middle">답변 관련성</text>
-            </g>
-            <g class="ba-delta">
-              <text x="44" y="185" text-anchor="middle">+18.0</text>
-              <text x="112" y="185" text-anchor="middle">+9.0pp</text>
-              <text x="180" y="185" text-anchor="middle">+13.0pp</text>
-              <text x="248" y="185" text-anchor="middle">+9.0pp</text>
-              <text x="316" y="185" text-anchor="middle">+8.0pp</text>
-            </g>
+            <line x1="96.0" y1="176.0" x2="330.0" y2="176.0" stroke="#e3e3e3"/>
+            <text class="ba-ax" x="96.0" y="189.0" text-anchor="middle">0</text>
+            <text class="ba-ax" x="330.0" y="189.0" text-anchor="middle">100</text>
           </svg>
           <div class="ba-legend">
             <span><i class="before"></i>처방 전</span>
             <span><i class="after"></i>처방 후</span>
           </div>
-        </div>
-      </article>
-      <article class="bento-card wide">
-        <div class="bento-label">Pipeline workflow</div>
-        <div class="bento-title">문서 하나를 올리면 진단부터 롤백 검증까지 한 흐름으로 이어집니다.</div>
-        <div class="workflow-strip">
-          <div class="workflow-step"><b>Ingest</b>문서 읽기</div>
-          <div class="workflow-step"><b>Index</b>청크·임베딩</div>
-          <div class="workflow-step"><b>Probe</b>검증 질문 생성</div>
-          <div class="workflow-step"><b>Diagnose</b>실패 라벨링</div>
-          <div class="workflow-step"><b>Optimize</b>처방·롤백</div>
         </div>
       </article>
     </div>
