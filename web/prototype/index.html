@@ -133,7 +133,7 @@
   .claim .cl-lg b { color: var(--accent); font-weight: 640; }
 
   .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
-  .btn-primary, .btn-secondary {
+  .btn-primary {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
     min-height: 46px; padding: 0 18px; border-radius: 999px;
     font-size: 14px; font-weight: 720; letter-spacing: -.015em; text-decoration: none;
@@ -143,12 +143,7 @@
     color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2));
     box-shadow: 0 18px 38px -18px rgba(91,92,226,.62);
   }
-  .btn-secondary {
-    color: var(--accent-ink); background: rgba(255,255,255,.72);
-    border: 1px solid var(--border-strong);
-  }
-  .btn-primary:hover, .btn-secondary:hover { transform: translateY(-1px); }
-  .btn-secondary:hover { background: #fff; border-color: color-mix(in srgb, var(--accent) 32%, var(--border-strong)); }
+  .btn-primary:hover { transform: translateY(-1px); }
   .hero-proof { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 28px; max-width: 620px; }
   .proof-card {
     padding: 14px 15px; border: 1px solid var(--border); border-radius: 16px;
@@ -185,33 +180,6 @@
     background-image: linear-gradient(rgba(91,92,226,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(91,92,226,.06) 1px, transparent 1px);
     background-size: 28px 28px; mask-image: linear-gradient(180deg, rgba(0,0,0,.55), transparent 68%);
   }
-  .preview-top, .preview-score, .preview-metrics, .preview-rx { position: relative; z-index: 1; }
-  .preview-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-  .preview-badge {
-    display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px;
-    border-radius: 999px; background: color-mix(in srgb, var(--accent) 10%, #fff);
-    color: var(--accent-ink); font-size: 12px; font-weight: 720;
-  }
-  .preview-top .preview-doc { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
-  .preview-score { margin: 30px 0 24px; display: flex; align-items: flex-end; gap: 10px; }
-  .preview-score strong { font-size: 72px; line-height: .86; letter-spacing: -.075em; }
-  .preview-score span { color: var(--muted); font-weight: 700; padding-bottom: 8px; }
-  .preview-metrics { display: grid; gap: 12px; }
-  .mini-metric {
-    display: grid; grid-template-columns: 112px 1fr 68px; gap: 12px; align-items: center;
-    padding: 12px; border: 1px solid var(--border); border-radius: 16px;
-    background: rgba(255,255,255,.64);
-  }
-  .mini-metric .name { font-size: 12.5px; color: var(--muted); }
-  .mini-metric .bar { height: 7px; border-radius: 999px; background: #e5e7eb; overflow: hidden; }
-  .mini-metric .bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--good)); }
-  .mini-metric .value { font-family: var(--mono); font-size: 12px; font-weight: 760; text-align: right; color: var(--ink); }
-  .preview-rx {
-    margin-top: 16px; padding: 15px; border-radius: 18px;
-    background: #111827; color: #fff; box-shadow: 0 18px 32px -24px rgba(17,24,39,.75);
-  }
-  .preview-rx .rx-title { font-size: 12px; color: rgba(255,255,255,.62); margin-bottom: 7px; }
-  .preview-rx .rx-text { font-weight: 720; letter-spacing: -.018em; }
 
   .trust-strip {
     display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: center;
@@ -615,11 +583,8 @@
     .hero { padding: 48px 0 36px; }
     .hero h1 .nowrap { white-space: normal; }
     .hero-actions { flex-direction: column; align-items: stretch; }
-    .btn-primary, .btn-secondary { width: 100%; }
+    .btn-primary { width: 100%; }
     .preview-card { padding: 18px; border-radius: 22px; }
-    .preview-score strong { font-size: 58px; }
-    .mini-metric { grid-template-columns: 1fr; gap: 8px; }
-    .mini-metric .value { text-align: left; }
     .trust-strip { justify-content: flex-start; border-radius: 20px; }
     .landing-section { padding-top: 52px; }
     .bento-card { padding: 22px; border-radius: 22px; }
@@ -712,7 +677,6 @@
     color: #555;
   }
   .btn-primary,
-  .btn-secondary,
   .btn-run,
   .btn-report {
     border-radius: 5px;
@@ -724,7 +688,6 @@
     background: #111;
     color: #fff;
   }
-  .btn-secondary,
   .btn-report {
     background: #fff;
     color: #111;
@@ -751,7 +714,6 @@
   .console::after {
     display: none !important;
   }
-  .preview-score strong,
   .proof-card b,
   .bento-title,
   .section-heading h2,
@@ -760,13 +722,11 @@
   .tab[aria-selected="true"] {
     color: #111;
   }
-  .mini-metric .bar,
   .rx-mini-row .rail,
   .track,
   .ticker {
     background: #f1f1f1;
   }
-  .mini-metric .bar i,
   .rx-mini-row .rail i,
   .track-fill,
   .stage[data-state="done"] .stage-ic {
@@ -783,11 +743,6 @@
     color: #555;
   }
   .bento-card.dark .rx-mini-row strong,
-  .rx-mini-row strong,
-  .preview-badge {
-    color: #111;
-  }
-  .preview-badge,
   .label-pill {
     background: #f5f5f5;
     border-color: #e3e3e3;
@@ -896,6 +851,58 @@
   .trust-strip { border: 0; border-bottom: 1px solid #e3e3e3; padding: 26px 0; }
   .console { margin: 20px 0 28px; }
 
+  /* ── 미리보기 카드 = 진단서 대시보드 첫 화면 복제 ──
+     색은 report.html 실측 팔레트를 그대로 박아둔다. 랜딩은 모든 색을
+     #111 로 눌러버리는데, 차트는 상승/실패/롤백이 구분돼야 하기 때문이다.
+       상승·유지 #315f86 / 실패 #8f3f35 / 롤백 #9a5b28 / 보조선 #8a8a8a  */
+  .preview-card { padding: 22px; }
+  .pv-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .pv-verdict {
+    display: inline-flex; align-items: center; padding: 5px 10px;
+    border: 1px solid #e3e3e3; border-radius: 4px; background: #f7f7f7;
+    font-size: 12px; font-weight: 650; color: #111;
+  }
+  .pv-date { font-family: var(--mono); font-size: 11.5px; color: #888; }
+
+  .pv-gauge { position: relative; width: 150px; margin: 18px auto 4px; }
+  .pv-gauge svg { display: block; width: 100%; height: auto; }
+  .pv-gauge-c {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 2px;
+  }
+  .pv-score { font-size: 40px; font-weight: 640; letter-spacing: -.045em; color: #111; font-variant-numeric: tabular-nums; }
+  .pv-score small { font-size: 14px; font-weight: 520; color: #777; margin-left: 2px; letter-spacing: -.02em; }
+  .pv-cap { font-size: 12px; color: #555; }
+
+  .pv-headline {
+    margin: 12px 0 0; font-size: 15px; font-weight: 620;
+    letter-spacing: -.02em; line-height: 1.45; color: #111;
+  }
+  .pv-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .pv-chip {
+    padding: 4px 9px; border: 1px solid #e3e3e3; border-radius: 4px;
+    font-size: 11.5px; color: #666;
+  }
+  .pv-chip b { color: #111; font-weight: 620; }
+
+  .pv-course { margin-top: 20px; padding-top: 16px; border-top: 1px solid #e3e3e3; }
+  .pv-course-title { font-size: 12.5px; font-weight: 650; color: #111; }
+  .pv-chart { display: block; width: 100%; height: auto; margin-top: 8px; }
+  .pv-chart text { font-family: var(--mono); }
+  .pv-chart .pv-val text { font-size: 10px; font-weight: 700; fill: #111; }
+  .pv-chart .pv-rb text { font-size: 8px; fill: #9a5b28; }
+  .pv-chart .pv-xlab text { font-size: 8px; fill: #777; font-family: var(--sans); }
+
+  .pv-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; }
+  .pv-legend span { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #666; }
+  .pv-legend i { width: 10px; height: 2px; border-radius: 2px; flex: none; }
+  .pv-legend i.rb { height: 8px; width: 8px; border-radius: 999px; background: #fff; border: 2px solid #9a5b28; }
+
+  @media (max-width: 760px) {
+    .pv-gauge { width: 128px; }
+    .pv-score { font-size: 34px; }
+  }
+
 </style>
 </head>
 <body>
@@ -928,7 +935,6 @@
       </div>
       <div class="hero-actions">
         <a class="btn-primary" href="#run">문서 진단 시작하기</a>
-        <a class="btn-secondary" href="report.html">결과 리포트 미리보기</a>
       </div>
       <div class="hero-proof" aria-label="RAG Doctor 핵심 기능">
         <div class="proof-card"><b>5단계</b><span>수집·색인·질문 생성·진단·최적화</span></div>
@@ -936,35 +942,94 @@
         <div class="proof-card"><b>Rx 추적</b><span>처방 전후 지표 변화 기록</span></div>
       </div>
     </div>
-    <div class="hero-preview" aria-label="RAG Doctor 리포트 미리보기">
+    <div class="hero-preview" aria-label="진단서 첫 화면 미리보기">
       <div class="preview-card">
-        <div class="preview-top">
-          <span class="preview-badge">Live diagnosis</span>
-          <span class="preview-doc">corpus.pdf</span>
+        <div class="pv-top">
+          <span class="pv-verdict">처방 후 기준선 통과</span>
+          <span class="pv-date">2026-07-20</span>
         </div>
-        <div class="preview-score">
-          <strong>84</strong><span>/100 composite</span>
-        </div>
-        <div class="preview-metrics">
-          <div class="mini-metric">
-            <span class="name">faithfulness</span>
-            <span class="bar"><i style="width:89%"></i></span>
-            <span class="value">0.72 → 0.89</span>
-          </div>
-          <div class="mini-metric">
-            <span class="name">context recall</span>
-            <span class="bar"><i style="width:88%"></i></span>
-            <span class="value">0.60 → 0.88</span>
-          </div>
-          <div class="mini-metric">
-            <span class="name">precision</span>
-            <span class="bar"><i style="width:79%"></i></span>
-            <span class="value">0.66 → 0.79</span>
+
+        <div class="pv-gauge">
+          <svg viewBox="0 0 240 240" aria-hidden="true">
+            <circle cx="120" cy="120" r="96" fill="none" stroke="#e3e3e3" stroke-width="14"
+                    stroke-dasharray="452.4 603.2" transform="rotate(135 120 120)" stroke-linecap="round"/>
+            <circle cx="120" cy="120" r="96" fill="none" stroke="#315f86" stroke-width="14"
+                    stroke-dasharray="452.4 603.2" stroke-dashoffset="72.4"
+                    transform="rotate(135 120 120)" stroke-linecap="round"/>
+          </svg>
+          <div class="pv-gauge-c">
+            <div class="pv-score">84<small>/100</small></div>
+            <div class="pv-cap">종합 점수</div>
           </div>
         </div>
-        <div class="preview-rx">
-          <div class="rx-title">추천 처방</div>
-          <div class="rx-text">검색 후보 범위 확대 · 재정렬 강화</div>
+
+        <p class="pv-headline">4건을 처방했고, 종합점수는 84/100입니다.</p>
+
+        <div class="pv-chips">
+          <span class="pv-chip">코퍼스 <b>사내 제품 문서</b></span>
+          <span class="pv-chip">테스트 질문 <b>47</b></span>
+        </div>
+
+        <div class="pv-course">
+          <div class="pv-course-title">종합 점수 추이</div>
+          <svg class="pv-chart" viewBox="0 0 340 132" role="img"
+               aria-label="처방 단계별 종합 점수 추이. 기준 41에서 시작해 하이브리드 검색 적용 후 59까지 올랐고, 실패한 처방 2건은 롤백으로 되돌렸습니다.">
+            <defs>
+              <linearGradient id="pvFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#315f86" stop-opacity=".12"/>
+                <stop offset="1" stop-color="#315f86" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <path d="M20 88 L81.2 54.67 L142.4 78 L142.4 54.67 L203.6 38 L264.8 34.67 L264.8 38 L326 28 L326 88 Z"
+                  fill="url(#pvFill)" stroke="none"/>
+            <path d="M20 88 L81.2 54.67" stroke="#315f86" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <path d="M81.2 54.67 L142.4 78" stroke="#8f3f35" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <path d="M142.4 78 L142.4 54.67" stroke="#8a8a8a" stroke-width="1.6" stroke-dasharray="3 3" fill="none"/>
+            <path d="M142.4 54.67 L203.6 38" stroke="#315f86" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <path d="M203.6 38 L264.8 34.67" stroke="#8f3f35" stroke-width="2" fill="none" stroke-linecap="round"/>
+            <path d="M264.8 34.67 L264.8 38" stroke="#8a8a8a" stroke-width="1.6" stroke-dasharray="3 3" fill="none"/>
+            <path d="M264.8 38 L326 28" stroke="#315f86" stroke-width="2" fill="none" stroke-linecap="round"/>
+
+            <circle cx="20" cy="88" r="3.4" fill="#8a8a8a" stroke="#fff" stroke-width="1.5"/>
+            <circle cx="81.2" cy="54.67" r="3.4" fill="#315f86" stroke="#fff" stroke-width="1.5"/>
+            <circle cx="142.4" cy="78" r="4" fill="#8f3f35" stroke="#fff" stroke-width="1.5"/>
+            <circle cx="142.4" cy="54.67" r="3.4" fill="#fff" stroke="#9a5b28" stroke-width="2"/>
+            <circle cx="203.6" cy="38" r="3.4" fill="#315f86" stroke="#fff" stroke-width="1.5"/>
+            <circle cx="264.8" cy="34.67" r="4" fill="#8f3f35" stroke="#fff" stroke-width="1.5"/>
+            <circle cx="264.8" cy="38" r="3.4" fill="#fff" stroke="#9a5b28" stroke-width="2"/>
+            <circle cx="326" cy="28" r="3.4" fill="#315f86" stroke="#fff" stroke-width="1.5"/>
+
+            <g class="pv-val">
+              <text x="20" y="80" text-anchor="start">41</text>
+              <text x="81.2" y="46" text-anchor="middle">51</text>
+              <text x="134" y="81" text-anchor="end">44</text>
+              <text x="203.6" y="30" text-anchor="middle">56</text>
+              <text x="257" y="27" text-anchor="end">57</text>
+              <text x="326" y="20" text-anchor="end">59</text>
+            </g>
+            <g class="pv-rb">
+              <text x="147" y="62" text-anchor="start">롤백</text>
+              <text x="269" y="50" text-anchor="start">롤백</text>
+            </g>
+            <g class="pv-xlab">
+              <text x="8" y="106" text-anchor="start">기준</text>
+              <text x="81.2" y="106" text-anchor="middle">리랭커</text>
+              <text x="81.2" y="115" text-anchor="middle">활성화</text>
+              <text x="142.4" y="106" text-anchor="middle">기권 기준</text>
+              <text x="142.4" y="115" text-anchor="middle">강화</text>
+              <text x="203.6" y="106" text-anchor="middle">질문</text>
+              <text x="203.6" y="115" text-anchor="middle">재진술</text>
+              <text x="264.8" y="106" text-anchor="middle">기권 기준</text>
+              <text x="264.8" y="115" text-anchor="middle">강화</text>
+              <text x="336" y="106" text-anchor="end">하이브리드</text>
+              <text x="336" y="115" text-anchor="end">검색</text>
+            </g>
+          </svg>
+          <div class="pv-legend">
+            <span><i style="background:#315f86"></i>상승·유지</span>
+            <span><i style="background:#8f3f35"></i>실패 점수</span>
+            <span><i class="rb"></i>롤백 복구</span>
+          </div>
         </div>
       </div>
     </div>
