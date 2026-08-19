@@ -247,7 +247,6 @@
   .metric-row { display: grid; grid-template-columns: 170px 1fr 150px; align-items: center; gap: 22px; padding: 18px 8px; border-bottom: 1px solid var(--border); }
   .metric-row:last-child { border-bottom: none; }
   .metric-name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 7px; }
-  .metric-name .en { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
   .dumbbell { position: relative; height: 28px; }
   .dumbbell .track { position: absolute; left: 0; right: 0; top: 50%; height: 5px; transform: translateY(-50%); background: color-mix(in srgb, var(--border) 84%, var(--faint)); border-radius: 999px; }
   .dumbbell .connect { position: absolute; top: 50%; height: 5px; transform: translateY(-50%); background: linear-gradient(90deg, var(--faint), var(--accent)); border-radius: 999px; }
@@ -256,7 +255,7 @@
   .dumbbell .pt.before { background: var(--faint); }
   .dumbbell .pt.after { background: var(--accent); box-shadow: 0 0 0 5px var(--accent-glow); }
   .metric-row.down .dumbbell .pt.after { background: var(--critical); box-shadow: 0 0 0 5px var(--critical-glow); }
-  .metric-vals { font-family: var(--mono); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; }
+  .metric-vals { font-family: var(--mono); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .metric-vals .b { color: var(--faint); } .metric-vals .a { color: var(--ink); font-weight: 500; }
   .metric-vals .d { color: var(--good); font-size: 11px; margin-left: 6px; font-weight: 700; }
   .metric-row.down .metric-vals .d { color: var(--critical); }
@@ -274,10 +273,21 @@
     letter-spacing: -.025em;
   }
   .course-chart .cc-legend { font-family: var(--mono); font-size: 11px; color: var(--faint); display: flex; gap: 14px; }
-  .course-chart .cc-legend i { font-style: normal; display: inline-flex; align-items: center; gap: 5px; }
+  .cc-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; }
+  .cc-tabs button { padding: 5px 10px; border: 1px solid #dcdcdc; border-radius: 999px; background: #fff; color: #555; font: 600 11.5px/1 var(--sans); cursor: pointer; transition: border-color .15s ease, background-color .15s ease, color .15s ease; }
+  .cc-tabs button:hover { border-color: #a9a9a9; background: #fafafa; }
+  .cc-tabs button[aria-selected="true"] { border-color: #111; background: #111; color: #fff; }
+  .cc-tabs button:focus-visible { outline: 2px solid #111; outline-offset: 2px; }
+  .course-chart .cc-legend { flex-wrap: wrap; }
+  .course-chart .cc-legend i { font-style: normal; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
   .course-segment-hit { cursor: pointer; }
-  .course-segment-hit circle { transition: transform .16s ease, filter .16s ease; transform-box: fill-box; transform-origin: center; }
-  .course-segment-hit:hover circle { transform: scale(1.08); filter: drop-shadow(0 5px 10px rgba(17,24,39,.16)); }
+  .course-step-band { fill: rgba(17,24,39,.06); opacity: 0; transition: opacity .15s ease; pointer-events: none; }
+  .course-step-band.active { opacity: 1; }
+  .course-seg { transition: stroke-width .15s ease; }
+  .course-seg.active { stroke-width: 4; }
+  .course-segment-hit { transition: stroke .16s ease; }
+  .course-segment-hit:hover { stroke: rgba(17,24,39,.10); }
+  .course-segment-hit:focus:not(:focus-visible) { outline: none; }
   .rule-note { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 10px 14px; margin-bottom: 22px; }
   .rule-note svg { color: var(--accent); flex: none; }
   .rule-note b { color: var(--ink); font-weight: 550; }
@@ -285,7 +295,15 @@
   .rx { display: flex; flex-direction: column; gap: 10px; }
   .rx-card { position: relative; border: 1px solid var(--border); border-radius: 22px; background: var(--surface); overflow: hidden; box-shadow: 0 18px 44px -38px rgba(17,24,39,.42); }
   .rx-card.active { border-color: rgba(17,24,39,.34); box-shadow: 0 20px 52px -38px rgba(17,24,39,.58), inset 0 0 0 1px rgba(17,24,39,.06); }
-  .rx-main { display: grid; grid-template-columns: 30px 1fr auto; gap: 15px; align-items: start; padding: 17px 20px; cursor: pointer; }
+  .rx-main { display: grid; grid-template-columns: 30px 1fr auto; gap: 12px; align-items: center; padding: 10px 14px; cursor: pointer; }
+  .rx-card:hover { border-color: #a9a9a9; background: #fafafa; box-shadow: 0 2px 10px -5px rgba(17,24,39,.35); }
+  .rx-card.open, .rx-card.active { border-color: #8d8d8d; box-shadow: none; }
+  .rx-main:focus-visible { outline: 2px solid #111; outline-offset: -2px; }
+  .rx-key-ko .rx-no { color: #888; font-weight: 600; margin-right: 1px; }
+  .rx-state-mark.applied { color: #246b45; }
+  .rx-state-mark.canceled { color: #8a5a14; }
+  .rx-state-mark.errored { color: #a3352a; }
+  .rx-state-mark.pending { color: #777; }
   .rx-num { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font-family: var(--mono); font-size: 12px; border: 1px solid var(--border); color: var(--muted); }
   .rx-card.kept .rx-num { border-color: transparent; background: var(--good-glow); color: var(--good); }
   .rx-card.rolled .rx-num { border-color: transparent; background: var(--surface-2); color: var(--faint); }
@@ -348,11 +366,11 @@
   .rx-verdict.keep { color: var(--good); background: var(--good-glow); }
   .rx-verdict.roll { color: var(--warning); background: var(--warning-glow); }
   .rx-verdict.error { color: var(--critical); background: var(--critical-glow); }
-  .rx-drill { border-top: 1px solid var(--border); padding: 0 20px; max-height: 0; overflow: hidden; transition: max-height .3s ease, padding .3s ease; background: var(--bg-2); }
+  .rx-drill { display: none; border-top: 1px solid var(--border); padding: 12px 14px; background: var(--bg-2); }
   /* 펼친 카드의 라벨 툴팁이 카드·상세 영역 경계에 잘리지 않도록 카드부터 상세
      영역까지 clipping을 해제한다. 닫힌 상태는 위 규칙의 hidden으로 접힘을 유지한다. */
   .rx-card.open { z-index: 4; overflow: visible; }
-  .rx-card.open .rx-drill { max-height: 2000px; overflow: visible; padding: 18px 20px; }
+  .rx-card.open .rx-drill { display: block; }
   .rx-card.open .rx-label-term { position: relative; z-index: 20; }
   .rx-card.open .rx-label-term:hover,
   .rx-card.open .rx-label-term:focus-visible { z-index: 30; }
@@ -363,18 +381,28 @@
   }
   .drill-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-bottom: 12px; }
   .rx-detail-summary { margin-bottom: 14px; border: 1px solid var(--border); border-radius: 10px; overflow: visible; }
-  .rx-info-row { display: grid; grid-template-columns: 118px minmax(0, 1fr); gap: 20px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
+  .course-split { display: grid; grid-template-columns: minmax(0, 0.78fr) minmax(0, 1.22fr); gap: 24px; align-items: start; margin-top: 18px; }
+  .course-split-rx { min-width: 0; }
+  /* 두 칼럼 상단을 맞춘다. .rx-ragas-panel{margin-top:22px} 가 뒤에 오므로 특이도로 이긴다. */
+  .course-split > .rx-ragas-panel,
+  .course-split > .course-split-rx,
+  .course-split .rx { margin-top: 0; }
+  #course-section .course-chart svg { display: block; width: 100%; height: auto; }
+  #course-section > .course-chart { margin-top: 0; }
+  #course-section { overflow: visible; }
+  @media (max-width: 1080px) {
+    .course-split { grid-template-columns: 1fr; gap: 18px; }
+  }
+  .rx-info-row { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 10px; padding: 8px 11px; border-bottom: 1px solid var(--border); }
   .rx-info-row:last-child { border-bottom: 0; }
-  .rx-info-name { color: #555; font-size: 12px; font-weight: 700; line-height: 1.6; }
-  .rx-info-name small { display: block; margin-top: 2px; color: #888; font-size: 10.5px; font-weight: 400; line-height: 1.45; }
-  .rx-info-value { min-width: 0; color: #222; font-size: 13px; line-height: 1.65; }
+  .rx-info-name { color: #555; font-size: 11.5px; font-weight: 700; line-height: 1.5; }
+  .rx-info-value { min-width: 0; color: #222; font-size: 12.5px; line-height: 1.5; }
   .rx-info-value .rx-label-list { margin-top: 0; }
   .rx-info-value .rx-impact,
   .rx-info-value .rx-reason,
   .rx-info-value .rx-target { margin: 0; color: inherit; font-size: inherit; line-height: inherit; }
   @media (max-width: 640px) {
     .rx-info-row { grid-template-columns: 1fr; gap: 5px; }
-    .rx-info-name small { display: inline; margin-left: 5px; }
   }
   .sweep { display: flex; flex-direction: column; gap: 7px; }
   .sweep-row { display: grid; grid-template-columns: 96px 1fr 54px; align-items: center; gap: 12px; }
@@ -388,7 +416,6 @@
   .drill-note { display: grid; grid-template-columns: 96px 1fr; align-items: baseline; gap: 12px; }
   .dn-k { font-family: var(--mono); font-size: 11px; color: var(--faint); }
   .dn-v { font-size: 12px; color: var(--muted); line-height: 1.5; }
-  .rx-expand { font-family: var(--mono); font-size: 10.5px; color: var(--faint); display: inline-flex; align-items: center; gap: 4px; }
 
   /* diagnosis detail */
   .dx { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -503,7 +530,6 @@
   }
   @media (prefers-reduced-motion: reduce) {
     html { scroll-behavior: auto; }
-    .rx-drill { transition: none; }
     .rhead h1 b, .rhead::before, .hero::before, .metric-panel::before, .rx-card::before, .report-signal-track { animation: none; }
   }
 
@@ -1001,31 +1027,14 @@
     padding-top: 8px;
   }
   .rx-ragas-panel .metric-row {
-    grid-template-columns: 190px minmax(260px, 1fr) 168px;
-    min-height: 78px;
+    grid-template-columns: 104px minmax(0, 1fr) 176px;
+    gap: 14px;
+    min-height: 62px;
     cursor: pointer;
   }
   .rx-ragas-panel .metric-row:focus-visible {
     outline: 2px solid #111;
     outline-offset: -2px;
-  }
-  .metric-history {
-    display: none;
-    border-bottom: 1px solid var(--border);
-    padding: 4px 18px 20px 208px;
-    background: #fff;
-  }
-  .metric-row.open + .metric-history {
-    display: block;
-  }
-  .metric-history .rx-history {
-    display: block;
-    margin: 0;
-    max-width: 460px;
-  }
-  .metric-history .rx-history svg {
-    width: 100%;
-    height: 138px;
   }
   .section-head .sub {
     max-width: 56ch;
@@ -1041,6 +1050,8 @@
   .rx-card {
     border-radius: 6px;
     border-color: #dcdcdc;
+    box-shadow: none;
+    transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease;
   }
   .rx-main {
     grid-template-columns: 42px 1fr auto;
@@ -1061,9 +1072,6 @@
   }
   .rx-reason .rl {
     display: none;
-  }
-  .rx-expand {
-    color: #666;
   }
   .rx-metrics {
     display: none;
@@ -1809,7 +1817,8 @@
           <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--faint)" stroke-width="2" stroke-dasharray="3 3"/></svg> 롤백 복구</i>
         </span>
       </div>
-      <svg viewBox="0 0 660 220" width="100%" height="220" id="treatmentCourseSvg" data-course-svg aria-label="치료 경과 종합 점수 추이 차트"></svg>
+      <div class="cc-tabs" id="courseMetricTabs" role="tablist" aria-label="추이로 볼 지표"></div>
+      <svg viewBox="0 0 1120 440" width="100%" id="treatmentCourseSvg" data-course-svg aria-label="치료 경과 종합 점수 추이 차트"></svg>
     </div>
 
     <div class="rule-note" hidden>
@@ -1817,20 +1826,21 @@
       <span><b>판정 규칙</b> — 처방 후 종합점수가 오르면 그대로 두고, 떨어지면 되돌린 뒤 다른 방법을 시도합니다.</span>
     </div>
 
-    <div class="rx" id="rxList"></div>
-
-    <div class="rx-ragas-panel" id="rxRagasPanel">
-      <div class="rx-ragas-head">
-        <h2>품질 지표 · 처방 전후</h2>
+    <div class="course-split">
+      <div class="course-split-rx">
+        <div class="rx" id="rxList"></div>
       </div>
-      <div class="metric-panel">
-        <div class="metric-toolbar">
-          <div class="metric-legend">
-            <span class="k"><span class="sw" style="background:var(--faint)"></span> 처방 전</span>
-            <span class="k"><span class="sw" style="background:var(--accent)"></span> 처방 후</span>
+
+      <div class="rx-ragas-panel" id="rxRagasPanel">
+        <div class="metric-panel">
+          <div class="metric-toolbar">
+            <div class="metric-legend">
+              <span class="k"><span class="sw" style="background:var(--faint)"></span> <span id="rxRagasLegendBefore">진단 시작</span></span>
+              <span class="k"><span class="sw" style="background:var(--accent)"></span> <span id="rxRagasLegendAfter">처방 완료</span></span>
+            </div>
           </div>
+          <div class="metrics" id="rxRagasMetrics"></div>
         </div>
-        <div class="metrics" id="rxRagasMetrics"></div>
       </div>
     </div>
 
@@ -2138,9 +2148,14 @@
     renderDxs(dxs, score, meta, recs, qas, rxs);
     renderLabelDistributions(dxs);
     renderMetrics(metrics, rxs, score);
-    renderCourse(data.course, !isLive);
     renderRxMatrix(rxs);
     renderRxs(rxs);
+    // 지표 탭은 처방 이력에서 목록을 뽑으므로 renderRxs 뒤에 와야 한다.
+    renderCourseMetricTabs();
+    renderCourse(data.course, !isLive);
+    CURRENT_METRICS = metrics;
+    CURRENT_SCORE = score;
+    renderSelectedRxMetrics(rxs);
     renderQas(qas);
     renderGauge(score, isLive ? data.mode : null);
     renderPriority(priority);
@@ -2492,29 +2507,30 @@
       });
     });
   }
-  function renderMetricRows(rows, includeHistory) {
+  function renderMetricRows(rows) {
     if (!rows || !rows.length) {
       return '<div class="empty">아직 처방별 지표 변화가 기록되지 않았습니다.</div>';
     }
     return rows.map(function (m) {
       var before = numOrNull(m.before), after = numOrNull(m.after);
+      var code = String(m.key || m.en || '');
       var tip = metricDescription(m.key || m.en || m.name, m.tip);
-      var name = '<div class="metric-name"><span class="term" tabindex="0" data-tip="' + esc(tip) + '" title="' + esc(tip) + '">' + esc(m.name || m.key || 'metric') + '</span><span class="en">' + esc(m.key || '') + '</span></div>';
-      var attrs = includeHistory ? ' role="button" tabindex="0" data-metric-key="' + esc(m.key || m.name || 'metric') + '"' : '';
-      var history = includeHistory ? '<div class="metric-history"><div class="rx-history"><div class="rx-history-head"><b>' + esc(m.name || m.key || 'metric') + '</b><span>' + esc(m.key || '') + '</span></div>' + metricHistorySvg(m) + '</div></div>' : '';
+      // 영문 키는 행에서 빼고 툴팁 첫 줄로 옮긴다 — 좁은 칼럼에서 이름이 밀리던 자리다.
+      var tipFull = code ? (code + ' — ' + tip) : tip;
+      var name = '<div class="metric-name"><span class="term" tabindex="0" data-tip="' + esc(tipFull) + '" title="' + esc(tipFull) + '">' + esc(m.name || m.key || 'metric') + '</span></div>';
       if (before === null || after === null || m.single) {
         var pa = metricBarWidth(m, after);
-        return '<div class="metric-row single"' + attrs + '>' + name +
+        return '<div class="metric-row single">' + name +
           '<div class="dumbbell"><div class="track"></div><div class="pt after" style="left:' + pa + '%"></div></div>' +
-          '<div class="metric-vals"><span class="a">' + esc(metricDisplayValue(m, after)) + '</span></div></div>' + history;
+          '<div class="metric-vals"><span class="a">' + esc(metricDisplayValue(m, after)) + '</span></div></div>';
       }
       var pb = metricBarWidth(m, before), pa2 = metricBarWidth(m, after);
       var lo = Math.min(pb, pa2), hi = Math.max(pb, pa2);
       var cls = metricTrendClass(before, after);
-      return '<div class="metric-row ' + cls + '"' + attrs + '>' + name +
+      return '<div class="metric-row ' + cls + '">' + name +
         '<div class="dumbbell"><div class="track"></div><div class="connect" style="left:' + lo + '%;width:' + (hi - lo) + '%"></div><div class="pt before" style="left:' + pb + '%"></div><div class="pt after" style="left:' + pa2 + '%"></div></div>' +
         '<div class="metric-vals"><span class="b">' + esc(metricDisplayValue(m, before)) + '</span> → <span class="a">' + esc(metricDisplayValue(m, after)) + '</span><span class="d">' + esc(metricDeltaText(m, before, after)) + '</span></div>' +
-      '</div>' + history;
+      '</div>';
     }).join('');
   }
   function renderMetrics(metrics, rxs, score) {
@@ -2588,48 +2604,28 @@
     });
     return rows;
   }
-  function selectedRx(rxs) {
-    rxs = rxs || [];
-    if (!rxs.length) return null;
-    var active = String(ACTIVE_RX_NUM || '').padStart(2, '0');
-    return rxs.filter(function (r) {
-      return String(r.num || '').padStart(2, '0') === active;
-    })[0] || rxs[0];
-  }
-  function bindLargeMetricRows(rootEl) {
-    if (!rootEl) return;
-    rootEl.querySelectorAll('.metric-row[data-metric-key]').forEach(function (row) {
-      function toggleMetric(ev) {
-        if (ev) ev.stopPropagation();
-        var willOpen = !row.classList.contains('open');
-        rootEl.querySelectorAll('.metric-row[data-metric-key]').forEach(function (other) {
-          other.classList.remove('open');
-        });
-        if (willOpen) row.classList.add('open');
-      }
-      row.addEventListener('click', toggleMetric);
-      row.addEventListener('keydown', function (ev) {
-        if (ev.key === 'Enter' || ev.key === ' ') {
-          ev.preventDefault();
-          toggleMetric(ev);
-        }
-      });
-    });
-  }
+  /* 처방을 고르면 그 처방의 전후, 아무것도 안 골랐으면 진단 전체의 최종 변화. */
   function renderSelectedRxMetrics(rxs) {
     var panel = document.getElementById('rxRagasPanel');
     var rowsEl = document.getElementById('rxRagasMetrics');
     if (!panel || !rowsEl) return;
-    var rx = selectedRx(rxs);
-    if (!rx) {
-      panel.hidden = false;
-      rowsEl.innerHTML = '<div class="empty">처방별 RAGAS 지표 데이터가 아직 없습니다.</div>';
-      return;
-    }
-    ACTIVE_RX_NUM = String(rx.num || ACTIVE_RX_NUM || '01').padStart(2, '0');
-    var rows = ragasMetricRows(normalizeRxMetrics(rx));
-    rowsEl.innerHTML = renderMetricRows(rows, true);
-    bindLargeMetricRows(rowsEl);
+    panel.hidden = false;
+    var rx = (rxs || []).filter(function (r) {
+      return ACTIVE_RX_NUM && String(r.num || '').padStart(2, '0') === ACTIVE_RX_NUM;
+    })[0] || null;
+    var rows = rx
+      ? ragasMetricRows(normalizeRxMetrics(rx))
+      : ragasMetricRows(overallMetricRows(CURRENT_METRICS, CURRENT_SCORE));
+    setMetricLegendMode(!!rx);
+    rowsEl.innerHTML = rows.length
+      ? renderMetricRows(rows)
+      : '<div class="empty">' + (rx ? '이 처방에는 기록된 RAGAS 지표가 없습니다.' : 'RAGAS 지표 데이터가 아직 없습니다.') + '</div>';
+  }
+  function setMetricLegendMode(perRx) {
+    var before = document.getElementById('rxRagasLegendBefore');
+    var after = document.getElementById('rxRagasLegendAfter');
+    if (before) before.textContent = perRx ? '처방 전' : '진단 시작';
+    if (after) after.textContent = perRx ? '처방 후' : '처방 완료';
   }
 
   /* ── course line chart ── */
@@ -2643,24 +2639,104 @@
     { label: '원상 복구', axis_label: '기권 기준 강화', rx_num: '04', step: 4, score: 56, kept: true, kind: 'rollback' },
     { label: '하이브리드 검색', axis_label: '하이브리드 검색', rx_num: '05', step: 5, score: 59, kept: true, kind: 'kept' }
   ];
+  var CURRENT_COURSE = [];
+  var COURSE_METRIC_KEY = '';
+  /* 처방 이력 전체에서 지표 목록을 모은다 — 종합점수는 기본 탭이라 뺀다. */
+  function courseMetricChoices() {
+    var seen = {}, out = [];
+    (CURRENT_RX_HISTORY || []).forEach(function (rx) {
+      normalizeRxMetrics(rx).forEach(function (m) {
+        if (m.key === 'composite' || seen[m.key]) return;
+        seen[m.key] = 1;
+        out.push({ key: m.key, name: m.name, unit: m.unit || '' });
+      });
+    });
+    return out;
+  }
+  function metricCoursePoints(choice) {
+    var row = { key: choice.key, name: choice.name, unit: choice.unit || '' };
+    var pts = metricHistoryPoints(row);
+    if (pts.length < 2) return [];
+    // 값이 없는 지표는 metricHistoryPoints 가 before/after 폴백을 내놓는다 — 그리지 않는다.
+    if (pts.some(function (p) { return !Number.isFinite(Number(p.value)); })) return [];
+    return pts.map(function (p, i) {
+      return {
+        step: p.step == null ? i : p.step,
+        rx_num: p.rx_num || '',
+        label: p.label,
+        score: metricBarWidth(row, p.value),
+        kept: p.kind !== 'failed',
+        kind: p.kind
+      };
+    });
+  }
+  function renderCourseMetricTabs() {
+    var host = document.getElementById('courseMetricTabs');
+    if (!host) return;
+    var choices = courseMetricChoices();
+    if (!choices.length) { host.innerHTML = ''; host.hidden = true; return; }
+    host.hidden = false;
+    var all = [{ key: '', name: '종합점수' }].concat(choices);
+    if (!all.some(function (c) { return c.key === COURSE_METRIC_KEY; })) COURSE_METRIC_KEY = '';
+    host.innerHTML = all.map(function (c) {
+      return '<button type="button" role="tab" data-metric-key="' + esc(c.key) + '"' +
+        ' aria-selected="' + (c.key === COURSE_METRIC_KEY ? 'true' : 'false') + '">' + esc(c.name) + '</button>';
+    }).join('');
+    Array.prototype.slice.call(host.querySelectorAll('button')).forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        COURSE_METRIC_KEY = btn.getAttribute('data-metric-key') || '';
+        renderCourseMetricTabs();
+        renderCourse(CURRENT_COURSE, false);
+      });
+    });
+  }
+  function highlightCourseRx(num) {
+    var key = String(num || '');
+    Array.prototype.slice.call(document.querySelectorAll('[data-course-svg]')).forEach(function (svg) {
+      Array.prototype.slice.call(svg.querySelectorAll('.course-step-band, .course-seg')).forEach(function (node) {
+        var on = !!key && node.getAttribute('data-rx-num') === key;
+        node.classList[on ? 'add' : 'remove']('active');
+      });
+    });
+  }
   function renderCourse(coursePoints, allowPreview) {
     var raw = coursePoints && coursePoints.length ? coursePoints : (allowPreview ? DUMMY_COURSE : []);
+    CURRENT_COURSE = raw;
     var svgs = Array.prototype.slice.call(document.querySelectorAll('[data-course-svg]'));
     if (!svgs.length) {
       var fallback = document.getElementById('courseSvg');
       if (fallback) svgs = [fallback];
     }
+    var choice = null;
+    if (COURSE_METRIC_KEY) {
+      choice = courseMetricChoices().filter(function (c) { return c.key === COURSE_METRIC_KEY; })[0] || null;
+    }
+    var metricPts = choice ? metricCoursePoints(choice) : [];
     svgs.forEach(function (svg) {
-      renderCourseSvg(svg, raw);
+      // 대시보드 차트는 늘 종합점수. 지표 전환은 치료 경과 쪽에만 건다.
+      var useMetric = choice && metricPts.length && svg.id === 'treatmentCourseSvg';
+      renderCourseSvg(
+        svg,
+        useMetric ? metricPts : raw,
+        useMetric ? { format: function (v) { return Number(v).toFixed(0) + '%'; } } : null
+      );
+      if (svg.id === 'treatmentCourseSvg') {
+        svg.setAttribute('aria-label', (useMetric ? choice.name : '종합 점수') + ' 추이 차트');
+      }
     });
+    var title = document.querySelector('#course-section .cc-title');
+    if (title) title.textContent = (choice && metricPts.length ? choice.name : '종합 점수') + ' 추이';
+    highlightCourseRx(ACTIVE_RX_NUM);
   }
-  function renderCourseSvg(svg, raw) {
+  function renderCourseSvg(svg, raw, opts) {
+    var fmt = (opts && opts.format) || function (v) { return String(v); };
     svg.innerHTML = '';
     var NS = 'http://www.w3.org/2000/svg';
     if (!raw.length) {
       var empty = document.createElementNS(NS, 'text');
-      empty.setAttribute('x', '330');
-      empty.setAttribute('y', '112');
+      var evb = String(svg.getAttribute('viewBox') || '0 0 660 220').split(/[\s,]+/).map(Number);
+      empty.setAttribute('x', String((evb[2] > 0 ? evb[2] : 660) / 2));
+      empty.setAttribute('y', String((evb[3] > 0 ? evb[3] : 220) / 2));
       empty.setAttribute('text-anchor', 'middle');
       empty.setAttribute('fill', 'var(--faint)');
       empty.setAttribute('font-size', '13');
@@ -2668,7 +2744,9 @@
       svg.appendChild(empty);
       return;
     }
-    var L = 46, R = 634, T = 24, B = 178;
+    var vb = String(svg.getAttribute('viewBox') || '0 0 660 220').split(/[\s,]+/).map(Number);
+    var VW = vb[2] > 0 ? vb[2] : 660, VH = vb[3] > 0 ? vb[3] : 220;
+    var L = 46, R = VW - 26, T = 24, B = VH - 42;
     var scores = raw.map(function (p) { return p.score; });
     var sMin = Math.max(0, Math.min.apply(null, scores) - 10);
     var sMax = Math.min(100, Math.max.apply(null, scores) + 10);
@@ -2681,7 +2759,8 @@
       return {
         x: L + (R - L) * ((step - stepMin) / (stepMax - stepMin)),
         step: step,
-        axisLabel: step === stepMin ? '기준' : String(p.axis_label || p.label || ('처방 ' + step)),
+        axisLabel: step === stepMin ? '기준' : (p.rx_num ? String(Number(p.rx_num)) : String(step)),
+        pointName: String(p.axis_label || p.label || ('처방 ' + step)),
         rxNum: String(p.rx_num || '').padStart(p.rx_num ? 2 : 0, '0'),
         label: p.label, score: p.score, kept: p.kept, kind: p.kind || (p.kept ? 'kept' : 'pending')
       };
@@ -2693,23 +2772,46 @@
     var gStep = (sMax - sMin) / 4;
     [1, 2, 3, 4].map(function (i) { return Math.round(sMin + gStep * i); }).forEach(function (g) {
       svg.appendChild(el('line', { x1: L, y1: y(g), x2: R, y2: y(g), stroke: 'var(--border)', 'stroke-width': 1 }));
-      svg.appendChild(el('text', { x: L - 10, y: y(g) + 3.5, 'text-anchor': 'end', fill: 'var(--faint)', 'font-size': 10.5, 'font-family': 'var(--mono)' })).textContent = g;
+      svg.appendChild(el('text', { x: L - 10, y: y(g) + 3.5, 'text-anchor': 'end', fill: 'var(--faint)', 'font-size': 10.5, 'font-family': 'var(--mono)' })).textContent = fmt(g);
+    });
+
+    // 처방 한 건이 차지하는 x 구간(실패→롤백까지 포함)을 강조용 밴드로 깔아둔다.
+    var bands = {};
+    pts.slice(1).forEach(function (point, i) {
+      if (!point.rxNum) return;
+      var prev = pts[i];
+      var lo = Math.min(prev.x, point.x), hi = Math.max(prev.x, point.x);
+      if (!bands[point.rxNum]) bands[point.rxNum] = { lo: lo, hi: hi };
+      else {
+        bands[point.rxNum].lo = Math.min(bands[point.rxNum].lo, lo);
+        bands[point.rxNum].hi = Math.max(bands[point.rxNum].hi, hi);
+      }
+    });
+    Object.keys(bands).forEach(function (num) {
+      var b = bands[num];
+      svg.appendChild(el('rect', {
+        class: 'course-step-band', 'data-rx-num': num,
+        x: b.lo, y: T, width: Math.max(3, b.hi - b.lo), height: B - T
+      }));
     });
 
     // 실제 측정 순서 전체 경로: 실패 점수와 롤백 복구도 독립된 지점으로 잇는다.
     var d = 'M' + pts.map(function (p) { return p.x + ' ' + y(p.score); }).join(' L');
     // area
     var area = d + ' L' + R + ' ' + B + ' L' + L + ' ' + B + ' Z';
-    var ag = el('linearGradient', { id: 'cg', x1: 0, y1: 0, x2: 0, y2: 1 });
+    var gid = 'cg-' + (svg.id || 'course');
+    var ag = el('linearGradient', { id: gid, x1: 0, y1: 0, x2: 0, y2: 1 });
     ag.appendChild(el('stop', { offset: '0%', 'stop-color': 'var(--accent)', 'stop-opacity': .18 }));
     ag.appendChild(el('stop', { offset: '100%', 'stop-color': 'var(--accent)', 'stop-opacity': 0 }));
     var defs = el('defs', {}); defs.appendChild(ag); svg.appendChild(defs);
-    svg.appendChild(el('path', { d: area, fill: 'url(#cg)' }));
+    svg.appendChild(el('path', { d: area, fill: 'url(#' + gid + ')' }));
     pts.slice(1).forEach(function (point, i) {
       var prev = pts[i];
       var isFailed = point.kind === 'failed';
       var isRollback = point.kind === 'rollback';
       var segPath = el('path', {
+        class: 'course-seg',
+        'data-rx-num': point.rxNum || '',
         d: 'M' + prev.x + ' ' + y(prev.score) + ' L' + point.x + ' ' + y(point.score),
         fill: 'none',
         stroke: isFailed ? 'var(--critical)' : (isRollback ? 'var(--faint)' : 'var(--accent)'),
@@ -2726,15 +2828,15 @@
           class: 'course-segment-hit',
           'data-rx-num': point.rxNum,
           tabindex: '0', role: 'button',
-          'aria-label': point.axisLabel + ' 처방 보기',
+          'aria-label': point.pointName + ' 처방 보기',
           d: 'M' + prev.x + ' ' + y(prev.score) + ' L' + point.x + ' ' + y(point.score),
           fill: 'none', stroke: 'transparent', 'stroke-width': 14
         });
-        hit.addEventListener('click', function () { activateRxByNum(point.rxNum, true); });
+        hit.addEventListener('click', function () { activateRxByNum(point.rxNum); });
         hit.addEventListener('keydown', function (ev) {
           if (ev.key === 'Enter' || ev.key === ' ') {
             ev.preventDefault();
-            activateRxByNum(point.rxNum, true);
+            activateRxByNum(point.rxNum);
           }
         });
         svg.appendChild(hit);
@@ -2785,7 +2887,7 @@
           'text-anchor': scoreAnchor,
           fill: isFailed ? 'var(--critical)' : (isRollback ? 'var(--warning)' : (isBase ? 'var(--muted)' : 'var(--ink)')),
           'font-size': 12, 'font-weight': isBase ? 400 : 600, 'font-family': 'var(--mono)'
-        })).textContent = p.score;
+        })).textContent = fmt(p.score);
       }
       if (isRollback) {
         svg.appendChild(el('text', {
@@ -2879,6 +2981,8 @@
     }).join('') + '</div>';
   }
   var CURRENT_RX_HISTORY = [];
+  var CURRENT_METRICS = [];
+  var CURRENT_SCORE = null;
   var ACTIVE_RX_NUM = '';
   function metricKey(row) {
     return String((row && (row.key || row.en || row.name)) || '').trim();
@@ -2892,13 +2996,14 @@
       normalizeRxMetrics(rx).forEach(function (m) {
         if (!metricMatches(row, m)) return;
         if (!points.length) {
-          points.push({ label: '기준', value: m.before, kind: 'baseline' });
+          points.push({ label: '기준', value: m.before, kind: 'baseline', step: 0, rx_num: '' });
         }
         var label = rxStepLabel(rx, index);
         var failed = rx.state === 'rolled';
-        points.push({ label: label, value: m.after, kind: failed ? 'failed' : 'kept' });
+        var rxNum = String(rx.num || '').padStart(2, '0');
+        points.push({ label: label, value: m.after, kind: failed ? 'failed' : 'kept', step: index + 1, rx_num: rxNum });
         if (failed) {
-          points.push({ label: label, value: m.before, kind: 'rollback' });
+          points.push({ label: label, value: m.before, kind: 'rollback', step: index + 1, rx_num: rxNum });
         }
       });
     });
@@ -3220,16 +3325,26 @@
     if (labelCount) parts.push('<span title="이 처방을 선택하도록 근거를 제공한 진단 라벨 수입니다.">지지 라벨 <b>' + esc(labelCount) + '</b>개</span>');
     return parts.join(' · ');
   }
-  function rxChangeHtml(r) {
-    var change = r.change || ['처방', '', ''];
-    var code = normalizeActionKey(change[0]);
-    var ko = String(r.change_label || configNameKo(code));
-    var after = valueNameKo(change[2]);
-    var enabled = /^(true|on|enable|enabled|켜짐|사용)$/i.test(String(change[2] == null ? '' : change[2])) || after === '켜짐';
-    return '<span class="rx-key-ko">' + esc(ko) + '</span>' +
-      (enabled ? '<span class="rx-state-mark">✓ 적용</span>' : '');
+  /* 처방이 최종 설정에 남았는지를 한 자리에서 말한다 — 유지/롤백 배지는 걷어냈다. */
+  function rxStateMark(r) {
+    var v = (r.verdict && r.verdict[0]) || 'pending';
+    if (v === 'keep') return { cls: 'applied', text: '✓ 적용' };
+    if (v === 'roll') return { cls: 'canceled', text: '✕ 취소' };
+    if (v === 'error') return { cls: 'errored', text: '! 오류' };
+    return { cls: 'pending', text: '대기' };
   }
-  function activateRxByNum(num, scrollIntoView) {
+  function rxChangeNameKo(r) {
+    var change = (r && r.change) || ['처방', '', ''];
+    return String((r && r.change_label) || configNameKo(normalizeActionKey(change[0])));
+  }
+  function rxChangeHtml(r, index) {
+    var ko = rxChangeNameKo(r);
+    var mark = rxStateMark(r);
+    var no = rxStepLabel(r, index);
+    return '<span class="rx-key-ko"><span class="rx-no">' + esc(no) + '.</span> ' + esc(ko) + '</span>' +
+      '<span class="rx-state-mark ' + mark.cls + '">' + esc(mark.text) + '</span>';
+  }
+  function activateRxByNum(num) {
     num = String(num || '').padStart(2, '0');
     var cards = Array.prototype.slice.call(document.querySelectorAll('.rx-card'));
     var target = cards.filter(function (card) { return card.getAttribute('data-rx-num') === num; })[0];
@@ -3239,13 +3354,13 @@
       var active = card === target;
       card.classList.toggle('active', active);
       card.classList.toggle('open', active);
+      var head = card.querySelector('.rx-main');
+      if (head) head.setAttribute('aria-expanded', active ? 'true' : 'false');
     });
+    highlightCourseRx(ACTIVE_RX_NUM);
     renderSelectedRxMetrics(CURRENT_RX_HISTORY);
-    if (scrollIntoView) {
-      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
   }
-  function rxCard(r) {
+  function rxCard(r, index) {
     var drill = r.drill || { label: '상세 지표', rows: [], notes: [], caption: '' };
     var labels = rxLabels(r, drill);
     var metrics = normalizeRxMetrics(r);
@@ -3253,71 +3368,78 @@
     var hasScore = Array.isArray(r.score);
     var scoreCls = hasScore && r.score[2] === 'up' ? 'up' : 'down';
     var arrowUp = hasScore && r.score[2] === 'up';
-    var verdict = r.verdict || ['pending', '판정 대기'];
-    var verdictIcon = verdict[0] === 'keep' ? '✓' : (verdict[0] === 'error' ? '!' : '↩');
     var scoreHtml = hasScore ?
-      '<div class="rx-scoredelta">종합 ' + esc(r.score[0]) + ' <b class="' + scoreCls + '">→ ' + esc(r.score[1]) + (arrowUp ? ' ↑' : ' ↓') + '</b></div>' :
+      '<div class="rx-scoredelta">' + esc(r.score[0]) + ' <b class="' + scoreCls + '">→ ' + esc(r.score[1]) + (arrowUp ? ' ↑' : ' ↓') + '</b></div>' :
       '<div class="rx-scoredelta error">종합 점수 측정 안 됨</div>';
     var metricChipsHtml = '';
     var metricTableHtml = renderRxMetricTable(metrics);
+    var verdictText = (r.verdict && r.verdict[1]) || '판정 대기';
     var decisionBasis = hasScore
-      ? ('종합점수 ' + esc(r.score[0]) + ' → ' + esc(r.score[1]) + ' · ' + esc(verdict[1]))
-      : esc(verdict[1]);
+      ? ('종합점수 ' + esc(r.score[0]) + ' → ' + esc(r.score[1]) + ' · ' + esc(verdictText))
+      : esc(verdictText);
     var detailHtml = '<div class="rx-detail-summary">' +
       '<div class="rx-info-row">' +
-        '<div class="rx-info-name">처방 목적<small>무엇을 고치려 했는지</small></div>' +
+        '<div class="rx-info-name">처방 목적</div>' +
         '<div class="rx-info-value"><div class="rx-target">' + esc(r.target) + '</div></div>' +
       '</div>' +
       '<div class="rx-info-row">' +
-        '<div class="rx-info-name">진단 근거<small>처방을 선택하게 한 라벨</small></div>' +
+        '<div class="rx-info-name">진단 근거</div>' +
         '<div class="rx-info-value">' + rxLabelListHtml(labels) + '</div>' +
       '</div>' +
       (impactHtml ? '<div class="rx-info-row">' +
-        '<div class="rx-info-name">영향 범위<small>관련 질문과 근거 수</small></div>' +
+        '<div class="rx-info-name">영향 범위</div>' +
         '<div class="rx-info-value"><div class="rx-impact">' + impactHtml + '</div></div>' +
       '</div>' : '') +
       '<div class="rx-info-row">' +
-        '<div class="rx-info-name">판정 결과<small>유지·롤백을 정한 이유</small></div>' +
+        '<div class="rx-info-name">판정 결과</div>' +
         '<div class="rx-info-value"><div class="rx-reason">' + decisionBasis + '</div></div>' +
       '</div>' +
     '</div>';
     var rxNum = String(r.num || '').padStart(2, '0');
     var activeClass = rxNum === ACTIVE_RX_NUM ? ' active open' : '';
     return '<div class="rx-card ' + r.state + activeClass + '" data-rx-num="' + esc(rxNum) + '">' +
-      '<div class="rx-main">' +
+      '<div class="rx-main" role="button" tabindex="0" aria-expanded="' + (rxNum === ACTIVE_RX_NUM ? 'true' : 'false') + '">' +
         '<div class="rx-body">' +
-          '<div class="rx-change">' + rxChangeHtml(r) + '</div>' +
+          '<div class="rx-change">' + rxChangeHtml(r, index) + '</div>' +
           metricChipsHtml +
         '</div>' +
-        '<div class="rx-right">' +
-          '<div class="rx-verdict ' + verdict[0] + '">' + verdictIcon + ' ' + esc(verdict[1]) + '</div>' +
-          scoreHtml +
-          '<div class="rx-expand">상세 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>' +
-        '</div>' +
+        '<div class="rx-right">' + scoreHtml + '</div>' +
       '</div>' +
       '<div class="rx-drill">' + detailHtml + metricTableHtml + '</div>' +
     '</div>';
   }
   function renderRxs(rxs) {
     CURRENT_RX_HISTORY = rxs || [];
+    // 처음에는 아무것도 고르지 않은 상태 — 오른쪽에 최종 변화가 뜬다.
     if (!CURRENT_RX_HISTORY.some(function (r) { return String(r.num || '').padStart(2, '0') === ACTIVE_RX_NUM; })) {
-      ACTIVE_RX_NUM = CURRENT_RX_HISTORY[0] ? String(CURRENT_RX_HISTORY[0].num || '01').padStart(2, '0') : '';
+      ACTIVE_RX_NUM = '';
     }
     document.getElementById('rxList').innerHTML = rxs.map(rxCard).join('');
     document.querySelectorAll('.rx-main').forEach(function (m) {
-      m.addEventListener('click', function () {
+      function toggle() {
         var card = m.parentElement;
         var willOpen = !card.classList.contains('open');
         document.querySelectorAll('.rx-card').forEach(function (other) {
           other.classList.remove('active');
           other.classList.remove('open');
+          var head = other.querySelector('.rx-main');
+          if (head) head.setAttribute('aria-expanded', 'false');
         });
         if (willOpen) {
           ACTIVE_RX_NUM = card.getAttribute('data-rx-num') || ACTIVE_RX_NUM;
           card.classList.add('active');
           card.classList.add('open');
+        } else {
+          // 닫으면 선택도 함께 푼다 — 오른쪽은 최종 변화로 돌아간다.
+          ACTIVE_RX_NUM = '';
         }
+        m.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+        highlightCourseRx(ACTIVE_RX_NUM);
         renderSelectedRxMetrics(CURRENT_RX_HISTORY);
+      }
+      m.addEventListener('click', toggle);
+      m.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(); }
       });
     });
     document.querySelectorAll('.rx-metric-vrow').forEach(function (row) {
@@ -3340,6 +3462,7 @@
         }
       });
     });
+    highlightCourseRx(ACTIVE_RX_NUM);
     renderSelectedRxMetrics(CURRENT_RX_HISTORY);
   }
 
