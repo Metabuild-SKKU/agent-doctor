@@ -385,8 +385,6 @@
 
 
   .run-row { display: flex; align-items: center; justify-content: space-between; margin-top: 28px; gap: 18px; }
-  .run-note { font-family: var(--mono); font-size: 12px; color: var(--faint); }
-  .run-note b { color: var(--muted); font-weight: 500; }
   .btn-run {
     display: inline-flex; align-items: center; gap: 8px;
     font-family: var(--sans); font-size: 14px; font-weight: 560; letter-spacing: -.01em;
@@ -1246,7 +1244,6 @@
         </div>
 
         <div class="run-row">
-          <div class="run-note"><span id="srcNote">문서 미선택</span> · 예상 <b id="etaNote">약 6분</b></div>
           <button class="btn-run" id="btnRun">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4.5 19 12 6 19.5V4.5z"/></svg>
             진단 시작
@@ -1343,18 +1340,10 @@
         o.setAttribute('aria-selected', sel ? 'true' : 'false');
         document.getElementById(panels[o.id]).hidden = !sel;
       });
-      updateModeCopy(t.id === 'tab-conn');
       refreshRunButton();
     });
   });
 
-  /* 리플레이(로그) 모드는 남의 인덱스라 재검색이 없다 — 진단 깊이가
-     규칙·QA셋 대조 vs LLM 심층 두 단계뿐이므로 문구·선택지를 바꾼다. */
-  function updateModeCopy(isLog) {
-    if (isLog) updateSrcNote();
-    else updateDocNote();
-    updateEta(isLog);
-  }
 
   /* 파일 형식 안내 안쪽 탭(실행 로그 / QA셋). details 안에 있어서 접힌 상태에선
      보이지 않으므로 초기 상태만 맞춰 두고 클릭으로 전환한다. */
@@ -1376,16 +1365,6 @@
     });
   });
 
-  /* 진단 깊이는 정밀 검진(full) 하나뿐이다 - 선택지를 두지 않는다. */
-  var DOC_ETA = '약 6분';
-
-  /* 리플레이는 깊이 선택이 없어 seg 클릭이 안 일어나므로 ETA 를 따로 세운다.
-     문서 모드의 '약 6분'은 색인·임베딩까지 포함한 값이라 리플레이엔 안 맞는다
-     (리플레이는 RAGAS 채점만 — 실측 6건 13.8초, 레코드 단위 병렬). */
-  function updateEta(isLog) {
-    document.getElementById('etaNote').textContent =
-      isLog ? '약 1분 이내' : DOC_ETA;
-  }
 
   /* file upload wiring — 세 드롭존(문서/로그/QA셋)이 같은 클릭·드래그·키보드
      동작을 공유하므로 헬퍼 하나로 묶는다. */
@@ -1550,7 +1529,7 @@
   wireDropzone('dropzone', 'fileInput', {
     mainId: 'dzMain', subId: 'dzSub', pattern: /\.pdf$/i,
     rejectMsg: 'PDF 파일만 지원합니다.',
-    onChange: function (f) { selectedFile = f; updateDocNote(); },
+    onChange: function (f) { selectedFile = f; },
   });
   wireDropzone('logDropzone', 'logInput', {
     mainId: 'logDzMain', subId: 'logDzSub', pattern: /\.(jsonl|json)$/i,
@@ -1558,36 +1537,19 @@
     onChange: function (f) {
       selectedLogFile = f;
       if (!f) logHasInlineGolden = false;  // 거부된 파일의 인라인 정답 판정은 무효
-      refreshGoldenGate(); updateSrcNote(); refreshRunButton();
+      refreshGoldenGate(); refreshRunButton();
     },
   });
   wireDropzone('goldenDropzone', 'goldenInput', {
     mainId: 'goldenDzMain', subId: 'goldenDzSub', pattern: /\.(xlsx|csv|jsonl|json)$/i,
     rejectMsg: 'XLSX · CSV · JSONL · JSON 형식만 지원합니다.', validate: validateGoldenFile,
-    onChange: function (f) { selectedGoldenFile = f; refreshGoldenGate(); updateSrcNote(); refreshRunButton(); },
+    onChange: function (f) { selectedGoldenFile = f; refreshGoldenGate(); refreshRunButton(); },
   });
 
   // 브라우저가 새로고침 때 체크박스 상태를 복원하는 경우가 있어 초기 상태를 맞춰 둔다.
   refreshGoldenGate();
   refreshRunButton();
 
-  /* 문서 탭도 로그 탭과 같이 실제 선택 상태를 말한다 - 예전에는
-     '코퍼스 1개 준비됨' 이 고정 문구라 파일이 없어도 준비됐다고 했다. */
-  function updateDocNote() {
-    var note = document.getElementById('srcNote');
-    if (!note) return;
-    if (!selectedFile) { note.textContent = '문서 미선택'; return; }
-    note.innerHTML = '문서 <b>준비됨</b>';
-  }
-
-  function updateSrcNote() {
-    var note = document.getElementById('srcNote');
-    if (!note) return;
-    if (!selectedLogFile) { note.textContent = '실행 로그 미선택'; return; }
-    if (selectedGoldenFile) note.innerHTML = '로그 · QA셋 <b>준비됨</b>';
-    else if (logHasInlineGolden) note.innerHTML = '로그에 정답 포함 — QA셋 <b>불필요</b>';
-    else note.innerHTML = 'QA셋 <b>필요</b> — 정답지가 없으면 종합점수를 낼 수 없습니다';
-  }
 
   /* ECG canvas — subtle oscilloscope trace */
   var cv = document.getElementById('ecg');
