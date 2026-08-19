@@ -202,12 +202,6 @@
     background: rgba(255,255,255,.74);
     box-shadow: 0 22px 64px -44px rgba(17,24,39,.48), inset 0 1px 0 rgba(255,255,255,.86);
   }
-  .bento-card.dark {
-    color: #fff; background:
-      radial-gradient(circle at 80% 0%, rgba(124,58,237,.42), transparent 38%),
-      linear-gradient(135deg, #111827, #1f1f46 58%, #3b2a78);
-    border-color: rgba(255,255,255,.12);
-  }
   .bento-card::before {
     content: ""; position: absolute; inset: -1px; pointer-events: none;
     background:
@@ -215,32 +209,12 @@
       linear-gradient(180deg, rgba(255,255,255,.20), transparent 40%);
     opacity: .65; transition: opacity .18s ease;
   }
-  .bento-card.dark::before {
-    background:
-      radial-gradient(circle at var(--mx, 80%) var(--my, 18%), rgba(255,255,255,.22), transparent 28%),
-      radial-gradient(circle at 18% 90%, rgba(6,182,212,.20), transparent 32%);
-  }
   .bento-card > * { position: relative; z-index: 1; }
   .bento-card.tall { min-height: 456px; }
   .bento-card.wide { grid-column: span 2; min-height: 250px; }
   .bento-label { font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: .08em; text-transform: uppercase; }
-  .bento-card.dark .bento-label { color: rgba(255,255,255,.58); }
   .bento-title { margin-top: 14px; font-size: 24px; font-weight: 760; letter-spacing: -.04em; line-height: 1.14; }
   .bento-copy { margin-top: 12px; color: var(--muted); font-size: 14px; line-height: 1.68; max-width: 48ch; }
-  .bento-card.dark .bento-copy { color: rgba(255,255,255,.72); }
-  .rx-mini {
-    margin-top: 26px; display: grid; gap: 12px;
-  }
-  .rx-mini-row {
-    display: grid; grid-template-columns: 88px 1fr 72px; gap: 12px; align-items: center;
-    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
-  }
-  .rx-mini-row .rail { height: 8px; border-radius: 999px; background: rgba(255,255,255,.16); overflow: hidden; }
-  .rx-mini-row .rail i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #a5b4fc, #4ade80); }
-  .rx-mini-row strong { color: var(--good); text-align: right; font-weight: 700; }
-  .bento-card.dark .rx-mini-row { color: rgba(255,255,255,.72); }
-  .bento-card.dark .rx-mini-row strong { color: #fff; }
-  .bento-card:not(.dark) .rx-mini-row .rail { background: #e5e7eb; }
   .workflow-strip {
     display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 18px;
   }
@@ -656,27 +630,14 @@
   .tab[aria-selected="true"] {
     color: #111;
   }
-  .rx-mini-row .rail,
   .track,
   .ticker {
     background: #f1f1f1;
   }
-  .rx-mini-row .rail i,
   .track-fill,
   .stage[data-state="done"] .stage-ic {
     background: #111;
   }
-  .bento-card.dark {
-    color: #111;
-    background: #fff;
-    border-color: #e3e3e3;
-  }
-  .bento-card.dark .bento-label,
-  .bento-card.dark .bento-copy,
-  .bento-card.dark .rx-mini-row {
-    color: #555;
-  }
-  .bento-card.dark .rx-mini-row strong,
   .section-kicker,
   .step-n,
   .claim .cl-sm {
@@ -759,22 +720,6 @@
   .workflow-step,
   .bento-card,
   .workflow-step,
-  .bento-card.dark { color: #111; background: transparent; border-color: #e3e3e3; }
-  .step { border: 0; border-top: 1px solid #e3e3e3; padding: 18px 0 0; }
-  .console { margin: 20px 0 28px; }
-
-  /* ── 미리보기 카드 = 진단서 대시보드 첫 화면 복제 ──
-     색은 report.html 실측 팔레트를 그대로 박아둔다. 랜딩은 모든 색을
-     #111 로 눌러버리는데, 차트는 상승/실패/롤백이 구분돼야 하기 때문이다.
-       상승·유지 #315f86 / 실패 #8f3f35 / 롤백 #9a5b28 / 보조선 #8a8a8a  */
-  .preview-card { padding: 22px; }
-
-  .pv-gauge { position: relative; width: 132px; margin: 2px auto; }
-  .pv-gauge svg { display: block; width: 100%; height: auto; }
-  .pv-gauge-c {
-    position: absolute; inset: 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 2px;
-  }
   .pv-score { font-size: 36px; font-weight: 640; letter-spacing: -.045em; color: #111; font-variant-numeric: tabular-nums; }
   .pv-score small { font-size: 14px; font-weight: 520; color: #777; margin-left: 2px; letter-spacing: -.02em; }
   .pv-cap { font-size: 12px; color: #555; }
@@ -807,13 +752,32 @@
      덩어리(h1 / lede / claim / CTA)의 간격을 넓혀 카드 높이에 가깝게
      끌어올린다. 두 기둥은 align-items:center 로 서로 가운데를 맞춘다. */
 
+
+  /* ── 처방 전후 지표 (카드 2) ──
+     값은 리포트 치료 경과 탭의 전체 변화 그대로다.
+       종합점수 41 -> 59 (추이 차트), 충실도 55 -> 64, 정답 회수율 48 -> 61,
+       검색 정확도 51 -> 60, 답변 관련성 50 -> 58.
+     종합점수만 점수 단위라 델타를 pp 없이 적는다 — 리포트 표기와 같다. */
+  .ba { margin-top: 20px; }
+  .ba-chart { display: block; width: 100%; height: auto; }
+  .ba-chart text { font-family: var(--mono); }
+  .ba-chart .ba-ax text, .ba-chart text.ba-ax { font-size: 9px; fill: #999; }
+  .ba-chart .ba-col .ba-hi { font-size: 11px; font-weight: 700; fill: #111; }
+  .ba-chart .ba-col .ba-lo { font-size: 9.5px; fill: #999; }
+  .ba-chart .ba-name text { font-size: 9.5px; fill: #555; font-family: var(--sans); }
+  .ba-chart .ba-delta text { font-size: 9.5px; font-weight: 700; fill: #315f86; }
+  .ba-legend { display: flex; gap: 14px; margin-top: 4px; }
+  .ba-legend span { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #666; }
+  .ba-legend i { width: 9px; height: 9px; border-radius: 999px; flex: none; }
+  .ba-legend i.before { background: #fff; border: 1.8px solid #8a8a8a; }
+  .ba-legend i.after { background: #315f86; }
+
   /* ── 진단 라벨 축 (카드 1) ──
      리포트 진단 상세 내역의 4그룹 축을 그대로 쓴다. 개수 15/10/3/4 는
      label_catalog.py 의 축(포괄 라벨 3개 제외)과 같은 값이다.
      라벨 코드와 A/B/C 등급은 쓰지 않는다 — 리포트가 이미 걷어냈다. */
-  .lbx { margin-top: 22px; display: grid; gap: 14px; }
-  .lbx-row { padding-top: 13px; border-top: 1px solid #e3e3e3; }
-  .lbx-row:first-child { padding-top: 0; border-top: 0; }
+  .lbx { margin-top: 22px; display: grid; gap: 10px; }
+  .lbx-row { padding: 13px 14px; border: 1px solid #e3e3e3; border-radius: 6px; background: #fcfcfc; }
   .lbx-top { display: flex; align-items: baseline; gap: 8px; }
   .lbx-name { font-size: 14px; font-weight: 680; color: #111; letter-spacing: -.02em; }
   .lbx-n {
@@ -962,7 +926,7 @@
     <div class="bento-grid">
       <article class="bento-card tall">
         <div class="bento-label">진단 라벨</div>
-        <div class="bento-title">틀린 이유를 32가지로 나눠 봅니다.</div>
+        <div class="bento-title">실패 원인을 32개 라벨로 분류합니다.</div>
         <p class="bento-copy">
           검색·생성·컨텍스트·데이터 네 갈래로 실패 원인을 가르고,
           이번 실행에서 실제로 나온 라벨과 질문 수를 전체 축 위에 채웁니다.
@@ -971,36 +935,99 @@
           <div class="lbx-row">
             <div class="lbx-top"><span class="lbx-name">검색</span><span class="lbx-n">15</span></div>
             <div class="lbx-desc">정답 근거를 찾거나 상위에 올리는 단계</div>
-            <div class="lbx-ex">정답 순위가 낮음 · 나열형 근거 누락 · 청크 경계에서 근거 분리 <span>외 12</span></div>
+            <div class="lbx-ex">정답 순위가 낮음 · 나열형 답변 일부 누락 · 청크 경계에서 근거가 잘림 <span>외 12</span></div>
           </div>
           <div class="lbx-row">
             <div class="lbx-top"><span class="lbx-name">생성</span><span class="lbx-n">10</span></div>
             <div class="lbx-desc">근거를 보고 답변을 만드는 단계</div>
-            <div class="lbx-ex">근거 없는 생성 · 부분 답변 · 잘못된 기권 <span>외 7</span></div>
+            <div class="lbx-ex">근거 없는 답변 생성 · 부분 답변 · 근거가 있는데 기권 <span>외 7</span></div>
           </div>
           <div class="lbx-row">
             <div class="lbx-top"><span class="lbx-name">컨텍스트</span><span class="lbx-n">3</span></div>
             <div class="lbx-desc">청크 경계·노이즈·길이 문제</div>
-            <div class="lbx-ex">컨텍스트 과다 · 중간 근거 손실 · 노이즈 간섭</div>
+            <div class="lbx-ex">컨텍스트가 너무 김 · 정답이 중간에 묻힘 · 노이즈 근거에 영향받음</div>
           </div>
           <div class="lbx-row">
             <div class="lbx-top"><span class="lbx-name">데이터</span><span class="lbx-n">4</span></div>
             <div class="lbx-desc">코퍼스·QA·골드 답변 자체의 문제</div>
-            <div class="lbx-ex">코퍼스 근거 없음 · 일부 hop 문서 누락 · 골드 정답 오류 · 골드 청크 오류</div>
+            <div class="lbx-ex">코퍼스에 근거 없음 · 일부 단계 근거 없음 · 정답셋 오류 · 골드 청크 지정 오류</div>
           </div>
         </div>
       </article>
       <article class="bento-card">
-        <div class="bento-label">Before / After</div>
-        <div class="bento-title">처방 한 번마다 지표가 얼마나 움직였는지 봅니다.</div>
+        <div class="bento-label">처방 전후</div>
+        <div class="bento-title">지표 5개가 어디서 어디로 갔는지 봅니다.</div>
         <p class="bento-copy">
-          전체 최적화 결과뿐 아니라 Rx1, Rx2처럼 개별 처방 단위로
-          faithfulness, recall, precision, composite 변화를 비교합니다.
+          종합점수와 RAGAS 지표 네 개를 처방 전후로 나란히 세워 비교합니다.
         </p>
-        <div class="rx-mini">
-          <div class="rx-mini-row"><span>faith</span><span class="rail"><i style="width:89%"></i></span><strong>+0.17</strong></div>
-          <div class="rx-mini-row"><span>recall</span><span class="rail"><i style="width:88%"></i></span><strong>+0.28</strong></div>
-          <div class="rx-mini-row"><span>precision</span><span class="rail"><i style="width:79%"></i></span><strong>+0.13</strong></div>
+        <div class="ba">
+          <svg class="ba-chart" viewBox="0 0 380 200" role="img"
+               aria-label="처방 전후 지표 변화. 종합점수 41에서 59, 충실도 55%에서 64%, 정답 회수율 48%에서 61%, 검색 정확도 51%에서 60%, 답변 관련성 50%에서 58%로 모두 올랐습니다.">
+            <line x1="34" y1="24" x2="370" y2="24" stroke="#e3e3e3" stroke-dasharray="3 4"/>
+            <line x1="34" y1="150" x2="370" y2="150" stroke="#e3e3e3"/>
+            <text class="ba-ax" x="28" y="28" text-anchor="end">100</text>
+            <text class="ba-ax" x="28" y="154" text-anchor="end">0</text>
+
+            <g class="ba-col">
+              <line x1="44" y1="24" x2="44" y2="150" stroke="#f0f0f0" stroke-width="10"/>
+              <line x1="44" y1="98.34" x2="44" y2="75.66" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
+              <circle cx="44" cy="98.34" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
+              <circle cx="44" cy="75.66" r="4" fill="#315f86"/>
+              <text class="ba-hi" x="44" y="67" text-anchor="middle">59</text>
+              <text class="ba-lo" x="44" y="112" text-anchor="middle">41</text>
+            </g>
+            <g class="ba-col">
+              <line x1="112" y1="24" x2="112" y2="150" stroke="#f0f0f0" stroke-width="10"/>
+              <line x1="112" y1="80.7" x2="112" y2="69.36" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
+              <circle cx="112" cy="80.7" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
+              <circle cx="112" cy="69.36" r="4" fill="#315f86"/>
+              <text class="ba-hi" x="112" y="61" text-anchor="middle">64</text>
+              <text class="ba-lo" x="112" y="94" text-anchor="middle">55</text>
+            </g>
+            <g class="ba-col">
+              <line x1="180" y1="24" x2="180" y2="150" stroke="#f0f0f0" stroke-width="10"/>
+              <line x1="180" y1="89.52" x2="180" y2="73.14" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
+              <circle cx="180" cy="89.52" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
+              <circle cx="180" cy="73.14" r="4" fill="#315f86"/>
+              <text class="ba-hi" x="180" y="65" text-anchor="middle">61</text>
+              <text class="ba-lo" x="180" y="103" text-anchor="middle">48</text>
+            </g>
+            <g class="ba-col">
+              <line x1="248" y1="24" x2="248" y2="150" stroke="#f0f0f0" stroke-width="10"/>
+              <line x1="248" y1="85.74" x2="248" y2="74.4" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
+              <circle cx="248" cy="85.74" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
+              <circle cx="248" cy="74.4" r="4" fill="#315f86"/>
+              <text class="ba-hi" x="248" y="66" text-anchor="middle">60</text>
+              <text class="ba-lo" x="248" y="99" text-anchor="middle">51</text>
+            </g>
+            <g class="ba-col">
+              <line x1="316" y1="24" x2="316" y2="150" stroke="#f0f0f0" stroke-width="10"/>
+              <line x1="316" y1="87" x2="316" y2="76.92" stroke="#315f86" stroke-width="4" stroke-linecap="round"/>
+              <circle cx="316" cy="87" r="3.4" fill="#fff" stroke="#8a8a8a" stroke-width="1.8"/>
+              <circle cx="316" cy="76.92" r="4" fill="#315f86"/>
+              <text class="ba-hi" x="316" y="68.5" text-anchor="middle">58</text>
+              <text class="ba-lo" x="316" y="100.5" text-anchor="middle">50</text>
+            </g>
+
+            <g class="ba-name">
+              <text x="44" y="170" text-anchor="middle">종합점수</text>
+              <text x="112" y="170" text-anchor="middle">충실도</text>
+              <text x="180" y="170" text-anchor="middle">정답 회수율</text>
+              <text x="248" y="170" text-anchor="middle">검색 정확도</text>
+              <text x="316" y="170" text-anchor="middle">답변 관련성</text>
+            </g>
+            <g class="ba-delta">
+              <text x="44" y="185" text-anchor="middle">+18.0</text>
+              <text x="112" y="185" text-anchor="middle">+9.0pp</text>
+              <text x="180" y="185" text-anchor="middle">+13.0pp</text>
+              <text x="248" y="185" text-anchor="middle">+9.0pp</text>
+              <text x="316" y="185" text-anchor="middle">+8.0pp</text>
+            </g>
+          </svg>
+          <div class="ba-legend">
+            <span><i class="before"></i>처방 전</span>
+            <span><i class="after"></i>처방 후</span>
+          </div>
         </div>
       </article>
       <article class="bento-card wide">
