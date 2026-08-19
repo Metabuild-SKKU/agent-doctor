@@ -70,6 +70,12 @@ def main() -> int:
         description="RAGEC 정답지로 진단 유효성 측정 (실행 + 채점)")
     parser.add_argument("--limit", type=int, default=0,
                         help="probe 상한(0=전체 377). 비용을 아껴 배선만 확인할 때 쓴다")
+    # 리랭커 시나리오. baseline(off)만 돌리면 리랭커 계열 라벨 4개가 **원리적으로 발화하지
+    # 못해** 32개 중 절반만 검증된다(실측: E7 0/22 · E8 0/13 이 전부 미측정 탓이었다).
+    # config 를 코드에서 바꾸지 않고 플래그로 여는 이유는, 어느 시나리오의 수치인지 로그와
+    # 명령어에 남아야 두 실행을 나란히 비교할 수 있어서다.
+    parser.add_argument("--reranker", action="store_true",
+                        help="리랭커를 켜고 돌린다(기본 off). 리랭커 계열 라벨을 재려면 필요")
     parser.add_argument("--label-sample", type=int, default=60,
                         help="사람이 채울 라벨 시트의 표본 수(0=전체). "
                              "1건당 2~3분 소요를 감안할 것")
@@ -142,6 +148,11 @@ def main() -> int:
     state = AgentDoctorState()
     state.source_type = "korquad"
     state.source_url = CORPUS
+    if args.reranker:
+        state.index_config["use_reranker"] = True
+        print(f"[RAGEC] 리랭커 ON "
+              f"(모델 {state.index_config['reranker_model']}, "
+              f"후보창 {state.index_config['rerank_candidates']})")
 
     for name, step in (("Ingest", ingest_run), ("Index", index_run), ("Eval", eval_run)):
         print("\n" + "=" * 56 + f"\n  {name}\n" + "=" * 56)
