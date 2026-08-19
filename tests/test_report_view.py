@@ -47,6 +47,28 @@ def make_state(report):
 
 
 class ReportViewCompositeTest(unittest.TestCase):
+    def test_diagnosis_summary_inputs_come_from_report_and_probes(self):
+        report = make_report(overall=0.90, composite_total=84)
+        report.failed_questions = [{"probe_id": "p2", "question": "failed"}]
+        state = make_state(report)
+        state.probes = [
+            Probe(probe_id="p1", question="q1", source="taxonomy",
+                  gold_chunk_ids=["c1", "c2"]),
+            Probe(probe_id="p2", question="q2", source="taxonomy",
+                  gold_chunk_ids=["c2", "c3"]),
+            Probe(probe_id="p3", question="q3", source="taxonomy",
+                  gold_chunk_ids=[]),
+        ]
+
+        view = build_report_view(state)
+
+        self.assertEqual(view["meta"]["question_count"], 3)
+        self.assertEqual(view["meta"]["passed_question_count"], 2)
+        self.assertEqual(view["meta"]["failed_question_count"], 1)
+        self.assertEqual(view["meta"]["gold_chunk_count"], 3)
+        self.assertEqual(view["score"]["quality"], 89)
+        self.assertEqual(view["score"]["reliability"], 7)
+
     def test_headline_score_uses_composite_not_overall(self):
         # overall 0.90(→90점)과 composite 12 를 크게 벌려둠. 헤드라인은 composite(12)여야.
         view = build_report_view(make_state(make_report(overall=0.90, composite_total=12)))

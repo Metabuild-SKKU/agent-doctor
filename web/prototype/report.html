@@ -907,8 +907,9 @@
     text-transform: none;
     letter-spacing: 0;
     font-family: var(--sans);
-    font-size: 13px;
-    color: #555;
+    font-size: 16px;
+    font-weight: 600;
+    color: #222;
   }
   .score-date {
     display: none;
@@ -921,7 +922,27 @@
     padding-top: 0;
     margin-top: 18px;
     font-size: 14.5px;
+    line-height: 1.7;
+    font-weight: 450;
   }
+  .score-explain b,
+  .score-explain .score-note { color: #333; font: inherit; }
+  #dashboard-course-section .course-chart { padding: 28px 30px 18px; }
+  #dashboard-course-section [data-course-svg] { min-height: 260px; }
+  #dashboard-course-section > .section-head h2,
+  #recommend-section > .section-head h2 { font-size: 23px; font-weight: 680; }
+  .course-chart .cc-legend { color: #111; font-size: 13px; font-weight: 550; }
+  .course-note { margin: 8px 0 0; text-align: right; color: #444; font-size: 12.5px; line-height: 1.55; }
+  .course-note b { margin-right: 8px; color: #111; font-weight: 650; }
+  .rec-summary { white-space: pre-line; font-weight: 400; }
+  .rec-item { grid-template-columns: 34px 1fr; }
+  .rec-body .rt { font-size: 16px; font-weight: 650; }
+  .rec-body .rd { margin-top: 7px; color: #333; font-size: 13.5px; line-height: 1.65; }
+  .rec-cta, .rec-body .badge { display: none !important; }
+  .rec-q { padding: 11px 13px; background: #fff; }
+  .rec-q .rq { line-height: 1.55; }
+  .rec-q .rw { white-space: pre-line; line-height: 1.65; color: #444; }
+  .rec-q .rw-line + .rw-line { margin-top: 3px; }
   .score-explain .score-note {
     color: #777;
   }
@@ -1242,6 +1263,7 @@
   }
   #diagnosisSummary .summary-line p {
     margin: 0;
+    white-space: pre-line;
   }
   #diagnosisSummary .summary-line p + p {
     margin-top: 6px;
@@ -1254,8 +1276,12 @@
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 14px;
+    align-items: start;
   }
+  /* 막대 툴팁은 카드 바깥으로 떠야 하므로 진단 섹션에서 잘라내지 않는다. */
+  #detail-section { overflow: visible; }
   .diagnosis-group-card {
+    position: relative;
     border: 1px solid #dcdcdc;
     border-radius: 6px;
     background: #fff;
@@ -1268,6 +1294,7 @@
   }
   .diagnosis-group-card:hover,
   .diagnosis-group-card.active {
+    z-index: 8;
     border-color: #111;
     box-shadow: 0 12px 28px -24px rgba(0, 0, 0, .55);
   }
@@ -1313,12 +1340,48 @@
     margin: 18px 0 10px;
   }
   .diagnosis-mini-bars i {
-    flex: 1;
-    min-width: 12px;
+    position: relative;
+    flex: 0 0 12px;
+    width: 12px;
     height: var(--h, 10%);
     border-radius: 3px 3px 1px 1px;
     background: #111;
     opacity: .82;
+    cursor: help;
+  }
+  .diagnosis-mini-bars i::after {
+    content: attr(data-label);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 7px);
+    z-index: 12;
+    width: max-content;
+    max-width: 230px;
+    padding: 7px 9px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    background: #fff;
+    color: #111;
+    box-shadow: 0 8px 20px rgba(0,0,0,.12);
+    font: 12px/1.4 var(--sans);
+    white-space: normal;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translate(-50%, 3px);
+    transition: opacity .12s ease, transform .12s ease;
+  }
+  .diagnosis-mini-bars i:hover::after,
+  .diagnosis-mini-bars i:focus-visible::after {
+    opacity: 1;
+    visibility: visible;
+    transform: translate(-50%, 0);
+  }
+  #detail-section > .section-head h2,
+  #qa-section > .section-head h2 {
+    font-size: 23px;
+    font-weight: 680;
+    letter-spacing: -.025em;
   }
   .diagnosis-card-desc {
     color: #333;
@@ -1363,6 +1426,12 @@
     color: #333;
     font: 11px/1.2 var(--mono);
     font-weight: 400;
+  }
+  .diagnosis-chart-note {
+    margin: 14px 0 0;
+    color: #444;
+    font-size: 12.5px;
+    line-height: 1.55;
   }
   .qa-search-label {
     display: block;
@@ -1414,8 +1483,9 @@
     background: #f4f4f4;
   }
   .qa-window {
-    max-height: 640px;
+    height: clamp(420px, 62vh, 640px);
     overflow: auto;
+    scrollbar-gutter: stable;
     border: 1px solid #dcdcdc;
     border-radius: 8px;
     background: #fbfbfb;
@@ -1491,7 +1561,9 @@
   .topbar {
     position: sticky; top: 0; z-index: 30; max-width: none; width: 100vw; margin-left: calc(50% - 50vw);
     padding: 14px max(34px, calc((100vw - 1172px) / 2)); display: flex; gap: 10px;
-    background: rgba(255,255,255,.96); border-bottom: 1px solid #dedede;
+    background: #fff; border-bottom: 1px solid #dedede;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
   .topbar .topbar-right { display: contents; }
   .topbar .back-link { order: -2; padding-left: 0; }
@@ -1527,10 +1599,6 @@
 <div class="wrap">
   <header class="topbar">
     <div class="brand">
-      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <rect x="1" y="1" width="22" height="22" rx="6.5" stroke="var(--accent)" stroke-width="1.2" fill="color-mix(in srgb, var(--accent-glow) 60%, transparent)"/>
-        <path d="M3.5 12.5h3l1.8-4.5 3 9 1.8-5.2 1.3 2.9h4.6" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" fill="none"/>
-      </svg>
       <div class="brand-name">RAG <span class="doc">Doctor</span></div>
     </div>
     <nav class="report-nav" aria-label="리포트 탭">
@@ -1591,9 +1659,8 @@
       </div>
       <div class="hero-stats" id="heroStats" hidden></div>
       <div class="score-explain" id="scoreExplain">
-        <b>종합 점수는 검색·답변·검증 결과를 함께 본 참고용 점수입니다.</b>
-        정답 근거를 가져왔는지, 답변이 그 근거와 맞는지, 처방 후 품질이 유지됐는지를 함께 봅니다.
-        이 프로젝트는 종합 점수 80점을 기준으로 보고, 그보다 낮으면 추가 처방이나 데이터 확인이 필요한 상태로 봅니다.
+        종합 점수는 검색, 답변, 검증 결과를 함께 본 참고용 표시값입니다.<br>
+        이 프로젝트는 종합 점수 85점을 기준으로 처방 필요 여부를 결정합니다.
       </div>
     </div>
   </section>
@@ -1610,6 +1677,7 @@
         </span>
       </div>
       <svg viewBox="0 0 660 220" width="100%" height="220" id="courseSvg" data-course-svg aria-label="종합 점수 추이 차트"></svg>
+      <p class="course-note"><b>참고</b>LLM 호출 노이즈를 고려하여 3점 이상 개선되지 못하면 롤백됩니다.</p>
     </div>
   </section>
 
@@ -1700,6 +1768,7 @@
     <div class="section-head"><span class="idx">02</span><h2>진단 상세 내역</h2><span class="sub"></span></div>
     <div class="evidence-summary" id="diagnosisSummary"></div>
     <div class="diagnosis-grid" id="dxList"></div>
+    <p class="diagnosis-chart-note">라벨별 영향 질문 수 막대 높이는 그룹에서 가장 많이 발견된 라벨을 기준으로 비교합니다.</p>
   </section>
 
   <!-- FAILED QA -->
@@ -1728,7 +1797,8 @@
   <!-- RECOMMENDATIONS -->
   <section class="section" id="recommend-section" data-section="recommendations" data-report-panel="dashboard">
     <div class="section-head"><span class="idx">07</span><h2>남은 권고</h2><span class="sub"></span></div>
-    <p class="rec-summary" id="recSummary">자동 처방으로 해결할 수 없는 항목입니다. 코퍼스나 QA 셋 자체에 근거가 없거나 QAR·골드 답변이 어긋난 경우라, 검색 파라미터를 바꾸기보다 데이터를 먼저 확인해야 합니다.</p>
+    <p class="rec-summary" id="recSummary">자동 처방으로 해결할 수 없는 항목입니다.
+코퍼스나 Q/A 셋에 문제가 있기 때문에 데이터를 먼저 확인해야 합니다.</p>
     <div class="rec" id="recList"></div>
   </section>
 
@@ -1930,14 +2000,14 @@
       fix: '추가 처방 없음' }
   ];
   var DUMMY_RECS = [
-    { kind: 'prelim', code: 'generation_partial_answer', badge: ['prelim', '의심'],
-      title: '부분 답변 · 질문 1건',
-      desc: '검색 설정을 바꿔도 바로 해결된다고 보기 어렵습니다. 근거는 들어왔지만 답변이 조건 일부를 빠뜨린 경우라, 생성 단계의 판단을 한 번 더 확인해야 합니다.',
-      cta: '정밀 확인 필요', steps: [
-        { action: '누락된 조건을 답변과 대조', detail: '정답 근거가 컨텍스트에 있었는지, 있었는데 답변만 빠뜨렸는지 확인합니다.' },
-        { action: '생성 프롬프트 또는 검증 기준 보강', detail: '같은 유형이 반복되면 답변 생성 지시나 후처리 검증을 강화합니다.' }
-      ],
-      items: [{ q: '무료 체험 기간과 전환 조건을 모두 알려줘', where: '', gold: '' }] },
+    { kind: 'manual', code: 'bad_gold_chunk', badge: ['data', 'D · 데이터'],
+      title: 'QA 셋에 오류가 있는 질문',
+      desc: '응답은 정상적으로 생성됐지만 Q/A 셋의 기대 정답 또는 근거 청크 연결이 잘못된 질문입니다.',
+      items: [{
+        q: '무료 체험 기간과 전환 조건을 모두 알려줘',
+        where: '현재 골드 청크: chunk_policy_014',
+        gold: '무료 체험은 14일이며 기간 종료 후 유료 요금제로 전환됩니다.'
+      }] },
     { kind: 'manual', code: 'corpus_gap', badge: ['data', 'D · 데이터'],
       title: '코퍼스에 근거가 없는 질문 2건',
       desc: '질문에 답할 근거 문서가 코퍼스나 QA 셋 안에 없습니다. 검색 범위나 청크 크기를 조정해도 없는 근거를 만들 수 없으므로 데이터 보강이 먼저입니다.',
@@ -1954,6 +2024,8 @@
   var DUMMY_SCORE = {
     before: 62,
     after: 84,
+    quality: 88,
+    reliability: 80,
     findings_count: 4,
     kept: 2,
     rolled: 1,
@@ -1971,7 +2043,11 @@
     { group: 'A · 검색 실패', severity: 'warning', title: '정답 순위가 낮음', desc: '정답이 검색은 되지만 6~15위라 상위 컷 밖으로 밀려 답변에 안 쓰입니다.', confirmed: true, affected: 2 },
     { group: 'C · 컨텍스트', severity: 'warning', title: '컨텍스트가 너무 김', desc: '가져온 조각이 많아 정답이 중간에 묻혀 답이 흐려집니다.', confirmed: true, affected: 1 }
   ];
-  var DUMMY_META = { corpus: '사내 제품 문서', depth: '표준 검진', question_count: 47, created_at: '2026-07-20T14:32:00' };
+  var DUMMY_META = {
+    corpus: '사내 제품 문서', depth: '표준 검진', question_count: 47,
+    passed_question_count: 44, failed_question_count: 3, gold_chunk_count: 38,
+    created_at: '2026-07-20T14:32:00'
+  };
 
   /* data가 실제 서버 응답이면 true, run_id 없음/fetch 실패로 인한 빈 프리뷰({})면 false.
      실제 응답인데 배열이 비어 있는 경우("처방 0건" 등)는 더미로 치환하지 않고 빈 상태를 그대로 보여준다. */
@@ -2126,9 +2202,8 @@
       return;
     }
     el.innerHTML =
-      '<b>종합 점수는 검색·답변·검증 결과를 함께 본 참고용 표시값입니다.</b> ' +
-      '정답 근거를 가져왔는지, 답변이 그 근거와 맞는지, 처방 후 품질이 유지됐는지를 함께 봅니다. ' +
-      '<span class="score-note">이 프로젝트는 종합 점수 80점을 기준으로 보고, 그보다 낮으면 추가 처방이나 데이터 확인이 필요한 상태로 봅니다.</span>';
+      '종합 점수는 검색, 답변, 검증 결과를 함께 본 참고용 표시값입니다.<br>' +
+      '이 프로젝트는 종합 점수 85점을 기준으로 처방 필요 여부를 결정합니다.';
   }
 
   /* ── hero summary/stats ── */
@@ -2605,7 +2680,7 @@
       // 전체 처방명과 수치는 아래 카드에 모두 남는다.
       if (axisIndex !== 0 && axisIndex !== axisSteps.length - 1 && axisIndex % axisEvery !== 0) return;
       var x = L + (R - L) * ((Number(step) - stepMin) / (stepMax - stepMin));
-      var axis = el('text', { x: x, y: B + 22, 'text-anchor': Number(step) === stepMin ? 'start' : (Number(step) === stepMax ? 'end' : 'middle'), fill: 'var(--faint)', 'font-size': 9.5, 'font-family': 'var(--sans)' });
+      var axis = el('text', { x: x, y: B + 22, 'text-anchor': Number(step) === stepMin ? 'start' : (Number(step) === stepMax ? 'end' : 'middle'), fill: 'var(--ink)', 'font-size': 12, 'font-weight': 650, 'font-family': 'var(--sans)' });
       var fullAxisLabel = String(axisLabels[step] || '');
       axis.textContent = fullAxisLabel.length > 10 ? fullAxisLabel.slice(0, 9) + '…' : fullAxisLabel;
       var axisTitle = el('title', {});
@@ -3219,7 +3294,7 @@
     return 'D';
   }
   var DIAG_GROUP_META = {
-    A: { name: '검색', hint: '정답 근거를 찾거나 상위에 올리는 단계' },
+    A: { name: '검색', hint: '정답 근거를 찾는 단계' },
     B: { name: '생성', hint: '근거를 보고 답변을 만드는 단계' },
     C: { name: '컨텍스트', hint: '청크 경계·노이즈·길이 문제' },
     D: { name: '데이터', hint: '코퍼스·QA·골드 답변 자체의 문제' }
@@ -3530,20 +3605,17 @@
     return all.slice(0, limit || 3);
   }
   function diagnosisSummaryLine1(score, meta, qas) {
-    var value = diagnosisScoreValue(score);
-    var threshold = diagnosisScoreThreshold(score);
-    var pass = diagnosisGatePass(score, value, threshold);
     var qCount = meta && meta.question_count != null ? Number(meta.question_count) : ((qas || []).length || 0);
-    if (value === null) {
-      return '검증 질문 ' + qCount + '건을 기준으로 진단했지만, 비교 가능한 종합점수는 아직 산출되지 않았습니다.';
-    }
-    var line = '검증 질문 ' + qCount + '건 기준 종합점수는 ' + Math.round(value) + '/100입니다.';
-    if (threshold !== null) {
-      line += ' 기준 ' + Math.round(threshold) + '점 대비 ' + (pass === true ? '통과했습니다.' : pass === false ? '미달했습니다.' : '판정 대기 상태입니다.');
-    } else if (pass !== null) {
-      line += ' 현재 gate 판정은 ' + (pass ? '통과' : '미달') + '입니다.';
-    }
-    return line;
+    var passed = meta && meta.passed_question_count != null
+      ? Number(meta.passed_question_count)
+      : Math.max(0, qCount - (qas || []).filter(function (q) { return !qaIsCorrect(q); }).length);
+    var quality = score && score.quality != null ? Number(score.quality) : null;
+    var reliability = score && score.reliability != null ? Number(score.reliability) : null;
+    var goldChunks = meta && meta.gold_chunk_count != null ? Number(meta.gold_chunk_count) : null;
+    return '검증 질문 ' + qCount + '개 중 ' + passed + '개 통과\n' +
+      '품질 ' + (Number.isFinite(quality) ? Math.round(quality) + '점' : '-') +
+      ' / 신뢰도 ' + (Number.isFinite(reliability) ? Math.round(reliability) + '점' : '-') +
+      ' / 골드 청크 ' + (Number.isFinite(goldChunks) ? Math.round(goldChunks) + '개' : '-');
   }
   function diagnosisSummaryLine2(groups) {
     var rankedGroups = DIAG_GROUP_ORDER.map(function (key) { return groups[key]; })
@@ -3579,15 +3651,8 @@
   function renderDiagnosisSummary(dxs, score, meta, recs, qas, rxs) {
     var el = document.getElementById('diagnosisSummary');
     if (!el) return;
-    var groups = buildDiagnosisGroups(dxs);
-    var lines = [
-      diagnosisSummaryLine1(score, meta, qas),
-      diagnosisSummaryLine2(groups),
-      diagnosisSummaryLine3(recs, qas, rxs)
-    ];
-    el.innerHTML = '<div class="summary-line">' + lines.map(function (line) {
-      return '<p>' + esc(line) + '</p>';
-    }).join('') + '</div>';
+    el.innerHTML = '<div class="summary-line"><p>' +
+      esc(diagnosisSummaryLine1(score, meta, qas)) + '</p></div>';
   }
   function renderDxs(dxs, score, meta, recs, qas, rxs) {
     LABEL_NAME_LOOKUP = {};
@@ -3610,7 +3675,8 @@
       var labelMax = Math.max.apply(null, rows.map(function (l) { return l.count; }).concat([1]));
       var bars = rows.length ? rows.map(function (label) {
         var opacity = label.count > 0 ? .86 : .12;
-        return '<i title="' + esc(label.title) + ' ' + esc(label.count) + '건" style="--h:' +
+        var barLabel = label.title + ' · 영향 질문 ' + label.count + '건';
+        return '<i title="' + esc(barLabel) + '" data-label="' + esc(barLabel) + '" style="--h:' +
           Math.max(8, label.count / labelMax * 100) + '%;opacity:' + opacity + '"></i>';
       }).join('') : '<i style="--h:8%;opacity:.12"></i>';
       var detail = rows.length ? rows.map(function (label) {
@@ -3629,7 +3695,7 @@
           '<div class="diagnosis-card-title"><b>' + esc(group.name) + '</b><span>' + esc(group.hint) + '</span></div>' +
           '<div class="diagnosis-count"><b>' + esc(detected) + '/' + esc(rows.length) + '</b>라벨<br>질문 ' + esc(group.total) + '건</div>' +
         '</div>' +
-        '<div class="diagnosis-chart-caption">라벨별 영향 질문 수<span>막대 높이는 그룹에서 가장 많이 발견된 라벨을 기준으로 비교합니다.</span></div>' +
+        '<div class="diagnosis-chart-caption">라벨별 영향 질문 수</div>' +
         '<div class="diagnosis-mini-bars" aria-label="라벨별 영향 질문 수 비교">' + bars + '</div>' +
         '<div class="group-share"><i style="width:' + Math.max(5, group.total / maxTotal * 100) + '%"></i></div>' +
         '<div class="diagnosis-card-desc">전체 라벨 축에서 실제로 나온 라벨과 질문 수를 확인합니다.</div>' +
@@ -3698,6 +3764,39 @@
   /* ── 남은 권고 (D그룹 매뉴얼 + 예비) ── */
   var RECIC_BULB = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a6 6 0 0 0-4 10.5V17h8v-3.5A6 6 0 0 0 12 3zM9 21h6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   var RECIC_BOX = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2M4 7h16M4 7v12a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7M9 11h6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  function groupRecommendations(recs) {
+    var qa = [];
+    var corpus = [];
+    var other = [];
+    (recs || []).forEach(function (r) {
+      var code = String(r.code || '').toLowerCase();
+      if (/bad_gold_(answer|chunk)/.test(code)) qa.push(r);
+      else if (/corpus_gap/.test(code)) corpus.push(r);
+      else other.push(r);
+    });
+    var grouped = [];
+    if (qa.length) grouped.push({
+      kind: 'manual', code: 'qa_set_error', badge: ['', ''],
+      title: 'QA 셋에 오류가 있는 질문',
+      desc: '응답은 정상적으로 생성됐지만 Q/A 셋의 기대 정답 또는 근거 청크 연결이 잘못된 질문입니다. 아래 내용을 확인해 Q/A 셋을 수정해야 합니다.',
+      items: qa.reduce(function (all, r) {
+        return all.concat((r.items || []).map(function (item) {
+          return Object.assign({ recommendationCode: r.code }, item);
+        }));
+      }, [])
+    });
+    if (corpus.length) grouped.push({
+      kind: 'manual', code: 'corpus_gap', badge: ['', ''],
+      title: '코퍼스에 근거가 없는 질문',
+      desc: '질문에 답할 근거가 현재 코퍼스에 없어 검색 설정에서 수정할 사항은 없습니다. 빠진 근거 문서를 추가한 뒤 다시 진단해야 합니다.',
+      items: corpus.reduce(function (all, r) {
+        return all.concat((r.items || []).map(function (item) {
+          return Object.assign({ recommendationCode: r.code }, item);
+        }));
+      }, [])
+    });
+    return grouped.concat(other);
+  }
   function renderRecommendations(recs) {
     var el = document.getElementById('recList');
     var summary = document.getElementById('recSummary');
@@ -3705,7 +3804,7 @@
       if (!recs || !recs.length) {
         summary.textContent = '현재 추가 확인이 필요한 남은 권고는 없습니다.';
       } else if (recs.some(function (r) { return r.kind === 'manual' || /corpus|gold|qa/i.test(r.code || ''); })) {
-        summary.textContent = '자동 처방으로 해결할 수 없는 항목입니다. 코퍼스나 QA 셋 자체에 근거가 없거나 QAR·골드 답변이 어긋난 경우라, 검색 파라미터를 바꾸기보다 데이터를 먼저 확인해야 합니다.';
+        summary.textContent = '자동 처방으로 해결할 수 없는 항목입니다.\n코퍼스나 Q/A 셋에 문제가 있기 때문에 데이터를 먼저 확인해야 합니다.';
       } else {
         summary.textContent = '자동 처방만으로 끝나지 않는 항목입니다. 검색 설정이 아니라 답변 생성 과정에서 조건을 빠뜨렸는지 사람이 한 번 더 확인해야 합니다.';
       }
@@ -3714,14 +3813,27 @@
       el.innerHTML = '<div class="rec-item"><div class="rec-ic">' + RECIC_BULB + '</div><div class="rec-body"><div class="rd">사람 개입이 필요한 남은 권고가 없습니다.</div></div></div>';
       return;
     }
+    recs = groupRecommendations(recs);
     el.innerHTML = recs.map(function (r) {
       var isData = r.kind === 'manual';
-      var badgeCls = r.badge[0] === 'prelim' ? 'badge prelim' : 'badge rec-badge-data';
+      var badge = r.badge || ['', ''];
+      var badgeCls = badge[0] === 'prelim' ? 'badge prelim' : 'badge rec-badge-data';
       var items = (r.items || []).map(function (it) {
         var lines = [];
+        var itemCode = String(it.recommendationCode || r.code || '').toLowerCase();
         if (it.gold) lines.push('기대 정답: ' + esc(it.gold));
-        if (it.where) lines.push(esc(it.where));
-        var where = lines.join(' · ');
+        if (it.where) {
+          var whereText = String(it.where)
+            .replace(/^현재 골드 청크:\s*/i, '')
+            .replace(/^근거 문서:\s*/i, '');
+          if (itemCode === 'bad_gold_chunk') lines.push('현재 골드 청크: ' + esc(whereText));
+          else if (itemCode === 'bad_gold_answer') lines.push('확인 사항: ' + esc(whereText));
+          else if (/corpus_gap/.test(itemCode)) lines.push('현재 근거 문서: ' + esc(whereText));
+          else lines.push(esc(it.where));
+        }
+        var where = lines.map(function (line) {
+          return '<div class="rw-line">' + line + '</div>';
+        }).join('');
         return '<div class="rec-q"><div class="rq">' + esc(it.q) + '</div>' +
           (where ? '<div class="rw">' + where + '</div>' : '') + '</div>';
       }).join('');
@@ -3732,13 +3844,12 @@
       return '<div class="rec-item">' +
         '<div class="rec-ic">' + (isData ? RECIC_BOX : RECIC_BULB) + '</div>' +
         '<div class="rec-body">' +
-          '<div class="rt">' + esc(r.title) + ' <span class="' + badgeCls + '">' + esc(r.badge[1]) + '</span></div>' +
+          '<div class="rt">' + esc(r.title) + (badge[1] ? ' <span class="' + badgeCls + '">' + esc(badge[1]) + '</span>' : '') + '</div>' +
           '<div class="rd">' + esc(r.desc) + '</div>' +
           (items ? '<div class="rec-items">' + items + '</div>' : '') +
           (steps ? '<div class="rec-steps">' + steps + '</div>' : '') +
           (r.note ? '<div class="rec-note">' + esc(r.note) + '</div>' : '') +
         '</div>' +
-        '<div class="rec-cta">' + esc(r.cta) + '</div>' +
       '</div>';
     }).join('');
   }
@@ -3748,12 +3859,26 @@
   var dashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 12h12" stroke-linecap="round"/></svg>';
   var CURRENT_QAS = [];
   var QA_FILTER = 'all';
+  var QA_RENDER_FRAME = null;
+  function scheduleQaFilters() {
+    if (QA_RENDER_FRAME !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(QA_RENDER_FRAME);
+    }
+    if (typeof requestAnimationFrame !== 'function') {
+      applyQaFilters();
+      return;
+    }
+    QA_RENDER_FRAME = requestAnimationFrame(function () {
+      QA_RENDER_FRAME = null;
+      applyQaFilters();
+    });
+  }
   function renderQas(qas) {
     CURRENT_QAS = qas || [];
     var input = document.getElementById('qaSearch');
     if (input && !input.dataset.bound) {
       input.dataset.bound = '1';
-      input.addEventListener('input', applyQaFilters);
+      input.addEventListener('input', scheduleQaFilters);
     }
     if (input) input.value = '';
     var filterSelect = document.getElementById('qaFilter');

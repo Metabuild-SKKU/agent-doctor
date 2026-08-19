@@ -151,13 +151,28 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
     headline_after = _headline_score(report)
     headline_before = _first_headline(history, headline_after)
     gate_summary = _gate_summary(report)
+    component_scores = {
+        str(component.get("key")): component.get("score")
+        for component in ((report.composite_score or {}).get("components", []) if report else [])
+        if isinstance(component, dict) and component.get("key")
+    }
+    question_count = len(state.probes)
+    failed_question_count = len(getattr(report, "failed_questions", []) or []) if report else 0
+    gold_chunk_count = len({
+        chunk_id
+        for probe in state.probes
+        for chunk_id in (getattr(probe, "gold_chunk_ids", None) or [])
+    })
 
     depth_key = (depth or os.getenv("EVAL_MODE", "")).strip().lower()
     return {
         "meta": {
             "corpus": _corpus_label(state),
             "depth": _EVAL_MODE_LABELS.get(depth_key, "표준 검진"),
-            "question_count": len(state.probes),
+            "question_count": question_count,
+            "passed_question_count": max(0, question_count - failed_question_count),
+            "failed_question_count": failed_question_count,
+            "gold_chunk_count": gold_chunk_count,
             "created_at": report.created_at.isoformat() if report else "",
         },
         "score": {
@@ -173,6 +188,8 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
             "rolled": rolled,
             "errors": errors,
             "pending": pending,
+            "quality": component_scores.get("quality"),
+            "reliability": component_scores.get("reliability"),
         },
         "priority": _build_priority(confirmed),
         "metrics": _build_metrics(report, history),
@@ -921,6 +938,13 @@ def build_ext_report_view(
     gate_summary = _gate_summary(report)
     tier = capability.get("tier", "")
     unmeasured = _unmeasured_components(report)
+    component_scores = {
+        str(component.get("key")): component.get("score")
+        for component in ((report.composite_score or {}).get("components", []) if report else [])
+        if isinstance(component, dict) and component.get("key")
+    }
+    question_count = capability.get("diagnosed", capability.get("records", 0))
+    failed_question_count = len(getattr(report, "failed_questions", []) or []) if report else 0
     if unmeasured:  # noqa: SIM102 — 아래 주석이 이 분기 전체의 근거다
         # 성분 하나가 미측정이면 총점을 내지 않는다. composite 는 측정된 성분만으로
         # 결합하므로, 신뢰도가 빠지면 '품질 점수'가 '종합점수' 이름을 달고 나간다 -
@@ -955,7 +979,9 @@ def build_ext_report_view(
             "depth": _EXT_TIER_LABELS.get(tier, "외부 로그 진단"),
             # diagnosed = 실제로 진단한 건수(--limit 반영). records 는 적재 건수라
             # limit 이 걸리면 부풀려 보인다. 구버전 payload 는 records 로 폴백.
-            "question_count": capability.get("diagnosed", capability.get("records", 0)),
+            "question_count": question_count,
+            "passed_question_count": max(0, question_count - failed_question_count),
+            "failed_question_count": failed_question_count,
             "created_at": report.created_at.isoformat() if report else "",
             "tier": _EXT_TIER_SHORT.get(tier, tier or "-"),
         },
@@ -985,6 +1011,8 @@ def build_ext_report_view(
             # 예비인지가 상대에게 "얼마나 믿고 고칠지"를 알려주는 값이다.
             "confirmed": sum(1 for f in findings if f.confirmed),
             "tentative": sum(1 for f in findings if not f.confirmed),
+            "quality": component_scores.get("quality"),
+            "reliability": component_scores.get("reliability"),
             "kept": 0, "rolled": 0, "errors": 0, "pending": 0,
         },
         # 라벨 코드(ext_grounded_but_wrong)를 그대로 노출하지 않는다 — 진단서는
