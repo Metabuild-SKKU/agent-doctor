@@ -147,14 +147,6 @@
     box-shadow: 0 18px 38px -18px rgba(91,92,226,.62);
   }
   .btn-primary:hover { transform: translateY(-1px); }
-  .hero-proof { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 28px; max-width: 620px; }
-  .proof-card {
-    padding: 14px 15px; border: 1px solid var(--border); border-radius: 16px;
-    background: color-mix(in srgb, #fff 72%, transparent);
-    box-shadow: 0 14px 34px -28px rgba(17,24,39,.45);
-  }
-  .proof-card b { display: block; font-size: 20px; line-height: 1.05; letter-spacing: -.035em; }
-  .proof-card span { display: block; margin-top: 6px; color: var(--muted); font-size: 12.5px; line-height: 1.35; }
 
   .hero-preview { position: relative; z-index: 1; }
   .preview-card {
@@ -572,7 +564,6 @@
   @media (max-width: 980px) {
     .hero { grid-template-columns: 1fr; gap: 34px; padding-top: 62px; }
     .hero-preview { max-width: 560px; width: 100%; }
-    .hero-proof { grid-template-columns: 1fr; }
     .section-heading { grid-template-columns: 1fr; gap: 18px; }
     .bento-grid { grid-template-columns: 1fr; }
     .bento-card.wide { grid-column: auto; }
@@ -697,7 +688,6 @@
     border-color: #d8d8d8;
   }
   .preview-card,
-  .proof-card,
   .trust-strip,
   .trust-pill,
   .bento-card,
@@ -717,7 +707,6 @@
   .console::after {
     display: none !important;
   }
-  .proof-card b,
   .bento-title,
   .section-heading h2,
   .console-intro h2,
@@ -813,8 +802,7 @@
     line-height: 1.14;
   }
   .bento-title,
-  .step-title,
-  .proof-card b {
+  .step-title {
     font-size: 18px;
     font-weight: 650;
     letter-spacing: -.02em;
@@ -839,16 +827,14 @@
   .step,
   .workflow-step,
   .marquee-chip,
-  .label-pill,
-  .proof-card {
+  .label-pill {
     background: transparent;
     border-radius: 0;
     box-shadow: none;
   }
   .bento-card,
   .workflow-step,
-  .marquee-chip,
-  .proof-card { border: 1px solid #e3e3e3; border-radius: 6px; }
+  .marquee-chip { border: 1px solid #e3e3e3; border-radius: 6px; }
   .bento-card.dark { color: #111; background: transparent; border-color: #e3e3e3; }
   .step { border: 0; border-top: 1px solid #e3e3e3; padding: 18px 0 0; }
   .trust-strip { border: 0; border-bottom: 1px solid #e3e3e3; padding: 26px 0; }
@@ -860,13 +846,13 @@
        상승·유지 #315f86 / 실패 #8f3f35 / 롤백 #9a5b28 / 보조선 #8a8a8a  */
   .preview-card { padding: 22px; }
 
-  .pv-gauge { position: relative; width: 150px; margin: 4px auto; }
+  .pv-gauge { position: relative; width: 132px; margin: 2px auto; }
   .pv-gauge svg { display: block; width: 100%; height: auto; }
   .pv-gauge-c {
     position: absolute; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 2px;
   }
-  .pv-score { font-size: 40px; font-weight: 640; letter-spacing: -.045em; color: #111; font-variant-numeric: tabular-nums; }
+  .pv-score { font-size: 36px; font-weight: 640; letter-spacing: -.045em; color: #111; font-variant-numeric: tabular-nums; }
   .pv-score small { font-size: 14px; font-weight: 520; color: #777; margin-left: 2px; letter-spacing: -.02em; }
   .pv-cap { font-size: 12px; color: #555; }
 
@@ -875,7 +861,7 @@
     letter-spacing: -.02em; line-height: 1.45; color: #111;
   }
 
-  .pv-course { margin-top: 20px; padding-top: 16px; border-top: 1px solid #e3e3e3; }
+  .pv-course { margin-top: 16px; padding-top: 14px; border-top: 1px solid #e3e3e3; }
   .pv-course-title { font-size: 12.5px; font-weight: 650; color: #111; }
   .pv-chart { display: block; width: 100%; height: auto; margin-top: 8px; }
   .pv-chart text { font-family: var(--mono); }
@@ -892,6 +878,14 @@
     .pv-gauge { width: 128px; }
     .pv-score { font-size: 34px; }
   }
+
+  /* ── 히어로 좌우 균형 ──
+     proof 카드 3장이 빠지면서 왼쪽 기둥이 108px 짧아졌다. 남은 네
+     덩어리(h1 / lede / claim / CTA)의 간격을 넓혀 카드 높이에 가깝게
+     끌어올린다. 두 기둥은 align-items:center 로 서로 가운데를 맞춘다. */
+  .hero .lede { margin-top: 28px; }
+  .hero .claim { margin-top: 38px; }
+  .hero .hero-actions { margin-top: 42px; }
 
 </style>
 </head>
@@ -925,11 +919,6 @@
       </div>
       <div class="hero-actions">
         <a class="btn-primary" href="#run">문서 진단 시작하기</a>
-      </div>
-      <div class="hero-proof" aria-label="RAG Doctor 핵심 기능">
-        <div class="proof-card"><b>5단계</b><span>수집·색인·질문 생성·진단·최적화</span></div>
-        <div class="proof-card"><b>라벨 기반</b><span>검색/청킹/생성 실패 원인 분류</span></div>
-        <div class="proof-card"><b>Rx 추적</b><span>처방 전후 지표 변화 기록</span></div>
       </div>
     </div>
     <div class="hero-preview" aria-label="진단서 첫 화면 미리보기">
