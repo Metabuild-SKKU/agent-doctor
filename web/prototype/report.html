@@ -1219,19 +1219,6 @@
   .label-bar-row.zero em i {
     width: 0 !important;
   }
-  .group-share {
-    height: 8px;
-    border-radius: 999px;
-    background: #ededed;
-    overflow: hidden;
-    margin-bottom: 10px;
-  }
-  .group-share i {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background: #111;
-  }
   .evidence-summary {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1267,6 +1254,18 @@
   }
   #diagnosisSummary .summary-line p + p {
     margin-top: 6px;
+  }
+  #diagnosisSummary .diagnosis-summary-note {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #e5e5e5;
+    color: #444;
+    font-size: .92em;
+    line-height: 1.65;
+  }
+  #diagnosisSummary .diagnosis-summary-note b {
+    display: inline-block;
+    margin-right: 8px;
   }
   .summary-line b {
     color: #111;
@@ -1858,8 +1857,8 @@
         <span>결과 필터</span>
         <select class="qa-filter-select" id="qaFilter" aria-label="검증 질문 결과 필터">
           <option value="all">전체 질문</option>
-          <option value="wrong">확인 필요</option>
-          <option value="correct">통과</option>
+          <option value="wrong">실패</option>
+          <option value="correct">맞음</option>
         </select>
       </label>
     </div>
@@ -3685,11 +3684,9 @@
       : Math.max(0, qCount - (qas || []).filter(function (q) { return !qaIsCorrect(q); }).length);
     var quality = score && score.quality != null ? Number(score.quality) : null;
     var reliability = score && score.reliability != null ? Number(score.reliability) : null;
-    var goldChunks = meta && meta.gold_chunk_count != null ? Number(meta.gold_chunk_count) : null;
     return '검증 질문 ' + qCount + '개 중 ' + passed + '개 통과\n' +
       '품질 ' + (Number.isFinite(quality) ? Math.round(quality) + '점' : '-') +
-      ' / 신뢰도 ' + (Number.isFinite(reliability) ? Math.round(reliability) + '점' : '-') +
-      ' / 골드 청크 ' + (Number.isFinite(goldChunks) ? Math.round(goldChunks) + '개' : '-');
+      ' / 신뢰도 ' + (Number.isFinite(reliability) ? Math.round(reliability) + '점' : '-');
   }
   function diagnosisSummaryLine2(groups) {
     var rankedGroups = DIAG_GROUP_ORDER.map(function (key) { return groups[key]; })
@@ -3726,7 +3723,11 @@
     var el = document.getElementById('diagnosisSummary');
     if (!el) return;
     el.innerHTML = '<div class="summary-line"><p>' +
-      esc(diagnosisSummaryLine1(score, meta, qas)) + '</p></div>';
+      esc(diagnosisSummaryLine1(score, meta, qas)) + '</p>' +
+      '<div class="diagnosis-summary-note"><b>참고</b>' +
+        '<div>품질: 검색 결과와 생성 답변이 기대 정답에 얼마나 잘 부합하는지를 나타냅니다.</div>' +
+        '<div>신뢰도: 답변이 검색 근거에 기반하고 평가 결과를 얼마나 믿을 수 있는지를 나타냅니다.</div>' +
+      '</div></div>';
   }
   function renderDxs(dxs, score, meta, recs, qas, rxs) {
     LABEL_NAME_LOOKUP = {};
@@ -3741,7 +3742,6 @@
     renderDiagnosisSummary(dxs, score, meta, recs, qas, rxs);
     var el = document.getElementById('dxList');
     var groups = buildDiagnosisGroups(dxs);
-    var maxTotal = Math.max.apply(null, DIAG_GROUP_ORDER.map(function (key) { return groups[key].total; }).concat([1]));
     el.innerHTML = DIAG_GROUP_ORDER.map(function (key) {
       var group = groups[key];
       var rows = catalogRowsForGroup(group);
@@ -3771,7 +3771,6 @@
         '</div>' +
         '<div class="diagnosis-chart-caption">라벨별 영향 질문 수</div>' +
         '<div class="diagnosis-mini-bars" aria-label="라벨별 영향 질문 수 비교">' + bars + '</div>' +
-        '<div class="group-share"><i style="width:' + Math.max(5, group.total / maxTotal * 100) + '%"></i></div>' +
         '<div class="diagnosis-card-desc">전체 라벨 축에서 실제로 나온 라벨과 질문 수를 확인합니다.</div>' +
         '<div class="diagnosis-toggle">라벨 분포</div>' +
         '<div class="diagnosis-detail-panel">' +
@@ -3814,13 +3813,11 @@
       el.innerHTML = '<div class="label-group"><div class="label-group-head"><b>라벨 없음</b><span>0건</span></div></div>';
       return;
     }
-    var maxTotal = Math.max.apply(null, order.map(function (key) { return groups[key].total; }));
     el.innerHTML = order.map(function (key) {
       var group = groups[key];
       var labels = Object.keys(group.labels).sort(function (a, b) { return group.labels[b] - group.labels[a]; });
       return '<div class="label-group">' +
         '<div class="label-group-head"><b>' + esc(group.name) + '</b><span>' + group.total + '건</span></div>' +
-        '<div class="group-share"><i style="width:' + Math.max(5, group.total / maxTotal * 100) + '%"></i></div>' +
         labels.map(function (label) {
           var count = group.labels[label];
           var found = (dxs || []).filter(function (d) { return d.code === label; })[0];
@@ -3993,8 +3990,8 @@
     var total = (qas || []).length;
     var correct = (qas || []).filter(qaIsCorrect).length;
     var wrong = Math.max(0, total - correct);
-    el.innerHTML = '<div class="summary-line">검증 질문 <b>' + esc(total) + '개</b> · 통과 <b>' +
-      esc(correct) + '개</b> · 확인 필요 <b>' + esc(wrong) + '개</b></div>';
+    el.innerHTML = '<div class="summary-line">검증 질문 <b>' + esc(total) + '개</b> · 맞음 <b>' +
+      esc(correct) + '개</b> · 실패 <b>' + esc(wrong) + '개</b></div>';
   }
   function filterQas(query) {
     var q = String(query || '').trim().toLowerCase();
@@ -4020,7 +4017,7 @@
     list.innerHTML = qas.map(function (x) {
       var correct = qaIsCorrect(x);
       return '<div class="qa-card ' + (correct ? 'solved' : 'unsolved') + '">' +
-        '<div class="qa-head"><span class="qm">Q</span><span class="qt">' + esc(x.q || '-') + '</span><span class="qa-status">' + (correct ? '맞음' : '틀림') + '</span></div>' +
+        '<div class="qa-head"><span class="qm">Q</span><span class="qt">' + esc(x.q || '-') + '</span><span class="qa-status">' + (correct ? '맞음' : '실패') + '</span></div>' +
         '<div class="qa-qar">' +
           '<div class="qa-qar-col"><span class="tag">A</span><p>' + esc(qaExpected(x)) + '</p></div>' +
           '<div class="qa-qar-col"><span class="tag">R</span><p>' + esc(qaResponse(x)) + '</p></div>' +
