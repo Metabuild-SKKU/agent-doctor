@@ -228,14 +228,6 @@
   .bento-title { margin-top: 14px; font-size: 24px; font-weight: 760; letter-spacing: -.04em; line-height: 1.14; }
   .bento-copy { margin-top: 12px; color: var(--muted); font-size: 14px; line-height: 1.68; max-width: 48ch; }
   .bento-card.dark .bento-copy { color: rgba(255,255,255,.72); }
-  .label-stack { position: absolute; right: 24px; bottom: 22px; display: grid; gap: 8px; min-width: 210px; }
-  .label-pill {
-    display: flex; justify-content: space-between; gap: 12px; padding: 11px 13px;
-    border-radius: 14px; background: rgba(255,255,255,.84); border: 1px solid rgba(255,255,255,.38);
-    color: #111827; box-shadow: 0 12px 24px -20px rgba(17,24,39,.75);
-    font-family: var(--mono); font-size: 11px;
-  }
-  .label-pill b { color: var(--accent-ink); }
   .rx-mini {
     margin-top: 26px; display: grid; gap: 12px;
   }
@@ -535,7 +527,6 @@
     .preview-card { padding: 18px; border-radius: 22px; }
     .landing-section { padding-top: 52px; }
     .bento-card { padding: 22px; border-radius: 22px; }
-    .label-stack { position: static; margin-top: 22px; min-width: 0; }
     .workflow-strip { grid-template-columns: 1fr; }
     .steps { grid-template-columns: 1fr; }
     .step + .step { padding-left: 0; padding-top: 22px; }
@@ -686,12 +677,6 @@
     color: #555;
   }
   .bento-card.dark .rx-mini-row strong,
-  .label-pill {
-    background: #f5f5f5;
-    border-color: #e3e3e3;
-    border-radius: 4px;
-    box-shadow: none;
-  }
   .section-kicker,
   .step-n,
   .claim .cl-sm {
@@ -772,11 +757,6 @@
   .bento-card,
   .step,
   .workflow-step,
-  .label-pill {
-    background: transparent;
-    border-radius: 0;
-    box-shadow: none;
-  }
   .bento-card,
   .workflow-step,
   .bento-card.dark { color: #111; background: transparent; border-color: #e3e3e3; }
@@ -826,6 +806,24 @@
      proof 카드 3장이 빠지면서 왼쪽 기둥이 108px 짧아졌다. 남은 네
      덩어리(h1 / lede / claim / CTA)의 간격을 넓혀 카드 높이에 가깝게
      끌어올린다. 두 기둥은 align-items:center 로 서로 가운데를 맞춘다. */
+
+  /* ── 진단 라벨 축 (카드 1) ──
+     리포트 진단 상세 내역의 4그룹 축을 그대로 쓴다. 개수 15/10/3/4 는
+     label_catalog.py 의 축(포괄 라벨 3개 제외)과 같은 값이다.
+     라벨 코드와 A/B/C 등급은 쓰지 않는다 — 리포트가 이미 걷어냈다. */
+  .lbx { margin-top: 22px; display: grid; gap: 14px; }
+  .lbx-row { padding-top: 13px; border-top: 1px solid #e3e3e3; }
+  .lbx-row:first-child { padding-top: 0; border-top: 0; }
+  .lbx-top { display: flex; align-items: baseline; gap: 8px; }
+  .lbx-name { font-size: 14px; font-weight: 680; color: #111; letter-spacing: -.02em; }
+  .lbx-n {
+    font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: #555;
+    padding: 1px 6px; border: 1px solid #e3e3e3; border-radius: 4px;
+  }
+  .lbx-desc { margin-top: 3px; font-size: 12px; color: #777; line-height: 1.45; }
+  .lbx-ex { margin-top: 6px; font-size: 12.5px; color: #333; line-height: 1.55; }
+  .lbx-ex span { color: #999; }
+
   /* section-heading 을 히어로와 같은 세로 구조로 — h2 아래 설명문이 온다 */
   .section-heading { display: block; }
   .section-heading p { margin-top: 28px; max-width: 56ch; }
@@ -962,17 +960,34 @@
       </p>
     </div>
     <div class="bento-grid">
-      <article class="bento-card dark tall">
-        <div class="bento-label">Failure taxonomy</div>
-        <div class="bento-title">검색 실패, 청킹 문제, 생성 오류를 같은 점수로 뭉개지 않습니다.</div>
+      <article class="bento-card tall">
+        <div class="bento-label">진단 라벨</div>
+        <div class="bento-title">틀린 이유를 32가지로 나눠 봅니다.</div>
         <p class="bento-copy">
-          probe별 Q/A/R, gold span, 검색 순위, judge 결과를 함께 보고
-          실패 원인을 처방 가능한 단위로 분류합니다.
+          검색·생성·컨텍스트·데이터 네 갈래로 실패 원인을 가르고,
+          이번 실행에서 실제로 나온 라벨과 질문 수를 전체 축 위에 채웁니다.
         </p>
-        <div class="label-stack">
-          <span class="label-pill"><span>retrieval_low_rank</span><b>A</b></span>
-          <span class="label-pill"><span>chunking_context_mismatch</span><b>C</b></span>
-          <span class="label-pill"><span>generation_partial_answer</span><b>B</b></span>
+        <div class="lbx">
+          <div class="lbx-row">
+            <div class="lbx-top"><span class="lbx-name">검색</span><span class="lbx-n">15</span></div>
+            <div class="lbx-desc">정답 근거를 찾거나 상위에 올리는 단계</div>
+            <div class="lbx-ex">정답 순위가 낮음 · 나열형 근거 누락 · 청크 경계에서 근거 분리 <span>외 12</span></div>
+          </div>
+          <div class="lbx-row">
+            <div class="lbx-top"><span class="lbx-name">생성</span><span class="lbx-n">10</span></div>
+            <div class="lbx-desc">근거를 보고 답변을 만드는 단계</div>
+            <div class="lbx-ex">근거 없는 생성 · 부분 답변 · 잘못된 기권 <span>외 7</span></div>
+          </div>
+          <div class="lbx-row">
+            <div class="lbx-top"><span class="lbx-name">컨텍스트</span><span class="lbx-n">3</span></div>
+            <div class="lbx-desc">청크 경계·노이즈·길이 문제</div>
+            <div class="lbx-ex">컨텍스트 과다 · 중간 근거 손실 · 노이즈 간섭</div>
+          </div>
+          <div class="lbx-row">
+            <div class="lbx-top"><span class="lbx-name">데이터</span><span class="lbx-n">4</span></div>
+            <div class="lbx-desc">코퍼스·QA·골드 답변 자체의 문제</div>
+            <div class="lbx-ex">코퍼스 근거 없음 · 일부 hop 문서 누락 · 골드 정답 오류 · 골드 청크 오류</div>
+          </div>
         </div>
       </article>
       <article class="bento-card">
