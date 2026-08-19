@@ -3515,7 +3515,8 @@
       ['chunking_overchunking', '근거가 여러 청크로 쪼개짐'],
       ['chunking_context_mismatch', '청크 경계에서 근거가 잘림'],
       ['chunking_underchunking', '청크가 너무 커서 노이즈 유입'],
-      ['reranker_low_precision', '리랭커가 무관 청크를 상위 배치']
+      ['reranker_low_precision', '리랭커가 무관 청크를 상위 배치'],
+      ['retrieval_failure', '검색 실패']
     ],
     B: [
       ['generation_hallucination', '근거 없는 답변 생성'],
@@ -3527,12 +3528,14 @@
       ['generation_chronological_error', '시간 순서 오류'],
       ['generation_abstention_failure', '기권해야 하는데 답변'],
       ['generation_wrongful_abstention', '근거가 있는데 기권'],
-      ['generation_parametric_overreliance', '모델 지식에 과의존']
+      ['generation_parametric_overreliance', '모델 지식에 과의존'],
+      ['generation_failure', '생성 실패']
     ],
     C: [
       ['too_long_context', '컨텍스트가 너무 김'],
       ['lost_in_the_middle', '정답이 중간에 묻힘'],
-      ['context_noise_interference', '노이즈 근거에 영향받음']
+      ['context_noise_interference', '노이즈 근거에 영향받음'],
+      ['context_failure', '컨텍스트 실패']
     ],
     D: [
       ['corpus_gap', '코퍼스에 근거 없음'],
