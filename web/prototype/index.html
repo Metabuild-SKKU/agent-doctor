@@ -1246,7 +1246,7 @@
         </div>
 
         <div class="run-row">
-          <div class="run-note"><span id="srcNote">코퍼스 <b>1</b>개 준비됨</span> · 예상 <b id="etaNote">약 6분</b></div>
+          <div class="run-note"><span id="srcNote">문서 미선택</span> · 예상 <b id="etaNote">약 6분</b></div>
           <button class="btn-run" id="btnRun">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4.5 19 12 6 19.5V4.5z"/></svg>
             진단 시작
@@ -1352,7 +1352,7 @@
      규칙·QA셋 대조 vs LLM 심층 두 단계뿐이므로 문구·선택지를 바꾼다. */
   function updateModeCopy(isLog) {
     if (isLog) updateSrcNote();
-    else document.getElementById('srcNote').innerHTML = '코퍼스 <b>1</b>개 준비됨';
+    else updateDocNote();
     updateEta(isLog);
   }
 
@@ -1550,7 +1550,7 @@
   wireDropzone('dropzone', 'fileInput', {
     mainId: 'dzMain', subId: 'dzSub', pattern: /\.pdf$/i,
     rejectMsg: 'PDF 파일만 지원합니다.',
-    onChange: function (f) { selectedFile = f; },
+    onChange: function (f) { selectedFile = f; updateDocNote(); },
   });
   wireDropzone('logDropzone', 'logInput', {
     mainId: 'logDzMain', subId: 'logDzSub', pattern: /\.(jsonl|json)$/i,
@@ -1570,6 +1570,15 @@
   // 브라우저가 새로고침 때 체크박스 상태를 복원하는 경우가 있어 초기 상태를 맞춰 둔다.
   refreshGoldenGate();
   refreshRunButton();
+
+  /* 문서 탭도 로그 탭과 같이 실제 선택 상태를 말한다 - 예전에는
+     '코퍼스 1개 준비됨' 이 고정 문구라 파일이 없어도 준비됐다고 했다. */
+  function updateDocNote() {
+    var note = document.getElementById('srcNote');
+    if (!note) return;
+    if (!selectedFile) { note.textContent = '문서 미선택'; return; }
+    note.innerHTML = '문서 <b>준비됨</b>';
+  }
 
   function updateSrcNote() {
     var note = document.getElementById('srcNote');
