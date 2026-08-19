@@ -397,6 +397,17 @@
   .btn-run:disabled { opacity: .45; cursor: not-allowed; background: var(--surface-2); color: var(--faint); box-shadow: none; }
   .btn-run:disabled:hover { background: var(--surface-2); }
 
+
+  /* ── 서버 코퍼스 선택 ── */
+  .corpus-alt { margin-top: 12px; padding: 14px 16px; border: 1px solid #e3e3e3; border-radius: 6px; background: #fcfcfc; }
+  .corpus-alt[hidden] { display: none; }
+  .corpus-pick { display: flex; align-items: center; gap: 9px; cursor: pointer; }
+  .corpus-pick input { width: 15px; height: 15px; accent-color: #315f86; cursor: pointer; }
+  .corpus-label { font-size: 13.5px; color: #111; }
+  .corpus-label b { font-weight: 650; }
+  .corpus-meta { margin-top: 8px; padding-left: 24px; font-family: var(--mono); font-size: 11.5px; color: #777; line-height: 1.7; }
+  .corpus-meta b { color: #333; font-weight: 700; }
+
   /* progress */
   .progress[hidden] { display: none; }
   .progress-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 22px; }
@@ -1059,6 +1070,17 @@
             <div class="dz-sub" id="dzSub">진단할 지식 문서를 넣으면 검색 파이프라인을 만들어 검사합니다</div>
             <div class="dz-formats">PDF (현재 지원 형식)</div>
           </div>
+
+          <!-- 서버에 코퍼스(SOURCE_URL)가 설정돼 있을 때만 나타난다. PDF 한 장으로는
+               못 보는 규모 - 다문서 검색, 나열형 질문 - 를 웹에서 확인하는 경로다.
+               무엇을 돌리는지 숨기지 않는다: 파일 경로와 문서·질문 수를 그대로 적는다. -->
+          <div class="corpus-alt" id="corpusAlt" hidden>
+            <label class="corpus-pick">
+              <input type="checkbox" id="corpusToggle">
+              <span class="corpus-label">업로드 대신 <b>서버 코퍼스</b>로 진단</span>
+            </label>
+            <div class="corpus-meta" id="corpusMeta"></div>
+          </div>
         </div>
 
         <div class="panel" id="panel-conn" role="tabpanel" aria-labelledby="tab-conn" hidden>
@@ -1374,6 +1396,34 @@
   var selectedGoldenFile = null;  // 로그 탭 — QA셋(필수, 면제는 인라인 정답뿐)
   var logHasInlineGolden = false; // 로그 줄에 ground_truth/gold_contexts 가 이미 있음
   var btnRun = document.getElementById('btnRun');
+  var useCorpus = false;          // 서버 코퍼스로 돌릴지 여부
+
+  /* 서버에 코퍼스가 설정돼 있으면 문서 탭에 선택지를 연다. 설정이 없으면
+     블록 자체가 안 보이므로 기존 PDF 업로드 흐름 그대로다. */
+  fetch(WEB_API_BASE + '/config')
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (cfg) {
+      var c = cfg && cfg.corpus;
+      if (!c) return;
+      var bits = [];
+      bits.push('경로 <b>' + c.source_url + '</b>');
+      if (c.max_docs) bits.push('문서 <b>' + c.max_docs + '</b>개');
+      else bits.push('문서 <b>전체</b>');
+      if (c.qa_path) bits.push('QA셋 <b>' + c.qa_path + '</b>');
+      if (c.qa_limit) bits.push('질문 <b>' + c.qa_limit + '</b>개');
+      bits.push('처방 반복 <b>' + c.max_iterations + '</b>회');
+      document.getElementById('corpusMeta').innerHTML = bits.join(' · ');
+      document.getElementById('corpusAlt').hidden = false;
+    })
+    .catch(function () { /* 서버가 없으면 조용히 넘어간다 - 정적 미리보기에서도 화면은 떠야 한다 */ });
+
+  document.getElementById('corpusToggle').addEventListener('change', function () {
+    useCorpus = this.checked;
+    var dz = document.getElementById('dropzone');
+    dz.style.opacity = useCorpus ? '.45' : '';
+    dz.style.pointerEvents = useCorpus ? 'none' : '';
+  });
+
 
   function wireDropzone(zoneId, inputId, opts) {
     var zone = document.getElementById(zoneId);
@@ -1621,7 +1671,7 @@
         document.getElementById('goldenDropzone').focus();
         return;
       }
-    } else if (!selectedFile) {
+    } else if (!useCorpus && !selectedFile) {
       document.getElementById('dzSub').textContent = '먼저 진단할 PDF 문서를 선택하세요.';
       dropzone.focus();
       return;
@@ -1680,7 +1730,8 @@
       // 들어 있는 경우뿐이고, 그건 서버가 로그를 읽어 직접 판정한다.
       if (selectedGoldenFile) form.append('goldenfile', selectedGoldenFile);
     } else {
-      form.append('file', selectedFile);
+      if (useCorpus) form.append('mode', 'corpus');
+      else form.append('file', selectedFile);
     }
     // 리플레이는 깊이 선택이 없다 — 서버도 무시하고 deep 으로 고정하지만, 보내는 값도
     // 맞춰 둔다(구버전 서버로 붙어도 얕은 진단이 안 나가게).

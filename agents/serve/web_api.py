@@ -45,6 +45,10 @@ UPLOAD_DIR = Path(__file__).parent.parent.parent / "uploads"
 _STAGE_ORDER = ["ingest", "index", "eval", "optimize", "serve"]
 _STAGE_WEIGHT = {"ingest": 10, "index": 20, "eval": 30, "optimize": 30, "serve": 10}
 
+# 처방-재평가 루프 상한. AgentDoctorState 기본값은 8 인데, 웹 실행은 한 번에
+# 40문서·100질문까지 갈 수 있어 8 회를 다 돌면 비용이 그만큼 곱해진다.
+MAX_ITERATIONS = 5
+
 app = FastAPI(title="Agent Doctor Web API", version="0.1.0")
 
 app.add_middleware(
@@ -53,6 +57,50 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _env_int(name: str) -> int | None:
+    """규모 제한 환경변수를 읽는다. 0/빈값/이상값은 '제한 없음'(None)으로 본다."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+def corpus_config() -> dict | None:
+    """서버에 코퍼스가 설정돼 있으면 그 내용을 돌려준다.
+
+    SOURCE_TYPE 이 file 이 아니고 SOURCE_URL 이 실제 파일이면 업로드 없이
+    그 코퍼스로 진단할 수 있다. 화면은 이 값을 받아 "무엇을 돌리는지"를
+    그대로 보여준다 - 서버 설정을 모른 채 버튼만 누르면, 40문서를 돌리는지
+    108문서를 돌리는지 알 수 없다.
+    """
+    source_type = (os.getenv("SOURCE_TYPE") or "").strip()
+    source_url = (os.getenv("SOURCE_URL") or "").strip()
+    if not source_type or source_type == "file" or not source_url:
+        return None
+    if not Path(source_url).exists():
+        return None
+    qa_path = (os.getenv("EVAL_TAXONOMY_QA") or "").strip() or None
+    return {
+        "source_type": source_type,
+        "source_url": source_url,
+        "qa_path": qa_path,
+        "max_docs": _env_int("KORQUAD_MAX_DOCS"),
+        "qa_limit": _env_int("KORQUAD_QA_LIMIT"),
+        "probe_source": (os.getenv("EVAL_PROBE_SOURCE") or "").strip() or None,
+        "max_iterations": MAX_ITERATIONS,
+    }
+
+
+@app.get("/config")
+def config() -> dict:
+    """화면이 시작 전에 서버 설정을 확인하는 곳. 코퍼스가 없으면 corpus=null."""
+    return {"corpus": corpus_config()}
 
 
 def _save_upload(run_id: str, upload: UploadFile) -> Path:
@@ -152,7 +200,7 @@ _DEPTH_TO_EVAL_MODE = {"fast": "fast", "standard": "standard", "full": "full"}
 _PIPELINE_LOCK = threading.Lock()
 
 
-def _run_pipeline_background(run_id: str, file_path: Path, depth: str) -> None:
+def _run_pipeline_background(run_id: str, source_url: str, source_type: str, depth: str) -> None:
     from core.console import force_utf8_stdio
     force_utf8_stdio()   # 콘솔 인코딩 보정(로깅과 독립 — Tee 설치 여부와 무관하게 보호)
 
@@ -169,9 +217,10 @@ def _run_pipeline_background(run_id: str, file_path: Path, depth: str) -> None:
 
             graph = build_graph()
             initial_state = AgentDoctorState(
-                source_url=str(file_path),
-                source_type="file",
+                source_url=source_url,
+                source_type=source_type,
                 status="running",
+                max_iterations=MAX_ITERATIONS,
             )
 
             last_state: AgentDoctorState | None = None
@@ -300,13 +349,35 @@ async def create_run(
             _discard_uploads(run_id)
             raise
 
+    if mode == "corpus":
+        # 업로드 없이 서버에 설정된 코퍼스를 그대로 색인한다. PDF 한 장으로는
+        # 못 보는 규모(다문서 검색·나열형 질문)를 웹에서 확인하기 위한 경로다.
+        cfg = corpus_config()
+        if cfg is None:
+            raise HTTPException(
+                status_code=400,
+                detail="서버에 코퍼스가 설정되어 있지 않습니다 — SOURCE_TYPE·SOURCE_URL 을 확인하세요.",
+            )
+        run_registry.create(
+            run_id, depth=depth, upload_path=cfg["source_url"], created_at=time.time(),
+        )
+        thread = threading.Thread(
+            target=_run_pipeline_background,
+            args=(run_id, cfg["source_url"], cfg["source_type"], depth),
+            daemon=True,
+        )
+        thread.start()
+        return {"run_id": run_id}
+
     if file is None or not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="PDF 파일만 지원합니다.")
 
     dest = _save_upload(run_id, file)
     run_registry.create(run_id, depth=depth, upload_path=str(dest), created_at=time.time())
 
-    thread = threading.Thread(target=_run_pipeline_background, args=(run_id, dest, depth), daemon=True)
+    thread = threading.Thread(
+        target=_run_pipeline_background, args=(run_id, str(dest), "file", depth), daemon=True,
+    )
     thread.start()
 
     return {"run_id": run_id}
