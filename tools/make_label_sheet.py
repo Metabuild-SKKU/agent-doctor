@@ -173,6 +173,11 @@ def to_entry(row: dict) -> dict:
         "정답청크_순위": _rank_note(obs),
         "검색된_청크수": len(obs.get("retrieved_chunk_ids") or []),
         "검색방식": obs.get("search_mode", "-"),
+        # 키워드(BM25)로는 놓친 정답 청크가 잡히는지. 없으면 라벨러가
+        # retrieval_lexical_mismatch 와 retrieval_semantic_mismatch 를 가를 수 없다
+        # (실행 검색방식만 보면 "키워드를 돌린 적 없다"로만 읽힌다 — 실측에서 그렇게 갈렸다).
+        "키워드검색_정답청크_적중": {True: "예", False: "아니오"}.get(
+            obs.get("bm25_hits_gold"), "미측정"),
         "리랭커": obs.get("reranker_status", "-"),
         "MMR": "적용" if obs.get("mmr_applied") else "미적용",
         "근거밀도": _round(obs.get("span_precision")),

@@ -29,6 +29,7 @@ from agents.eval.types import (
 )
 from agents.eval.scoring import compute_composite, format_composite
 from agents.eval.diagnose import _oracle_ok   # oracle 통과 판정은 진단과 같은 함수를 쓴다
+from agents.eval.metrics_search import _bm25_hits_gold
 
 _RAGAS_KEYS = ("faithfulness", "context_precision", "context_recall", "response_relevancy")
 
@@ -297,6 +298,17 @@ def _observations(record: EvalRecord) -> dict:
         # 전부 missing_gold 로 봤는데 진단기는 그 청크들이 13·15·24·27위라는 걸 알고 있었다
         # (사람 라벨 대조 0/6). 이건 측정값이라 시트에 실어도 블라인딩을 깨지 않는다.
         "gold_wide_ranks": record.signals.get("gold_ranks") or {},
+        # **키워드(BM25) 검색이 놓친 gold 를 잡는가.** 이게 없으면 라벨러는
+        # retrieval_lexical_mismatch("키워드로는 찾아진다")와 retrieval_semantic_mismatch
+        # ("둘 다 못 찾는다")를 **원리적으로 가를 수 없다** — 시트에는 실행 검색방식(dense)만
+        # 있어서, 키워드를 돌렸을 때 어떻게 되는지는 알 방법이 없다. 실측(60건): 두 라벨이
+        # 정답인 15건을 라벨러가 하나도 맞히지 못했고, 진단 근거 문구를 본 뒤에야 15/15 가 됐다.
+        #
+        # signals 를 읽지 않고 **직접 부른다** — 이 측정은 진단이 그 라벨을 검토한 probe 에서만
+        # 계산되므로(게으른 memoize), signals 로 읽으면 "우리가 검색 원인으로 의심한 probe"
+        # 에만 값이 붙어 진단 판단이 시트에 새어 나간다(gold_ranks 에서 실제로 그랬다).
+        # 이미 계산된 건 캐시라 공짜고, 새로 재는 건 BM25 검색 1회다(LLM 없음).
+        "bm25_hits_gold": _bm25_hits_gold(record),
         "search_mode": details.get("search_mode", "-"),
         "reranker_status": details.get("reranker_status", "disabled"),
         "mmr_applied": bool(details.get("mmr_applied")),

@@ -152,6 +152,44 @@ class EndToEndFromRealReportTest(unittest.TestCase):
 
         self.assertEqual(to_entry(rows[0])["정답청크_순위"], "d_chunk_5=검색안됨(전체 13위)")
 
+    def test_bm25_signal_reaches_the_sheet(self):
+        """키워드 적중 여부가 시트까지 가는지 — 헬퍼만 테스트하면 배선 누락을 못 잡는다.
+
+        이 신호가 없으면 라벨러는 retrieval_lexical_mismatch("키워드로는 찾아진다")와
+        retrieval_semantic_mismatch("둘 다 못 찾는다")를 **원리적으로 가를 수 없다.**
+        실측(60건): 두 라벨이 정답인 15건을 라벨러가 0건 맞혔고, 진단 근거 문구를 본
+        뒤에야 15/15 가 됐다 — 즉 그 15건은 블라인드 검증이 성립하지 않았다.
+        """
+        from agents.eval.metrics_common import set_context, set_mode
+        from agents.eval.report import _observations
+        from agents.eval.types import EvalRecord
+        from core.schema import Chunk, Probe
+
+        gold = Chunk(chunk_id="d_chunk_1", doc_id="d", text="정답 근거")
+        other = Chunk(chunk_id="d_chunk_9", doc_id="d", text="무관")
+        probe = Probe(probe_id="probe_qa_11", question="질문?", source="taxonomy",
+                      ground_truth="정답", gold_chunk_ids=["d_chunk_1"])
+        record = EvalRecord(probe=probe, generated_answer="틀린 답",
+                            retrieved_chunk_ids=["d_chunk_9"])
+
+        # 키워드 검색은 gold 를 1위로 잡는다 = 단어는 겹치는데 벡터가 놓친 상황
+        set_mode(3)
+        set_context(chunks=[gold, other],
+                    keyword_fn=lambda *_a, **_k: [{"chunk_id": "d_chunk_1"}])
+        try:
+            obs = _observations(record)
+        finally:
+            set_context()                    # 다른 테스트로 새지 않게 되돌린다
+
+        self.assertIs(obs["bm25_hits_gold"], True)
+        self.assertEqual(
+            to_entry({"qa_id": "11", "observations": obs})["키워드검색_정답청크_적중"], "예")
+
+    def test_unmeasured_bm25_is_not_shown_as_a_negative(self):
+        """미측정을 '아니오'로 보이면 라벨러가 semantic_mismatch 로 오독한다."""
+        entry = to_entry({"qa_id": "12", "observations": {"bm25_hits_gold": None}})
+        self.assertEqual(entry["키워드검색_정답청크_적중"], "미측정")
+
     def test_gold_error_probe_still_carries_its_evidence(self):
         """**우리 진단이 라벨러의 증거를 지우면 안 된다.**
 
