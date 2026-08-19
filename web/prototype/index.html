@@ -546,16 +546,6 @@
   .btn-report:hover { border-color: var(--accent); color: var(--accent); }
 
   /* tooltip */
-  .term { border-bottom: 1px dotted var(--faint); cursor: help; position: relative; color: var(--ink); }
-  .term::after {
-    content: attr(data-tip); position: absolute; left: 0; bottom: calc(100% + 9px);
-    width: max-content; max-width: 250px; background: var(--surface-2); color: var(--ink);
-    border: 1px solid var(--border-strong); font-family: var(--sans); font-size: 12px; line-height: 1.45;
-    letter-spacing: 0; text-transform: none; font-weight: 400;
-    padding: 9px 12px; border-radius: 9px; box-shadow: 0 12px 30px -12px rgba(0,0,0,.7);
-    opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .16s, transform .16s; z-index: 5; pointer-events: none;
-  }
-  .term:hover::after, .term:focus-visible::after { opacity: 1; visibility: visible; transform: translateY(0); }
 
   .foot { border-top: 1px solid var(--border); padding: 24px 0 44px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   .foot span { font-size: 12px; color: var(--faint); }
@@ -910,12 +900,11 @@
       <h1><span class="nowrap">RAG의 틀린 답변을</span><br><span class="fade">진단하고,</span> <span class="accent">자동으로 처방합니다.</span></h1>
       <p class="lede">
         RAG Doctor는 검색·생성 파이프라인을 검사해 어디서 문제가 생기는지 짚어내고,
-        <span class="term" tabindex="0" data-tip="검색해 올 문서 조각의 개수(top_k), 조각의 크기 같은 검색 설정값입니다.">검색 파라미터</span>를
-        근거에 따라 자동으로 조정합니다.
+        파라미터를 근거에 따라 자동으로 조정합니다.
       </p>
       <div class="claim">
         <span class="cl-sm">RAG 점수만 매기는 도구가 아닙니다</span>
-        <span class="cl-lg">정답 세트 없이, 문서에서 <b>검증 질문을 만들어 씁니다.</b></span>
+        <span class="cl-lg">QA셋이 없어도, <b>문서에서 질문을 만들어 진단할 수 있습니다.</b></span>
       </div>
       <div class="hero-actions">
         <a class="btn-primary" href="#run">진단 시작하기</a>
