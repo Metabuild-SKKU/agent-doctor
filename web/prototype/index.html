@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="stylesheet" as="style" crossorigin
+      href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
 <title>RAG Doctor — RAG 진단·처방</title>
 <style>
   :root {
@@ -25,7 +28,7 @@
     --warning: #d6a12a;
     --critical: #f0675c;
     --radius: 12px;
-    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+    --sans: 'Pretendard Variable', Pretendard, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
     --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, monospace;
   }
   :root[data-theme="light"] {
@@ -856,15 +859,8 @@
      #111 로 눌러버리는데, 차트는 상승/실패/롤백이 구분돼야 하기 때문이다.
        상승·유지 #315f86 / 실패 #8f3f35 / 롤백 #9a5b28 / 보조선 #8a8a8a  */
   .preview-card { padding: 22px; }
-  .pv-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .pv-verdict {
-    display: inline-flex; align-items: center; padding: 5px 10px;
-    border: 1px solid #e3e3e3; border-radius: 4px; background: #f7f7f7;
-    font-size: 12px; font-weight: 650; color: #111;
-  }
-  .pv-date { font-family: var(--mono); font-size: 11.5px; color: #888; }
 
-  .pv-gauge { position: relative; width: 150px; margin: 18px auto 4px; }
+  .pv-gauge { position: relative; width: 150px; margin: 4px auto; }
   .pv-gauge svg { display: block; width: 100%; height: auto; }
   .pv-gauge-c {
     position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -878,12 +874,6 @@
     margin: 12px 0 0; font-size: 15px; font-weight: 620;
     letter-spacing: -.02em; line-height: 1.45; color: #111;
   }
-  .pv-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
-  .pv-chip {
-    padding: 4px 9px; border: 1px solid #e3e3e3; border-radius: 4px;
-    font-size: 11.5px; color: #666;
-  }
-  .pv-chip b { color: #111; font-weight: 620; }
 
   .pv-course { margin-top: 20px; padding-top: 16px; border-top: 1px solid #e3e3e3; }
   .pv-course-title { font-size: 12.5px; font-weight: 650; color: #111; }
@@ -944,10 +934,6 @@
     </div>
     <div class="hero-preview" aria-label="진단서 첫 화면 미리보기">
       <div class="preview-card">
-        <div class="pv-top">
-          <span class="pv-verdict">처방 후 기준선 통과</span>
-          <span class="pv-date">2026-07-20</span>
-        </div>
 
         <div class="pv-gauge">
           <svg viewBox="0 0 240 240" aria-hidden="true">
@@ -965,10 +951,6 @@
 
         <p class="pv-headline">4건을 처방했고, 종합점수는 84/100입니다.</p>
 
-        <div class="pv-chips">
-          <span class="pv-chip">코퍼스 <b>사내 제품 문서</b></span>
-          <span class="pv-chip">테스트 질문 <b>47</b></span>
-        </div>
 
         <div class="pv-course">
           <div class="pv-course-title">종합 점수 추이</div>
