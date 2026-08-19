@@ -937,6 +937,8 @@
   .rx-ragas-panel {
     margin-top: 22px;
   }
+  #rxRagasPanel .metric-panel { overflow: visible; }
+  #rxRagasPanel .metric-name .term { z-index: 10; }
   .rx-ragas-head {
     display: flex;
     align-items: baseline;
@@ -1573,7 +1575,7 @@
     <div class="section-head"><span class="idx">01</span><h2>종합 점수 추이</h2><span class="sub"></span></div>
     <div class="course-chart">
       <div class="cc-head">
-        <span class="cc-title">종합 점수 추이</span>
+        <span></span>
         <span class="cc-legend">
           <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--accent)" stroke-width="2"/></svg> 상승·유지</i>
           <i><svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="var(--critical)" stroke-width="2"/></svg> 실패 점수</i>
@@ -2211,10 +2213,13 @@
   }
   function metricRowFromAggregate(m) {
     if (!m) return null;
+    var rawKey = m.en || m.key || m.name;
+    var key = normalizeMetricKey(rawKey);
     return {
-      key: m.en || m.key || m.name,
-      name: m.name,
-      tip: m.tip,
+      key: key,
+      source_key: rawKey,
+      name: metricDisplayName(key, m.name),
+      tip: metricDescription(key, m.tip),
       before: m.before,
       after: m.after,
       single: m.single,
@@ -2315,7 +2320,8 @@
     }
     return rows.map(function (m) {
       var before = numOrNull(m.before), after = numOrNull(m.after);
-      var name = '<div class="metric-name"><span class="term" tabindex="0" data-tip="' + esc(m.tip || '') + '">' + esc(m.name || m.key || 'metric') + '</span><span class="en">' + esc(m.key || '') + '</span></div>';
+      var tip = metricDescription(m.key || m.en || m.name, m.tip);
+      var name = '<div class="metric-name"><span class="term" tabindex="0" data-tip="' + esc(tip) + '" title="' + esc(tip) + '">' + esc(m.name || m.key || 'metric') + '</span><span class="en">' + esc(m.key || '') + '</span></div>';
       var attrs = includeHistory ? ' role="button" tabindex="0" data-metric-key="' + esc(m.key || m.name || 'metric') + '"' : '';
       var history = includeHistory ? '<div class="metric-history"><div class="rx-history"><div class="rx-history-head"><b>' + esc(m.name || m.key || 'metric') + '</b><span>' + esc(m.key || '') + '</span></div>' + metricHistorySvg(m) + '</div></div>' : '';
       if (before === null || after === null || m.single) {
@@ -2350,12 +2356,57 @@
     if (legend) legend.style.display = rows.some(function (m) { return m.single; }) ? 'none' : '';
   }
   var RAGAS_METRIC_ORDER = ['faithfulness', 'context_recall', 'context_precision', 'response_relevancy'];
+  var METRIC_KEY_ALIASES = {
+    answer_relevancy: 'response_relevancy',
+    answer_relevance: 'response_relevancy',
+    response_relevance: 'response_relevancy',
+    context_relevance: 'context_precision'
+  };
+  var METRIC_KO_NAMES = {
+    faithfulness: '충실도',
+    context_recall: '정답 회수율',
+    context_precision: '검색 정확도',
+    response_relevancy: '답변 관련성',
+    composite: '종합점수'
+  };
+  function normalizeMetricKey(key) {
+    key = String(key || '').trim().toLowerCase().replace(/[\s.-]+/g, '_');
+    return METRIC_KEY_ALIASES[key] || key;
+  }
+  function metricDisplayName(key, explicitName) {
+    if (explicitName && normalizeMetricKey(explicitName) !== normalizeMetricKey(key)) return explicitName;
+    key = normalizeMetricKey(key);
+    return METRIC_KO_NAMES[key] || String(explicitName || key || '품질 지표').replace(/_/g, ' ');
+  }
+  var METRIC_DESCRIPTIONS = {
+    faithfulness: '답변이 검색된 근거에 충실하며, 근거에 없는 내용을 지어내지 않은 정도입니다.',
+    context_recall: '정답을 만드는 데 필요한 근거를 검색 결과가 얼마나 빠짐없이 가져왔는지 나타냅니다.',
+    context_precision: '검색된 근거 중 실제 답변에 도움이 되는 내용이 차지하는 비율입니다.',
+    response_relevancy: '생성된 답변이 질문의 의도와 핵심 내용에 얼마나 직접적으로 부합하는지 나타냅니다.',
+    composite: '검색·답변·검증 결과를 종합한 참고용 점수입니다.'
+  };
+  function metricDescription(key, explicitTip) {
+    if (explicitTip) return explicitTip;
+    key = normalizeMetricKey(key);
+    if (METRIC_DESCRIPTIONS[key]) return METRIC_DESCRIPTIONS[key];
+    if (key.indexOf('recall') >= 0) return '필요한 항목을 얼마나 빠짐없이 찾아냈는지 나타내는 지표입니다.';
+    if (key.indexOf('precision') >= 0) return '찾아낸 항목 중 실제로 유효한 항목의 비율을 나타내는 지표입니다.';
+    if (key.indexOf('faith') >= 0 || key.indexOf('ground') >= 0) return '답변이 제공된 근거에 얼마나 충실한지 나타내는 지표입니다.';
+    if (key.indexOf('relev') >= 0) return '결과가 질문이나 평가 대상과 얼마나 관련 있는지 나타내는 지표입니다.';
+    if (key.indexOf('latency') >= 0 || key.indexOf('time') >= 0) return '처리에 걸린 시간을 나타내며, 값이 낮을수록 빠릅니다.';
+    if (key.indexOf('cost') >= 0) return '해당 실행 또는 처방 과정에서 발생한 비용을 나타냅니다.';
+    return '입력된 리포트가 제공한 품질 지표로, 처방 전후 값을 비교해 변화를 확인합니다.';
+  }
   function ragasMetricRows(rows) {
     rows = (rows || []).filter(function (row) {
-      return row && row.key !== 'composite' && RAGAS_METRIC_ORDER.indexOf(row.key) >= 0;
+      return row && normalizeMetricKey(row.key) !== 'composite';
     });
     rows.sort(function (a, b) {
-      return RAGAS_METRIC_ORDER.indexOf(a.key) - RAGAS_METRIC_ORDER.indexOf(b.key);
+      var ai = RAGAS_METRIC_ORDER.indexOf(normalizeMetricKey(a.key));
+      var bi = RAGAS_METRIC_ORDER.indexOf(normalizeMetricKey(b.key));
+      if (ai < 0) ai = RAGAS_METRIC_ORDER.length;
+      if (bi < 0) bi = RAGAS_METRIC_ORDER.length;
+      return ai - bi;
     });
     return rows;
   }
@@ -2622,9 +2673,13 @@
       var before = numOrNull(m.before);
       var after = numOrNull(m.after);
       if (before === null || after === null) return;
+      var rawKey = m.key || m.en || m.name || 'metric';
+      var key = normalizeMetricKey(rawKey);
       rows.push({
-        key: m.key || m.en || m.name || 'metric',
-        name: m.name || m.label || m.key || m.en || '지표',
+        key: key,
+        source_key: rawKey,
+        name: metricDisplayName(key, m.name || m.label),
+        tip: metricDescription(key, m.tip),
         before: before,
         after: after,
         unit: m.unit || ''
@@ -3820,7 +3875,9 @@
   /* ── run_id 가 있으면 실제 리포트를 fetch. 샘플 데이터는 ?sample=1 일 때만 쓴다. ── */
   var params = new URLSearchParams(location.search);
   var runId = params.get('run_id');
-  var sampleMode = params.get('sample') === '1';
+  // 파일을 카카오톡 등으로 공유해 직접 열 때는 서버가 없으므로 샘플 리포트를 표시한다.
+  // HTTP 환경에서는 기존 계약대로 ?sample=1을 명시해야 샘플이 보인다.
+  var sampleMode = params.get('sample') === '1' || location.protocol === 'file:';
   if (runId) {
     fetch(WEB_API_BASE + '/runs/' + runId + '/report')
       .then(function (res) {
