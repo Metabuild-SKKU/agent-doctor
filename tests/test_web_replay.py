@@ -29,7 +29,7 @@ from core import run_registry
 def _log_lines(n: int, *, inline_golden: bool = True) -> str:
     """유효한 triad 로그 n줄.
 
-    기본으로 정답을 인라인에 넣는다 - 웹 경로는 골든셋 면제가 없어서(옵트아웃 없음),
+    기본으로 정답을 인라인에 넣는다 - 웹 경로는 QA셋 면제가 없어서(옵트아웃 없음),
     정답 없는 로그는 업로드 게이트에서 막힌다. 게이트 자체를 보는 테스트만 False 로 준다.
     """
     def line(i):
@@ -92,7 +92,7 @@ class UploadGateTests(_ReplayClient):
     def test_rejects_unsupported_golden_extension(self):
         res = self._post(_log_lines(1), golden=("golden.txt", "질문,정답"))
         self.assertEqual(res.status_code, 400)
-        self.assertIn("골든셋", res.json()["detail"])
+        self.assertIn("QA셋", res.json()["detail"])
 
     def test_no_run_is_registered_when_gate_rejects(self):
         """게이트에 걸린 업로드가 run 을 남기면 프론트가 영원히 폴링한다."""
@@ -105,7 +105,7 @@ class UploadGateTests(_ReplayClient):
 
 
 class GoldenGateTests(_ReplayClient):
-    """웹 경로에는 골든셋 면제가 없다.
+    """웹 경로에는 QA셋 면제가 없다.
 
     정답지가 없으면 신뢰도 축을 못 재 종합점수 자체가 안 나오는데, 원인 7종 중 3종만
     담긴 '점수 없는 진단서'를 받아가는 건 오해만 만든다. 정답지를 아직 못 만든 경우는
@@ -114,7 +114,7 @@ class GoldenGateTests(_ReplayClient):
     def test_rejects_when_no_golden_anywhere(self):
         res = self._post(_log_lines(2, inline_golden=False))
         self.assertEqual(res.status_code, 400)
-        self.assertIn("골든셋", res.json()["detail"])
+        self.assertIn("QA셋", res.json()["detail"])
 
     def test_no_opt_out_parameter_is_honored(self):
         """예전에는 no_golden=1 로 빠져나갈 수 있었다. 그 통로를 없앤 것이 이 변경이다."""
@@ -126,7 +126,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertEqual(res.status_code, 400)
 
     def test_inline_ground_truth_counts_as_golden(self):
-        """로그에 정답이 인라인으로 있으면 골든셋이 없는 게 아니다(CLI 와 같은 판정)."""
+        """로그에 정답이 인라인으로 있으면 QA셋이 없는 게 아니다(CLI 와 같은 판정)."""
         with patch.object(web_api, "_run_replay_background"):
             res = self._post(_log_lines(2))
         self.assertEqual(res.status_code, 200)
@@ -139,7 +139,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertEqual(res.status_code, 200)
 
     def test_rejects_golden_that_matches_nothing(self):
-        """표기가 달라 한 건도 안 붙는 골든셋. 그대로 두면 전량 RAGAS 를 돌린 뒤에야
+        """표기가 달라 한 건도 안 붙는 QA셋. 그대로 두면 전량 RAGAS 를 돌린 뒤에야
         '정답 0건' 리포트가 나온다 - 비싸고, 사용자는 대조된 줄 안다."""
         golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
                             ensure_ascii=False)
@@ -170,7 +170,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertIn("gold_contexts", res.json()["detail"])
 
     def test_rejects_golden_file_without_ground_truth(self):
-        """같은 정렬이 골든셋 '파일' 경로에도 있어야 한다(리뷰 지적).
+        """같은 정렬이 QA셋 '파일' 경로에도 있어야 한다(리뷰 지적).
 
         인라인으로 gold_contexts 만 주면 막는데 파일로 같은 걸 주면 통과하고 있었다 -
         질문이 겹치는지만 보고 그 항목이 정답을 채우는지는 안 봤다. 결과는 같다:
@@ -183,7 +183,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertIn("ground_truth", res.json()["detail"])
 
     def test_rejects_golden_file_with_questions_only(self):
-        """질문 열 하나짜리 골든셋 - 매칭은 전부 되는데 아무것도 안 채운다."""
+        """질문 열 하나짜리 QA셋 - 매칭은 전부 되는데 아무것도 안 채운다."""
         golden = json.dumps({"question": "질문 0"}, ensure_ascii=False)
         res = self._post(_log_lines(2, inline_golden=False),
                          golden=("golden.jsonl", golden))
@@ -191,7 +191,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertIn("ground_truth", res.json()["detail"])
 
     def test_golden_file_without_answers_is_allowed_when_the_log_has_inline_ones(self):
-        """정답 없는 골든셋이어도 로그가 인라인 정답을 들고 있으면 대조가 된다 -
+        """정답 없는 QA셋이어도 로그가 인라인 정답을 들고 있으면 대조가 된다 -
         매칭 0건 선검사와 같은 이유로, 재료를 더 줄수록 거부되면 안 된다."""
         golden = json.dumps({"question": "질문 0", "gold_contexts": ["정답 근거"]},
                             ensure_ascii=False)
@@ -200,7 +200,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertEqual(res.status_code, 200)
 
     def test_zero_match_golden_message_points_at_matching_not_answers(self):
-        """매칭 0건이면 정답도 0건이라, 순서를 뒤집으면 '골든셋에 정답이 없다'는
+        """매칭 0건이면 정답도 0건이라, 순서를 뒤집으면 'QA셋에 정답이 없다'는
         엉뚱한 사유가 나간다 - 고치는 방법이 완전히 다르다
         (report_view._reliability_unavailable_how 와 같은 순서)."""
         golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
@@ -215,7 +215,7 @@ class GoldenGateTests(_ReplayClient):
         """매칭 0건 선검사가 인라인 정답이 있는 로그까지 막고 있었다.
 
         파일을 안 준 경우는 인라인을 인정하는데 파일을 준 경우만 안 하면, 재료를 더
-        줄수록 거부되는 게이트가 된다. 이 로그는 골든셋이 한 건도 안 붙어도 정답
+        줄수록 거부되는 게이트가 된다. 이 로그는 QA셋이 한 건도 안 붙어도 정답
         대조가 된다."""
         golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
                             ensure_ascii=False)
@@ -240,7 +240,7 @@ class RejectedUploadCleanupTests(_ReplayClient):
         self.assertEqual(self._upload_files(), [])
 
     def test_rejected_golden_is_discarded_too(self):
-        """골든셋 거부는 로그를 이미 저장한 뒤에 일어난다 - 두 파일 다 지워져야 한다."""
+        """QA셋 거부는 로그를 이미 저장한 뒤에 일어난다 - 두 파일 다 지워져야 한다."""
         golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
                             ensure_ascii=False)
         res = self._post(_log_lines(2, inline_golden=False),

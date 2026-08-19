@@ -385,7 +385,7 @@
   .field-label { display: block; font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--faint); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 9px; }
   .field-optional { font-family: var(--sans); font-size: 12px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted); margin-left: 6px; }
 
-  /* 골든셋 옵트아웃 — 기본은 막고 명시 선택으로만 통과 (CLI 의 --no-golden 과 같은 구조) */
+  /* QA셋 옵트아웃 — 기본은 막고 명시 선택으로만 통과 (CLI 의 --no-golden 과 같은 구조) */
   .optout { margin-top: 11px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
   .optout[hidden] { display: none; }
   .optout-check { display: flex; align-items: center; gap: 9px; cursor: pointer; font-size: 13.2px; font-weight: 600; color: var(--ink); }
@@ -423,7 +423,7 @@
   .help-guide ul { margin: 6px 0 0 19px; padding: 0; }
   .help-guide li { margin: 5px 0; }
 
-  /* 도움말 안쪽 탭 — 실행 로그 / 골든셋은 출처도 채우는 사람도 다른 파일이라
+  /* 도움말 안쪽 탭 — 실행 로그 / QA셋은 출처도 채우는 사람도 다른 파일이라
      한 화면에 붙여 놓으면 어느 필드가 어느 파일 것인지 섞여 읽힌다. */
   .help-tabs { display: flex; gap: 5px; padding: 4px; margin: 14px 0 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; }
   .help-tab { flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 10px; font-family: var(--sans); font-size: 12.8px; font-weight: 620; letter-spacing: -.01em; border: none; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
@@ -807,6 +807,8 @@
     line-height: 1.7;
     color: #333;
   }
+  .claim .cl-lg,
+  .claim .cl-lg b { color: #111; }
   .claim .cl-lg { font-size: 18px; font-weight: 650; letter-spacing: -.02em; }
   .step p,
   .bento-copy { color: #555; }
@@ -1147,12 +1149,12 @@
             </div>
           </div>
 
-          <label class="field-label" for="goldenInput" style="margin-top:16px">골든셋 — 시험지 (질문 · 정답 · 정답 근거)<span class="field-optional">필수 · 로그에 정답이 들어 있으면 생략 가능</span></label>
+          <label class="field-label" for="goldenInput" style="margin-top:16px">QA셋 — 시험지 (질문 · 정답 · 정답 근거)<span class="field-optional">필수 · 로그에 정답이 들어 있으면 생략 가능</span></label>
           <div class="dropzone dropzone-compact" id="goldenDropzone" tabindex="0">
             <input type="file" id="goldenInput" accept=".xlsx,.csv,.jsonl,.json" hidden>
             <svg class="dz-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 16V4m0 0 4 4m-4-4-4 4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke-linecap="round"/></svg>
             <div class="dz-text">
-              <div class="dz-main" id="goldenDzMain">골든셋 파일을 끌어다 놓거나 클릭해 선택</div>
+              <div class="dz-main" id="goldenDzMain">QA셋 파일을 끌어다 놓거나 클릭해 선택</div>
               <div class="dz-sub" id="goldenDzSub">정답 대조가 있어야 원인 7종을 다 판정합니다</div>
             </div>
             <div class="dz-formats">XLSX · CSV · JSONL · 필수</div>
@@ -1162,14 +1164,14 @@
             </div>
           </div>
 
-          <!-- 골든셋 옵트아웃은 두지 않는다. 정답지가 없으면 신뢰도 축을 못 재고, 그러면
+          <!-- QA셋 옵트아웃은 두지 않는다. 정답지가 없으면 신뢰도 축을 못 재고, 그러면
                종합점수 자체가 안 나온다(report_view 가 총점을 감춘다) — 원인 7종 중 3종만
                나오는 진단서를 "점수 없음" 상태로 받아가는 건 오해만 만든다. 정답지를 아직
                못 만든 경우는 CLI 의 --no-golden 이 개발용 통로로 남아 있다.
-               로그에 정답이 인라인으로 들어 있으면 골든셋이 없는 게 아니므로 통과시킨다. -->
+               로그에 정답이 인라인으로 들어 있으면 QA셋이 없는 게 아니므로 통과시킨다. -->
           <div class="optout optout-inline" id="goldenInlineNote" hidden>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12.5 10 17 19 7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span>실행 로그 안에 정답(<code>ground_truth</code>)이 들어 있어 골든셋 파일 없이도 전체 진단이 가능합니다.</span>
+            <span>실행 로그 안에 정답(<code>ground_truth</code>)이 들어 있어 QA셋 파일 없이도 전체 진단이 가능합니다.</span>
           </div>
 
           <p class="dz-sub" style="margin-top:12px;font-size:13.2px;line-height:1.65;color:var(--muted)">이미 운영 중인 RAG의 실행 로그를 올리면, 파이프라인을 바꾸지 않고 그대로 진단합니다.
@@ -1200,7 +1202,7 @@
             <div class="help-body">
               <div class="help-tabs" role="tablist" aria-label="파일 형식">
                 <button class="help-tab" type="button" role="tab" id="htab-log" aria-selected="true" aria-controls="hpanel-log">실행 로그 <span class="ht-req">필수 파일</span></button>
-                <button class="help-tab" type="button" role="tab" id="htab-golden" aria-selected="false" aria-controls="hpanel-golden">골든셋 <span class="ht-req">필수 파일</span></button>
+                <button class="help-tab" type="button" role="tab" id="htab-golden" aria-selected="false" aria-controls="hpanel-golden">QA셋 <span class="ht-req">필수 파일</span></button>
               </div>
 
               <!-- 실행 로그 -->
@@ -1216,7 +1218,7 @@
                 <ul class="field-list">
                   <li>
                     <div class="fl-head"><code>question</code><span class="badge badge-req">필수</span></div>
-                    <div class="fl-desc">사용자가 실제로 던진 질문 원문. 골든셋과 짝을 맞추는 키로도 쓰입니다.</div>
+                    <div class="fl-desc">사용자가 실제로 던진 질문 원문. QA셋과 짝을 맞추는 키로도 쓰입니다.</div>
                   </li>
                   <li>
                     <div class="fl-head"><code>answer</code><span class="badge badge-req">필수</span></div>
@@ -1248,9 +1250,9 @@
                     <div class="fl-gain"><b>켜지는 진단 ·</b> 불만족 케이스를 <b>우선 표본</b>으로 삼아, 사용자가 실제로 아파한 질문부터 원인을 파고듭니다.</div>
                   </li>
                   <li>
-                    <div class="fl-head"><code>ground_truth</code> <code>gold_contexts</code><span class="badge badge-opt">선택</span><span class="fl-note">골든셋을 로그 안에 직접</span></div>
+                    <div class="fl-head"><code>ground_truth</code> <code>gold_contexts</code><span class="badge badge-opt">선택</span><span class="fl-note">QA셋을 로그 안에 직접</span></div>
                     <div class="fl-desc">정답과 정답 근거를 별도 파일 대신 로그 줄에 바로 넣는 방식입니다.</div>
-                    <div class="fl-gain"><b>켜지는 진단 ·</b> 골든셋 탭과 똑같은 진단이 켜지고, <b>골든셋 파일 업로드를 생략</b>할 수 있습니다. 보통은 정답지를 따로 관리하니 골든셋 파일 쪽이 편합니다.</div>
+                    <div class="fl-gain"><b>켜지는 진단 ·</b> QA셋 탭과 똑같은 진단이 켜지고, <b>QA셋 파일 업로드를 생략</b>할 수 있습니다. 보통은 정답지를 따로 관리하니 QA셋 파일 쪽이 편합니다.</div>
                   </li>
                   <li>
                     <div class="fl-head"><code>latency_ms</code> <code>timestamp</code><span class="badge badge-opt">선택</span></div>
@@ -1259,7 +1261,7 @@
                 </ul>
               </div>
 
-              <!-- 골든셋 -->
+              <!-- QA셋 -->
               <div class="help-panel" id="hpanel-golden" role="tabpanel" aria-labelledby="htab-golden" hidden>
                 <p class="help-intro">사람이 만든 정답지이고, <b>진단의 기본 입력입니다.</b> 이게 있어야 “틀렸다”를 추측이 아니라 대조로 확정합니다.
                   <code>XLSX · CSV · JSONL · JSON</code> 모두 받으니, <b>이미 쓰는 테스트셋이 있으면 그대로 주셔도 됩니다.</b></p>
@@ -1271,7 +1273,7 @@
                   <li>
                     <div class="fl-head"><code>question</code><span class="badge badge-req">필수</span></div>
                     <div class="fl-desc">실행 로그의 질문과 <b>자동으로 짝지어집니다</b> — 공백·끝 문장부호·대소문자 차이는 무시하므로 토씨까지 맞출 필요는 없습니다.
-                      매칭된 건수만 골든셋 기반 진단에 들어가고, 못 맞춘 항목은 버려지지 않고 리포트에 집계됩니다.</div>
+                      매칭된 건수만 QA셋 기반 진단에 들어가고, 못 맞춘 항목은 버려지지 않고 리포트에 집계됩니다.</div>
                   </li>
                   <li>
                     <div class="fl-head"><code>ground_truth</code><span class="badge badge-req">필수</span><span class="fl-note">정답 텍스트</span></div>
@@ -1438,7 +1440,7 @@
   });
 
   /* 리플레이(로그) 모드는 남의 인덱스라 재검색이 없다 — 진단 깊이가
-     규칙·골든셋 대조 vs LLM 심층 두 단계뿐이므로 문구·선택지를 바꾼다. */
+     규칙·QA셋 대조 vs LLM 심층 두 단계뿐이므로 문구·선택지를 바꾼다. */
   function updateModeCopy(isLog) {
     // 리플레이는 깊이 선택 자체가 없다 — 블록을 통째로 숨기고 서버도 deep 으로 고정한다.
     // (선택지를 남겨두면 '빠른 검진'을 고른 채 로그 탭으로 넘어와 생성축 라벨 4종이
@@ -1449,7 +1451,7 @@
     updateEta(isLog);
   }
 
-  /* 파일 형식 안내 안쪽 탭(실행 로그 / 골든셋). details 안에 있어서 접힌 상태에선
+  /* 파일 형식 안내 안쪽 탭(실행 로그 / QA셋). details 안에 있어서 접힌 상태에선
      보이지 않으므로 초기 상태만 맞춰 두고 클릭으로 전환한다. */
   var helpTabs = [document.getElementById('htab-log'), document.getElementById('htab-golden')];
   helpTabs.forEach(function (t) {
@@ -1489,12 +1491,12 @@
     });
   });
 
-  /* file upload wiring — 세 드롭존(문서/로그/골든셋)이 같은 클릭·드래그·키보드
+  /* file upload wiring — 세 드롭존(문서/로그/QA셋)이 같은 클릭·드래그·키보드
      동작을 공유하므로 헬퍼 하나로 묶는다. */
   var WEB_API_BASE = 'http://localhost:8767';
   var selectedFile = null;        // 문서 탭 — PDF
   var selectedLogFile = null;     // 로그 탭 — 실행 로그(필수)
-  var selectedGoldenFile = null;  // 로그 탭 — 골든셋(필수, 면제는 인라인 정답뿐)
+  var selectedGoldenFile = null;  // 로그 탭 — QA셋(필수, 면제는 인라인 정답뿐)
   var logHasInlineGolden = false; // 로그 줄에 ground_truth/gold_contexts 가 이미 있음
   var btnRun = document.getElementById('btnRun');
 
@@ -1556,7 +1558,7 @@
   var LOG_REQUIRED_KEYS = ['question', 'answer'];
   var QA_QUESTION_KEYS = ['question', 'q', 'query'];
   var QA_GROUND_TRUTH_KEYS = ['ground_truth', 'gold_answer', 'answer', 'answers'];
-  // 로그 자체에 정답이 인라인으로 들어 있으면 골든셋이 "없는" 게 아니다 —
+  // 로그 자체에 정답이 인라인으로 들어 있으면 QA셋이 "없는" 게 아니다 —
   // web_api 의 게이트도 이 필드를 보고 통과시킨다. gold_contexts 는 여기 넣지 않는다:
   // 그것만으로는 검색축까지만 재고 답변축(ground_truth 대조)이 빠져 신뢰도 축이 통째로
   // 미측정이 되고, 진단서가 총점을 감춘다 — 게이트가 막겠다고 적어둔 그 결과다.
@@ -1630,9 +1632,9 @@
     reader.readAsText(file, 'utf-8');
   }
 
-  /* 골든셋은 이 화면에서 면제가 없다. 정답지가 없으면 신뢰도 축을 못 재고, 그러면
+  /* QA셋은 이 화면에서 면제가 없다. 정답지가 없으면 신뢰도 축을 못 재고, 그러면
      종합점수 자체가 안 나온다 — 원인 7종 중 3종만 담긴 "점수 없는 진단서"를 받아가는 건
-     오해만 만든다. 면제는 하나뿐: 로그에 정답이 인라인으로 들어 있는 경우(그건 골든셋이
+     오해만 만든다. 면제는 하나뿐: 로그에 정답이 인라인으로 들어 있는 경우(그건 QA셋이
      없는 게 아니다). 정답지를 아직 못 만든 경우는 CLI 의 --no-golden 이 개발용 통로다. */
   function goldenSatisfied() {
     return !!selectedGoldenFile || logHasInlineGolden;
@@ -1677,9 +1679,9 @@
     var note = document.getElementById('srcNote');
     if (!note) return;
     if (!selectedLogFile) { note.textContent = '실행 로그 미선택'; return; }
-    if (selectedGoldenFile) note.innerHTML = '로그 · 골든셋 <b>준비됨</b>';
-    else if (logHasInlineGolden) note.innerHTML = '로그에 정답 포함 — 골든셋 <b>불필요</b>';
-    else note.innerHTML = '골든셋 <b>필요</b> — 정답지가 없으면 종합점수를 낼 수 없습니다';
+    if (selectedGoldenFile) note.innerHTML = '로그 · QA셋 <b>준비됨</b>';
+    else if (logHasInlineGolden) note.innerHTML = '로그에 정답 포함 — QA셋 <b>불필요</b>';
+    else note.innerHTML = 'QA셋 <b>필요</b> — 정답지가 없으면 종합점수를 낼 수 없습니다';
   }
 
   /* ECG canvas — subtle oscilloscope trace */
@@ -1748,7 +1750,7 @@
       }
       if (!goldenSatisfied()) {
         document.getElementById('goldenDzSub').textContent =
-          '골든셋은 진단의 기본 입력입니다 — 파일을 올리거나, 아래에서 없이 진행을 선택하세요.';
+          'QA셋은 진단의 기본 입력입니다 — 파일을 올리거나, 아래에서 없이 진행을 선택하세요.';
         document.getElementById('goldenDropzone').focus();
         return;
       }
@@ -1807,7 +1809,7 @@
     if (isLog) {
       form.append('mode', 'replay');
       form.append('logfile', selectedLogFile);
-      // 골든셋 옵트아웃은 이 경로에 없다 — 파일이 없으면 로그에 정답이 인라인으로
+      // QA셋 옵트아웃은 이 경로에 없다 — 파일이 없으면 로그에 정답이 인라인으로
       // 들어 있는 경우뿐이고, 그건 서버가 로그를 읽어 직접 판정한다.
       if (selectedGoldenFile) form.append('goldenfile', selectedGoldenFile);
     } else {

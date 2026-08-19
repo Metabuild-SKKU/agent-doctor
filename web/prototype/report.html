@@ -2195,10 +2195,10 @@
         [ext.with_ground_truth || 0, '정답 텍스트'],
         [ext.with_gold_contexts || 0, '정답 근거 문단'],
       ];
-      // 골든셋 병합은 질문 정규화 후 완전 일치라 표기가 다르면 안 붙고, 부분 매칭이
-      // 흔하다. "골든셋 줬으니 전부
+      // QA셋 병합은 질문 정규화 후 완전 일치라 표기가 다르면 안 붙고, 부분 매칭이
+      // 흔하다. "QA셋 줬으니 전부
       // 대조됐다"고 읽히면 미매칭 레코드의 검색 실패가 점수에서 빠진 걸 못 본다.
-      if (ext.golden) cells.push([ext.golden.matched + '/' + ext.golden.entries, '골든셋 매칭']);
+      if (ext.golden) cells.push([ext.golden.matched + '/' + ext.golden.entries, 'QA셋 매칭']);
       return cells;
     }
     var rxLabel = '처방 시도';

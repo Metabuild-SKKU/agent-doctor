@@ -61,7 +61,7 @@ def _save_upload(run_id: str, upload: UploadFile) -> Path:
 
 def _save_upload_as(run_id: str, upload: UploadFile, suffix: str) -> Path:
     """업로드를 run별 폴더에 저장 — 원본 파일명 대신 uuid+고정 확장자를 써서
-    경로 탈출·이름 충돌을 막는다(리플레이 로그/골든셋도 같은 규칙을 쓴다)."""
+    경로 탈출·이름 충돌을 막는다(리플레이 로그/QA셋도 같은 규칙을 쓴다)."""
     run_dir = UPLOAD_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     dest = (run_dir / f"{uuid.uuid4().hex}{suffix}").resolve()
@@ -72,13 +72,13 @@ def _save_upload_as(run_id: str, upload: UploadFile, suffix: str) -> Path:
     return dest
 
 
-# 골든셋은 qa_merge.load_qa_set 이 확장자로 파서를 고른다 — 여기서 허용 확장자를
+# QA셋은 qa_merge.load_qa_set 이 확장자로 파서를 고른다 — 여기서 허용 확장자를
 # 한 번 더 거르는 이유는 잘못된 파일이 백그라운드 스레드까지 가서야 죽는 것보다
 # 업로드 시점에 바로 400 으로 알리는 게 사용자 경험이 낫기 때문이다.
 _GOLDEN_SUFFIXES = (".json", ".jsonl", ".csv", ".xlsx", ".xlsm")
 
 # 로그는 JSONL 내용만 받지만 확장자는 .json 도 허용한다 - 상대가 .json 이름으로 JSONL
-# 을 주는 실무 케이스가 흔하고(qa_merge 가 골든셋에 대해 이미 지원하는 그 케이스),
+# 을 주는 실무 케이스가 흔하고(qa_merge 가 QA셋에 대해 이미 지원하는 그 케이스),
 # 내용 검증은 프론트의 validateLogFile 이 줄 단위 파싱으로 이미 한다. 여기서 .jsonl
 # 만 받으면 프론트가 통과시킨 파일이 진행 화면 전환 뒤에 400 으로 떨어진다.
 _LOG_SUFFIXES = (".jsonl", ".json")
@@ -349,7 +349,7 @@ def _start_replay_run(
     if oversize:
         raise HTTPException(status_code=400, detail=oversize)
 
-    # 로그 줄에 정답이 인라인으로 들어 있으면 골든셋 파일이 없어도, 붙지 않아도
+    # 로그 줄에 정답이 인라인으로 들어 있으면 QA셋 파일이 없어도, 붙지 않아도
     # 진단이 성립한다. 게이트가 보는 재료를 점수층(scoring._is_evaluable)과 같은
     # 것으로 맞춘다 - gold_contexts 는 검색축까지만 재고 답변축(answer_score)은
     # ground_truth 없이 못 재므로, 신뢰도 축이 통째로 빠져 총점이 안 나온다.
@@ -364,7 +364,7 @@ def _start_replay_run(
         if golden_suffix not in _GOLDEN_SUFFIXES:
             raise HTTPException(
                 status_code=400,
-                detail=f"골든셋은 {', '.join(_GOLDEN_SUFFIXES)} 형식만 지원합니다.",
+                detail=f"QA셋은 {', '.join(_GOLDEN_SUFFIXES)} 형식만 지원합니다.",
             )
         golden_dest = _save_upload_as(run_id, goldenfile, suffix=golden_suffix)
         from agents.eval.qa_merge import load_qa_set, normalize_question
@@ -374,9 +374,9 @@ def _start_replay_run(
             raise HTTPException(status_code=400, detail=oversize)
         # 매칭 0건이면 지금 끊는다. 병합은 질문 텍스트 매칭이라 표기가 다르면 한 건도
         # 안 붙는데, 그대로 두면 레코드 전량 RAGAS 를 돌린 뒤에야 "정답 0건" 리포트가
-        # 나온다 - 비싸고, 사용자는 골든셋을 줬으니 대조된 줄 안다. 같은 정규화를
+        # 나온다 - 비싸고, 사용자는 QA셋을 줬으니 대조된 줄 안다. 같은 정규화를
         # 쓰므로 여기서 세는 값이 실제 병합 결과와 같다.
-        # 단, 로그에 정답이 인라인이면 막지 않는다 - 그 로그는 골든셋이 한 건도 안
+        # 단, 로그에 정답이 인라인이면 막지 않는다 - 그 로그는 QA셋이 한 건도 안
         # 붙어도 정답 대조가 되고, 파일을 안 준 경우(아래 elif)보다 재료가 많은데
         # 거부하면 재료를 더 줄수록 거부되는 게이트가 된다. 매칭률은 진단서가 밝힌다.
         log_questions = {normalize_question(r.question) for r in logs}
@@ -385,38 +385,38 @@ def _start_replay_run(
             if not matched_keys:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"골든셋 {len(qa_map)}건이 로그의 질문과 한 건도 매칭되지 "
-                           "않았습니다. 골든셋 질문과 로그 질문의 표기를 확인해 주세요 "
+                    detail=f"QA셋 {len(qa_map)}건이 로그의 질문과 한 건도 매칭되지 "
+                           "않았습니다. QA셋 질문과 로그 질문의 표기를 확인해 주세요 "
                            "(공백·문장부호·대소문자는 자동 정규화됩니다).",
                 )
-            # 매칭됐다고 정답이 채워지는 건 아니다 - gold_contexts 만 있는 골든셋이
+            # 매칭됐다고 정답이 채워지는 건 아니다 - gold_contexts 만 있는 QA셋이
             # 그 경우다. 위 has_inline_gt 게이트와 같은 재료(ground_truth)를 봐야
-            # 파일로 준 정답 없는 골든셋만 통과하는 구멍이 안 생긴다. 사후에는
+            # 파일로 준 정답 없는 QA셋만 통과하는 구멍이 안 생긴다. 사후에는
             # report_view._reliability_unavailable_how 가 정확히 이 사유를 말하는데,
             # 사전에 막으라고 세운 게이트가 통과시키면 그 진단서를 전 레코드 RAGAS 를
             # 돌린 뒤에야 받게 된다.
             # 순서도 그쪽과 같다 - 매칭 0건이면 정답도 0건이라, 매칭을 먼저 보지 않으면
-            # "골든셋에 정답이 없다"는 엉뚱한 사유가 나간다(고치는 방법이 다르다).
+            # "QA셋에 정답이 없다"는 엉뚱한 사유가 나간다(고치는 방법이 다르다).
             if not any(qa_map[key].get("ground_truth") for key in matched_keys):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"골든셋의 매칭된 {len(matched_keys)}건에 정답"
+                    detail=f"QA셋의 매칭된 {len(matched_keys)}건에 정답"
                            "(ground_truth)이 없습니다. 정답이 없으면 답변이 맞았는지 "
                            "대조할 수 없어 종합점수를 낼 수 없고, 원인도 7종 중 3종만 "
                            "나옵니다 (gold_contexts 만으로는 검색축까지만 잽니다). "
-                           "골든셋에 정답 열을 채우거나 로그 줄에 ground_truth 를 "
+                           "QA셋에 정답 열을 채우거나 로그 줄에 ground_truth 를 "
                            "넣어 주세요.",
                 )
         qa = (qa_map, qa_errors)
     elif not has_inline_gt:
-        # 이 화면에는 골든셋 면제가 없다. 정답지가 없으면 신뢰도 축을 못 재고 종합점수
+        # 이 화면에는 QA셋 면제가 없다. 정답지가 없으면 신뢰도 축을 못 재고 종합점수
         # 자체가 안 나오는데(report_view 가 총점을 감춘다), 원인 7종 중 3종만 담긴
         # "점수 없는 진단서"를 받아가는 건 오해만 만든다. 정답지를 아직 못 만든 경우는
         # CLI 의 --no-golden 이 개발용 통로로 남아 있다.
-        # 로그에 정답이 인라인으로 들어 있으면 골든셋이 없는 게 아니다(CLI 와 같은 판정).
+        # 로그에 정답이 인라인으로 들어 있으면 QA셋이 없는 게 아니다(CLI 와 같은 판정).
         raise HTTPException(
             status_code=400,
-            detail="골든셋(질문·정답)이 필요합니다. 정답이 없으면 답변이 맞았는지 "
+            detail="QA셋(질문·정답)이 필요합니다. 정답이 없으면 답변이 맞았는지 "
                    "대조할 수 없어 종합점수를 낼 수 없고, 원인도 7종 중 3종만 "
                    "나옵니다. 로그 줄에 ground_truth 를 넣어 주셔도 됩니다 "
                    "(gold_contexts 만으로는 검색축까지만 재므로 통과하지 않습니다).",
