@@ -3,10 +3,10 @@ tools/measure_eval_sigma.py
 같은 config 를 반복 측정해 Eval 종합점수의 노이즈 σ 를 재고, 개선 마진을 제안한다. (#102)
 
 [왜 이 스크립트가 있나]
-  MIN_IMPROVEMENT_MARGIN(0.02) 은 측정에서 나온 값이 아니다(history.py 주석이 스스로
-  그렇게 적어 두고 σ 측정을 요구한다). 마진의 목적은 "노이즈로 우연히 오른 점수를 개선으로
-  확정하지 않는다" 인데, 노이즈가 마진보다 크면 judge 의 유지/롤백이 동전 던지기와
-  구분되지 않는다. 이 스크립트는 그 σ 를 재서 마진을 숫자로 바꾼다.
+  history.MIN_IMPROVEMENT_MARGIN 은 실측 σ 에 근거해야 하는 값이다(처음엔 측정 없이 정해졌고
+  history.py 주석이 스스로 σ 측정을 요구했다). 마진의 목적은 "노이즈로 우연히 오른 점수를
+  개선으로 확정하지 않는다" 인데, 노이즈가 마진보다 크면 judge 의 유지/롤백이 동전 던지기와
+  구분되지 않는다. 이 스크립트는 그 σ 를 재서 마진을 숫자로 바꾸고, 지금 상수와 비교한다.
 
 [설계 - 왜 이런 모양인가]
   ① 반복은 **별도 프로세스**로 돌린다. state.eval_cache 는 같은 config 를 cache hit 시켜
@@ -21,6 +21,12 @@ tools/measure_eval_sigma.py
   ④ 목표 N(운영 probe 수)으로의 환산은 **몬테카를로**로 한다. composite 은 조화평균이라
      비선형이고, 손으로 분산을 전파하면 틀린다. 측정한 관측치를 다시 뽑아 "가상의 N-probe
      실행"을 만들고 그 실행들이 얼마나 흩어지는지를 본다. 계산만이라 API 를 더 쓰지 않는다.
+     회차 R개를 그대로 되뽑으면 분산이 ÷R(모집단 추정)로 나와 √((R-1)/R) 만큼 작다. 세트
+     평균 기준으로 편차를 √(R/(R-1)) 배 늘려 불편추정(÷(R-1))에 맞춘다(R=5 면 약 12%).
+     **가정**: 회차 노이즈는 probe 마다 독립이다. probe 별로 회차를 따로 뽑으므로 한 회차
+     전체를 같이 밀어 올리는 성분(judge drift·재색인 차이)은 환산에서 0 으로 놓인다. 그런
+     성분이 있으면 N 을 늘려도 안 줄어들어 여기 σ 는 과소추정이다. 회차 5개로는 그 검정력이
+     약하니 measured.spread(실측 회차 간 폭)와 환산값을 같이 볼 것.
   ⑤ 마진은 σ 가 아니라 **σ_Δ** 로 정한다. 마진은 서로 다른 두 config 를 각각 한 번씩 잰
      차이에 걸리므로 기준은 독립 두 측정의 차이 분포다(독립이면 σ_Δ = √2·σ).
   ⑥ sweep 경로용으로 **best-of-T** 마진도 같이 낸다. internal sweep 은 후보 T개 중 최고를
@@ -37,7 +43,7 @@ tools/measure_eval_sigma.py
   · composite 이 아닌 축(예: chunk prescreener 의 span 포함률)에 걸리는 마진.
 
 [사용법]
-    # 배선 확인. LLM 호출 없음(답변 생성은 스텁, RAGAS 는 off)
+    # 배선 확인. API 호출 없음(답변 생성 스텁 · RAGAS off · 임베딩은 로컬 cpu 로 강제)
     python tools/measure_eval_sigma.py --dry-run --probes 5 --repeat 2 \
         --set KORQUAD_MAX_DOCS=2 --set KORQUAD_QA_LIMIT=12
 
@@ -57,6 +63,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import statistics
@@ -110,7 +117,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mc-pairs", type=int, default=120,
                    help="몬테카를로: 세트당 실행 쌍 개수 (기본 120)")
     p.add_argument("--dry-run", action="store_true",
-                   help="LLM 호출 없이 배선만 확인(답변 생성 스텁 + RAGAS off)")
+                   help="API 호출 없이 배선만 확인(답변 생성 스텁 + RAGAS off + 임베딩 로컬 cpu). "
+                        "--embed 를 따로 주면 그 값이 이긴다 - openrouter 면 임베딩은 과금된다")
     p.add_argument("--yes", action="store_true",
                    help="비용 확인 프롬프트를 건너뛴다(비대화형 실행에 필요)")
     p.add_argument("--cost-per-probe", type=float, default=0.006,
@@ -473,6 +481,13 @@ def aggregate(outdir: Path, args) -> dict:
     # 환산 목표는 **운영 probe 수**다. 부분표집한 M 을 기본값으로 쓰면 "25개짜리 실행의 σ"가
     # 나와서, 100개로 도는 실제 판정에는 과대평가된 마진을 물리게 된다.
     target_n = args.target_n or meta.get("pool_size") or len(pids)
+    # 되뽑기 σ 보정. rng.choice(pool) 은 R개 관측을 그대로 되뽑으므로 그 분산은 ÷R(모집단
+    # 추정)이고, 불편추정(÷(R-1)) 대비 √((R-1)/R) 만큼 작다(R=5 면 약 11%). 최종 σ 에 곱하는
+    # 대신 세트 안에서 편차를 세트 평균 기준으로 √(R/(R-1)) 배 늘린다 - composite 은 비선형이라
+    # 정확히 그 비율은 아니지만, 양자화·best-of 처럼 값 자체를 보는 통계에도 같은 보정이
+    # 들어가려면 값 단계에서 해야 한다.
+    repeats = len(runs)
+    inflate = math.sqrt(repeats / (repeats - 1))
     rng = Random(args.seed)
     deltas: list[float] = []
     q_deltas: list[float] = []
@@ -485,19 +500,31 @@ def aggregate(outdir: Path, args) -> dict:
         def _one_run() -> float | None:
             return _composite([rng.choice(pool) for pool in pools])
 
-        values = []
+        # 세트 안의 실행을 전부 먼저 뽑고(원값), 세트 평균이 정해진 뒤 편차를 늘린다.
+        pairs: list[tuple[float, float, list[float]]] = []
         for _ in range(args.mc_pairs):
             a, b = _one_run(), _one_run()
             if a is None or b is None:
                 continue
-            values.extend((a, b))
-            deltas.append(a - b)
-            q_deltas.append(_quantized(a) - _quantized(b))
             # sweep 경로: 같은 config 로 만든 후보 T개 중 최고 vs baseline.
             # 전부 baseline 과 같은 config 이므로 진짜 개선은 0 이고, 여기서 나오는
             # 상승폭은 전부 노이즈다 - 그 분포가 sweep 이 통과시키면 안 될 값의 분포다.
-            candidates = [a] + [v for v in (_one_run() for _ in range(max(BEST_OF_T) - 1))
-                                if v is not None]
+            extra = [v for v in (_one_run() for _ in range(max(BEST_OF_T) - 1)) if v is not None]
+            pairs.append((a, b, extra))
+        if not pairs:
+            continue
+        center = statistics.fmean(v for a, b, _ in pairs for v in (a, b))
+
+        def _adj(v: float) -> float:
+            return center + (v - center) * inflate
+
+        values = []
+        for a, b, extra in pairs:
+            a, b = _adj(a), _adj(b)
+            values.extend((a, b))
+            deltas.append(a - b)
+            q_deltas.append(_quantized(a) - _quantized(b))
+            candidates = [a] + [_adj(v) for v in extra]
             for t in BEST_OF_T:
                 if len(candidates) >= t:
                     best_of[t].append(max(candidates[:t]) - b)
@@ -518,6 +545,8 @@ def aggregate(outdir: Path, args) -> dict:
         for t in BEST_OF_T if best_of[t]
     }
 
+    from agents.optimize.history import MIN_IMPROVEMENT_MARGIN
+
     report = {
         "measured": {
             "repeats": len(runs),
@@ -533,6 +562,9 @@ def aggregate(outdir: Path, args) -> dict:
             "sigma_delta": round(sigma_delta, 5),
             "p95_abs_delta": round(p95, 5),
             "p95_abs_delta_quantized": round(q_p95, 5),
+            "resample_bias_correction": round(inflate, 4),   # √(R/(R-1)), 편차에 곱한 값
+            "assumes": "회차 노이즈가 probe 간 독립(회차 공통 성분=0). "
+                       "그런 성분이 있으면 N 을 늘려도 안 줄어들어 과소추정이다",
         },
         "margin": {
             "k": args.k,
@@ -540,7 +572,7 @@ def aggregate(outdir: Path, args) -> dict:
             "suggested": _to_grid(raw_margin),          # judge(쌍대비교)용
             "suggested_display": round(_to_grid(raw_margin) * 100, 1),
             "sweep_best_of_t": sweep,                    # internal sweep(후보 T개)용
-            "current": 0.02,
+            "current": MIN_IMPROVEMENT_MARGIN,           # 하드코딩하면 #143 머지 뒤 거짓이 된다
         },
         "conditions": {
             "eval_mode": runs[0].get("eval_mode"),
@@ -576,6 +608,8 @@ def _print_report(rep: dict, outdir: Path) -> None:
     print(f"            σ_Δ (두 측정의 차이)  {e['sigma_delta']:.4f}")
     print(f"            |Δ| 95 분위          {e['p95_abs_delta']:.4f}"
           f"  (판정 눈금 반영 {e['p95_abs_delta_quantized']:.4f})")
+    print(f"            되뽑기 보정 ×{e['resample_bias_correction']:.3f} 반영"
+          f" · 가정: {e['assumes']}")
     print(f"\n  마진    : judge(1:1 비교)  k={g['k']} → max(k·σ_Δ, P95) = {g['raw']:.4f}"
           f" → 제안 {g['suggested']:.2f} (표시 {g['suggested_display']}점)")
     if g["sweep_best_of_t"]:
@@ -584,7 +618,7 @@ def _print_report(rep: dict, outdir: Path) -> None:
         print(f"            sweep(후보 중 최고) {detail}")
         print(f"            ↑ 후보가 많을수록 최고값이 위로 치우친다(승자의 저주). "
               f"두 경로가 한 상수를 공유한다면 더 큰 쪽이 기준이다")
-    print(f"            현재 값 {g['current']:.2f}"
+    print(f"            현재 값(history.MIN_IMPROVEMENT_MARGIN) {g['current']:.2f}"
           f" → {'올려야 한다' if g['suggested'] > g['current'] else '유지해도 된다'}")
     print(f"\n  ⚠ 이 값은 위 조건(코퍼스·QA셋·probe 수·judge 모델)에 딸린 값이다.")
     print(f"  상세: {outdir / 'sigma_report.json'}")
@@ -626,6 +660,19 @@ def main() -> int:
     for item in args.overrides:
         passthrough += ["--set", item]
     if args.dry_run:
+        # dry-run 은 무료여야 한다. 답변 생성·RAGAS 는 자식이 끄지만, 임베딩은 기본 provider 가
+        # openrouter 라(qdrant_store.resolve_embedding_provider) pool 생성과 회차 실행의
+        # 색인·질의 임베딩이 그대로 과금된다. 명시하지 않았으면 로컬(cpu)로 내린다.
+        if not args.embed:
+            args.embed = "cpu"
+            passthrough += ["--embed", "cpu"]
+        if "openrouter" in (args.embed, args.query_embed):
+            print("[σ] ⚠ --dry-run 인데 임베딩이 openrouter 다 - 색인·질의 임베딩은 과금된다",
+                  flush=True)
+        else:
+            query = f" (질의 {args.query_embed})" if args.query_embed else ""
+            print(f"[σ] dry-run: 답변 생성 스텁 · RAGAS off · 임베딩 {args.embed}{query}"
+                  f" - API 호출 없음", flush=True)
         passthrough.append("--dry-run")
 
     # 비용 확인은 pool 생성(인덱스 구축=임베딩 과금)보다 **먼저** 한다.
@@ -639,10 +686,16 @@ def main() -> int:
     pool = _load_probe_file(pool_path)
 
     # ② 층화 부분표집
+    # 우선순위: 이전 회차 덤프(이 측정에서 직접 관측) > 로그 > probe 속성. 로그는 이전 회차가
+    # 모르는 probe 만 채우므로, meta 의 labels_source 는 실제로 기여한 출처만 적는다.
     labels = _labels_from_previous(outdir)
+    label_sources = ["previous_runs"] if labels else []
     if args.labels_from_log:
-        for pid, label in _labels_from_log(Path(args.labels_from_log)).items():
-            labels.setdefault(pid, label)
+        from_log = {pid: label for pid, label in
+                    _labels_from_log(Path(args.labels_from_log)).items() if pid not in labels}
+        labels.update(from_log)
+        if from_log:
+            label_sources.append("log")
     subset = _stratified_sample(pool, args.probes, labels, args.seed)
     subset_path = outdir / SUBSET_NAME
     subset_path.write_text(
@@ -657,8 +710,7 @@ def main() -> int:
         "subset_size": len(subset),
         "repeat": args.repeat,
         "strata": strata,
-        "labels_source": ("log" if args.labels_from_log else
-                          ("previous_runs" if labels else "probe_attrs")),
+        "labels_source": "+".join(label_sources) or "probe_attrs",
         "dry_run": args.dry_run,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[σ] pool {len(pool)}개 → 부분표집 {len(subset)}개 "
