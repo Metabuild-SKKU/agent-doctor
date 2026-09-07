@@ -22,6 +22,24 @@ RAGEC 377건은 *그들* RAG 시스템이 실패한 질문이다. 검색기·생
 질문에서 성공할 수 있고, 그건 진단 오류가 아니다. 그래서 덤프에 **성공/실패를 함께** 싣고
 채점기가 따로 센다(`score_ragec.score` 의 we_passed).
 
+## 구간 실행 — 중간에 죽어도 앞 구간을 다시 사지 않는다
+
+377건 1회가 약 100분·$5 인데, findings 는 Eval 이 **전부 끝난 뒤에** 쓰인다. 350번째에서
+OOM 이 나면 그때까지의 비용이 전액 재지출이다. 그래서 구간으로 나눠 돌리고 합친다:
+
+    python tools/run_ragec_validation.py --limit 100
+    python tools/run_ragec_validation.py --offset 100 --limit 100 --append
+    python tools/run_ragec_validation.py --offset 200 --append        # 나머지 전부
+
+`--append` 는 기존 findings.jsonl 에 이번 구간을 **qa_id 기준으로 병합**한다(같은 qa_id 는
+이번 실행이 이긴다). 라벨 시트·채점은 병합된 전체로 다시 만든다. `--offset` 을 붙였는데
+`--append` 가 없고 findings 가 이미 있으면 **돌기 전에** 멈춘다 — 덮어쓰면 앞 구간이
+사라지고, 그걸 파이프라인이 끝난 뒤에 알면 늦다.
+
+Eval 내부 체크포인트(probe 단위 증분 기록)는 두지 않았다 — 리포트가 Eval 끝에 한 번에
+만들어지는 구조라 STEP2~4 루프에 손을 대야 하고, 구간 실행으로 같은 목적을 훨씬 싸게
+얻는다.
+
 ## 내는 것
 
     output/ragec/findings.jsonl   probe 별 {qa_id, labels, failed}
@@ -56,6 +74,34 @@ def _load_env() -> None:
         pass
 
 
+def _describe_range(offset: int, limit: int) -> str:
+    if not offset and not limit:
+        return "전체"
+    if not limit:
+        return f"{offset + 1}번째부터 끝까지"
+    return f"{offset + 1}~{offset + limit}번째" if offset else f"상한 {limit}"
+
+
+def overwrite_guard(offset: int, append: bool, findings_path: pathlib.Path) -> str | None:
+    """구간 실행이 앞 구간 결과를 덮어쓰려 하면 그 이유를 돌려준다(None = 안전).
+
+    구간 실행인데 병합하지 않으면 이미 지불한 앞 구간 결과를 덮어쓰게 된다. offset 0 은
+    처음부터 다시 도는 것이므로 덮어써도 된다(그게 의도다).
+    """
+    if offset > 0 and not append and findings_path.exists():
+        return (f"--offset 구간 실행인데 --append 가 없습니다. {findings_path} 를 덮어쓰면 "
+                f"앞 구간 결과가 사라집니다.")
+    return None
+
+
+def merge_findings(previous: list[dict], fresh: list[dict]) -> list[dict]:
+    """기존 덤프에 이번 구간을 qa_id 기준으로 병합한다. 같은 qa_id 는 **이번 실행이 이긴다**
+    (죽은 구간을 다시 돌린 경우라 최신이 맞다). 기존 순서를 지키고 새 probe 는 뒤에 붙인다."""
+    by_id = {str(r["qa_id"]): r for r in fresh}
+    merged = [by_id.pop(str(r["qa_id"]), r) for r in previous]
+    return merged + [r for r in fresh if str(r["qa_id"]) in by_id]
+
+
 def main() -> int:
     import argparse
 
@@ -70,6 +116,11 @@ def main() -> int:
         description="RAGEC 정답지로 진단 유효성 측정 (실행 + 채점)")
     parser.add_argument("--limit", type=int, default=0,
                         help="probe 상한(0=전체 377). 비용을 아껴 배선만 확인할 때 쓴다")
+    parser.add_argument("--offset", type=int, default=0,
+                        help="앞 N개 probe 를 건너뛴다. --limit 과 함께 구간 실행용")
+    parser.add_argument("--append", action="store_true",
+                        help="기존 findings.jsonl 에 이번 결과를 qa_id 기준으로 병합한다"
+                             "(구간 실행을 이어 붙일 때)")
     # 리랭커 시나리오. baseline(off)만 돌리면 리랭커 계열 라벨 4개가 **원리적으로 발화하지
     # 못해** 32개 중 절반만 검증된다(실측: E7 0/22 · E8 0/13 이 전부 미측정 탓이었다).
     # config 를 코드에서 바꾸지 않고 플래그로 여는 이유는, 어느 시나리오의 수치인지 로그와
@@ -91,6 +142,15 @@ def main() -> int:
         print("       tools/build_ragec_dataset.py 로 먼저 만드세요.", file=sys.stderr)
         return 1
 
+    findings_path = OUT_DIR / "findings.jsonl"
+    refusal = overwrite_guard(args.offset, args.append, findings_path)
+    if refusal:
+        # 파이프라인이 돌기 **전에** 멈춘다 — 100분 뒤에 알면 늦다.
+        print(f"[중단] {refusal}", file=sys.stderr)
+        print("       이어 붙이려면 --append, 새로 시작하려면 파일을 옮기거나 지우세요.",
+              file=sys.stderr)
+        return 1
+
     # 이 검증의 설정을 여기서 확정한다. .env 가 무엇이든 덮어쓴다 — 절반만 맞은 설정으로
     # 도는 것이 가장 위험하다(비용은 나가고 결과는 못 쓴다).
     os.environ["SOURCE_TYPE"] = "korquad"          # 스키마가 같아 로더를 재사용한다
@@ -99,6 +159,7 @@ def main() -> int:
     os.environ["EVAL_TAXONOMY_QA"] = QA
     os.environ["KORQUAD_MAX_DOCS"] = "0"           # 108개 전부
     os.environ["KORQUAD_QA_LIMIT"] = str(max(0, args.limit))
+    os.environ["KORQUAD_QA_OFFSET"] = str(max(0, args.offset))
     # setdefault 가 아니라 **직접 대입**이다. _load_env() 가 override=True 로 .env 를 먼저
     # 실었기 때문에, setdefault 로 두면 팀원 .env 의 EVAL_MODE=fast 나
     # RAG_ANSWER_LANGUAGE=ko 가 조용히 이긴다 — 이 스크립트가 막겠다고 선언한
@@ -137,8 +198,7 @@ def main() -> int:
     print(f"[RAGEC] {describe_embedding_route()}")
     if applied:
         print(f"[RAGEC] 임베딩 설정 적용: {applied}")
-    print(f"[RAGEC] 코퍼스 {CORPUS} · QA {QA}"
-          f"{f' (상한 {args.limit})' if args.limit else ' (전체)'}")
+    print(f"[RAGEC] 코퍼스 {CORPUS} · QA {QA} ({_describe_range(args.offset, args.limit)})")
     if overridden:
         # .env 와 달라진 값은 반드시 남긴다 — 나중에 "이 수치가 어떤 설정에서 나왔나" 를
         # 로그만 보고 알 수 있어야 한다.
@@ -171,11 +231,16 @@ def main() -> int:
     # probe 객체를 그대로 넘겨 질문·정답 원문까지 싣는다(probe_id 만 넘기면 대조 출력에서
     # 라벨만 보이고, 진단이 틀린 건지 데이터가 틀린 건지 갈리지 않는다).
     rows = findings_from_report(state.report, state.probes)
-    findings_path = OUT_DIR / "findings.jsonl"
+    fresh = len(rows)
+    print()
+    if args.append and findings_path.exists():
+        previous = _read_jsonl(str(findings_path))
+        rows = merge_findings(previous, rows)
+        print(f"findings 병합: 기존 {len(previous)}건 + 이번 {fresh}건 → {len(rows)}건")
     with open(findings_path, "w", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    print(f"\nfindings → {findings_path}  ({len(rows)}건)")
+    print(f"findings → {findings_path}  ({len(rows)}건)")
 
     # 사람이 채울 라벨 시트. RAGEC 라벨은 *그들* 시스템의 관측을 보고 붙인 것이라 우리
     # 관측에는 성립하지 않을 수 있다(실측 qa_id 2205: 그쪽은 '검색 실패' 인데 우리는
@@ -185,8 +250,10 @@ def main() -> int:
     sheet_path = OUT_DIR / "label_sheet.json"
     sample = stratified_sample(rows, args.label_sample)
     if sample:
-        write_sheet(sample, sheet_path)
-        print(f"라벨 시트 → {sheet_path}  ({len(sample)}건)")
+        # 이미 채워진 시트가 있으면 write_sheet 가 옆 파일에 쓰고 그 경로를 돌려준다 —
+        # 구간 실행을 이어 붙이는 동안 누가 앞 구간을 라벨링하고 있었을 수 있다.
+        written = write_sheet(sample, sheet_path)
+        print(f"라벨 시트 → {written}  ({len(sample)}건)")
 
     # **probe 별 우리 진단을 콘솔에 찍지 않는다.** 소규모 팀에서는 실행자가 라벨러를 겸하는데,
     # 여기서 qa_id별 진단을 화면에 뿌리면 시트를 열기도 전에 답을 본 상태가 되어 시트에서

@@ -648,6 +648,7 @@ EVAL_MODE=deep EVAL_ENABLE_LLM=1 python run_local_pipeline.py  # 생성·RAGAS �
 | `EVAL_TAXONOMY_QA` | `data/qa_pairs.jsonl` | taxonomy qa 파일 경로 |
 | `KORQUAD_MAX_DOCS` | (스모크 20) | 앞 N개 문서만. 0/미설정=전체. corpus·qa 동일 규칙 |
 | `KORQUAD_QA_LIMIT` | (스모크 50) | qa 개수 상한. 0/미설정=전체 |
+| `KORQUAD_QA_OFFSET` | (0) | 앞 N개 qa 를 건너뜀. LIMIT 과 함께 구간 실행용(`tools/run_ragec_validation.py --offset`) |
 | `EVAL_MODE` / `EVAL_ENABLE_LLM` | `fast` / off | 진단 깊이·RAGAS. deep 이상+LLM 이면 생성·RAGAS 채점(**API 비용**) |
 
 > 생성 채점(token F1)은 LLM 답변 생성이 있어야 의미가 있다 — LLM을 끄면 추출식 폴백이

@@ -177,15 +177,23 @@ def _gold_spans_of(qa: dict, doc_id: str, span_of: dict) -> list[dict]:
 
 
 def load_taxonomy_probes(qa_path: str = DEFAULT_QA, corpus_path: str = DEFAULT_CORPUS,
-                         *, limit=None, max_docs=None) -> list[Probe]:
-    """qa_pairs.jsonl → taxonomy Probe(gold_spans 포함). 재청킹 후 resync 로 gold 확정."""
+                         *, limit=None, max_docs=None, offset: int = 0) -> list[Probe]:
+    """qa_pairs.jsonl → taxonomy Probe(gold_spans 포함). 재청킹 후 resync 로 gold 확정.
+
+    offset 은 (문서 필터를 통과한) qa 중 **앞 N개를 건너뛴다.** limit 은 그 뒤부터 센다 —
+    `offset=100, limit=100` 이 101~200번째다. 구간 실행용(korquad_qa_offset 참고).
+    """
     keep = _selected_doc_ids(corpus_path, max_docs)
     span_of = _chunk_span_index(corpus_path, keep)
 
     probes: list[Probe] = []
+    skipped = 0
     for o in _iter_jsonl(qa_path):
         did = o.get("doc_id")
         if keep is not None and did not in keep:
+            continue
+        if skipped < (offset or 0):
+            skipped += 1
             continue
         gold_spans = _gold_spans_of(o, did, span_of)
         probes.append(Probe(

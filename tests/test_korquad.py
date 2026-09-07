@@ -151,3 +151,24 @@ def test_missing_file_raises_friendly(tmp_path):
     import pytest
     with pytest.raises(FileNotFoundError, match="data/README.md"):
         reconstruct_documents(str(tmp_path / "nope.jsonl"))
+
+
+def test_taxonomy_qa_offset_skips_the_front(tmp_path):
+    """구간 실행: offset 은 문서 필터를 통과한 qa 중 앞 N개를 건너뛰고, limit 은 그 뒤부터 센다."""
+    corpus_rows = [
+        {"doc_id": "d1", "chunk_id": "d1_0", "text": "x", "char_start": 0, "char_end": 1},
+        {"doc_id": "d2", "chunk_id": "d2_0", "text": "y", "char_start": 0, "char_end": 1},
+    ]
+    qa_rows = [
+        {"qa_id": "1", "question": "Q1", "answer_text": "A", "doc_id": "d1", "positive_chunk_ids": ["d1_0"]},
+        {"qa_id": "2", "question": "Q2", "answer_text": "B", "doc_id": "d2", "positive_chunk_ids": ["d2_0"]},
+        {"qa_id": "3", "question": "Q3", "answer_text": "C", "doc_id": "d1", "positive_chunk_ids": ["d1_0"]},
+    ]
+    corpus, qa = _corpus_qa(tmp_path, corpus_rows, qa_rows)
+    ids = lambda probes: [p.probe_id for p in probes]
+    assert ids(load_taxonomy_probes(qa, corpus, offset=1)) == ["probe_qa_2", "probe_qa_3"]
+    assert ids(load_taxonomy_probes(qa, corpus, offset=1, limit=1)) == ["probe_qa_2"]
+    assert ids(load_taxonomy_probes(qa, corpus, offset=5)) == []
+    # 문서 필터 뒤에 센다 — max_docs=1 이면 d1 의 qa(1·3)만 남고 그중 앞 1개를 건너뛴다.
+    assert ids(load_taxonomy_probes(qa, corpus, max_docs=1, offset=1)) == ["probe_qa_3"]
+    assert ids(load_taxonomy_probes(qa, corpus, offset=0)) == ids(load_taxonomy_probes(qa, corpus))

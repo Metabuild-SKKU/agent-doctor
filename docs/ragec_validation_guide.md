@@ -72,6 +72,9 @@ output/ragec/logs/run_*.log     실행 로그 (파이프라인 스모크 로그�
 | 옵션 | 뜻 |
 |---|---|
 | `--limit N` | probe 상한 (0=전체 377) |
+| `--offset N` | 앞 N개 probe 를 건너뜀 (구간 실행) |
+| `--append` | 기존 `findings.jsonl`에 qa_id 기준으로 병합 (구간 실행을 이어 붙일 때) |
+| `--reranker` | 리랭커를 켜고 실행 (시나리오 비교용, 아래 참고) |
 | `--label-sample N` | 라벨 시트 표본 수 (기본 60, 0=전체) |
 | `--embed {openrouter,gpu,cpu}` | 임베딩 계산 위치 |
 | `--rerank {openrouter,gpu,cpu}` | 리랭크 계산 위치 |
@@ -79,6 +82,20 @@ output/ragec/logs/run_*.log     실행 로그 (파이프라인 스모크 로그�
 `--embed`는 생략해도 `.env`의 `INDEX_EMBED_PROVIDER`를 따릅니다.
 
 > **메모리 주의.** 로컬 임베딩 모델이 작업자당 약 2GB를 점유합니다. 램 8GB 환경에서는 `EVAL_LLM_CONCURRENCY=2` 이하로 두세요. 이보다 높으면 실행 중 중단됩니다(실측).
+
+### 중간에 죽으면 — 구간 실행
+
+`findings.jsonl`은 Eval이 **전부 끝난 뒤에** 쓰입니다. 377건을 한 번에 돌리다 350번째에서 죽으면 그때까지의 비용(약 $5·100분)이 전액 재지출입니다. 처음부터 구간으로 나눠 돌리면 죽은 구간만 다시 돌리면 됩니다.
+
+```powershell
+python tools/run_ragec_validation.py --limit 100
+python tools/run_ragec_validation.py --offset 100 --limit 100 --append
+python tools/run_ragec_validation.py --offset 200 --append          # 나머지 전부
+```
+
+- `--append`는 같은 `qa_id`를 이번 실행으로 갈아끼우고 나머지는 유지합니다. 죽은 구간을 같은 `--offset`으로 다시 돌리면 됩니다.
+- `--offset`을 붙였는데 `--append`가 없고 `findings.jsonl`이 이미 있으면 **파이프라인이 돌기 전에** 멈춥니다. 덮어쓰면 앞 구간이 사라지기 때문입니다.
+- 라벨 시트와 RAGEC 대조는 매번 **병합된 전체**로 다시 만듭니다. 이미 채우기 시작한 `label_sheet.json`은 덮어쓰지 않고 `label_sheet.new.json`에 씁니다.
 
 ---
 
@@ -177,6 +194,8 @@ qa_id 2205
 ```powershell
 python tools/make_label_sheet.py --limit 80 --seed 1
 ```
+
+기존 시트에 이미 채운 항목이 있으면 덮어쓰지 않고 `label_sheet.new.json`에 씁니다(라벨링 몇 시간이 사라지지 않게). 정말 새로 시작하려면 `--force`.
 
 표본은 우리 예측 라벨 기준으로 **층화 추출**됩니다. 무작위로 뽑으면 한 라벨로 쏠려(실측: 10건 중 5건이 `retrieval_low_rank`) 희귀 라벨이 표본에 아예 안 들어옵니다.
 
@@ -319,7 +338,8 @@ python tools/run_ragec_validation.py --rerank openrouter
 | 답변이 질문과 다른 언어로 나옴 | `RAG_ANSWER_LANGUAGE=match` 확인 (스크립트가 자동 설정) |
 | `label_sheet.json`에 지표가 비어 있음 | 구버전 덤프. 파이프라인 재실행 필요 |
 | 채점기가 JSON 오류를 냄 | 줄 번호를 알려줍니다. 값은 큰따옴표, 마지막 항목 뒤 쉼표 금지 |
-| 정확도가 전부 0 | 실패 probe가 없거나 라벨 표기 오타. `--detail` 출력으로 확인 |
+| 정확도가 전부 0 | 실패 probe가 없거나 라벨 표기 오타. 채점기의 probe별 대조(기본 출력)로 확인 |
+| 실행이 350번째쯤에서 죽음 | 구간 실행으로 나눠 돌리기 (위 "중간에 죽으면") |
 | 실행이 KorQuAD 설정으로 돎 | 스크립트가 환경변수를 고정하므로 발생하지 않아야 함. 로그 첫 줄 확인 |
 
 ---

@@ -252,6 +252,15 @@ def korquad_qa_limit() -> Optional[int]:
     return _pos_int_env("KORQUAD_QA_LIMIT")
 
 
+def korquad_qa_offset() -> int:
+    """KORQUAD_QA_OFFSET — 앞 N개 qa 를 건너뛴다(0/미설정=처음부터). Eval 전용.
+
+    LIMIT 과 짝을 이뤄 **구간 실행**을 연다: 377건을 한 번에 돌리다 350번째에서 죽으면
+    그때까지의 비용이 전액 재지출인데, 구간으로 나눠 돌리면 죽은 구간만 다시 돌리면 된다
+    (tools/run_ragec_validation.py --offset/--append)."""
+    return _pos_int_env("KORQUAD_QA_OFFSET") or 0
+
+
 def llm_eval_enabled() -> bool:
     """STEP3-2 RAGAS(LLM-as-Judge) 진단 활성화 여부. 기본 꺼짐(EVAL_ENABLE_LLM=1/true/yes/on).
     실제 실행은 signals 의 RAGAS 신호(_faith 등)가 `EVAL_MODE≥deep` 게이트와 AND 로 정한다."""
