@@ -192,5 +192,41 @@ class CodeFenceIsWiredIntoChatJsonTest(unittest.TestCase):
         self.assertEqual(self._chat_json('```json\nnot json at all\n```'), {})
 
 
+
+class CodeFenceEdgeTest(unittest.TestCase):
+    """3차 리뷰에서 남은 형태 — 닫는 펜스 **뒤 설명 안에** 펜스가 또 있는 경우."""
+
+    def test_fence_inside_the_trailing_explanation_is_not_swallowed(self):
+        """마지막 ``` 를 탐욕으로 잡으면 설명의 펜스까지 본문에 딸려온다.
+        닫는 펜스는 줄 시작에 있는 것만 인정한다."""
+        raw = '```json\n{"a":1}\n```\n설명: ```코드```'
+        self.assertEqual(_strip_code_fence(raw), '{"a":1}')
+
+    def test_crlf_fences_are_handled(self):
+        self.assertEqual(_strip_code_fence('```json\r\n{"a":1}\r\n```'), '{"a":1}')
+
+    def test_multi_line_body_survives(self):
+        self.assertEqual(_strip_code_fence('```json\n{\n  "a": 1\n}\n```'), '{\n  "a": 1\n}')
+
+    def test_helper_is_the_shared_core_implementation(self):
+        """eval 과 index 가 같은 구현을 써야 한쪽만 고쳐지는 일이 없다."""
+        from core.llm_clients import strip_code_fence
+        self.assertIs(_strip_code_fence, strip_code_fence)
+
+
+class GraphIndexStripsTheFenceTooTest(unittest.TestCase):
+    """같은 실패 모드가 index 의 entity 추출에도 있었다 — json_mode 를 무시하고 펜스로
+    응답하면 json.loads 가 죽고 _extract 가 삼켜 그 청크만 keyword 폴백으로 조용히 강등됐다."""
+
+    def test_fenced_entity_json_is_parsed(self):
+        from unittest.mock import patch
+        from agents.index import graph_index
+        fenced = ('```json\n{"entities": ["Qdrant", "BM25"], '
+                  '"relations": [{"source": "Qdrant", "target": "BM25", "type": "hybrid"}]}\n```')
+        with patch.object(graph_index, "openai_chat", return_value=fenced):
+            entities, relations = graph_index._llm_entities("text", "model")
+        self.assertEqual(entities, ["Qdrant", "BM25"])
+        self.assertEqual(relations[0]["type"], "hybrid")
+
 if __name__ == "__main__":
     unittest.main()
