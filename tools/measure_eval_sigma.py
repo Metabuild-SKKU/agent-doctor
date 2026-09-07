@@ -164,18 +164,24 @@ def _state_from_env():
     return state
 
 
-def _stub_generation() -> None:
-    """--dry-run 전용: 답변 생성 LLM 만 스텁으로 바꾼다.
+def _stub_llm() -> None:
+    """--dry-run 전용: 이 프로세스에서 나갈 수 있는 LLM 호출을 전부 끊는다.
 
-    EVAL_ENABLE_LLM=0 은 RAGAS 만 막고 STEP2 답변 생성은 그대로 API 를 태운다.
-    배선 확인에 돈을 쓰지 않으려면 여기까지 끊어야 한다."""
+    EVAL_ENABLE_LLM=0 은 RAGAS 만 막는다. 나머지 두 출구를 여기서 막는다.
+      · STEP2 답변 생성(generate_answer) → 스텁.
+      · probe 합성(probe_gen: ragas 4분면·DataMorgana·단일홉·bad_gold 재생성)은 전부
+        llm_provider.has_key() 로 게이트된다 → False 로 고정하면 휴리스틱 폴백으로 간다.
+        pool 생성이 taxonomy(korquad) 소스가 아닐 때 여기가 유일한 과금 출구다.
+    임베딩은 자식이 아니라 부모(main)가 --embed cpu 로 내린다."""
     import agents.eval.agent as eval_agent
+    from agents.eval import llm_provider
 
     def _fake(question: str, contexts: list[str], **kwargs) -> str:
         head = (contexts[0][:200] if contexts else "")
         return f"[dry-run] {question} :: {head}"
 
     eval_agent.generate_answer = _fake
+    llm_provider.has_key = lambda: False
 
 
 def _run_pipeline(dry_run: bool):
@@ -188,7 +194,7 @@ def _run_pipeline(dry_run: bool):
     if dry_run:
         os.environ["EVAL_ENABLE_LLM"] = "0"
         os.environ["EVAL_MODE"] = "fast"
-        _stub_generation()
+        _stub_llm()
 
     # probe 별 원자료를 꺼내는 유일한 지점. DiagnosticReport 에는 probe 별 수치가 남지
     # 않으므로(집계만 남는다) 점수 재료가 살아 있는 compute_composite 호출을 가로챈다.
@@ -259,12 +265,17 @@ def _worker(args) -> int:
 
 
 def _build_pool(args) -> int:
-    """probe pool 을 만든다(LLM 없이 파일 로드+gold 재동기화 경로). 부분표집의 모집단."""
+    """probe pool 을 만든다. 부분표집의 모집단.
+
+    taxonomy(korquad) 소스면 파일 로드+gold 재동기화라 LLM 이 없다. auto 소스는 probe 합성에
+    LLM 이 갈 수 있으므로 비용 확인(_confirm_cost)이 이보다 먼저 온다."""
     from agents.eval.probe_gen import generate_probes
     from agents.eval.probe_store import save_probes
     from agents.ingest.agent import run as ingest_run
     from agents.index.agent import run as index_run
 
+    if args.dry_run:
+        _stub_llm()   # taxonomy 소스가 아니면 probe 합성이 LLM 을 탄다
     state = _state_from_env()
     for name, fn in (("Ingest", ingest_run), ("Index", index_run)):
         state = fn(state)
