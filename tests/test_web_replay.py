@@ -258,17 +258,35 @@ class RejectedUploadCleanupTests(_ReplayClient):
 
 class BackgroundRunTests(_ReplayClient):
     def _run_background(self, diagnose_return):
-        """_run_replay_background 를 동기로 한 번 돌리고 run 상태를 돌려준다."""
+        """_run_replay_background 를 동기로 한 번 돌리고 run 상태를 돌려준다.
+
+        diagnose_return 이 호출 가능하면 side_effect 로 넘긴다 - 진단이 도는
+        그 순간의 환경변수처럼 "실행 중" 상태를 봐야 하는 테스트가 쓴다.
+        """
         run_id = "test-replay-run"
         run_registry.create(run_id, depth="full", upload_path="x.jsonl",
                             created_at=0.0, mode="replay")
         log_path = Path(self._tmp.name) / "log.jsonl"
         log_path.write_text(_log_lines(2), encoding="utf-8")
 
-        with patch.object(web_api, "diagnose_external_log", return_value=diagnose_return), \
+        stub = ({"side_effect": diagnose_return} if callable(diagnose_return)
+                else {"return_value": diagnose_return})
+        with patch.object(web_api, "diagnose_external_log", **stub), \
              patch("core.run_logger.setup_run_logging"):
             web_api._run_replay_background(run_id, log_path, None)
         return run_registry.get(run_id)
+
+    def test_replay_does_not_leak_eval_mode_to_the_next_run(self):
+        """리플레이는 EVAL_MODE 를 "deep" 으로 고정해 돈다. 그 값이 프로세스에
+        남으면 이후 파이프라인 실행이 effective_eval_mode 에서 그것을 보고 조용히
+        심층으로 돈다 - .env 에 EVAL_MODE 가 없는 배포에서 실제로 그렇게 된다.
+        run 이 끝나면 원래 값으로 돌아와야 한다."""
+        report = SimpleNamespace(findings=[], findings_summary={"confirmed": 0})
+        with patch.dict(os.environ, {"EVAL_MODE": "standard", "EVAL_ENABLE_LLM": "0"}):
+            run = self._run_background((report, {"tier": "triad", "records": 2}, []))
+            self.assertEqual(run.status, "done")
+            self.assertEqual(os.environ["EVAL_MODE"], "standard")
+            self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "0")
 
     def test_missing_context_tier_becomes_error(self):
         """qa_only(컨텍스트 없음)는 리포트가 안 나온다 — 빈 진단서를 내보내지 않고
@@ -312,11 +330,24 @@ class BackgroundRunTests(_ReplayClient):
 
     def test_forces_deep_llm_regardless_of_form_depth(self):
         """리플레이는 깊이 선택이 없다 — LLM 을 끄면 생성축 라벨 4종이 통째로 죽어
-        '점수는 낮은데 소견 0건' 인 진단서가 나간다."""
+        '점수는 낮은데 소견 0건' 인 진단서가 나간다.
+
+        고정이 지켜져야 하는 곳은 진단이 도는 그 순간이다. 예전에는 run 이 끝난
+        뒤의 os.environ 을 봤는데, 그건 값이 프로세스에 남는다는 사실에 기댄
+        관측이었다 - 이제 _eval_env 가 원래 값으로 되돌린다(EvalEnvTests 참고).
+        """
+        seen = {}
+
+        def fake_diagnose(path, **kwargs):
+            seen["mode"] = os.environ.get("EVAL_MODE")
+            seen["llm"] = os.environ.get("EVAL_ENABLE_LLM")
+            return (None, {"tier": "none"}, [])
+
         with patch.dict(os.environ, {"EVAL_MODE": "fast", "EVAL_ENABLE_LLM": "0"}):
-            self._run_background((None, {"tier": "none"}, []))
-            self.assertEqual(os.environ["EVAL_MODE"], "deep")
-            self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "1")
+            self._run_background(fake_diagnose)
+
+        self.assertEqual(seen["mode"], "deep")
+        self.assertEqual(seen["llm"], "1")
 
 
 class ReportRoutingTests(_ReplayClient):
@@ -350,6 +381,56 @@ class ReportRoutingTests(_ReplayClient):
         res = self.client.get(f"/runs/{run_id}/report")
         self.assertEqual(res.status_code, 500)
         self.assertIn("컨텍스트", res.json()["detail"])
+
+
+class EvalEnvTests(unittest.TestCase):
+    """EVAL_MODE/EVAL_ENABLE_LLM 이 run 밖으로 새지 않는지.
+
+    Eval 은 이 둘을 프로세스 전역 환경변수로 읽는다. run 이 쓴 값을 되돌리지
+    않으면 다음 run 이 그 값을 "운영자가 .env 에 적은 값"으로 착각한다 —
+    리플레이 한 번이 이후 모든 파이프라인 실행을 심층으로 끌어올린다.
+    """
+
+    def _env(self, **values):
+        return patch.dict(os.environ, values, clear=False)
+
+    def test_restores_values_that_existed_before(self):
+        with self._env(EVAL_MODE="standard", EVAL_ENABLE_LLM="0"):
+            with web_api._eval_env("deep", "1", force_llm=True):
+                self.assertEqual(os.environ["EVAL_MODE"], "deep")
+                self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "1")
+            self.assertEqual(os.environ["EVAL_MODE"], "standard")
+            self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "0")
+
+    def test_removes_values_that_did_not_exist(self):
+        with self._env():
+            os.environ.pop("EVAL_MODE", None)
+            os.environ.pop("EVAL_ENABLE_LLM", None)
+            with web_api._eval_env("deep", "1", force_llm=True):
+                self.assertEqual(os.environ["EVAL_MODE"], "deep")
+            self.assertNotIn("EVAL_MODE", os.environ)
+            self.assertNotIn("EVAL_ENABLE_LLM", os.environ)
+
+    def test_restores_even_when_the_body_raises(self):
+        with self._env(EVAL_MODE="standard"):
+            with self.assertRaises(RuntimeError):
+                with web_api._eval_env("deep", "1", force_llm=True):
+                    raise RuntimeError("boom")
+            self.assertEqual(os.environ["EVAL_MODE"], "standard")
+
+    def test_llm_flag_is_left_alone_when_not_forced(self):
+        """파이프라인 경로는 setdefault 규약 - .env 가 정한 값을 덮지 않는다."""
+        with self._env(EVAL_ENABLE_LLM="0"):
+            with web_api._eval_env("deep", "1"):
+                self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "0")
+
+    def test_effective_mode_ignores_what_a_previous_run_wrote(self):
+        """effective_eval_mode 는 실행이 덮어쓴 값이 아니라 .env 스냅샷을 본다."""
+        with patch.object(web_api, "_ENV_EVAL_MODE", ""):
+            with self._env(EVAL_MODE="deep"):
+                self.assertEqual(web_api.effective_eval_mode("full"), "full")
+        with patch.object(web_api, "_ENV_EVAL_MODE", "standard"):
+            self.assertEqual(web_api.effective_eval_mode("full"), "standard")
 
 
 if __name__ == "__main__":

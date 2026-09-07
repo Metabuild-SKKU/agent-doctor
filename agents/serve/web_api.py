@@ -12,6 +12,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import sys
@@ -38,6 +39,11 @@ try:
     load_dotenv()
 except ImportError:
     pass
+
+# load_dotenv() 직후의 EVAL_MODE 를 운영자 설정의 정본으로 붙잡아 둔다.
+# 실행 경로가 os.environ["EVAL_MODE"] 를 덮어쓰므로, 실행 중에 다시 읽으면
+# "직전 run 이 써 둔 값"을 운영자가 적은 값으로 착각한다.
+_ENV_EVAL_MODE = (os.getenv("EVAL_MODE") or "").strip()
 
 UPLOAD_DIR = Path(__file__).parent.parent.parent / "uploads"
 
@@ -80,10 +86,35 @@ def effective_eval_mode(depth: str) -> str:
     수치가 비교되지 않았다. 운영자가 .env 에 적은 값이 우선이고, 없을 때만
     depth 매핑으로 떨어진다.
     """
-    from_env = (os.getenv("EVAL_MODE") or "").strip()
-    if from_env:
-        return from_env
+    if _ENV_EVAL_MODE:
+        return _ENV_EVAL_MODE
     return _DEPTH_TO_EVAL_MODE.get(depth, "standard")
+
+
+@contextlib.contextmanager
+def _eval_env(mode: str, llm: str, *, force_llm: bool = False):
+    """EVAL_MODE/EVAL_ENABLE_LLM 을 이 run 동안만 세우고 끝나면 되돌린다.
+
+    Eval 은 이 둘을 프로세스 전역 환경변수로 읽는다(agents/eval/types.py).
+    되돌리지 않으면 값이 다음 run 까지 남는다 - 리플레이가 "deep" 을 박아 두면
+    그 뒤의 모든 파이프라인 실행이 effective_eval_mode 에서 그 값을 보고
+    조용히 심층으로 돈다(.env 에 EVAL_MODE 가 없는 배포에서 그렇다).
+
+    force_llm=False 면 EVAL_ENABLE_LLM 은 setdefault 로 둔다 - .env 가 정해둔
+    값을 파이프라인이 덮어쓰지 않게 하려는 기존 규약을 그대로 유지한다.
+    """
+    saved = {key: os.environ.get(key) for key in ("EVAL_MODE", "EVAL_ENABLE_LLM")}
+    os.environ["EVAL_MODE"] = mode
+    if force_llm or "EVAL_ENABLE_LLM" not in os.environ:
+        os.environ["EVAL_ENABLE_LLM"] = llm
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def corpus_config() -> dict | None:
@@ -226,13 +257,10 @@ def _run_pipeline_background(run_id: str, source_url: str, source_type: str, dep
     run_registry.update(run_id, status="running")
 
     try:
-        with _PIPELINE_LOCK:
-            eval_mode = effective_eval_mode(depth)
-            os.environ["EVAL_MODE"] = eval_mode
-            os.environ.setdefault(
-                "EVAL_ENABLE_LLM", "1" if eval_mode in ("deep", "full") else "0",
-            )
-
+        eval_mode = effective_eval_mode(depth)
+        with _PIPELINE_LOCK, _eval_env(
+            eval_mode, "1" if eval_mode in ("deep", "full") else "0",
+        ):
             graph = build_graph()
             initial_state = AgentDoctorState(
                 source_url=source_url,
@@ -299,15 +327,12 @@ def _run_replay_background(
     run_registry.update(run_id, status="running", stage="eval", percent=10)
 
     try:
-        with _PIPELINE_LOCK:
+        with _PIPELINE_LOCK, _eval_env("deep", "1", force_llm=True):
             # 리플레이는 depth 를 받지 않는다 — 항상 LLM 심층으로 돈다(tools/run_replay_report.py
             # 와 같은 처리). 리플레이엔 색인·검색·답변생성이 없어 실제 작업이 RAGAS 채점 하나뿐이라
             # LLM 을 꺼도 아끼는 시간이 거의 없는 반면(실측 6건: 0.03초 vs 13.8초), 끄면 생성축
             # 라벨 4종이 통째로 죽고 검색축도 gold 겹침이 낮을 때만 남아 "점수는 낮은데 소견 0건"
             # 인 진단서가 나간다. 프론트가 무엇을 보내든 여기서 고정해 그 경로를 막는다.
-            os.environ["EVAL_MODE"] = "deep"
-            os.environ["EVAL_ENABLE_LLM"] = "1"
-
             run_registry.add_event(
                 run_id, stage="eval", tag="적재", text="로그 파일을 읽는 중", ts=time.time(),
             )
@@ -573,8 +598,9 @@ def run_report(run_id: str) -> dict:
     if run.status != "done" or run.final_state is None:
         raise HTTPException(status_code=409, detail="아직 완료되지 않았습니다.")
 
-    eval_mode = _DEPTH_TO_EVAL_MODE.get(run.depth, "standard")
-    return build_report_view(run.final_state, depth=eval_mode)
+    # 실행 경로(_run_pipeline_background)와 같은 함수를 써야 진단서에 찍히는
+    # 깊이가 실제로 돈 깊이와 어긋나지 않는다.
+    return build_report_view(run.final_state, depth=effective_eval_mode(run.depth))
 
 
 if __name__ == "__main__":
