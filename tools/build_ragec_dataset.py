@@ -178,6 +178,9 @@ def locate(reference: str, content: str) -> tuple[int, int] | None:
     return None
 
 
+_TAIL_SLACK = 1.5   # 접두 폴백에서 꼬리를 찾는 범위 = 참조 길이 × 이 값 (_prefix_end 참고)
+
+
 def _prefix_end(ref: str, content: str, match) -> int:
     """접두 폴백의 end 좌표. **양방향으로 어긋날 수 있어** 따로 뺐다.
 
@@ -194,12 +197,19 @@ def _prefix_end(ref: str, content: str, match) -> int:
     # 꼬리를 문서에서 다시 찾는다. **관대하게** 찾아야 한다 — 이 폴백에 온 이유가 애초에
     # 원문과 참조가 어긋나서다(대소문자·따옴표·오탈자). 전체 꼬리로 실패하면 **마지막 몇
     # 토큰**으로 다시 시도한다. 끝 좌표만 필요하므로 뒤쪽이 맞으면 충분하다.
+    #
+    # 단 탐색 범위에 상한을 둔다. 문서 끝까지 보면 전체 꼬리가 실패하고 마지막 3토큰이
+    # 한참 뒤에 다시 나올 때 그 지점까지 span 이 늘어난다(실측: 참조 84자 → span 1163자,
+    # 문서 1172자 — 옛 코드의 `start + len(ref)` 클램프가 빠지면서 부풀림이 다른 모양으로
+    # 열렸다). 참조 길이의 1.5배 안에서만 찾는다 — 공백·따옴표 차이로 늘어나는 폭은 그
+    # 안에 들고, 그 밖에서 찾은 꼬리는 우연한 재등장이다.
     tokens = ref[40:].split()
+    horizon = min(len(content), match.start() + int(len(ref) * _TAIL_SLACK))
     for take in (len(tokens), 5, 3):
         if take < 2 or take > len(tokens):
             continue
         piece = r"\s+".join(re.escape(tok) for tok in tokens[-take:])
-        found = re.compile(piece, re.IGNORECASE).search(content, match.end())
+        found = re.compile(piece, re.IGNORECASE).search(content, match.end(), horizon)
         if found:
             return found.end()
 

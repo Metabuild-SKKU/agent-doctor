@@ -339,5 +339,35 @@ class LoaderQtypeTest(unittest.TestCase):
         self.assertIsNone(by_id["2"].qtype)     # 미표시 데이터셋(KorQuAD)은 그대로 None
 
 
+
+class PrefixTailBoundTest(unittest.TestCase):
+    """접두 폴백의 꼬리 탐색은 참조 길이 근처까지만 본다.
+
+    문서 끝까지 보면 전체 꼬리가 실패하고 마지막 3토큰이 한참 뒤에 다시 나올 때 그 지점까지
+    span 이 늘어난다(리뷰 실측: 참조 84자 → span 1163자, 문서 1172자). 옛 클램프가 빠지면서
+    축소가 닫히는 대신 부풀림이 다른 모양으로 열렸다.
+    """
+
+    def test_tail_reappearing_far_later_does_not_stretch_the_span(self):
+        from tools.build_ragec_dataset import _TAIL_SLACK
+        head = "The board approved the merger in June after a long review, "
+        tail = "and the CFO resigned in December."
+        ref = head + "and the CFO stepped down in December."      # 꼬리가 원문과 다르다(≥40자 접두는 일치)
+        content = (head + tail + " " + "Filler sentence about nothing in particular. " * 25
+                   + "Later the note said the CFO stepped down in December.")   # 꼬리가 여기 다시 나온다
+        start, end = locate(ref, content)
+        self.assertEqual(start, 0)
+        self.assertLessEqual(end, int(len(ref) * _TAIL_SLACK))
+        self.assertLess(end, content.index("Later"))
+
+    def test_tail_within_reach_is_still_found(self):
+        """상한이 정상 경로를 막으면 안 된다 — 공백·대소문자 차이의 두 문장 참조는 그대로 복원."""
+        content = ("Alpha beta gamma delta epsilon zeta eta theta. "
+                   "Iota kappa lambda mu nu xi omicron pi rho sigma")
+        ref = ("Alpha beta gamma delta epsilon zeta eta theta.  "
+               "Iota kappa lambda mu nu XI omicron pi rho sigma")
+        start, end = locate(ref, content)
+        self.assertEqual(content[start:end], content)
+
 if __name__ == "__main__":
     unittest.main()
