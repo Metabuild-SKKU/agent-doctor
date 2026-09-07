@@ -454,7 +454,8 @@ class DetailReportTest(unittest.TestCase):
         """대조표의 판정이 채점기와 어긋나면 표를 근거로 고칠 수 없다.
 
         gold 오류 주장은 score() 가 **제일 먼저** 걸러 정확도에서 뺀다. 표가 그걸 'X'(틀림)로
-        표시하면 사람이 없는 오진을 쫓게 된다.
+        표시하면 사람이 없는 오진을 쫓게 된다. (판정은 이제 score() 가 행별로 돌려주고 표는
+        그걸 찍기만 한다 — VerdictsComeFromTheScorerTest.)
         """
         gold_claim = {"qa_id": "1", "labels": ["bad_gold_chunk"], "failed": True}
         self.assertIn("[gold]", self._detail(gold_claim))
@@ -552,6 +553,43 @@ class MappingIntegrityTest(unittest.TestCase):
         }
         self.assertEqual(categories - set(RAGEC_TO_OURS), set())
 
+
+
+class VerdictsComeFromTheScorerTest(unittest.TestCase):
+    """제외 결정 트리는 score() 한 곳에만 있다 — 대조표는 그 판정을 찍기만 한다.
+
+    예전엔 표가 같은 트리를 사본으로 재구현해 순서까지 손으로 맞춰야 했다(#146).
+    """
+
+    def _key(self, category="E4 Missed Retrieval", stage="Retrieval"):
+        return [_key("1", category, stage)]
+
+    def _verdict(self, row, key=None):
+        return score([row], key or self._key())["verdicts"].get("1")
+
+    def test_each_branch_has_a_mark(self):
+        self.assertEqual(self._verdict({"qa_id": "1", "labels": ["bad_gold_chunk"], "failed": True}),
+                         "gold")
+        self.assertEqual(self._verdict({"qa_id": "1", "labels": ["retrieval_low_rank"], "failed": True},
+                                       self._key("E99 Unknown", "Retrieval")), "-")
+        self.assertEqual(self._verdict({"qa_id": "1", "labels": [], "failed": False}), "성공")
+        self.assertEqual(self._verdict({"qa_id": "1", "labels": ["generation_hallucination"],
+                                        "failed": True, "recall_at_k": 1.0}), "검색OK")
+        self.assertEqual(self._verdict({"qa_id": "1", "labels": [], "failed": True}), "X")
+        self.assertEqual(self._verdict({"qa_id": "1", "labels": ["retrieval_low_rank"], "failed": True}),
+                         "O")
+        self.assertEqual(self._verdict({"qa_id": "1", "labels": ["generation_hallucination"],
+                                        "failed": True, "recall_at_k": 0.5}), "X")
+
+    def test_probe_absent_from_the_dump_has_no_verdict(self):
+        self.assertNotIn("1", score([], self._key())["verdicts"])
+
+    def test_detail_prints_exactly_the_scorer_verdict(self):
+        row = {"qa_id": "1", "labels": ["generation_hallucination"], "failed": True,
+               "recall_at_k": 1.0}
+        out = format_detail([row], self._key())
+        self.assertIn("[검색OK]", out)
+        self.assertEqual(score([row], self._key())["retrieval_ok"], 1)
 
 if __name__ == "__main__":
     unittest.main()

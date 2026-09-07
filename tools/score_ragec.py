@@ -280,6 +280,14 @@ def _rpad(text: str, width: int) -> str:
 
 
 def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
+    """정답지 행마다 판정을 내고 집계한다.
+
+    행별 판정(`verdicts`: qa_id → 표시 기호)도 함께 돌려준다 — format_detail 이 그걸 그대로
+    찍는다. 제외 결정 트리(gold_error → unmappable → not_run → we_passed → retrieval_ok →
+    no_diagnosis)는 **여기 한 곳에만** 있다. 예전엔 대조표가 같은 트리를 사본으로 재구현해
+    순서까지 손으로 맞춰야 했고, 어긋나면 표가 정확도와 다른 이야기를 해서 표를 근거로
+    진단을 고칠 수 없었다.
+    """
     ours = {str(r["qa_id"]): set(r.get("labels") or []) for r in findings_rows}
     # "failed" 가 없는 덤프(구버전)는 라벨 유무로 추론한다 — 그 경우 '우리는 성공' 과
     # '실패했는데 원인을 못 짚음' 이 구분되지 않으므로 리포트가 그렇다고 밝힌다.
@@ -297,6 +305,7 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
     stage_hit = stage_total = 0
     no_diagnosis = gold_error = unmappable = we_passed = not_run = 0
     retrieval_ok = 0
+    verdicts: dict[str, str] = {}   # qa_id → 표시 기호(_MARK_LEGEND). 덤프에 없는 probe 는 없다
 
     for key in key_rows:
         qa_id = str(key["qa_id"])
@@ -307,12 +316,15 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
         if got & GOLD_ERROR_LABELS:
             # 평가셋 결함 주장 — 정확도에 섞지 않는다.
             gold_error += 1
+            verdicts[qa_id] = "gold"
             continue
         if expected is None:
             unmappable += 1          # 대조표에 없는 카테고리(데이터가 바뀐 것)
+            verdicts[qa_id] = "-"
             continue
         if not expected:
             unmappable += 1          # 대응 라벨이 아직 없다(E15)
+            verdicts[qa_id] = "-"
             continue
         if qa_id not in failed:
             not_run += 1             # 덤프에 없다 = 이 probe 를 안 돌렸다
@@ -323,6 +335,7 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
             # 이걸 오답으로 세면 정확도가 진단 품질이 아니라 "얼마나 그들과 비슷하게
             # 실패하나" 를 재게 된다.
             we_passed += 1
+            verdicts[qa_id] = "성공"
             continue
         if category in RECALL_REFUTES and recalls.get(qa_id, -1.0) >= RECALL_FULL:
             # **우리 검색은 성공했다** — 이 카테고리의 주장(gold 가 생성기에 도달하지 못했다)이
@@ -330,14 +343,18 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
             # 순서 주의: no_diagnosis 앞이어야 한다. 뒤로 가면 '검색은 됐는데 원인을 못 짚은'
             # probe 가 오답으로 먼저 세어져 이 분기가 영영 안 걸린다.
             retrieval_ok += 1
+            verdicts[qa_id] = "검색OK"
             continue
         if not got:
             no_diagnosis += 1        # 실패했는데 원인을 못 짚었다 = 진짜 미진단
             per_category[category].append(False)
             stage_total += 1         # 단계도 못 짚은 것 — 아래 주석 참고
+            verdicts[qa_id] = "X"
             continue
 
-        per_category[category].append(bool(expected & got))
+        hit = bool(expected & got)
+        per_category[category].append(hit)
+        verdicts[qa_id] = "O" if hit else "X"
 
         # 단계는 우리가 낸 라벨 중 **하나라도** 그 단계면 맞은 것으로 본다(포함과 같은 취지).
         #
@@ -365,6 +382,7 @@ def score(findings_rows: list[dict], key_rows: list[dict]) -> dict:
         "retrieval_ok": retrieval_ok,
         "has_status": has_status,
         "has_recall": has_recall,
+        "verdicts": verdicts,
     }
 
 
@@ -421,26 +439,6 @@ _MARK_LEGEND = ("  O 맞음 · X 틀림 · 성공=우리가 성공(제외) · �
                 " · - 대응 라벨 없음(제외)")
 
 
-def _verdict(row: dict, category: str) -> str:
-    """이 probe 의 채점 판정. score() 의 분기와 **같은 순서**로 본다.
-
-    순서가 어긋나면 표가 정확도와 다른 이야기를 해서, 표를 근거로 진단을 고칠 수 없게 된다.
-    """
-    labels = set(row.get("labels") or [])
-    if labels & GOLD_ERROR_LABELS:
-        return "gold"         # 평가셋 결함 주장 — 정확도에서 제외
-    expected = RAGEC_TO_OURS.get(category)
-    if not expected:
-        return "-"            # 대응 라벨 없음 또는 대조표에 없는 카테고리 — 제외
-    if not probe_failed(row):
-        return "성공"          # 우리 파이프라인이 이 질문에 성공 — 채점 제외
-    recall = row.get("recall_at_k")
-    if (category in RECALL_REFUTES
-            and isinstance(recall, (int, float)) and recall >= RECALL_FULL):
-        return "검색OK"        # 검색 단계 주장인데 우리 검색은 성공 — 채점 제외
-    return "O" if labels & expected else "X"
-
-
 def _wrap(label: str, text: str, width: int = 88) -> list[str]:
     """`  Q   본문…` 꼴로 접어 쓴다. 이어지는 줄은 본문 열에 맞춰 들여쓴다.
 
@@ -485,8 +483,11 @@ def format_detail(findings_rows: list[dict], key_rows: list[dict]) -> str:
     두 번째는 **라벨만 봤으면 못 찾는다** — 답변 원문이 붙어 있어야 보인다.
 
     블록(probe 하나씩)을 먼저 내고, 마지막에 한눈에 보는 압축 표를 붙인다.
+
+    판정 기호는 score() 가 낸 것을 그대로 쓴다 — 여기서 다시 판정하지 않는다.
     """
     ours = {str(r["qa_id"]): r for r in findings_rows}
+    verdicts = score(findings_rows, key_rows)["verdicts"]
     lines = ["", "=" * 92, "  probe 별 대조 (질문·답변·정답 ↔ RAGEC 정답 라벨 ↔ 우리 진단)", "=" * 92]
 
     shown = 0
@@ -497,7 +498,7 @@ def format_detail(findings_rows: list[dict], key_rows: list[dict]) -> str:
             continue          # 덤프에 없다 = 안 돌린 probe
         shown += 1
         category = key["ragec_category"].strip()
-        mark = _verdict(row, category)
+        mark = verdicts.get(qa_id, "?")
         stage = key.get("ragec_stage", "").strip()
         qtype = key.get("query_type", "").strip()
 
@@ -530,7 +531,7 @@ def format_detail(findings_rows: list[dict], key_rows: list[dict]) -> str:
         if row is None:
             continue
         lines.append("  " + _pad(qa_id, 8)
-                     + _pad(_verdict(row, key["ragec_category"].strip()), 6)
+                     + _pad(verdicts.get(qa_id, "?"), 6)
                      + _pad(key["ragec_category"], 30)
                      + (", ".join(row.get("labels") or []) or "(라벨 없음)"))
     lines.append("")
