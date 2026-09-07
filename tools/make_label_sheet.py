@@ -206,12 +206,45 @@ def build_sheet(rows: list[dict]) -> dict:
     }
 
 
-def write_sheet(rows: list[dict], path: pathlib.Path) -> None:
+def filled_entries(path: pathlib.Path) -> int:
+    """기존 시트에서 사람이 이미 채운 항목 수. 파일이 없거나 비어 있으면 0.
+
+    JSON 이 깨져 있으면 **채워진 것으로 본다**(무한대) — 편집 중인 파일일 가능성이 크고,
+    못 읽는다고 덮어쓰면 그 편집이 사라진다.
+    """
+    if not path.exists():
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return sys.maxsize
+    items = data.get("항목", data) if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return 0
+    return sum(1 for item in items if isinstance(item, dict)
+               and any(str(item.get(f) or "").strip() for f in FILL_FIELDS))
+
+
+def write_sheet(rows: list[dict], path: pathlib.Path, *, force: bool = False) -> pathlib.Path:
+    """시트를 쓴다. **채워진 시트는 덮어쓰지 않는다** — 실제로 쓴 경로를 돌려준다.
+
+    라벨링은 1건당 2~3분, 60건이면 사람 시간 2~3시간이다. 표본을 다시 뽑거나 파이프라인을
+    구간별로 다시 돌릴 때 이 함수가 그 시간을 조용히 지우면 안 된다. 기존 시트에 채워진
+    항목이 있으면 `<이름>.new.json` 옆에 쓰고 알린다. 덮어쓰려면 force.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if not force:
+        filled = filled_entries(path)
+        if filled:
+            target = path.with_name(path.stem + ".new" + path.suffix)
+            print(f"[보호] {path} 에 이미 채워진 항목이 {min(filled, 10**6)}건 있어 덮어쓰지 않습니다"
+                  f" → {target} 에 씁니다 (덮어쓰려면 --force)", file=sys.stderr)
+            path = target
     path.write_text(
         json.dumps(build_sheet(rows), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    return path
 
 
 def summarize(rows: list[dict]) -> str:
@@ -229,6 +262,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=60,
                     help="표본 수(0=전체). 1건당 2~3분 소요를 감안할 것")
     ap.add_argument("--seed", type=int, default=0, help="층화 추출 시드(재현용)")
+    ap.add_argument("--force", action="store_true",
+                    help="채워진 항목이 있는 기존 시트도 덮어쓴다(라벨링이 사라진다)")
     args = ap.parse_args()
 
     if not pathlib.Path(args.findings).exists():
@@ -244,10 +279,14 @@ def main() -> int:
         print("[경고] 덤프에 observations 가 없어 지표 없이 시트가 나갑니다 — "
               "파이프라인을 다시 실행하세요.", file=sys.stderr)
 
-    out = pathlib.Path(args.out)
-    write_sheet(picked, out)
+    out = write_sheet(picked, pathlib.Path(args.out), force=args.force)
     print(f"라벨 시트 {len(picked)}건 → {out}")
-    print(summarize(picked))
+    # 표본 구성(우리 예측 라벨 분포)은 콘솔에 찍지 않는다 — 시트를 만드는 사람이 라벨러를
+    # 겸하면 "이 표본은 low_rank 가 12건" 을 알고 라벨링하게 되어 그쪽으로 끌린다
+    # (run_ragec_validation 이 같은 이유로 뺐다). 파일로만 남기고, 라벨링이 끝난 뒤에 본다.
+    composition = out.with_name(out.stem + "_composition.txt")
+    composition.write_text(summarize(picked) + "\n", encoding="utf-8")
+    print(f"표본 구성 → {composition}  (우리 예측 라벨 분포 — 라벨링을 마친 뒤에 여세요)")
     return 0
 
 

@@ -488,5 +488,51 @@ class SheetRoundTripTest(unittest.TestCase):
         self.assertIn("JSON 형식이 깨졌습니다", str(ctx.exception))
 
 
+
+class SheetOverwriteGuardTest(unittest.TestCase):
+    """표본을 다시 뽑거나 구간 실행을 이어 붙일 때 **채우던 시트를 지우면 안 된다** —
+    60건이면 사람 시간 2~3시간이다."""
+
+    def setUp(self):
+        import pathlib
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = pathlib.Path(self._tmp.name) / "label_sheet.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, **kw):
+        from tools.make_label_sheet import write_sheet
+        return write_sheet([_row("1", "retrieval_low_rank")], self.path, **kw)
+
+    def test_unfilled_sheet_is_overwritten_in_place(self):
+        self.assertEqual(self._write(), self.path)
+        self.assertEqual(self._write(), self.path)
+
+    def test_filled_sheet_is_kept_and_the_new_one_goes_beside_it(self):
+        self._write()
+        sheet = json.loads(self.path.read_text(encoding="utf-8"))
+        sheet["항목"][0][PRIMARY_FIELD] = "retrieval_missing_gold"
+        self.path.write_text(json.dumps(sheet, ensure_ascii=False), encoding="utf-8")
+
+        written = self._write()
+        self.assertEqual(written.name, "label_sheet.new.json")
+        kept = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(kept["항목"][0][PRIMARY_FIELD], "retrieval_missing_gold")
+
+    def test_force_overwrites_a_filled_sheet(self):
+        self._write()
+        sheet = json.loads(self.path.read_text(encoding="utf-8"))
+        sheet["항목"][0][PRIMARY_FIELD] = "retrieval_missing_gold"
+        self.path.write_text(json.dumps(sheet, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(self._write(force=True), self.path)
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["항목"][0][PRIMARY_FIELD], "")
+
+    def test_unreadable_sheet_is_treated_as_filled(self):
+        """편집 중이라 JSON 이 깨져 있을 수 있다 — 못 읽는다고 덮어쓰면 그 편집이 사라진다."""
+        self.path.write_text('{"항목": [{"qa_id": "1",}]}', encoding="utf-8")
+        self.assertEqual(self._write().name, "label_sheet.new.json")
+
 if __name__ == "__main__":
     unittest.main()
