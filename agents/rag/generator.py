@@ -593,8 +593,9 @@ def _gen_flag(config: dict | None, name: str, default: bool) -> bool:
 # 그래서 조각이 아니라 **프롬프트 전체를 언어별로** 둔다.
 #
 # "match" 는 질문의 문자 구성으로 고른다. 처음엔 감지기를 피하려고 모델에 맡겼지만 위처럼
-# 실패했고, 판정은 '한글이 있나' 하나라 오판 여지가 거의 없다(정답 채점 단위를 고르는
-# metrics_basic.scoring_unit 과 같은 방식이다).
+# 실패했고, 판정은 '한글이 있나' 하나라 오판 여지가 거의 없다. 정답 채점 단위를 고르는
+# metrics_basic.scoring_unit 이 **같은 함수(question_language)로 같은 입력(질문)** 을 본다 —
+# 답변 언어와 채점 단위가 갈리면 정답을 담은 답이 0점이 된다.
 
 _PROMPT_KO = {
     "role": "너는 사내 문서 QA 어시스턴트다.",
@@ -649,19 +650,20 @@ def _answer_language(question: str, config: dict | None) -> str:
         raw = os.getenv("RAG_ANSWER_LANGUAGE", "")
     key = str(raw or "").strip().lower()
     if key == "match":
-        return "ko" if _has_hangul(question or "") else "en"
+        return _question_language(question or "")
     return key if key in _PROMPTS else "ko"
 
 
-def _has_hangul(text: str) -> bool:
-    """한글 포함 여부 — **채점 단위 판정과 같은 구현을 쓴다.**
+def _question_language(question: str) -> str:
+    """질문 언어("ko"|"en") — **채점 단위 판정과 같은 함수·같은 입력을 쓴다.**
 
-    주석에서 "metrics_basic.scoring_unit 과 같은 방식" 이라고 선언한 계약을 코드로 묶는다.
-    복제해 두면 한쪽만 한글 블록을 넓혔을 때 혼합 문자 질문에서 생성 언어와 채점 단위가
-    갈리고, 이 파일이 고친 f1=0 오진이 그 부분집합에서 조용히 재현된다(어떤 테스트도 못 잡음).
+    헬퍼(has_hangul)만 공유하고 결정을 각자 내리면 계약이 반만 묶인다: 한쪽은 질문을,
+    다른 쪽은 정답을 보면 한국어 질문 + 라틴 정답("OECD")에서 답변은 한국어로 나오는데
+    채점은 단어 단위로 해 정답을 담은 답이 0점이 된다. 결정 함수 자체를 공유한다.
+    (import 를 함수 안에 두는 이유: agents.rag → agents.eval 순환을 피한다.)
     """
-    from agents.eval.metrics_basic import has_hangul
-    return has_hangul(text)
+    from agents.eval.metrics_basic import question_language
+    return question_language(question)
 
 
 def _build_prompt(

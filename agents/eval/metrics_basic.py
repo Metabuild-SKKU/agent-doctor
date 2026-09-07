@@ -15,7 +15,8 @@ LLM 호출도, 추가 검색 쿼리도 쓰지 않는다 — 이미 가진 답변
 
 [구현 포인트]
   - 정답 매칭은 **정답 언어에 맞는 공식 지표**를 따른다. 정규화(normalize_answer: 구두점
-    제거·소문자화·공백정리)는 공통이고, 채점 단위만 갈린다 — scoring_unit 이 정한다.
+    제거·소문자화·공백정리)는 공통이고, 채점 단위만 갈린다 — scoring_unit 이 정한다
+    (질문 언어가 1차 기준, 질문을 모르면 정답의 문자 구성).
       · 한국어 → KorQuAD 1.0 의 문자 단위(bag-of-characters) F1. 완벽한 형태소 분석기가
         없고 어절 단위 F1 이 F1 취지를 못 살려서 문자 단위가 표준이다.
         (근거: KorQuAD 1.0 논문 / evaluate-v1.0.py)
@@ -102,12 +103,38 @@ def _has_hangul(text: str) -> bool:
 has_hangul = _has_hangul
 
 
-def scoring_unit(reference: str) -> str:
+def question_language(question: str) -> str:
+    """질문의 언어 키 `"ko"` | `"en"` — 한글이 하나라도 있으면 한국어.
+
+    **생성 프롬프트 언어(agents/rag/generator._answer_language 의 "match")와 채점 단위
+    (scoring_unit)를 같은 함수가 정한다.** 헬퍼(has_hangul)만 공유하고 결정은 각자 하면
+    입력이 달라(질문 vs 정답) 어긋난다 — 한국어 코퍼스의 라틴 정답("OECD")이 정확히 그
+    틈에서 0점이 됐다(scoring_unit 참고).
+    """
+    return "ko" if _has_hangul(question or "") else "en"
+
+
+def scoring_unit(reference: str, *, question: str | None = None) -> str:
     """이 정답을 무엇 단위로 채점할지: `"char"`(한국어·숫자형) | `"word"`(영어).
 
-    정답(reference)만 보고 정한다 — 답변으로 정하면 모델이 언어를 바꾸는 것만으로 채점
-    단위가 흔들려, 진단이 아니라 답변 언어를 재게 된다.
+    **질문을 주면 질문 언어가 1차 기준이다.** 한국어 질문이면 답변도 한국어로 생성되므로
+    (generator 의 "match" 와 같은 판정) 정답이 라틴 문자뿐이어도 문자 단위다. 정답만 보고
+    정하면 한국어 코퍼스의 약어·영문 고유명사 정답이 단어 단위로 넘어가는데, 한국어 답변은
+    조사가 붙어 어절이 갈리므로 교집합이 0 이 된다:
+
+        gold "OECD"   / 답 "OECD에 가입했습니다."       char 0.533 → word 0.000
+        gold "UNESCO" / 답 "유네스코(UNESCO) 세계유산…"  char 0.444 → word 0.400
+
+    정답을 그대로 담은 답이 0점이면 _is_success 의 lexical 축이 실패로 떨어지고, 영어 쪽에서
+    없앤 generation_* 오진이 한국어 쪽에서 새로 생긴다. 질문은 probe 마다 고정이고
+    검색·모델과 무관하다.
+
+    영어 질문(또는 질문을 모를 때)은 **정답**의 문자 구성으로 정한다. 답변으로 정하지 않는
+    이유는 그대로다 — 모델이 언어를 바꾸는 것만으로 채점 단위가 흔들리면 진단이 아니라
+    답변 언어를 재게 된다.
     """
+    if question is not None and question.strip() and question_language(question) == "ko":
+        return "char"
     text = _normalize(reference or "")
     if not text or _has_hangul(text):
         return "char"
@@ -162,9 +189,9 @@ def word_f1(prediction: str, reference: str) -> float:
     return _f1_from_units(_words(prediction), _words(reference))
 
 
-def answer_f1(prediction: str, reference: str) -> float:
-    """정답 언어에 맞는 F1(한국어→문자, 영어→단어). 기본 진입점."""
-    unit = scoring_unit(reference)
+def answer_f1(prediction: str, reference: str, *, question: str | None = None) -> float:
+    """정답 언어에 맞는 F1(한국어→문자, 영어→단어). 기본 진입점. question 은 scoring_unit 참고."""
+    unit = scoring_unit(reference, question=question)
     return _f1_from_units(_units(prediction, unit), _units(reference, unit))
 
 
@@ -173,13 +200,13 @@ def answer_f1(prediction: str, reference: str) -> float:
 token_f1 = answer_f1
 
 
-def exact_match(prediction: str, reference: str) -> bool:
+def exact_match(prediction: str, reference: str, *, question: str | None = None) -> bool:
     """KorQuAD/SQuAD 공식 EM — 정규화 후 완전 일치.
 
     영어 정답은 관사를 뺀 단어열로 비교한다(SQuAD 공식 normalize_answer 가 remove_articles
     를 포함한다). 문자 단위 정답은 기존 그대로 정규화 문자열 비교다.
     """
-    if scoring_unit(reference) == "word":
+    if scoring_unit(reference, question=question) == "word":
         return _words(prediction) == _words(reference)
     return _normalize(prediction) == _normalize(reference)
 
@@ -209,7 +236,7 @@ def _recall_from_units(pred: list[str], ref: list[str]) -> float:
     return sum((Counter(pred) & Counter(ref)).values()) / len(ref)
 
 
-def char_recall(prediction: str, reference: str) -> float:
+def char_recall(prediction: str, reference: str, *, question: str | None = None) -> float:
     """정답이 답변에 담긴 비율(recall = 겹친 단위 / 정답 단위). 단위는 정답 언어를 따른다.
 
     Counter 멀티셋 교집합으로 겹친 개수(중복 고려)를 세고 정답 길이로 나눈다.
@@ -217,11 +244,12 @@ def char_recall(prediction: str, reference: str) -> float:
 
     (이름은 문자 단위 시절 그대로 두었다. 호출부가 이 이름으로 고정돼 있고, 하는 일은
     '짧은 정답의 포함 판정' 으로 같다.)"""
-    unit = scoring_unit(reference)
+    unit = scoring_unit(reference, question=question)
     return _recall_from_units(_units(prediction, unit), _units(reference, unit))
 
 
-def best_window_char_f1(prediction: str, reference: str) -> float:
+def best_window_char_f1(prediction: str, reference: str, *,
+                        question: str | None = None) -> float:
     """답변에서 '정답과 가장 잘 맞는 구간'만 떼어내 잰 문자 F1(0~1).
 
     왜 필요한가: char_f1 의 precision 분모가 답변 전체 길이라, 긴 서술형 gold 를 상대로 근거·
@@ -235,7 +263,7 @@ def best_window_char_f1(prediction: str, reference: str) -> float:
     즉 '정답 내용이 답변의 어느 한 구간에 얼마나 응집해 있나'를 재는 값이다.
     답변이 정답보다 짧으면 창을 못 잡으므로 전체 F1 을 그대로 돌려준다.
     창을 미끄러뜨리는 단위도 정답 언어를 따른다(한국어=문자, 영어=단어)."""
-    unit = scoring_unit(reference)
+    unit = scoring_unit(reference, question=question)
     return _best_window_f1(_units(prediction, unit), _units(reference, unit))
 
 
@@ -263,7 +291,7 @@ def _best_window_f1(pred: list[str], ref: list[str]) -> float:
     return best
 
 
-def answer_match(prediction: str, reference: str) -> float:
+def answer_match(prediction: str, reference: str, *, question: str | None = None) -> float:
     """정답 매칭 점수(규칙 기반 tier1). 기준은 KorQuAD 문자 단위 F1이고, 정답 길이에 따라 두
     보정 경로를 둔다. reference 없으면 0.0.
 
@@ -280,8 +308,9 @@ def answer_match(prediction: str, reference: str) -> float:
     [남는 한계] 부정/모순('사망'⊂'사망하지 않았다', recall=1.0)과 '3월'↔'3일'(char_f1=0.5)은
     표면 겹침으로 못 거른다 → 의미 판정은 tier3(RAGAS), 관측은 EM 병기가 담당한다.
 
-    채점 단위(문자/단어)와 두 길이 문턱은 정답 언어를 따른다 — scoring_unit 참고."""
-    unit = scoring_unit(reference)
+    채점 단위(문자/단어)와 두 길이 문턱은 정답 언어를 따른다 — scoring_unit 참고
+    (question 을 주면 질문 언어가 우선한다)."""
+    unit = scoring_unit(reference, question=question)
     ref = _units(reference, unit)
     if not ref:
         return 0.0
@@ -341,16 +370,19 @@ def gold_answer_variants(reference: str) -> list[str]:
     return variants[:8]
 
 
-def best_answer_match(prediction: str, reference: str) -> tuple[float, str, float, int]:
+def best_answer_match(prediction: str, reference: str, *,
+                      question: str | None = None) -> tuple[float, str, float, int]:
     """Return best lexical match over safe gold-answer variants.
 
     Returns: best_score, best_variant, raw_score_against_original, variant_count.
     best 는 관측 전용이다 — 게이트·점수가 쓰는 값은 raw 다(_compute_metrics 참고).
+    question 은 채점 단위 선택에 쓰인다(scoring_unit 참고).
     """
     variants = gold_answer_variants(reference)
     if not variants:
         return 0.0, "", 0.0, 0
-    scored = [(answer_match(prediction, variant), variant) for variant in variants]
+    scored = [(answer_match(prediction, variant, question=question), variant)
+              for variant in variants]
     best_score, best_variant = max(scored, key=lambda item: item[0])
     return best_score, best_variant, scored[0][0], len(variants)
 
@@ -774,9 +806,13 @@ def _compute_metrics(record: EvalRecord) -> None:
         record.retrieved_chunk_ids,
         _ctx.chunks,
     )
-    # answer_match: KorQuAD char-F1 (+짧은 정답 recall).
+    # answer_match: KorQuAD char-F1 (+짧은 정답 recall). 채점 단위는 **질문 언어**가 정한다 —
+    # 생성 프롬프트가 같은 입력으로 답변 언어를 고르므로(generator "match"), 한국어 질문의
+    # 라틴 정답("OECD")도 한국어 답변과 같은 단위(문자)로 잰다.
+    question = record.probe.question
     if gt:
-        score, best_variant, raw_score, variant_count = best_answer_match(record.generated_answer, gt)
+        score, best_variant, raw_score, variant_count = best_answer_match(
+            record.generated_answer, gt, question=question)
         record.f1_score = raw_score
         record.raw_f1_score = raw_score
         record.best_gold_answer_f1 = score
@@ -790,7 +826,8 @@ def _compute_metrics(record: EvalRecord) -> None:
         record.gold_answer_variant_count = 0
 
     if gt and record.oracle_answer:
-        score, best_variant, raw_score, _variant_count = best_answer_match(record.oracle_answer, gt)
+        score, best_variant, raw_score, _variant_count = best_answer_match(
+            record.oracle_answer, gt, question=question)
         record.oracle_f1 = raw_score
         record.raw_oracle_f1 = raw_score
         record.best_oracle_gold_answer_f1 = score
@@ -801,7 +838,8 @@ def _compute_metrics(record: EvalRecord) -> None:
         record.best_oracle_gold_answer_f1 = 0.0
         record.best_oracle_gold_answer = None
     # KorQuAD 공식 EM — 관측용으로만 남김.
-    record.exact_match = exact_match(record.generated_answer, gt) if gt else False
+    record.exact_match = (exact_match(record.generated_answer, gt, question=question)
+                          if gt else False)
 
 
 # ══════════════════════════════════════════════════════════════════

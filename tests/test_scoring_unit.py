@@ -27,7 +27,10 @@ from agents.eval.types import F1_PASS_THRESHOLD
 
 
 class ScoringUnitSelectionTest(unittest.TestCase):
-    """단위는 **정답(reference)** 만 보고 정한다."""
+    """질문을 모를 때는 **정답(reference)** 의 문자 구성으로 정한다.
+
+    (질문을 알면 질문 언어가 우선한다 — QuestionDrivesTheUnitTest.)
+    """
 
     def test_korean_reference_uses_characters(self):
         self.assertEqual(scoring_unit("재택근무는 주 2일 가능"), "char")
@@ -216,6 +219,78 @@ class DispatchWiringTest(unittest.TestCase):
         self.assertTrue(exact_match("Acme Logistics", "acme logistics"))
         self.assertFalse(exact_match("Acme Logistics", "Acme Holdings"))
 
+
+
+class QuestionDrivesTheUnitTest(unittest.TestCase):
+    """질문을 주면 **질문 언어**가 단위를 정한다 — 답변 언어를 고르는 입력과 같다.
+
+    정답만 보면 한국어 코퍼스의 라틴 정답(약어·영문 고유명사)이 단어 단위로 넘어간다.
+    한국어 답변은 조사가 붙어 어절이 갈리므로 정답을 그대로 담아도 교집합이 0 이다:
+        gold "OECD" / 답 "OECD에 가입했습니다."  char 0.533 → word 0.000
+    그러면 _is_success 의 lexical 축이 실패로 떨어져 generation_* 오진이 생긴다(리뷰 지적).
+    """
+
+    def test_korean_question_keeps_a_latin_gold_on_characters(self):
+        for gold in ("OECD", "Bill Gates", "UNESCO"):
+            self.assertEqual(scoring_unit(gold, question="어느 기구에 가입했나?"), "char", gold)
+            self.assertEqual(scoring_unit(gold), "word", gold)   # 질문 없이는 정답 규칙
+
+    def test_latin_gold_wrapped_in_a_korean_sentence_now_passes(self):
+        self.assertEqual(answer_match("OECD에 가입했습니다.", "OECD"), 0.0)   # 정답 규칙: 단어
+        self.assertGreaterEqual(
+            answer_match("OECD에 가입했습니다.", "OECD", question="어느 기구에 가입했나?"),
+            F1_PASS_THRESHOLD,
+        )
+        self.assertGreaterEqual(
+            answer_match("설립자는 Bill Gates입니다", "Bill Gates", question="설립자는 누구인가?"),
+            F1_PASS_THRESHOLD,
+        )
+
+    def test_english_question_still_follows_the_gold(self):
+        """영어 질문은 정답 규칙 그대로 — 숫자형은 문자, 영어는 단어."""
+        self.assertEqual(scoring_unit("332cm", question="How tall is it?"), "char")
+        self.assertEqual(scoring_unit("the Republic of Ireland", question="What country?"), "word")
+        # Ireland↔Iceland 를 거르는 힘이 영어 쪽에서 유지된다.
+        self.assertLess(answer_match("Iceland", "Ireland", question="What country?"),
+                        F1_PASS_THRESHOLD)
+
+    def test_blank_question_falls_back_to_the_gold(self):
+        self.assertEqual(scoring_unit("Ireland", question=""), "word")
+        self.assertEqual(scoring_unit("Ireland", question="   "), "word")
+        self.assertEqual(scoring_unit("Ireland", question=None), "word")
+
+    def test_every_entry_point_accepts_the_question(self):
+        """한 진입점만 질문을 받으면 나머지 경로에서 0점이 재현된다."""
+        from agents.eval.metrics_basic import best_answer_match
+        q, gold, ans = "어느 기구에 가입했나?", "OECD", "OECD에 가입했습니다."
+        self.assertGreater(answer_f1(ans, gold, question=q), 0.0)
+        self.assertEqual(char_recall(ans, gold, question=q), 1.0)
+        self.assertGreater(best_window_char_f1(ans, gold, question=q), 0.0)
+        self.assertGreater(best_answer_match(ans, gold, question=q)[2], 0.0)
+        self.assertTrue(exact_match("oecd", gold, question=q))
+
+    def test_generation_language_and_scoring_unit_share_the_decision(self):
+        """생성 프롬프트("match")와 채점 단위가 **같은 함수**로 갈린다 — 헬퍼만 공유하던
+        계약은 입력이 달라(질문 vs 정답) OECD 건에서 어긋났다."""
+        from agents.eval.metrics_basic import question_language
+        from agents.rag.generator import _answer_language
+        for question in ("어느 기구에 가입했나?", "Which body did it join?", "OECD 가입 연도는?"):
+            lang = _answer_language(question, {"answer_language": "match"})
+            self.assertEqual(lang, question_language(question))
+            self.assertEqual(scoring_unit("OECD", question=question),
+                             "char" if lang == "ko" else "word", question)
+
+    def test_compute_metrics_passes_the_probe_question(self):
+        """진입점이 맞아도 _compute_metrics 가 질문을 안 넘기면 파이프라인에서는 그대로 0점이다."""
+        from agents.eval.metrics_basic import _compute_metrics
+        from agents.eval.types import EvalRecord
+        from core.schema import Probe
+        probe = Probe(probe_id="p1", question="어느 기구에 가입했나?", source="taxonomy",
+                      ground_truth="OECD")
+        record = EvalRecord(probe=probe, retrieved_context=[], retrieved_chunk_ids=[],
+                            generated_answer="OECD에 가입했습니다.", recall_at_k=-1.0)
+        _compute_metrics(record)
+        self.assertGreaterEqual(record.f1_score, F1_PASS_THRESHOLD)
 
 if __name__ == "__main__":
     unittest.main()
