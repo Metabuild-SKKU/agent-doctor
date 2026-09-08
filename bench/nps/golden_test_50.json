@@ -1,0 +1,652 @@
+[
+  {
+    "question": "국민연금에서 징수하거나 환수할 권리는 몇 년간 유지됩니까?",
+    "ground_truth": "징수하거나 환수할 권리는 3년간",
+    "gold_contexts": [
+      "공단은 법 따른 징수금을 징수하거나 환수할 권리는 3년간, 급여 제125조제1항에 따라 사용자나 가입자가 신고한 소득이"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "abstract",
+      "style": "web_search",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "기준소득월액의 상한액은 얼마인가요?",
+    "ground_truth": "637만원",
+    "gold_contexts": [
+      "기준소득월액 상한액(637만원)"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "2026년 사업장가입자의 연금 보험료는 기준소득월액에 몇 분의 몇을 곱한 금액으로 계산되나요?",
+    "ground_truth": "2026년은 1만분의 475",
+    "gold_contexts": [
+      "2026년부터\n2032년까지는 기준소득월액에 다음 각 호의 해당연도의 비율을 곱한 금액으로 한다.\n1. 2026년은 1만분의 475\n2. 2027년은 1만분의 500\n3. 2028년은 1만분의 525\n4. 2029년은 1만분의 550\n5. 2030년은 1만분의 575\n6. 2031년은 1만분의 600\n7. 2032년은 1만분의 625"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "경상남도 창원시 마산회원구의 주소는 무엇인가?",
+    "ground_truth": "경상남도 창원시 마산회원구 3.15대로 133 마산 51316",
+    "gold_contexts": [
+      "경상남도 창원시 마산회원구 3.15대로\n133 마산 51316"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "web_search",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "적용배제신청일은 언제인가요?",
+    "ground_truth": "1월5일",
+    "gold_contexts": [
+      "적용배제신청일/상실일: 1월5일/1월5일"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "연금보험료의 납부 기한은 언제까지인가?",
+    "ground_truth": "다음 달 10일까지",
+    "gold_contexts": [
+      "연금보험료는 납부 의무자가 다음 달 10일까지 내야 한다."
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "협정 발효일이 2011. 11. 01.인 경우, 가입기간은 몇 년이며 연장 가능 여부는 어떻게 되나요?",
+    "ground_truth": "5년(3년 연장 가능)",
+    "gold_contexts": [
+      "2011. 11. 01. 5년(3년 연장 가능)"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "지원신청일이 속하는 달의 말일 현재 근로자 수가 몇 명 미만인 사업장에 필요한 사항은 대통령령으로 정해지나요?",
+    "ground_truth": "10명 미만",
+    "gold_contexts": [
+      "월평균 근로자 수가 10명 미만인 사업장 등에 필요한 사항은 대통령령으로 정한다."
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "web_search",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "가입기간 중 기준소득월액을 결정하는 경우 어떤 금액을 기준으로 조정하나요?",
+    "ground_truth": "전년도 기준소득월액",
+    "gold_contexts": [
+      "가입기간 중 기준소득월액을 결정하는 경우: 해당 가입자의 전년도 기준소득월액을 평균소득월액의 변동률을 기준으로 조정한 금액"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "일본의 보험료 면제협정은 언제부터 시작되며 기간은 얼마인가?",
+    "ground_truth": "2005. 04. 01. 5년",
+    "gold_contexts": [
+      "보험료 면제협정 일 본 2005. 04. 01. 5년(합의시 3년 연장 가능)"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "web_search",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "가입기간중 기준소득월액 평균액이 5,500,000일 때 연금보험료는 얼마인가?",
+    "ground_truth": "495,000",
+    "gold_contexts": [
+      "가입기간중 기준소득월액 평균액(B값): 5,500,000, 연금보험료: 495,000, 가입기간: 432,670, 647,400, 862,120, 1,076,850, 1,291,580, 1,506,300, 1,721,030"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "일용근로자가 근로소득 지급명세서를 제출해야 하는 기한은 언제인가?",
+    "ground_truth": "다음달 말일까지",
+    "gold_contexts": [
+      "일용근로자 근로소득은 그 지급일이 속하는 달의 다음달 말일까지 지급명세서를 제출"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "기준소득월액의 적용 기간은 언제부터 언제까지인지 알려줘?",
+    "ground_truth": "자격을 취득한 날이나 납부를 재개한 날이 속하는 달부터 제7조제1항에 따라 정기 결정되는 기준소득월액을 적용하는 달의 전달까지",
+    "gold_contexts": [
+      "그 적용 기간은 자격을 취득한 날이나 납부를 재개한 날이 속하는 달부터 제7조제1항에 따라 정기 결정되는 기준소득월액을 적용하는 달의 전달까지로 한다."
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "특수직종근로자임을 증명하기 위해 첨부해야 하는 서류의 수량을 알려줘",
+    "ground_truth": "서류 1부",
+    "gold_contexts": [
+      "국민연금 임금대장 사본 또는 선원수첩 사본 등 특수직종근로자임을 증명할 수 있는 서류 1부 첨부"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "어떤 신고를 통해 소급분 연금보험료 및 과오납 발생에 따른 보험료 정산의 번거로움을 줄일 수 있나요?",
+    "ground_truth": "입사･퇴사 등을 적기 신고",
+    "gold_contexts": [
+      "입사･퇴사 등을 적기 신고(매월 15일까지 신고)하여 소급분 연금보험료 및 과오납 등 발생에 따른 보험료 정산의 번거로움을 줄이세요!"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "abstract",
+      "style": "web_search",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "가입기간을 계산할 때 어떤 기간은 가입기간에 산입하지 않나요?",
+    "ground_truth": "연금보험료를 내지 아니한 기간",
+    "gold_contexts": [
+      "가입기간을 계산할 때 연금보험료를 내지 아니한 기간은 가입기간에 산입하지 아니한다."
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "근로를 위해 필요한 최소 일수 또는 소득은 얼마인가요?",
+    "ground_truth": "8일(또는 합산 소득 220만 원)",
+    "gold_contexts": [
+      "8일(또는 합산 소득 220만 원) 이상 근로"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "20254년 7월부터 2026년 6월까지 기준소득월액의 하한액과 상한액은 얼마인가?",
+    "ground_truth": "400,000원, 6,370,000원",
+    "gold_contexts": [
+      "20254년 7월부터 2026년 6월까지 기준소득월액 하한액은 400,000원, 상한액은 6,370,000원입니다."
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "web_search",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "가입기간중 기준소득월액 평균액이 1,600,000일 때 연금보험료는 얼마인가?",
+    "ground_truth": "144,000",
+    "gold_contexts": [
+      "가입기간중 기준소득월액 평균액(B값): 1,600,000, 연금보험료: 144,000, 가입기간: 236,210, 353,430, 470,660, 587,890, 705,110, 822,340"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "국민연금 웹 EDI서비스가 시작된 날짜는 언제인가요?",
+    "ground_truth": "2012.1월",
+    "gold_contexts": [
+      "2012.1월부터 서비스하고 있는 국민연금 웹 EDI서비스를 이용하실 수 있습니다."
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "지원대상 근로자의 기준소득월액이 얼마를 초과하면 지원 취소 및 지원금 전액 환수가 발생하나요?",
+    "ground_truth": "297만원",
+    "gold_contexts": [
+      "지원대상 근로자의 취득 후 최초 정기결정시 기준소득월액이 지원요건 상한선의\n110% (’24 ~ ’25년도 기준 297만원)를 초과하는 경우 지원 취소 및 지원금 전액 환수"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "2025.7월부터 2026.6월까지 적용되는 기준소득월액의 상한액과 하한액은 각각 얼마인가?",
+    "ground_truth": "637만원과 40만원",
+    "gold_contexts": [
+      "2025.7월부터 2026.6월까지 적용할 기준소득월액 상･하한액은 각각 637만원과 40만원임"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "면제신청서를 언제까지 제출해야 소급 면제가 가능한가?",
+    "ground_truth": "근로 시작일부터 3개월내 제출 시 소급 면제가능",
+    "gold_contexts": [
+      "중국은 면제신청서 접수일 익월부터 면제 가능함(단, 근로 시작일부터 3개월내 제출 시 소급 면제가능)"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "사업장 적용(등록) 신고를 위해 필요한 서류는 무엇인가?",
+    "ground_truth": "사업장 적용(등록) 신고 시 필수 구비서류",
+    "gold_contexts": [
+      "사업장 적용(등록) 신고\n- 필수 구비서류\n• 당연적용사업장 해당신고서\n• 보험료 일괄경정·전자고지 신청서\n• (원도급 또는 하도급)공사계약서\n- 추가서류 : 경과조치 사업장 인정을 위한 입증서류 제출\n- 신고방법 : 서면, 우편, 팩스, 인터넷(4대사회보험 포털사이트)"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "abstract",
+      "style": "web_search",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "연금보험료 지원금 중 최대 금액은 얼마인가요?",
+    "ground_truth": "165,600원",
+    "gold_contexts": [
+      "연금보험료 지원금 중 최대 165,600원(기여금 82,800원, 부담금 82,800원) 지원"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "사업장으로 자격 취득신고 대상이 되기 위해 1개월 동안의 소득이 얼마 이상이어야 하는지 알려줘",
+    "ground_truth": "보건복지부장관이 정하여 고시하는 금액",
+    "gold_contexts": [
+      "1개월 동안의 소득이 보건복지부장관이 정하여 고시하는 금액 이상인 경우에는 사업장으로 자격 취득신고 대상임"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "인문･사회과학 연구원의 직종 코드가 뭐야?",
+    "ground_truth": "110",
+    "gold_contexts": [
+      "0. 경영･사무･금융･보험직: 110 인문･사회과학 연구원"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "국적에 상응성 인정에 의한 대상국의 기준일은 언제인가요?",
+    "ground_truth": "2025. 7. 1.",
+    "gold_contexts": [
+      "2025. 7. 1. 기준 국적에 상응성 인정에 의한 대상국 (25개국)"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "기여금 납부 시 체납기간의 몇 분의 몇에 해당하는 기간이 가입기간에 산입되나요?",
+    "ground_truth": "체납기간의 2분의 1에 해당하는 기간",
+    "gold_contexts": [
+      "기여금 납부: 체납기간의 2분의 1에 해당하는 기간.\n이 경우 1개월 미만의 기간은 1개월로 한다."
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "2033년부터 적용되는 연금보험료율은 얼마인가?",
+    "ground_truth": "6.5%",
+    "gold_contexts": [
+      "2026년부터 2033년까지 매년 사용자, 근로자 각각 0.25% 상향되어\n2033년 부터는 각각 6.5%의 연금보험료율 적용"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "web_search",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "연금급여는 매월 몇 일에 지급받게 됩니까?",
+    "ground_truth": "매월 25일",
+    "gold_contexts": [
+      "연금급여는 매월 25일에 그 달의 금액을 지급받게 됩니다."
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "web_search",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "여행･숙박･오락 서비스직의 직종은 무엇인가요?",
+    "ground_truth": "52. 여행･숙박･오락 서비스직",
+    "gold_contexts": [
+      "52. 여행･숙박･오락 서비스직: 70. 건설･채굴직, 82. 금속･재료･설치･정비･생산직 (판금･단조･주조ㆍ용접ㆍ도장 등): 88. 인쇄･목재･공예 및 기타설치･정비･생산직"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "신고기한은 언제까지인가?",
+    "ground_truth": "다음달 15일까지",
+    "gold_contexts": [
+      "신고기한 : 사유발생일이 속하는 달의 다음달 15일까지"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "구직급여 수급자에게 지원되는 최대 기간은 얼마인가?",
+    "ground_truth": "1년(12개월)",
+    "gold_contexts": [
+      "최대 1년(12개월)까지 지원"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "사회보장협정의 형태는 어떤 두 가지로 구분되는지 알려줘",
+    "ground_truth": "사회보장협정의 형태는 가입기간 합산 협정과 보험료면제 협정으로 구분",
+    "gold_contexts": [
+      "사회보장협정은 대부분 양 당사국의 정부 간에 체결되고 있으며, 그 형태는 협정의 적용 범위에 따라 “가입기간 합산 협정(보험료면제 포함)”과 “보험료면제 협정”으로 구분"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "abstract",
+      "style": "imperative",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "가입기간이 몇 년 미만인 경우 지급연령이 되면 반환일시금을 받을 수 있나요?",
+    "ground_truth": "가입기간 10년 미만",
+    "gold_contexts": [
+      "가입기간 10년 미만인 사람이 지급연령(60~65세)이 된 경우"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "2026년 알기쉬운국민연금사업장실무안내에서 평균소득월액(A)은 얼마인가?",
+    "ground_truth": "3,089,062",
+    "gold_contexts": [
+      "2026년 알기쉬운국민연금사업장실무안내 제3장 부록 평균소득월액(A) : 3,089,062"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "2025년 기준으로 지원대상 근로자의 기준소득월액 상한액은 얼마인가?",
+    "ground_truth": "270만원",
+    "gold_contexts": [
+      "2025년 기준: 270만원"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "2024년도와 2025년도 기준으로 고시소득상한액의 110%는 얼마인가?",
+    "ground_truth": "297만원",
+    "gold_contexts": [
+      "기준 소득월액이 변경되어 취득 후 최초 정기결정 시 기준소득월액이 고시소득상한액의\n110%(’24 ~ ‘25년도 기준 297만원)을 초과할 것이 확실 시 되는 경우"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "노령연금을 받을 수 있는 요건은 무엇인가요?",
+    "ground_truth": "가입기간 10년 이상, 60세에 도달한 자",
+    "gold_contexts": [
+      "가입기간 10년 이상, 60세에 도달한 자"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "abstract",
+      "style": "conversational",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "기준소득월액의 상한액과 하한액을 알려줘",
+    "ground_truth": "상한액 637만원, 하한액 40만원",
+    "gold_contexts": [
+      "상한액 637만원, 하한액 40만원"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "경정고지 내역을 확인하고 납부해야 하는 기한은 언제인가?",
+    "ground_truth": "매월 6일 이후",
+    "gold_contexts": [
+      "매월 6일 이후 EDI(전자문서교환)･사회보험통합징수포털에서 경정고지 내역을 확인하여 경정된 고지금액으로 납부하여야 합니다."
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "web_search",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "2025년 고시기준으로 지원 근로자의 기준소득월액은 얼마 미만이어야 합니까?",
+    "ground_truth": "270만원",
+    "gold_contexts": [
+      "지원 근로자*의 기준소득월액 270만원 미만(2025년 고시기준)"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "web_search",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "고용보험법에 따른 우선지원대상(소규모) 사업장인 경우 납부예외인정 기간은 몇 일인가?",
+    "ground_truth": "90일",
+    "gold_contexts": [
+      "고용보험법에 따른 우선지원대상(소규모) 사업장인 경우 : 90일(다태아의 경우 120일)"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "web_search",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "2025년 12월 1일 이전 자격취득자의 적용 기한은 언제까지인가?",
+    "ground_truth": "2026년 6월",
+    "gold_contexts": [
+      "2025년 12월 1일 이전 자격취득자는 2026년 6월까지 적용"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "web_search",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "처리 오류 반송 후 결과 통보까지 걸리는 일수는?",
+    "ground_truth": "+1일",
+    "gold_contexts": [
+      "처리 오류 반송 처리\n+1일"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "web_search",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "가입자가 사망하기 전 연금보험료를 낸 기간은 최소 몇 년 이상이어야 하는가?",
+    "ground_truth": "3년 이상",
+    "gold_contexts": [
+      "사망일 5년 전부터 사망일까지의 기간 중 연금보험료를 낸 기간이 3년 이상인 가입자 또는 가입자였던 자가 사망한 경우."
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "배우자에게 지급되는 부양가족연금액은 얼마인가요?",
+    "ground_truth": "300,330원",
+    "gold_contexts": [
+      "배우자(사실혼 포함) 연 300,330원"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "conversational",
+      "persona": "국민연금 실무 담당자"
+    }
+  },
+  {
+    "question": "납부 예외 기간은 언제부터 시작되는지를 알려줘",
+    "ground_truth": "납부 예외 기간은 납부 예외 사유가 발생한 날이 속하는 달부터",
+    "gold_contexts": [
+      "납부 예외 기간은 납부 예외 사유가 발생한 날이 속하는 달부터 납부 예외 사유가 없"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "신입 사업장 담당자"
+    }
+  },
+  {
+    "question": "강동하남 지사의 우편번호를 알려줘",
+    "ground_truth": "05381",
+    "gold_contexts": [
+      "지사(센터)명: 강동하남, 우편번호: 05381, 주 소: 서울특별시 강동구 천호대로 1102, 8층(성내동), 전화번호: 02-480-8873"
+    ],
+    "qtype": null,
+    "metadata": {
+      "kind": "single",
+      "style": "imperative",
+      "persona": "신입 사업장 담당자"
+    }
+  }
+]

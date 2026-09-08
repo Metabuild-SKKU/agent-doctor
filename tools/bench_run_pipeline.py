@@ -35,12 +35,17 @@ import json
 import os
 import sys
 
-OUT_CONFIG = "bench/out/tuned_index_config.json"
-OUT_HISTORY = "bench/out/tuned_optimization_history.json"
+# 산출물 뿌리. 코퍼스마다 갈라야 한다 — 다른 코퍼스 실행이 기본값으로 돌면 앞선 실험의
+# tuned_config·처방 이력·내부 진단서를 **덮어쓴다**. bench/out/ 은 gitignore 대상이라
+# 덮이면 git 으로 못 되살리고, 발표 근거가 조용히 사라진다.
+OUT_DIR = os.getenv("BENCH_OUT_DIR", "bench/out")
+
+OUT_CONFIG = f"{OUT_DIR}/tuned_index_config.json"
+OUT_HISTORY = f"{OUT_DIR}/tuned_optimization_history.json"
 # --allow-reranker 실행은 차단 판본 산출물을 덮지 않는다. 두 판본을 나란히 남겨야
 # "리랭커 축이 얼마나 기여했나"를 사후에 되짚을 수 있다.
-OUT_CONFIG_RR = "bench/out/tuned_reranker_index_config.json"
-OUT_HISTORY_RR = "bench/out/tuned_reranker_optimization_history.json"
+OUT_CONFIG_RR = f"{OUT_DIR}/tuned_reranker_index_config.json"
+OUT_HISTORY_RR = f"{OUT_DIR}/tuned_reranker_optimization_history.json"
 
 # 리랭커 차단은 config 로 한다. eligibility._runtime_verified 가 reranker.* action 을
 # "runtime capability 의 status 가 verified 인가"로 거르는데, reranker_preflight="disabled"
@@ -51,6 +56,18 @@ OUT_HISTORY_RR = "bench/out/tuned_reranker_optimization_history.json"
 # 튜플을 받지만 그 앞단(agent.py::_active_excluded_action_keys)이 원소마다 .action_key 를
 # 읽어 AttributeError 로 죽는다 — 그 필드는 history 가 만든 객체 전용이다(실측).
 BLOCK_RERANKER_CONFIG = {"reranker_preflight": "disabled"}
+
+# 리랭커 후보창 고정. BENCH_PIN_RERANK_CANDIDATES 로 켠다.
+#
+# **왜 필요한가.** AutoRAG config 의 검색 노드 top_k 는 리랭커의 **입력 후보 풀**이고,
+# 그 값은 탐색 결과가 아니라 우리가 손으로 박은 상수다. 우리 쪽 rerank_candidates 는
+# 기본 20 에서 시작해 옵티마이저가 움직인다 — 그래서 실행마다 20 vs 40 처럼 갈릴 수
+# 있고, 그러면 한쪽이 후보를 두 배 받는 비대칭이 된다(영어 코퍼스에서 실측).
+#
+# max_candidates 를 같은 값으로 함께 올리는 이유: planner._policy_constraints 가 이 값을
+# 후보창 상한으로 읽는다. 시작값만 올리고 상한을 그대로 두면 옵티마이저가 더 넓힐 수
+# 있어 다시 비대칭이 된다.
+PIN_RERANK_CANDIDATES_KEY = "BENCH_PIN_RERANK_CANDIDATES"
 
 
 def main() -> int:
@@ -78,6 +95,15 @@ def main() -> int:
         source_type=os.getenv("SOURCE_TYPE", "json_corpus"),
         status="running",
     )
+    pinned = os.getenv(PIN_RERANK_CANDIDATES_KEY, "").strip()
+    if pinned:
+        try:
+            n = int(pinned)
+        except ValueError:
+            raise SystemExit(f"[bench] {PIN_RERANK_CANDIDATES_KEY}='{pinned}' 는 정수여야 합니다.")
+        state.index_config["rerank_candidates"] = n
+        state.index_config["rerank_candidate_policy"] = {"max_candidates": n}
+
     allow_reranker = "--allow-reranker" in sys.argv
     out_config = OUT_CONFIG_RR if allow_reranker else OUT_CONFIG
     out_history = OUT_HISTORY_RR if allow_reranker else OUT_HISTORY
@@ -88,6 +114,8 @@ def main() -> int:
     print("벤치마크 파이프라인 — " + ("리랭커 허용(본 비교)" if allow_reranker else "리랭커 처방 차단(대조군)"))
     print(f"  소스   : {state.source_url} ({state.source_type})")
     print(f"  Probe  : {os.getenv('EVAL_PROBE_STORE', '(기본)')}")
+    if pinned:
+        print(f"  후보창 : {pinned} 고정 (AutoRAG 검색 노드 top_k 와 대칭)")
     if allow_reranker:
         print("  주의   : AutoRAG 쪽도 리랭커(rankgpt)를 받은 실행과 짝지어야 공정하다.")
         print("           bench/autorag_config.yaml 의 passage_reranker 노드 참고.")
