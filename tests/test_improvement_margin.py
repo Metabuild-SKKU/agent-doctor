@@ -68,7 +68,7 @@ class JudgeMarginTest(unittest.TestCase):
     """티끌만큼 오른 점수는 노이즈와 구분되지 않으므로 개선이 아니다."""
 
     def test_gain_below_margin_is_rolled_back(self):
-        # 0.800 → 0.818 (+0.018) — 마진(0.03) 미만. 실측 σ_Δ(0.0107) 안에 묻히는 폭이다.
+        # 0.800 → 0.818 (+0.018) — 마진(0.03) 미만. 실측 σ_Δ(0.0120) 안에 묻히는 폭이다.
         verdict = _judge_totals(80.0, 81.8)
 
         self.assertFalse(verdict.keep)
