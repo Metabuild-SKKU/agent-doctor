@@ -1515,10 +1515,6 @@ class PlannerCandidateListTest(unittest.TestCase):
         ))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class MarginFloorWiringTest(unittest.TestCase):
     """하한선이 planner.plan() 경로에 실제로 배선돼 있는가.
 
@@ -1584,3 +1580,7 @@ class MarginFloorWiringTest(unittest.TestCase):
         demoted = request.metadata.get("margin_demoted_actions") or []
         self.assertIn("retriever.search_type:replace",
                       [d["action_key"] for d in demoted])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -675,12 +675,26 @@ def _conflict_sort_key(candidate: ActionCandidate) -> tuple:
 # [단위 주의]
 #   probe 비율과 마진은 **다른 공간**이다(마진은 종합점수 0~1 의 변화량). 비율을
 #   그대로 마진과 비교하면 안 된다. 그래서 비율을 성분에 얹어 실제 결합식(combine)을
-#   통과시킨 뒤, 나온 **종합점수 변화량**을 마진과 비교한다. 조화평균의 비선형성도
-#   이 경로로 자동 반영된다.
+#   통과시킨 뒤, 나온 **종합점수 변화량**을 마진과 비교한다.
 #
-# [일부러 후하게 잡는다]
-#   겨냥한 probe 가 지금 0점이라고 가정한다(실제로는 부분점수가 있다). 그래서 진짜
-#   상한은 이보다 낮다 — "후하게 쳐줘도 마진 미달" 이면 확실히 미달이라 오탈락이 없다.
+#   ⚠️ 지금 결합식(조화평균)에서는 이 왕복이 수치적으로 거의 항등이다 — 성분
+#   (20,15)~(85,80) 구간에서 상승폭이 probe 비율과 표시 0.08점 안에서 일치한다.
+#   즉 **현재 실효 규칙은 "지지 probe 수 ≥ 마진 × probe 총수"** 이며, 질문 100개·
+#   마진 0.02 에서 probe 2개다. 그럼에도 combine 을 부르는 이유는 결합식 교체
+#   대비다(scoring.py 가 그 교체를 전제한다) — 비선형 결합식으로 바뀌면 이 코드는
+#   고치지 않아도 따라간다.
+#
+# [후하게 잡되, 엄밀한 상한은 아니다]
+#   겨냥한 probe 가 지금 0점이라고 가정한다(실제로는 부분점수가 있다). 그만큼
+#   상한을 과대평가하므로 보통은 오탈락 쪽으로 기울지 않는다.
+#   다만 **엄밀한 상한은 아니다.** 여기 쓰는 분모는 채점 대상 probe 총수인데, 두
+#   성분은 각자 다른 모집단을 평균한다 — 신뢰도는 판정 가능하고 검색축이 측정된
+#   probe 만(scoring._is_evaluable · _probe_reliability), 품질은 해당 RAGAS 지표가
+#   실린 record 만 본다. 그 모집단이 총수보다 작으면 실제 상승 여력이 이 상한보다
+#   커서 오탈락이 날 수 있다. 실측(pipeline_20260814_160634)에서는 RAGAS 100/100,
+#   골드 오류 1개라 격차가 1% 수준이었지만, DEEP 미만 모드나 ground_truth 없는
+#   probe 가 많은 코퍼스에서는 커진다. 상한을 성분별 모집단으로 정확히 계산하려면
+#   리포트가 성분별 분모를 실어야 한다(지금은 성분 점수만 싣는다).
 #
 # [모르면 건드리지 않는다]
 #   성분이 하나라도 미측정이거나 probe 총수를 모르면 True(기존 동작)로 둔다.
@@ -689,29 +703,29 @@ def _conflict_sort_key(candidate: ActionCandidate) -> tuple:
 MARGIN_REACHABLE_KEY = "margin_reachable"
 MARGIN_CEILING_DELTA_KEY = "margin_ceiling_delta"
 
-# 종합점수 계산에서 빠지는 라벨(agents/eval/report.py::is_gold_labeling_error).
-# 분모를 그만큼 줄여야 composite 이 실제로 본 probe 집합과 맞는다.
-_GOLD_ERROR_LABELS = ("bad_gold_answer", "bad_gold_chunk")
-
 
 def _scorable_probe_total(state: AgentDoctorState) -> int | None:
-    """종합점수가 실제로 채점한 probe 수(근사). 모르면 None.
+    """종합점수가 실제로 채점한 probe 수. 모르면 None.
 
-    composite 은 골드 오류 probe 를 빼고 계산하므로 len(state.probes) 를 그대로 쓰면
-    분모가 커지고 → 비율이 작아지고 → 필요 이상으로 후보를 떨어뜨린다. findings_summary
-    의 가중 라벨수로 그만큼 뺀다(가중치라 정확한 개수는 아니지만 분모를 안전한 방향으로
-    당긴다 — 가중 합은 실제 제외 probe 수 이하다).
+    composite 은 골드 오류 probe 를 빼고 계산하므로(report.build_report 의 scorable)
+    len(state.probes) 를 그대로 쓰면 분모가 커지고 → 비율이 작아지고 → 필요 이상으로
+    후보를 떨어뜨린다. 뺄 개수는 Eval 이 이미 정확히 세어 리포트에 실어 두었다
+    (ragas_scores["gold_labeling_errors"], 0 이면 키가 없다). 그 값을 그대로 쓴다 —
+    같은 판정(is_gold_labeling_error)에서 나온 수라 확정/예비 규칙이 바뀌어도 따라간다.
+
+    라벨 집계(findings_summary)로 근사하지 않는 이유: 그쪽 수치는 probe 당 1/N 로
+    가중돼 실제 제외 probe 수보다 작고(분모가 커져 과잉 강등 쪽으로 기운다), 예비
+    bad_gold_answer 처럼 실제로는 제외되지 않는 건까지 세게 된다.
     """
     total = len(state.probes or [])
     if total <= 0:
         return None
-    summary = getattr(state.report, "findings_summary", None) or {}
-    excluded = 0.0
-    for bucket in ("confirmed_labels", "preliminary_labels"):
-        labels = summary.get(bucket) or {}
-        for label in _GOLD_ERROR_LABELS:
-            excluded += float(labels.get(label) or 0.0)
-    remaining = total - int(round(excluded))
+    scores = getattr(state.report, "ragas_scores", None) or {}
+    try:
+        excluded = int(scores.get("gold_labeling_errors") or 0)
+    except (TypeError, ValueError):
+        excluded = 0
+    remaining = total - max(0, excluded)
     return remaining if remaining > 0 else None
 
 

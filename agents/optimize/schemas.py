@@ -681,6 +681,9 @@ class OptimizationReport:
             남은 것. "지지받았다"와 "해결됐다"는 다른 사실이라 구분해 보고한다.
         score_breakdown: 선택 점수의 구성 요소(고유 probe 수·가중 지지·비용 출처 등).
         deferred_axes: 근소한 차이로 이번 방문에서 보류한 축과 그 이유.
+        margin_demoted_actions: 성공해도 개선 마진에 못 닿아 인과 우선권(A>C>B)을
+            잃은 후보와 그 상한. 탈락이 아니라 강등이다 — 이게 없으면 사용자에게는
+            상위 그룹 처방을 건너뛴 이유가 남지 않는다.
     """
 
     report_id: str
@@ -704,6 +707,7 @@ class OptimizationReport:
     remaining_labels: list[str] = field(default_factory=list)
     score_breakdown: dict[str, Any] = field(default_factory=dict)
     deferred_axes: list[dict[str, Any]] = field(default_factory=list)
+    margin_demoted_actions: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

@@ -888,10 +888,33 @@ class MarginReachabilityTest(unittest.TestCase):
         self.assertLess(entry["ceiling_delta"], entry["margin"])
 
     def test_gold_error_probes_leave_the_denominator(self):
-        """종합점수가 뺀 probe 는 분모에서도 빠진다 — 같은 집합을 봐야 한다."""
+        """종합점수가 뺀 probe 는 분모에서도 빠진다 — 같은 집합을 봐야 한다.
+
+        개수는 Eval 이 이미 정확히 세어 리포트에 실어 둔 값을 쓴다.
+        """
         state = self._state(probe_total=100)
-        state.report.findings_summary = {"confirmed_labels": {"bad_gold_chunk": 4.0}}
+        state.report.ragas_scores = {"gold_labeling_errors": 4}
         self.assertEqual(aggregator._scorable_probe_total(state), 96)
+
+    def test_denominator_ignores_weighted_label_counts(self):
+        """라벨 가중집계로 근사하지 않는다 — 그 수는 실제 제외 probe 수가 아니다.
+
+        findings_summary 의 라벨 수는 probe 당 1/N 로 가중돼 있고(제외 probe 수보다
+        작다), 예비 bad_gold_answer 처럼 실제로는 채점에서 안 빠지는 건도 센다. 그걸
+        분모에 쓰면 골드 오류가 없는 실행에서도 분모가 줄어 후보를 덜 강등한다.
+        """
+        state = self._state(probe_total=100)
+        state.report.findings_summary = {
+            "confirmed_labels": {"bad_gold_chunk": 4.0},
+            "preliminary_labels": {"bad_gold_answer": 3.0},
+        }
+        self.assertEqual(aggregator._scorable_probe_total(state), 100)
+
+    def test_missing_gold_error_key_means_none_excluded(self):
+        """골드 오류가 0 이면 Eval 이 키를 아예 안 싣는다 — 그때 분모는 총수 그대로다."""
+        state = self._state(probe_total=100)
+        state.report.ragas_scores = {"embedding_source": "openai"}
+        self.assertEqual(aggregator._scorable_probe_total(state), 100)
 
 
 if __name__ == "__main__":
