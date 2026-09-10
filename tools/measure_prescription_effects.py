@@ -95,7 +95,7 @@ DEFAULT_OUT_ROOT = Path("output") / "effects"
 COST_PER_PROBE_USD = 0.0058
 
 # 실측 σ_Δ @ probe 100 (output/sigma/20260814_155646) 를 표시 스케일(0~100)로 환산한 값.
-SIGMA_DELTA_AT_100_DISPLAY = 1.07
+SIGMA_DELTA_AT_100_DISPLAY = 1.20
 
 
 def _parse_value(raw: str):
@@ -161,18 +161,21 @@ def _state_from_env():
 
 
 def _stub_generation() -> None:
-    """--dry-run 용. 답변 생성 LLM 만 스텁으로 바꾼다(measure_eval_sigma 와 같은 방식).
+    """--dry-run 용. 생성·probe 합성의 LLM 출구를 모두 닫는다.
 
     EVAL_ENABLE_LLM=0 은 RAGAS 만 막고 STEP2 답변 생성은 그대로 API 를 태운다.
-    배선 확인에 돈을 쓰지 않으려면 여기까지 끊어야 한다.
+    probe 합성도 llm_provider.has_key() 뒤에서 API 를 탈 수 있으므로 키가 없는
+    것으로 고정해 휴리스틱 폴백으로 보낸다.
     """
     import agents.eval.agent as eval_agent
+    from agents.eval import llm_provider
 
     def _fake(question, contexts, **kwargs):
         head = contexts[0][:200] if contexts else ""
         return "[dry-run] " + str(question) + " :: " + head
 
     eval_agent.generate_answer = _fake
+    llm_provider.has_key = lambda: False
 
 
 def _worker(args) -> int:
@@ -345,7 +348,7 @@ def main() -> int:
     p.add_argument("--run", action="store_true",
                    help="실제로 측정한다. 없으면 계획과 예상 비용만 출력하고 끝낸다")
     p.add_argument("--dry-run", action="store_true",
-                   help="LLM 호출 없이 배선만 확인(답변 스텁, RAGAS off)")
+                   help="API 호출 없이 배선만 확인(생성 스텁, RAGAS off, 기본 임베딩 CPU)")
     p.add_argument("--outdir", default="",
                    help="결과 디렉터리(기본: output/effects/<타임스탬프>)")
     p.add_argument("--aggregate-only", default="",
@@ -382,6 +385,19 @@ def main() -> int:
         pass
     _apply_env_overrides(args.overrides)
 
+    # 부모가 받은 실행 경로 옵션은 각 측정 subprocess 에도 그대로 전달한다.
+    passthrough = []
+    if args.dry_run and not args.embed:
+        # .env 의 OpenRouter 기본값이 dry-run 에서 과금되는 것을 막는다.
+        args.embed = "cpu"
+    for flag, value in (("--embed", args.embed),
+                        ("--query-embed", args.query_embed),
+                        ("--rerank", args.rerank)):
+        if value:
+            passthrough += [flag, value]
+    if args.dry_run and "openrouter" in (args.embed, args.query_embed):
+        print("  경고: --dry-run 에 OpenRouter 임베딩을 명시했습니다 — API 비용이 발생할 수 있습니다")
+
     axes = _parse_axes(args.axes)
     if not axes:
         print("측정할 축이 없다. --axis KEY=VALUE 를 하나 이상 지정할 것.")
@@ -416,10 +432,11 @@ def main() -> int:
     if est is not None:
         print("  예상 비용: 약 $%.2f (probe 1건당 $%s, 93%%가 RAGAS 채점)"
               % (est, COST_PER_PROBE_USD))
+        print("  재색인 임베딩 비용은 provider·코퍼스 크기에 따라 달라 위 금액과 별도입니다")
     else:
         print("  예상 비용: KORQUAD_QA_LIMIT 이 없어 산정 불가 — 전체 질문셋은 비싸다")
     if args.dry_run:
-        print("  (--dry-run: LLM 호출 없음)")
+        print("  (--dry-run: 생성·심판 API 호출 없음; 임베딩 경로는 위 설정을 따름)")
     if not args.run:
         print("\n계획만 출력했다. 실제로 돌리려면 --run 을 붙일 것.")
         return 0
@@ -437,6 +454,7 @@ def main() -> int:
                "--outdir", str(outdir)]
         for item in args.overrides:
             cmd += ["--set", item]
+        cmd += passthrough
         if args.dry_run:
             cmd.append("--dry-run")
         print("[" + str(idx) + "/" + str(len(plan)) + "] " + name

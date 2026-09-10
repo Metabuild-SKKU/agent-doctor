@@ -100,8 +100,8 @@ def _eval_env(mode: str, llm: str, *, force_llm: bool = False):
     그 뒤의 모든 파이프라인 실행이 effective_eval_mode 에서 그 값을 보고
     조용히 심층으로 돈다(.env 에 EVAL_MODE 가 없는 배포에서 그렇다).
 
-    force_llm=False 면 EVAL_ENABLE_LLM 은 setdefault 로 둔다 - .env 가 정해둔
-    값을 파이프라인이 덮어쓰지 않게 하려는 기존 규약을 그대로 유지한다.
+    force_llm=False 면 호출자가 기존 환경값을 보존할 수 있다. 웹의 deep/full
+    파이프라인과 리플레이는 진단 축이 빠지지 않도록 force_llm=True 로 호출한다.
     """
     saved = {key: os.environ.get(key) for key in ("EVAL_MODE", "EVAL_ENABLE_LLM")}
     os.environ["EVAL_MODE"] = mode
@@ -146,8 +146,19 @@ def corpus_config() -> dict | None:
 
 @app.get("/config")
 def config() -> dict:
-    """화면이 시작 전에 서버 설정을 확인하는 곳. 코퍼스가 없으면 corpus=null."""
-    return {"corpus": corpus_config()}
+    """화면이 시작 전에 서버 설정을 확인하는 곳. 코퍼스가 없으면 corpus=null.
+
+    실제 경로는 서버 내부 실행에만 필요하다. CORS 를 허용한 로컬 프로토타입이라도
+    브라우저 응답에는 파일명만 보내 로컬 디렉터리 구조를 노출하지 않는다.
+    """
+    corpus = corpus_config()
+    if corpus is None:
+        return {"corpus": None}
+    public = dict(corpus)
+    public["source_url"] = Path(corpus["source_url"]).name
+    if corpus.get("qa_path"):
+        public["qa_path"] = Path(corpus["qa_path"]).name
+    return {"corpus": public}
 
 
 def _save_upload(run_id: str, upload: UploadFile) -> Path:
@@ -260,6 +271,7 @@ def _run_pipeline_background(run_id: str, source_url: str, source_type: str, dep
         eval_mode = effective_eval_mode(depth)
         with _PIPELINE_LOCK, _eval_env(
             eval_mode, "1" if eval_mode in ("deep", "full") else "0",
+            force_llm=True,
         ):
             graph = build_graph()
             initial_state = AgentDoctorState(

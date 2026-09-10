@@ -418,11 +418,17 @@ class EvalEnvTests(unittest.TestCase):
                     raise RuntimeError("boom")
             self.assertEqual(os.environ["EVAL_MODE"], "standard")
 
-    def test_llm_flag_is_left_alone_when_not_forced(self):
-        """파이프라인 경로는 setdefault 규약 - .env 가 정한 값을 덮지 않는다."""
+    def test_llm_flag_can_be_left_alone_for_non_web_callers(self):
+        """force 하지 않은 내부 호출자는 기존 환경값을 보존할 수 있다."""
         with self._env(EVAL_ENABLE_LLM="0"):
             with web_api._eval_env("deep", "1"):
                 self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "0")
+
+    def test_web_pipeline_forces_llm_for_deep_mode(self):
+        """웹 deep 실행은 .env=0 때문에 생성 진단 축을 잃어서는 안 된다."""
+        with self._env(EVAL_ENABLE_LLM="0"):
+            with web_api._eval_env("deep", "1", force_llm=True):
+                self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "1")
 
     def test_effective_mode_ignores_what_a_previous_run_wrote(self):
         """effective_eval_mode 는 실행이 덮어쓴 값이 아니라 .env 스냅샷을 본다."""
@@ -431,6 +437,27 @@ class EvalEnvTests(unittest.TestCase):
                 self.assertEqual(web_api.effective_eval_mode("full"), "full")
         with patch.object(web_api, "_ENV_EVAL_MODE", "standard"):
             self.assertEqual(web_api.effective_eval_mode("full"), "standard")
+
+
+class PublicConfigTests(_ReplayClient):
+    def test_config_exposes_names_without_server_directories(self):
+        internal = {
+            "source_type": "korquad",
+            "source_url": r"C:\\private\\corpus\\corpus.jsonl",
+            "qa_path": r"C:\\private\\qa\\qa_pairs.jsonl",
+            "max_docs": 20,
+            "qa_limit": 100,
+            "probe_source": "taxonomy",
+            "max_iterations": 5,
+            "eval_mode": "deep",
+        }
+        with patch.object(web_api, "corpus_config", return_value=internal):
+            corpus = self.client.get("/config").json()["corpus"]
+
+        self.assertEqual(corpus["source_url"], "corpus.jsonl")
+        self.assertEqual(corpus["qa_path"], "qa_pairs.jsonl")
+        self.assertNotIn("private", corpus["source_url"])
+        self.assertNotIn("private", corpus["qa_path"])
 
 
 if __name__ == "__main__":

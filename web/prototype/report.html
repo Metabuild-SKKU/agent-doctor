@@ -904,6 +904,7 @@
   }
   .rhead {
     padding: 24px 0 10px;
+    border: 0;
   }
   .rhead h1 {
     margin-top: 0;
@@ -912,8 +913,14 @@
   }
   .hero {
     grid-template-columns: 230px 1fr;
-    align-items: start;
+    align-items: center;
     overflow: visible;
+  }
+  .hero-side {
+    width: fit-content;
+    max-width: 100%;
+    justify-self: center;
+    align-self: center;
   }
   .gauge-wrap,
   .gauge-wrap svg {
@@ -1580,7 +1587,47 @@
   .topbar .brand { order: -1; }
   .topbar .theme-toggle { margin-left: auto; }
   .topbar { column-gap: 28px; }
-  .report-nav { position: static; display: inline-flex; width: auto; margin: 0 0 0 4px; }
+  .report-nav {
+    position: static;
+    display: inline-flex;
+    width: auto;
+    margin: 0 0 0 auto;
+    padding: 0;
+    gap: 18px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    overflow: visible;
+  }
+  .report-tab {
+    position: relative;
+    appearance: none;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    color: #666;
+    padding: 11px 4px 10px;
+    transition: background .16s ease, color .16s ease;
+  }
+  .report-tab:last-child { border: 0; }
+  .report-tab:hover {
+    background: transparent;
+    color: #111;
+  }
+  .report-tab.active {
+    background: transparent;
+    color: #111;
+  }
+  .report-tab.active::after {
+    content: "";
+    position: absolute;
+    right: 4px;
+    bottom: 0;
+    left: 4px;
+    height: 2px;
+    background: #111;
+  }
   .qa-tools { grid-template-columns: minmax(0, 1fr) 190px; align-items: end; }
   .qa-search { height: 44px; margin-bottom: 0; padding: 0 13px; }
   .qa-filter-field { display: block; }
@@ -1669,11 +1716,94 @@
   #qa-section .qa-ans .atext,
   #qa-section .qa-fix { font-size: 15px; }
   #qa-section .qa-ans .note { font-size: 12.5px; }
+  .dashboard-overview {
+    display: grid;
+    grid-template-columns: minmax(430px, .9fr) minmax(560px, 1.35fr);
+    gap: 20px;
+    align-items: stretch;
+    margin: 20px 0 34px;
+  }
+  .dashboard-overview .hero {
+    grid-template-columns: 155px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    gap: 22px;
+    align-items: start;
+    align-content: start;
+    height: 100%;
+    margin: 0;
+    padding: 24px;
+  }
+  .dashboard-overview .gauge-wrap,
+  .dashboard-overview .gauge-wrap svg {
+    width: 155px;
+    height: 155px;
+  }
+  .dashboard-overview .gauge-wrap {
+    align-self: start;
+    transform: translateY(-5px);
+  }
+  .dashboard-overview .gauge-center .big { font-size: 46px; }
+  .dashboard-overview .gauge-center .big small { font-size: 16px; }
+  .dashboard-overview .gauge-center .cap { font-size: 14px; }
+  .dashboard-overview .hero-side {
+    width: 100%;
+    justify-self: stretch;
+    align-self: start;
+  }
+  .dashboard-overview .hero-side h3 {
+    margin-top: 0;
+    font-size: 20px;
+  }
+  .dashboard-overview .hero-meta-chips { gap: 6px; }
+  .dashboard-overview .hero-meta-chip {
+    min-height: 34px;
+    padding: 7px 10px;
+    font-size: 12.5px;
+  }
+  .dashboard-overview .score-explain {
+    grid-column: 1 / -1;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    font-size: 13.5px;
+  }
+  .dashboard-overview #dashboard-course-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    margin: 0;
+    padding: 24px;
+    border: 1px solid #e3e3e3;
+    border-radius: 6px;
+  }
+  .dashboard-overview #dashboard-course-section > .section-head {
+    margin: 0 0 12px;
+  }
+  .dashboard-overview #dashboard-course-section .course-chart {
+    flex: 1;
+    margin: 0;
+    padding: 0 !important;
+    border: 0;
+  }
+  .dashboard-overview #dashboard-course-section [data-course-svg] {
+    min-height: 230px;
+  }
+  @media (max-width: 1100px) {
+    .dashboard-overview { grid-template-columns: 1fr; }
+    .dashboard-overview .hero { grid-template-columns: 210px minmax(0, 1fr); }
+    .dashboard-overview .gauge-wrap,
+    .dashboard-overview .gauge-wrap svg { width: 210px; height: 210px; }
+  }
   @media (max-width: 760px) {
     .topbar { padding: 12px 18px; flex-wrap: wrap; }
     .back-link { font-size: 0; }
     .back-link svg { width: 18px; height: 18px; }
     .report-nav { width: 100%; margin: 12px 0 0; }
+    .report-tab { flex: 1; }
+    .dashboard-overview .hero { grid-template-columns: 1fr; }
+    .dashboard-overview .gauge-wrap { margin: 0 auto; }
     .qa-tools { grid-template-columns: 1fr; }
   }
 </style>
@@ -1682,6 +1812,9 @@
 
 <div class="wrap">
   <header class="topbar">
+    <a class="back-link" href="index.html" aria-label="이전 화면으로 돌아가기" title="이전 화면으로 돌아가기">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5m6-6-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </a>
     <div class="brand">
       <div class="brand-name">RAG <span class="doc">Doctor</span></div>
     </div>
@@ -1691,10 +1824,6 @@
       <button class="report-tab" type="button" data-report-tab="treatment">치료 경과</button>
     </nav>
     <div class="topbar-right">
-      <a class="back-link" href="index.html">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5m6-6-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        새 진단
-      </a>
       <button class="theme-toggle" id="themeToggle" aria-label="테마 전환" title="테마 전환">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
@@ -1714,8 +1843,9 @@
   <!-- MODE NOTICE: 외부 RAG 로그 진단처럼 일부 섹션이 원리적으로 없는 경우에만 표시 -->
   <div id="modeNotice" style="display:none"></div>
 
+  <div class="dashboard-overview" data-report-panel="dashboard">
   <!-- HERO: score -->
-  <section class="hero" data-report-panel="dashboard">
+  <section class="hero">
     <div class="gauge-wrap">
       <svg viewBox="0 0 240 240" width="240" height="240" aria-hidden="true">
         <circle cx="120" cy="120" r="96" fill="none" stroke="var(--border)" stroke-width="14"
@@ -1742,14 +1872,14 @@
         <span class="hero-meta-chip"><b>-</b></span>
       </div>
       <div class="hero-stats" id="heroStats" hidden></div>
-      <div class="score-explain" id="scoreExplain">
-        종합 점수는 검색, 답변, 검증 결과를 함께 본 참고용 표시값입니다.<br>
-        이 프로젝트는 종합 점수 85점을 기준으로 처방 필요 여부를 결정합니다.
-      </div>
+    </div>
+    <div class="score-explain" id="scoreExplain">
+      종합 점수는 검색, 답변, 검증 결과를 함께 본 참고용 표시값입니다.<br>
+      이 프로젝트는 종합 점수 85점을 기준으로 처방 필요 여부를 결정합니다.
     </div>
   </section>
 
-  <section class="section" id="dashboard-course-section" data-report-panel="dashboard">
+  <section class="section" id="dashboard-course-section">
     <div class="section-head"><span class="idx">01</span><h2>종합 점수 추이</h2><span class="sub"></span></div>
     <div class="course-chart">
       <div class="cc-head">
@@ -1764,6 +1894,7 @@
       <p class="course-note"><b>참고</b>LLM 호출 노이즈를 고려하여 3점 이상 개선되지 못하면 롤백됩니다.</p>
     </div>
   </section>
+  </div>
 
   <!-- PRIORITY -->
   <section class="section" id="priority" data-report-panel="dashboard" hidden>
@@ -2342,7 +2473,7 @@
     var rxCount = (score.kept || 0) + (score.rolled || 0) + (score.errors || 0) + (score.pending || 0);
     var trend = after > before ? '올랐습니다.' : (after < before ? '내려갔습니다.' : '변화가 없었습니다.');
     document.getElementById('heroHeadline').innerHTML =
-      rxCount + '건을 처방했고, 종합점수는 <span style="color:var(--ink)">' + after + '</span>/100입니다.';
+      rxCount + '건을 처방했고,<br>종합점수는 <span style="color:var(--ink)">' + after + '</span>/100입니다.';
     var heroSummary = document.getElementById('heroSummary');
     heroSummary.className = 'hero-meta-chips';
     heroSummary.innerHTML = renderHeroMetaChips(meta);
@@ -3002,7 +3133,8 @@
           points.push({ label: '기준', value: m.before, kind: 'baseline', step: 0, rx_num: '' });
         }
         var label = rxStepLabel(rx, index);
-        var failed = rx.state === 'rolled';
+        // 실행 오류도 서버에서 설정을 원복한다. 그래프 역시 롤백과 같은 경로로 그린다.
+        var failed = rx.state === 'rolled' || rx.state === 'error';
         var rxNum = String(rx.num || '').padStart(2, '0');
         points.push({ label: label, value: m.after, kind: failed ? 'failed' : 'kept', step: index + 1, rx_num: rxNum });
         if (failed) {
