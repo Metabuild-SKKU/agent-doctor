@@ -11,7 +11,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from core.llm_clients import OPENROUTER_BASE_URL, normalize_provider, openai_chat
+from core.llm_clients import (
+    OPENROUTER_BASE_URL, normalize_provider, openai_chat, strip_code_fence,
+)
 from core.llm_retry import run_with_retry
 from core.parallel import parallel_map
 from core.schema import Chunk
@@ -120,7 +122,10 @@ def _llm_entities(
         label="entity 추출",
         tag="Index",
     )
-    data = json.loads(raw or "{}")
+    # json_mode 를 무시하고 ```json … ``` 으로 감싸는 모델이 있다. 벗기지 않으면 여기서
+    # JSONDecodeError → _extract 가 삼켜 이 청크만 keyword 폴백으로 조용히 강등된다
+    # (eval 의 chat_json 에서 실측된 것과 같은 침묵 실패).
+    data = json.loads(strip_code_fence(raw) or "{}")
     entities = [str(item).strip() for item in data.get("entities", []) if str(item).strip()]
     relations = [
         {

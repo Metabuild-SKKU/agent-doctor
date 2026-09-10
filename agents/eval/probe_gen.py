@@ -178,19 +178,23 @@ def _from_taxonomy(state: AgentDoctorState) -> list[Probe]:
 
     qa 는 EVAL_TAXONOMY_QA 에서, corpus(gold 좌표 조회용)는 state.source_url 에서
     가져온다 — Ingest 가 문서를 복원한 바로 그 파일이라 좌표계가 일치한다(설정 단일화).
-    KORQUAD_MAX_DOCS / KORQUAD_QA_LIMIT 로 규모 제한(스모크). MAX_DOCS 는 Ingest 의
-    corpus 로더와 같은 규칙이라 corpus/qa 가 같은 문서 집합을 본다."""
+    KORQUAD_MAX_DOCS / KORQUAD_QA_LIMIT 로 규모 제한(스모크), KORQUAD_QA_OFFSET 으로
+    구간 실행. MAX_DOCS 는 Ingest 의 corpus 로더와 같은 규칙이라 corpus/qa 가 같은 문서
+    집합을 본다."""
     from agents.eval.datasets.korquad import load_taxonomy_probes, DEFAULT_CORPUS
-    from agents.eval.types import korquad_qa_limit, korquad_max_docs
+    from agents.eval.types import korquad_qa_limit, korquad_max_docs, korquad_qa_offset
 
     corpus_path = state.source_url or DEFAULT_CORPUS
+    offset = korquad_qa_offset()
     probes = load_taxonomy_probes(taxonomy_qa_path(), corpus_path,
                                   limit=korquad_qa_limit(),
-                                  max_docs=korquad_max_docs())
+                                  max_docs=korquad_max_docs(),
+                                  offset=offset)
     probes = _resync_gold_chunk_ids(probes, state.chunks, state.documents)
     matched = sum(1 for p in probes if p.gold_chunk_ids)
     print(f"  taxonomy Probe {len(probes)}개 로드 "
-          f"(gold 매칭 {matched}/{len(probes)})")
+          f"(gold 매칭 {matched}/{len(probes)}"
+          f"{f', 앞 {offset}개 건너뜀' if offset else ''})")
     return probes
 
 

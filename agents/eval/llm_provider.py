@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 
 from core.llm_clients import (
@@ -36,6 +37,7 @@ from core.llm_clients import (
     gemini_embed,
     openai_chat,
     openai_embed,
+    strip_code_fence,
 )
 from core.llm_retry import run_with_retry
 
@@ -180,6 +182,14 @@ def _run_with_retry(fn, label: str = "LLM"):
 # 참고: STEP2 답변 생성은 이 모듈이 아니라 agents/rag/generator.py 가 담당한다
 # (그쪽은 RAG_LLM_PROVIDER / RAG_*_MODEL 계열 env 를 쓴다).
 
+# 코드펜스 벗기기는 core.llm_clients.strip_code_fence 가 정본이다 — 스키마 없이 프롬프트로만
+# JSON 을 요청하는 호출(`aspect_critic` 등)에서 모델이 ```json … ``` 을 씌우면 json.loads 가
+# 실패해 {} 로 떨어지고 **그 지표가 조용히 결측**된다(실측: RAGEC 스모크 10건에서
+# aspect_critic 3건 전부. 기권 판정에 쓰이는 지표라 무응답 probe 판정이 통째로 날아갈 뻔했다).
+# 같은 실패 모드를 가진 index 의 entity 추출 파서와 한 구현을 쓰려고 core 로 올렸다.
+_strip_code_fence = strip_code_fence
+
+
 def chat_json(
     system: str,
     user: str,
@@ -260,7 +270,7 @@ def chat_json(
         print(f"[Eval] chat_json{where} 빈 응답 → {{}}")
         return {}
     try:
-        obj = json.loads(raw)
+        obj = json.loads(_strip_code_fence(raw))
     except json.JSONDecodeError:
         # 응답 길이와 그 호출에 적용된 상한을 함께 남긴다 — 상한 절단이면 끝이 잘린 채로
         # 끝나므로 "모델이 JSON 을 못 만든 것"과 "만들다 잘린 것"을 로그만으로 가를 수 있다.

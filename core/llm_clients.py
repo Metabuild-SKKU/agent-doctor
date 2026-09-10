@@ -18,6 +18,7 @@ prompt caching·thinking 제어에 닿을 수 없다. RAGAS fused 판정은 그 
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from concurrent.futures import Future
@@ -25,6 +26,45 @@ from concurrent.futures import TimeoutError as _FutureTimeout
 
 from core.llm_retry import PermanentError
 from core.llm_usage import log_usage
+
+
+# ── LLM 응답의 마크다운 코드펜스 벗기기 ──────────────────────────────
+#
+# JSON 을 기대하는 파서는 **전부** 이 함수를 거친다 — eval 의 chat_json, index 의 entity
+# 추출(graph_index._llm_entities), tools 의 질문 생성. json_mode 를 강제해도 무시하고
+# ```json … ``` 으로 감싸 돌려주는 모델이 있고, 그러면 json.loads 가 실패해 빈 결과로
+# 떨어져 **그 단계가 조용히 결측**된다(eval 실측: RAGEC 스모크 10건 중 aspect_critic 3건
+# 전부 이 이유로 실패. index 는 entity 추출이 keyword 폴백으로 강등되는데 로그에 안 남는다).
+# 한 곳에만 배선하면 나머지 파서가 같은 침묵 실패를 그대로 갖는다.
+
+_FENCE_TAG = r"[A-Za-z0-9_+-]*"   # 언어 태그(json 등). 낱말 문자만 — `[^\s`]*` 로 두면 개행 없는
+                                  # 응답에서 태그가 본문까지 먹는다(```json{"v":1}``` → 본문 '')
+
+# 1) 표준 형태: 여는 펜스 줄 → 본문 → **줄 시작**의 닫는 펜스. 닫는 펜스 뒤 텍스트는 버린다.
+#    마지막 ``` 를 탐욕으로 잡으면 뒤 설명 안에 펜스가 있을 때(`설명: ```코드````) 본문에
+#    뒷부분이 딸려온다. 줄 시작에 앵커하면 그 경우와 본문 안의 펜스(`{"a":"```"}`)가 같이 닫힌다.
+_FENCE_BLOCK = re.compile(
+    r"^```" + _FENCE_TAG + r"[ \t]*\r?\n(.*?)\r?\n[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE)
+# 2) 개행 없는 한 줄 펜스(```json{"v":1}```): 줄 시작 펜스가 없으므로 문자열 끝의 펜스로 본다.
+_FENCE_ONE_LINE = re.compile(r"^```" + _FENCE_TAG + r"\s*(.*?)\s*```$", re.DOTALL)
+# 3) 닫는 펜스가 없는 절단 응답.
+_FENCE_TRUNCATED = re.compile(r"^```" + _FENCE_TAG + r"\s*(.*)$", re.DOTALL)
+
+
+def strip_code_fence(raw: str) -> str:
+    """```json … ``` 로 감싼 응답에서 본문만 꺼낸다. 펜스가 없으면 원문 그대로(무해하다).
+
+    provider 를 가리지 않고 파서 쪽에서 흡수한다 — 어느 모델이 언제 펜스를 씌울지는
+    호출부가 알 수 없고, 스키마 강제가 되는 경로에서도 이 함수는 무해하다.
+    """
+    text = (raw or "").strip()
+    if not text.startswith("```"):
+        return text
+    for pattern in (_FENCE_BLOCK, _FENCE_ONE_LINE, _FENCE_TRUNCATED):
+        found = pattern.match(text)
+        if found:
+            return found.group(1).strip()
+    return text
 
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"

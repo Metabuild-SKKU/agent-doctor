@@ -379,6 +379,23 @@ class GoldLabelingErrorScoringTest(unittest.TestCase):
 
         self.assertEqual([q["probe_id"] for q in listed], ["real"])
 
+    def test_failed_question_carries_recall(self):
+        """recall 은 EvalRecord 와 함께 사라지므로 여기서 안 남기면 영영 못 구한다.
+
+        외부 정답지 대조(tools/score_ragec.py)가 "저쪽은 검색 실패라는데 우리 검색은
+        성공했다" 를 판정하는 유일한 독립 근거다 — 우리 라벨로 판정하면 '진단이 다르니까
+        봐준다' 는 순환이 되어 틀릴 수가 없는 채점이 된다. 이 필드가 빠지면 그 제외가
+        조용히 0건이 되고 정확도만 낮게 나온다.
+        """
+        record = self._labeled("retrieval_low_rank")
+        record.recall_at_k = 1.0
+        record.recall_basis = "span"
+
+        listed = report.build_report([record], 0, mode=1).failed_questions
+
+        self.assertEqual(listed[0]["recall_at_k"], 1.0)
+        self.assertEqual(listed[0]["recall_basis"], "span")
+
     def test_gold_error_count_survives_the_exclusion(self):
         """조용히 빼면 '30문항 중 몇 개가 애초에 채점 불가였나'를 알 수 없다."""
         rep = report.build_report(

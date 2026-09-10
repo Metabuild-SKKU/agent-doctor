@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from core.llm_clients import openai_chat, OPENROUTER_BASE_URL  # noqa: E402
+from core.llm_clients import openai_chat, strip_code_fence, OPENROUTER_BASE_URL  # noqa: E402
 
 DEFAULT_CORPUS = "data/pdf_corpus.json"
 DEFAULT_OUT = "tools/tax_guide_questions.json"
@@ -78,7 +78,7 @@ def gen_one(chunk: str, api_key: str) -> dict | None:
     if not raw:
         return None
     try:
-        obj = json.loads(raw)
+        obj = json.loads(strip_code_fence(raw))
     except json.JSONDecodeError:
         return None
     if obj.get("skip"):
