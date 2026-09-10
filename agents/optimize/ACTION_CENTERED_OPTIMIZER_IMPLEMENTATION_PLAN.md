@@ -442,7 +442,7 @@ runtime unavailable은 품질 blacklist로 분류하지 않는다. chunk overlap
 | inverse transition | **정확 전이만 차단** | §5.1 |
 | `base_cost` | 현행 이분법 이관 | §3.1 |
 | `max_iterations` | 3 → 5 (탐색 깊이 목적) | §5.3 |
-| 개선 판정 마진 | composite 2점 = 내부 `0.02` | §5.2 |
+| 개선 판정 마진 | ~~composite 2점 = 내부 `0.02`~~ → **3점 = `0.03`** (#143 실측 σ 재보정) | §5.2 |
 | `graph.py` | 무수정 | §5.3 |
 | `rules.py` 전면 재작성 | **불필요** | §6 |
 | 차단 기능 활성화 | 별도 PR | — |
@@ -478,7 +478,8 @@ reranker 켜봄 → 별로 → 롤백 → top_k 고쳐 검색 개선
 안전망을 **통과하면서** 왕복이 발생한다.
 
 ```python
-MIN_IMPROVEMENT_MARGIN = 0.02      # composite 표시 2점. judge와 sweep이 같은 값을 쓴다
+MIN_IMPROVEMENT_MARGIN = 0.03      # composite 표시 3점. judge와 sweep이 같은 값을 쓴다
+                                   # (설계 당시 0.02 → #143에서 실측 σ_Δ 로 재보정)
 ```
 
 `internal_adapter`에 `min_delta`가 **이미 완성돼 있고** planner가 값을 넘기지 않아
