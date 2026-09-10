@@ -47,6 +47,28 @@ def make_state(report):
 
 
 class ReportViewCompositeTest(unittest.TestCase):
+    def test_diagnosis_summary_inputs_come_from_report_and_probes(self):
+        report = make_report(overall=0.90, composite_total=84)
+        report.failed_questions = [{"probe_id": "p2", "question": "failed"}]
+        state = make_state(report)
+        state.probes = [
+            Probe(probe_id="p1", question="q1", source="taxonomy",
+                  gold_chunk_ids=["c1", "c2"]),
+            Probe(probe_id="p2", question="q2", source="taxonomy",
+                  gold_chunk_ids=["c2", "c3"]),
+            Probe(probe_id="p3", question="q3", source="taxonomy",
+                  gold_chunk_ids=[]),
+        ]
+
+        view = build_report_view(state)
+
+        self.assertEqual(view["meta"]["question_count"], 3)
+        self.assertEqual(view["meta"]["passed_question_count"], 2)
+        self.assertEqual(view["meta"]["failed_question_count"], 1)
+        self.assertEqual(view["meta"]["gold_chunk_count"], 3)
+        self.assertEqual(view["score"]["quality"], 89)
+        self.assertEqual(view["score"]["reliability"], 7)
+
     def test_headline_score_uses_composite_not_overall(self):
         # overall 0.90(→90점)과 composite 12 를 크게 벌려둠. 헤드라인은 composite(12)여야.
         view = build_report_view(make_state(make_report(overall=0.90, composite_total=12)))
@@ -63,6 +85,22 @@ class ReportViewCompositeTest(unittest.TestCase):
         view = build_report_view(make_state(make_report(composite_total=88)))
         self.assertEqual(view["score"]["before"], view["score"]["after"])
         self.assertEqual(view["score"]["delta"], 0.0)
+
+    def test_label_catalog_is_served_with_report(self):
+        """라벨 분포 축은 프론트 샘플값이 아니라 서버 카탈로그를 정본으로 쓴다."""
+        view = build_report_view(make_state(make_report()))
+        catalog = view["label_catalog"]
+        self.assertIn("retrieval", catalog)
+        self.assertIn("generation", catalog)
+        self.assertIn("context", catalog)
+        self.assertIn("data", catalog)
+        self.assertIn(
+            "retrieval_rerank_candidate_miss",
+            {row["code"] for row in catalog["retrieval"]},
+        )
+        low_rank = next(row for row in catalog["retrieval"] if row["code"] == "retrieval_low_rank")
+        self.assertIn("상위 k개 밖", low_rank["situation"])
+        self.assertIn("리랭커", low_rank["prescription"])
 
     def test_pass_badge_uses_optimize_gate_not_eval_threshold(self):
         report = make_report(overall=0.95, composite_total=12, pass_threshold=True)
@@ -166,10 +204,17 @@ class TreatmentCourseViewTest(unittest.TestCase):
                 ("kept", 84),
             ],
         )
-        self.assertEqual(course[1]["label"], "top_k 확대")
+        self.assertEqual(course[1]["label"], "검색 결과 개수 확대")
         self.assertEqual(course[2]["label"], "청크 축소 실패")
         self.assertEqual(course[3]["label"], "원상 복구")
         self.assertEqual(course[4]["label"], "리랭커 활성화")
+        # 실패와 복구는 같은 처방 회차의 두 관측값이다. 프론트가 step을 다시
+        # 추측하면 서로 다른 x축으로 벌어지고 점수 라벨도 겹친다.
+        self.assertEqual([point["step"] for point in course], [0, 1, 2, 2, 3])
+        self.assertEqual(course[2]["rx_num"], "02")
+        self.assertEqual(course[3]["rx_num"], "02")
+        self.assertEqual(course[2]["axis_label"], "청크 축소")
+        self.assertEqual(course[3]["axis_label"], "청크 축소")
         self.assertEqual(view["score"]["rolled"], 1)
         self.assertEqual(view["score"]["errors"], 0)
 
@@ -550,11 +595,23 @@ class ActionCenteredRxCardTest(unittest.TestCase):
         card = self._rxs(self._item())[0]
 
         self.assertEqual(card["action"], "retriever.top_k:increase")
+        self.assertEqual(card["change_label"], "검색 결과 개수 확대")
         # 대표 라벨 하나로 좁히면 "여러 문제가 같은 변경을 원했다"는 선택 근거가 사라진다.
         self.assertEqual(
             card["target"],
             "retrieval_missing_gold, retrieval_incomplete_enumeration",
         )
+
+    def test_card_localizes_internal_reranker_key(self):
+        card = self._rxs(self._item(
+            action_key="reranker.enabled:enable",
+            selected_prescription_id="enable_reranker",
+            before_config={"use_reranker": False},
+            after_config={"use_reranker": True},
+        ))[0]
+
+        self.assertEqual(card["change"], ["use_reranker", "False", "True"])
+        self.assertEqual(card["change_label"], "리랭커 활성화")
 
     def test_card_separates_supported_from_resolved(self):
         """지지받은 라벨을 그대로 성과로 읽으면 리포트가 실제보다 좋아 보인다."""
@@ -601,7 +658,7 @@ class ActionCenteredRxCardTest(unittest.TestCase):
 
         labels = [p["label"] for p in build_report_view(state)["course"]]
 
-        self.assertIn("top_k 확대", labels)
+        self.assertIn("검색 결과 개수 확대", labels)
 
     def test_legacy_history_without_action_still_renders(self):
         """이전 실행이 저장한 이력에는 action 필드가 없다 — 그래도 읽혀야 한다."""
@@ -626,7 +683,7 @@ class ActionCenteredRxCardTest(unittest.TestCase):
         self.assertEqual(view["rxs"][0]["target"], "retrieval_missing_gold")
         self.assertEqual(view["rxs"][0]["drill"]["notes"], [])
         # 처방 id 표를 통한 구버전 이름이 그대로 나온다.
-        self.assertIn("top_k 확대", [p["label"] for p in view["course"]])
+        self.assertIn("검색 결과 개수 확대", [p["label"] for p in view["course"]])
 
 
 if __name__ == "__main__":

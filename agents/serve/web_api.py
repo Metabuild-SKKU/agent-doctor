@@ -12,6 +12,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import sys
@@ -39,11 +40,20 @@ try:
 except ImportError:
     pass
 
+# load_dotenv() 직후의 EVAL_MODE 를 운영자 설정의 정본으로 붙잡아 둔다.
+# 실행 경로가 os.environ["EVAL_MODE"] 를 덮어쓰므로, 실행 중에 다시 읽으면
+# "직전 run 이 써 둔 값"을 운영자가 적은 값으로 착각한다.
+_ENV_EVAL_MODE = (os.getenv("EVAL_MODE") or "").strip()
+
 UPLOAD_DIR = Path(__file__).parent.parent.parent / "uploads"
 
 # 그래프 실제 노드 → index.html UI 5단계 매핑. eval 완료는 probe+diagnose 둘 다 만족시킨다.
 _STAGE_ORDER = ["ingest", "index", "eval", "optimize", "serve"]
 _STAGE_WEIGHT = {"ingest": 10, "index": 20, "eval": 30, "optimize": 30, "serve": 10}
+
+# 처방-재평가 루프 상한. AgentDoctorState 기본값은 8 인데, 웹 실행은 한 번에
+# 40문서·100질문까지 갈 수 있어 8 회를 다 돌면 비용이 그만큼 곱해진다.
+MAX_ITERATIONS = 5
 
 app = FastAPI(title="Agent Doctor Web API", version="0.1.0")
 
@@ -55,13 +65,109 @@ app.add_middleware(
 )
 
 
+def _env_int(name: str) -> int | None:
+    """규모 제한 환경변수를 읽는다. 0/빈값/이상값은 '제한 없음'(None)으로 본다."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+def effective_eval_mode(depth: str) -> str:
+    """실제로 쓸 EVAL_MODE. .env 가 정해뒀으면 그것을 따른다.
+
+    예전에는 폼의 depth 를 무조건 EVAL_MODE 로 덮어썼다. 그런데 화면에서
+    깊이 선택을 없앤 뒤로 depth 는 항상 "full" 이라, .env 에 deep 을 적어두고
+    CLI 로 재던 사람이 웹으로 같은 코퍼스를 돌리면 한 단계 위에서 돌아
+    수치가 비교되지 않았다. 운영자가 .env 에 적은 값이 우선이고, 없을 때만
+    depth 매핑으로 떨어진다.
+    """
+    if _ENV_EVAL_MODE:
+        return _ENV_EVAL_MODE
+    return _DEPTH_TO_EVAL_MODE.get(depth, "standard")
+
+
+@contextlib.contextmanager
+def _eval_env(mode: str, llm: str, *, force_llm: bool = False):
+    """EVAL_MODE/EVAL_ENABLE_LLM 을 이 run 동안만 세우고 끝나면 되돌린다.
+
+    Eval 은 이 둘을 프로세스 전역 환경변수로 읽는다(agents/eval/types.py).
+    되돌리지 않으면 값이 다음 run 까지 남는다 - 리플레이가 "deep" 을 박아 두면
+    그 뒤의 모든 파이프라인 실행이 effective_eval_mode 에서 그 값을 보고
+    조용히 심층으로 돈다(.env 에 EVAL_MODE 가 없는 배포에서 그렇다).
+
+    force_llm=False 면 호출자가 기존 환경값을 보존할 수 있다. 웹의 deep/full
+    파이프라인과 리플레이는 진단 축이 빠지지 않도록 force_llm=True 로 호출한다.
+    """
+    saved = {key: os.environ.get(key) for key in ("EVAL_MODE", "EVAL_ENABLE_LLM")}
+    os.environ["EVAL_MODE"] = mode
+    if force_llm or "EVAL_ENABLE_LLM" not in os.environ:
+        os.environ["EVAL_ENABLE_LLM"] = llm
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def corpus_config() -> dict | None:
+    """서버에 코퍼스가 설정돼 있으면 그 내용을 돌려준다.
+
+    SOURCE_TYPE 이 file 이 아니고 SOURCE_URL 이 실제 파일이면 업로드 없이
+    그 코퍼스로 진단할 수 있다. 화면은 이 값을 받아 "무엇을 돌리는지"를
+    그대로 보여준다 - 서버 설정을 모른 채 버튼만 누르면, 40문서를 돌리는지
+    108문서를 돌리는지 알 수 없다.
+    """
+    source_type = (os.getenv("SOURCE_TYPE") or "").strip()
+    source_url = (os.getenv("SOURCE_URL") or "").strip()
+    if not source_type or source_type == "file" or not source_url:
+        return None
+    if not Path(source_url).exists():
+        return None
+    qa_path = (os.getenv("EVAL_TAXONOMY_QA") or "").strip() or None
+    return {
+        "source_type": source_type,
+        "source_url": source_url,
+        "qa_path": qa_path,
+        "max_docs": _env_int("KORQUAD_MAX_DOCS"),
+        "qa_limit": _env_int("KORQUAD_QA_LIMIT"),
+        "probe_source": (os.getenv("EVAL_PROBE_SOURCE") or "").strip() or None,
+        "max_iterations": MAX_ITERATIONS,
+        "eval_mode": effective_eval_mode("full"),
+    }
+
+
+@app.get("/config")
+def config() -> dict:
+    """화면이 시작 전에 서버 설정을 확인하는 곳. 코퍼스가 없으면 corpus=null.
+
+    실제 경로는 서버 내부 실행에만 필요하다. CORS 를 허용한 로컬 프로토타입이라도
+    브라우저 응답에는 파일명만 보내 로컬 디렉터리 구조를 노출하지 않는다.
+    """
+    corpus = corpus_config()
+    if corpus is None:
+        return {"corpus": None}
+    public = dict(corpus)
+    public["source_url"] = Path(corpus["source_url"]).name
+    if corpus.get("qa_path"):
+        public["qa_path"] = Path(corpus["qa_path"]).name
+    return {"corpus": public}
+
+
 def _save_upload(run_id: str, upload: UploadFile) -> Path:
     return _save_upload_as(run_id, upload, suffix=".pdf")
 
 
 def _save_upload_as(run_id: str, upload: UploadFile, suffix: str) -> Path:
     """업로드를 run별 폴더에 저장 — 원본 파일명 대신 uuid+고정 확장자를 써서
-    경로 탈출·이름 충돌을 막는다(리플레이 로그/골든셋도 같은 규칙을 쓴다)."""
+    경로 탈출·이름 충돌을 막는다(리플레이 로그/QA셋도 같은 규칙을 쓴다)."""
     run_dir = UPLOAD_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     dest = (run_dir / f"{uuid.uuid4().hex}{suffix}").resolve()
@@ -72,13 +178,13 @@ def _save_upload_as(run_id: str, upload: UploadFile, suffix: str) -> Path:
     return dest
 
 
-# 골든셋은 qa_merge.load_qa_set 이 확장자로 파서를 고른다 — 여기서 허용 확장자를
+# QA셋은 qa_merge.load_qa_set 이 확장자로 파서를 고른다 — 여기서 허용 확장자를
 # 한 번 더 거르는 이유는 잘못된 파일이 백그라운드 스레드까지 가서야 죽는 것보다
 # 업로드 시점에 바로 400 으로 알리는 게 사용자 경험이 낫기 때문이다.
 _GOLDEN_SUFFIXES = (".json", ".jsonl", ".csv", ".xlsx", ".xlsm")
 
 # 로그는 JSONL 내용만 받지만 확장자는 .json 도 허용한다 - 상대가 .json 이름으로 JSONL
-# 을 주는 실무 케이스가 흔하고(qa_merge 가 골든셋에 대해 이미 지원하는 그 케이스),
+# 을 주는 실무 케이스가 흔하고(qa_merge 가 QA셋에 대해 이미 지원하는 그 케이스),
 # 내용 검증은 프론트의 validateLogFile 이 줄 단위 파싱으로 이미 한다. 여기서 .jsonl
 # 만 받으면 프론트가 통과시킨 파일이 진행 화면 전환 뒤에 400 으로 떨어진다.
 _LOG_SUFFIXES = (".jsonl", ".json")
@@ -139,8 +245,10 @@ def _summarize_stage_event(stage: str, snapshot: AgentDoctorState) -> tuple[str,
     return (stage, "진행 중", "")
 
 
-# index.html 이 노출하는 depth 선택지(fast/standard/full) → EVAL_MODE 매핑.
-# "full"은 UI 상 가장 깊은 진단 — EVAL_MODE 쪽에서 DEEP(=LLM/RAGAS 전량)으로 접힌다.
+# depth → EVAL_MODE 매핑. 웹 UI 는 이제 깊이 선택을 두지 않고 항상 "full" 을 보낸다
+# (index.html 의 진단 깊이 세그먼트 삭제). fast/standard 는 CLI 등 다른 호출자를
+# 위해 매핑만 남겨 둔다.
+# "full"은 가장 깊은 진단 — EVAL_MODE 쪽에서 DEEP(=LLM/RAGAS 전량)으로 접힌다.
 _DEPTH_TO_EVAL_MODE = {"fast": "fast", "standard": "standard", "full": "full"}
 
 # Eval 에이전트가 EVAL_MODE/EVAL_ENABLE_LLM 을 프로세스 전역 환경변수로 읽기 때문에(agents/eval/types.py),
@@ -150,7 +258,7 @@ _DEPTH_TO_EVAL_MODE = {"fast": "fast", "standard": "standard", "full": "full"}
 _PIPELINE_LOCK = threading.Lock()
 
 
-def _run_pipeline_background(run_id: str, file_path: Path, depth: str) -> None:
+def _run_pipeline_background(run_id: str, source_url: str, source_type: str, depth: str) -> None:
     from core.console import force_utf8_stdio
     force_utf8_stdio()   # 콘솔 인코딩 보정(로깅과 독립 — Tee 설치 여부와 무관하게 보호)
 
@@ -160,16 +268,17 @@ def _run_pipeline_background(run_id: str, file_path: Path, depth: str) -> None:
     run_registry.update(run_id, status="running")
 
     try:
-        with _PIPELINE_LOCK:
-            eval_mode = _DEPTH_TO_EVAL_MODE.get(depth, "standard")
-            os.environ["EVAL_MODE"] = eval_mode
-            os.environ["EVAL_ENABLE_LLM"] = "1" if eval_mode in ("deep", "full") else "0"
-
+        eval_mode = effective_eval_mode(depth)
+        with _PIPELINE_LOCK, _eval_env(
+            eval_mode, "1" if eval_mode in ("deep", "full") else "0",
+            force_llm=True,
+        ):
             graph = build_graph()
             initial_state = AgentDoctorState(
-                source_url=str(file_path),
-                source_type="file",
+                source_url=source_url,
+                source_type=source_type,
                 status="running",
+                max_iterations=MAX_ITERATIONS,
             )
 
             last_state: AgentDoctorState | None = None
@@ -230,15 +339,12 @@ def _run_replay_background(
     run_registry.update(run_id, status="running", stage="eval", percent=10)
 
     try:
-        with _PIPELINE_LOCK:
+        with _PIPELINE_LOCK, _eval_env("deep", "1", force_llm=True):
             # 리플레이는 depth 를 받지 않는다 — 항상 LLM 심층으로 돈다(tools/run_replay_report.py
             # 와 같은 처리). 리플레이엔 색인·검색·답변생성이 없어 실제 작업이 RAGAS 채점 하나뿐이라
             # LLM 을 꺼도 아끼는 시간이 거의 없는 반면(실측 6건: 0.03초 vs 13.8초), 끄면 생성축
             # 라벨 4종이 통째로 죽고 검색축도 gold 겹침이 낮을 때만 남아 "점수는 낮은데 소견 0건"
             # 인 진단서가 나간다. 프론트가 무엇을 보내든 여기서 고정해 그 경로를 막는다.
-            os.environ["EVAL_MODE"] = "deep"
-            os.environ["EVAL_ENABLE_LLM"] = "1"
-
             run_registry.add_event(
                 run_id, stage="eval", tag="적재", text="로그 파일을 읽는 중", ts=time.time(),
             )
@@ -298,13 +404,35 @@ async def create_run(
             _discard_uploads(run_id)
             raise
 
+    if mode == "corpus":
+        # 업로드 없이 서버에 설정된 코퍼스를 그대로 색인한다. PDF 한 장으로는
+        # 못 보는 규모(다문서 검색·나열형 질문)를 웹에서 확인하기 위한 경로다.
+        cfg = corpus_config()
+        if cfg is None:
+            raise HTTPException(
+                status_code=400,
+                detail="서버에 코퍼스가 설정되어 있지 않습니다 — SOURCE_TYPE·SOURCE_URL 을 확인하세요.",
+            )
+        run_registry.create(
+            run_id, depth=depth, upload_path=cfg["source_url"], created_at=time.time(),
+        )
+        thread = threading.Thread(
+            target=_run_pipeline_background,
+            args=(run_id, cfg["source_url"], cfg["source_type"], depth),
+            daemon=True,
+        )
+        thread.start()
+        return {"run_id": run_id}
+
     if file is None or not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="PDF 파일만 지원합니다.")
 
     dest = _save_upload(run_id, file)
     run_registry.create(run_id, depth=depth, upload_path=str(dest), created_at=time.time())
 
-    thread = threading.Thread(target=_run_pipeline_background, args=(run_id, dest, depth), daemon=True)
+    thread = threading.Thread(
+        target=_run_pipeline_background, args=(run_id, str(dest), "file", depth), daemon=True,
+    )
     thread.start()
 
     return {"run_id": run_id}
@@ -349,7 +477,7 @@ def _start_replay_run(
     if oversize:
         raise HTTPException(status_code=400, detail=oversize)
 
-    # 로그 줄에 정답이 인라인으로 들어 있으면 골든셋 파일이 없어도, 붙지 않아도
+    # 로그 줄에 정답이 인라인으로 들어 있으면 QA셋 파일이 없어도, 붙지 않아도
     # 진단이 성립한다. 게이트가 보는 재료를 점수층(scoring._is_evaluable)과 같은
     # 것으로 맞춘다 - gold_contexts 는 검색축까지만 재고 답변축(answer_score)은
     # ground_truth 없이 못 재므로, 신뢰도 축이 통째로 빠져 총점이 안 나온다.
@@ -364,7 +492,7 @@ def _start_replay_run(
         if golden_suffix not in _GOLDEN_SUFFIXES:
             raise HTTPException(
                 status_code=400,
-                detail=f"골든셋은 {', '.join(_GOLDEN_SUFFIXES)} 형식만 지원합니다.",
+                detail=f"QA셋은 {', '.join(_GOLDEN_SUFFIXES)} 형식만 지원합니다.",
             )
         golden_dest = _save_upload_as(run_id, goldenfile, suffix=golden_suffix)
         from agents.eval.qa_merge import load_qa_set, normalize_question
@@ -374,9 +502,9 @@ def _start_replay_run(
             raise HTTPException(status_code=400, detail=oversize)
         # 매칭 0건이면 지금 끊는다. 병합은 질문 텍스트 매칭이라 표기가 다르면 한 건도
         # 안 붙는데, 그대로 두면 레코드 전량 RAGAS 를 돌린 뒤에야 "정답 0건" 리포트가
-        # 나온다 - 비싸고, 사용자는 골든셋을 줬으니 대조된 줄 안다. 같은 정규화를
+        # 나온다 - 비싸고, 사용자는 QA셋을 줬으니 대조된 줄 안다. 같은 정규화를
         # 쓰므로 여기서 세는 값이 실제 병합 결과와 같다.
-        # 단, 로그에 정답이 인라인이면 막지 않는다 - 그 로그는 골든셋이 한 건도 안
+        # 단, 로그에 정답이 인라인이면 막지 않는다 - 그 로그는 QA셋이 한 건도 안
         # 붙어도 정답 대조가 되고, 파일을 안 준 경우(아래 elif)보다 재료가 많은데
         # 거부하면 재료를 더 줄수록 거부되는 게이트가 된다. 매칭률은 진단서가 밝힌다.
         log_questions = {normalize_question(r.question) for r in logs}
@@ -385,38 +513,38 @@ def _start_replay_run(
             if not matched_keys:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"골든셋 {len(qa_map)}건이 로그의 질문과 한 건도 매칭되지 "
-                           "않았습니다. 골든셋 질문과 로그 질문의 표기를 확인해 주세요 "
+                    detail=f"QA셋 {len(qa_map)}건이 로그의 질문과 한 건도 매칭되지 "
+                           "않았습니다. QA셋 질문과 로그 질문의 표기를 확인해 주세요 "
                            "(공백·문장부호·대소문자는 자동 정규화됩니다).",
                 )
-            # 매칭됐다고 정답이 채워지는 건 아니다 - gold_contexts 만 있는 골든셋이
+            # 매칭됐다고 정답이 채워지는 건 아니다 - gold_contexts 만 있는 QA셋이
             # 그 경우다. 위 has_inline_gt 게이트와 같은 재료(ground_truth)를 봐야
-            # 파일로 준 정답 없는 골든셋만 통과하는 구멍이 안 생긴다. 사후에는
+            # 파일로 준 정답 없는 QA셋만 통과하는 구멍이 안 생긴다. 사후에는
             # report_view._reliability_unavailable_how 가 정확히 이 사유를 말하는데,
             # 사전에 막으라고 세운 게이트가 통과시키면 그 진단서를 전 레코드 RAGAS 를
             # 돌린 뒤에야 받게 된다.
             # 순서도 그쪽과 같다 - 매칭 0건이면 정답도 0건이라, 매칭을 먼저 보지 않으면
-            # "골든셋에 정답이 없다"는 엉뚱한 사유가 나간다(고치는 방법이 다르다).
+            # "QA셋에 정답이 없다"는 엉뚱한 사유가 나간다(고치는 방법이 다르다).
             if not any(qa_map[key].get("ground_truth") for key in matched_keys):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"골든셋의 매칭된 {len(matched_keys)}건에 정답"
+                    detail=f"QA셋의 매칭된 {len(matched_keys)}건에 정답"
                            "(ground_truth)이 없습니다. 정답이 없으면 답변이 맞았는지 "
                            "대조할 수 없어 종합점수를 낼 수 없고, 원인도 7종 중 3종만 "
                            "나옵니다 (gold_contexts 만으로는 검색축까지만 잽니다). "
-                           "골든셋에 정답 열을 채우거나 로그 줄에 ground_truth 를 "
+                           "QA셋에 정답 열을 채우거나 로그 줄에 ground_truth 를 "
                            "넣어 주세요.",
                 )
         qa = (qa_map, qa_errors)
     elif not has_inline_gt:
-        # 이 화면에는 골든셋 면제가 없다. 정답지가 없으면 신뢰도 축을 못 재고 종합점수
+        # 이 화면에는 QA셋 면제가 없다. 정답지가 없으면 신뢰도 축을 못 재고 종합점수
         # 자체가 안 나오는데(report_view 가 총점을 감춘다), 원인 7종 중 3종만 담긴
         # "점수 없는 진단서"를 받아가는 건 오해만 만든다. 정답지를 아직 못 만든 경우는
         # CLI 의 --no-golden 이 개발용 통로로 남아 있다.
-        # 로그에 정답이 인라인으로 들어 있으면 골든셋이 없는 게 아니다(CLI 와 같은 판정).
+        # 로그에 정답이 인라인으로 들어 있으면 QA셋이 없는 게 아니다(CLI 와 같은 판정).
         raise HTTPException(
             status_code=400,
-            detail="골든셋(질문·정답)이 필요합니다. 정답이 없으면 답변이 맞았는지 "
+            detail="QA셋(질문·정답)이 필요합니다. 정답이 없으면 답변이 맞았는지 "
                    "대조할 수 없어 종합점수를 낼 수 없고, 원인도 7종 중 3종만 "
                    "나옵니다. 로그 줄에 ground_truth 를 넣어 주셔도 됩니다 "
                    "(gold_contexts 만으로는 검색축까지만 재므로 통과하지 않습니다).",
@@ -482,8 +610,9 @@ def run_report(run_id: str) -> dict:
     if run.status != "done" or run.final_state is None:
         raise HTTPException(status_code=409, detail="아직 완료되지 않았습니다.")
 
-    eval_mode = _DEPTH_TO_EVAL_MODE.get(run.depth, "standard")
-    return build_report_view(run.final_state, depth=eval_mode)
+    # 실행 경로(_run_pipeline_background)와 같은 함수를 써야 진단서에 찍히는
+    # 깊이가 실제로 돈 깊이와 어긋나지 않는다.
+    return build_report_view(run.final_state, depth=effective_eval_mode(run.depth))
 
 
 if __name__ == "__main__":

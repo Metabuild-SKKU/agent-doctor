@@ -20,6 +20,7 @@ from agents.serve.report_view import build_ext_report_view
 TEMPLATE_KEYS = {
     "meta", "score", "priority", "metrics",
     "course", "rxs", "dxs", "qas", "recommendations",
+    "label_catalog",
 }
 
 
@@ -46,6 +47,19 @@ class ExtReportViewTests(unittest.TestCase):
     def test_template_keys_present(self):
         view = build_ext_report_view(_report(), {})
         self.assertTrue(TEMPLATE_KEYS <= set(view), TEMPLATE_KEYS - set(view))
+
+    def test_label_catalog_is_present(self):
+        view = build_ext_report_view(_report(), {})
+        self.assertIn("retrieval", view["label_catalog"])
+        self.assertIn("generation_abstention_failure", {
+            row["code"] for row in view["label_catalog"]["generation"]
+        })
+        abstention = next(
+            row for row in view["label_catalog"]["generation"]
+            if row["code"] == "generation_abstention_failure"
+        )
+        self.assertIn("근거가 없는 질문", abstention["situation"])
+        self.assertIn("기권", abstention["prescription"])
 
     def test_course_and_rxs_are_empty(self):
         """외부 모드에는 치료경과·처방이력이 원리적으로 없다 — 남의 인덱스에는
@@ -217,7 +231,7 @@ class ExtSectionLayoutTests(unittest.TestCase):
         titles = {t["section"]: t["title"] for t in view["mode"]["section_titles"]}
         self.assertEqual(titles["metrics"], "품질 지표")
         self.assertEqual(titles["recommendations"], "처방 추천")
-        self.assertEqual(titles["transparency"], "진단 범위")
+        self.assertNotIn("transparency", titles)
 
     def test_recommendations_move_above_dxs(self):
         """권고는 이 진단서의 결론이다 — 꼬리가 아니라 지표 다음 자리로 올린다."""
@@ -278,7 +292,7 @@ class ExtSectionLayoutTests(unittest.TestCase):
 
 
 class TransparencyRenderTests(unittest.TestCase):
-    """진단 내역 — 하드코딩 목업이 실제 진단서에 나가던 것을 데이터 렌더로 바꿨다."""
+    """진단 범위 목업이 실제 진단서에 섞이지 않아야 한다."""
 
     def test_mockup_numbers_are_gone_from_markup(self):
         from tools.report_html import REPORT_TEMPLATE
@@ -288,7 +302,7 @@ class TransparencyRenderTests(unittest.TestCase):
         # 마크업에 박힌 값은 어느 코퍼스든 똑같이 표시됐다.
         self.assertNotIn('<div class="tn">2분 14초</div>', html)
         self.assertNotIn('<div class="tn">218</div>', html)
-        self.assertIn('id="transList"', html)
+        self.assertNotIn('id="transList"', html)
         self.assertIn("function renderTransparency", html)
 
     def test_external_transparency_payload(self):
@@ -461,7 +475,8 @@ class ExtVerdictBadgeTests(unittest.TestCase):
         if not REPORT_TEMPLATE.exists():
             self.skipTest("report.html 템플릿 없음")
         html = REPORT_TEMPLATE.read_text(encoding="utf-8")
-        self.assertIn("score.pass_threshold == null", html)
+        self.assertIn("badge.style.display = 'none'", html)
+        self.assertIn("score.after == null", html)
 
 
 class FormatCompositeTests(unittest.TestCase):
@@ -606,10 +621,7 @@ class ExtNoticeTests(unittest.TestCase):
 
 
 class RenderStateLeakTests(unittest.TestCase):
-    """한 페이지에서 run 을 바꿔 다시 렌더할 때 숨긴 요소가 남지 않아야 한다.
-
-    display='none' 만 하고 되돌리는 분기가 없으면 외부 → 내부 전환에서 배지·증감이
-    사라진 채로 남는다. 첫 렌더만 보면 안 드러나는 종류라 핀으로 잡는다."""
+    """한 페이지에서 run 을 바꿔 다시 렌더할 때 표시 상태가 누수되지 않아야 한다."""
 
     def _html(self):
         from tools.report_html import REPORT_TEMPLATE
@@ -617,8 +629,15 @@ class RenderStateLeakTests(unittest.TestCase):
             self.skipTest("report.html 템플릿 없음")
         return REPORT_TEMPLATE.read_text(encoding="utf-8")
 
-    def test_badge_display_is_restored(self):
-        self.assertIn("badge.style.display = ''", self._html())
+    def test_badge_is_always_hidden_in_current_dashboard(self):
+        """현재 리포트는 pass/fail 배지를 화면에서 제거했다.
+
+        예전 계약처럼 내부 실행에서 badge 를 되살리면, 대시보드에서 제거한 배지가
+        run 전환 뒤 다시 튀어나올 수 있다.
+        """
+        html = self._html()
+        self.assertIn("badge.style.display = 'none'", html)
+        self.assertNotIn("badge.style.display = ''", html)
 
     def test_delta_display_is_assigned_both_ways(self):
         # 삼항으로 양쪽을 다 정한다(= 'none' 아니면 '').

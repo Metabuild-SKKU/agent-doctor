@@ -11,6 +11,7 @@ import os
 from typing import Any, Optional
 
 from agents.eval.scoring import unmeasured_components
+from agents.eval.label_catalog import diagnosis_label_catalog
 from agents.optimize import gate
 from agents.optimize.score_display import DisplayScores, display_scores_from_metadata
 from core.state import AgentDoctorState
@@ -34,7 +35,7 @@ _METRIC_LABELS = {
 # "무엇을 바꿨나"를 보여준다. 축 이름 + 동작 동사로 조립하므로 catalog 에 새 action 이
 # 생겨도 표를 손보지 않아도 된다(축만 등록하면 된다).
 _AXIS_NOUNS = {
-    "retriever.top_k": "top_k",
+    "retriever.top_k": "검색 결과 개수",
     "retriever.mmr": "MMR",
     "retriever.hybrid_dense_weight": "하이브리드 가중치",
     "retriever.search_type": "하이브리드 검색",
@@ -63,6 +64,31 @@ _OPERATION_VERBS = {
     "adjust": "조정",
 }
 
+# OptimizationHistoryItem.before/after_config 는 실행 시점의 평면 설정 키를 보관한다.
+# 화면은 내부 키를 그대로 노출하지 않고 한글 축 이름을 보여준다. 정식 action_key 가
+# 있는 새 이력은 _AXIS_NOUNS 를 정본으로 쓰고, 이 표는 구버전 이력 전용 fallback 이다.
+_CONFIG_FIELD_NOUNS = {
+    "top_k": "검색 결과 개수",
+    "chunk_size": "청크 크기",
+    "chunk_overlap": "청크 겹침",
+    "chunk_strategy": "청킹 전략",
+    "use_reranker": "리랭커",
+    "rerank_candidates": "리랭커 후보군",
+    "reranker_model": "리랭커 모델",
+    "use_hybrid": "하이브리드 검색",
+    "hybrid_dense_weight": "하이브리드 가중치",
+    "use_mmr": "중복 제거 검색",
+    "embedding_model": "임베딩 모델",
+    "temperature": "생성 온도",
+    "grounding_strict": "근거 지시",
+    "require_citation": "인용 표시",
+    "restate_question": "질문 재진술",
+    "completeness_mode": "완전성 모드",
+    "abstention_strict": "기권 기준",
+    "abstention_relaxed": "기권 완화",
+    "context_compression": "컨텍스트 압축",
+}
+
 # ⚠️ 구버전 이력 fallback. 이전 실행이 저장한 항목에는 action_key 가 없어
 # 처방 id 만 남아 있다. 그 리포트도 계속 읽혀야 하므로 표를 유지한다.
 _PRESCRIPTION_POINT_LABELS = {
@@ -75,9 +101,9 @@ _PRESCRIPTION_POINT_LABELS = {
     "increase_chunk_size": "청크 확대",
     "increase_chunk_overlap": "겹침 확대",
     "switch_chunking_strategy": "청킹 전략 변경",
-    "increase_top_k": "top_k 확대",
-    "decrease_top_k": "top_k 축소",
-    "dynamic_top_k": "동적 top_k",
+    "increase_top_k": "검색 결과 개수 확대",
+    "decrease_top_k": "검색 결과 개수 축소",
+    "dynamic_top_k": "검색 결과 개수 자동 조정",
     "expand_query": "질의 확장",
     "enable_query_decomposition": "질의 분해",
     "expand_bridge_entity_query": "연결어 확장",
@@ -125,13 +151,28 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
     headline_after = _headline_score(report)
     headline_before = _first_headline(history, headline_after)
     gate_summary = _gate_summary(report)
+    component_scores = {
+        str(component.get("key")): component.get("score")
+        for component in ((report.composite_score or {}).get("components", []) if report else [])
+        if isinstance(component, dict) and component.get("key")
+    }
+    question_count = len(state.probes)
+    failed_question_count = len(getattr(report, "failed_questions", []) or []) if report else 0
+    gold_chunk_count = len({
+        chunk_id
+        for probe in state.probes
+        for chunk_id in (getattr(probe, "gold_chunk_ids", None) or [])
+    })
 
     depth_key = (depth or os.getenv("EVAL_MODE", "")).strip().lower()
     return {
         "meta": {
             "corpus": _corpus_label(state),
             "depth": _EVAL_MODE_LABELS.get(depth_key, "표준 검진"),
-            "question_count": len(state.probes),
+            "question_count": question_count,
+            "passed_question_count": max(0, question_count - failed_question_count),
+            "failed_question_count": failed_question_count,
+            "gold_chunk_count": gold_chunk_count,
             "created_at": report.created_at.isoformat() if report else "",
         },
         "score": {
@@ -147,6 +188,8 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
             "rolled": rolled,
             "errors": errors,
             "pending": pending,
+            "quality": component_scores.get("quality"),
+            "reliability": component_scores.get("reliability"),
         },
         "priority": _build_priority(confirmed),
         "metrics": _build_metrics(report, history),
@@ -154,6 +197,7 @@ def build_report_view(state: AgentDoctorState, depth: Optional[str] = None) -> d
         "rxs": _build_rxs(history),
         "dxs": _build_dxs(findings),
         "qas": _build_qas(state, findings),
+        "label_catalog": diagnosis_label_catalog(),
         "recommendations": _build_recommendations(state, findings),
         "transparency": {
             "duration_label": "",
@@ -349,6 +393,33 @@ def _build_metrics(report, history: list) -> list[dict[str, Any]]:
     return out
 
 
+def _build_rx_metric_deltas(item) -> list[dict[str, Any]]:
+    """처방 1건의 RAGAS 지표 전후 변화.
+
+    상단 metrics 는 "최초 baseline → 최종 상태"만 보여준다. 처방 카드 안에서는
+    같은 지표를 "이 처방 직전 → 이 처방 직후"로 잘라 보여줘야, 어떤 처방이
+    recall 을 올렸고 어떤 처방이 precision 을 깎았는지 숫자로 추적할 수 있다.
+    """
+    before_scores = dict(item.before_metrics or {})
+    after_scores = dict(item.after_metrics or {})
+    rows: list[dict[str, Any]] = []
+    for key, (name, tip) in _METRIC_LABELS.items():
+        if key not in before_scores and key not in after_scores:
+            continue
+        before = before_scores.get(key, after_scores.get(key))
+        after = after_scores.get(key, before_scores.get(key))
+        if before is None or after is None:
+            continue
+        rows.append({
+            "key": key,
+            "name": name,
+            "tip": tip,
+            "before": round(float(before), 3),
+            "after": round(float(after), 3),
+        })
+    return rows
+
+
 def _course_scores(item) -> DisplayScores:
     """이 이력 항목의 표시용 점수 쌍. 변환 규약은 score_display 가 단독으로 갖는다.
 
@@ -364,13 +435,35 @@ def _is_study_error(item) -> bool:
 
 
 def _action_point_label(action_key: str) -> str:
-    """`retriever.top_k:increase` → `top_k 확대`. 모르는 축이면 None 대신 원문 축약."""
+    """`retriever.top_k:increase` → `검색 결과 개수 확대`.
+
+    catalog 밖의 외부 action 은 내부 식별자를 화면에 노출하지 않고 일반명으로 둔다.
+    원본 action_key 는 처방 payload 의 ``action`` 필드에 그대로 보존된다.
+    """
     path, _, operation = action_key.rpartition(":")
     noun = _AXIS_NOUNS.get(path)
     verb = _OPERATION_VERBS.get(operation)
     if noun and verb:
         return f"{noun} {verb}"
-    return action_key[:18]
+    return "설정 변경"
+
+
+def _rx_change_label(item, changed_key: str, prescription_index: int) -> str:
+    """처방 카드용 한글 변경명.
+
+    새 이력은 action catalog 축과 동작으로 조립하고, action_key 가 없는 구버전은
+    평면 config 키의 축 이름으로 폴백한다. 알 수 없는 외부 키는 영문을 노출하지 않고
+    일반명으로 표시하되 원본 change 값은 payload 에 그대로 남겨 호환성을 지킨다.
+    """
+    action_key = getattr(item, "action_key", None)
+    if action_key:
+        return _action_point_label(action_key)
+    if changed_key in _CONFIG_FIELD_NOUNS:
+        return f"{_CONFIG_FIELD_NOUNS[changed_key]} 변경"
+    point_label = _course_point_label(item, prescription_index)
+    if point_label and not point_label.startswith("처방 "):
+        return point_label
+    return "설정 변경"
 
 
 def _course_point_label(item, prescription_index: int) -> str:
@@ -396,6 +489,9 @@ def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
     # baseline_score 는 이미 헤드라인 스케일(0~100) — 여기서 다시 _to_100 하지 않는다.
     points = [{
         "label": "기준선",
+        "axis_label": "기준",
+        "rx_num": "",
+        "step": 0,
         "score": baseline_score,
         "kept": True,
         "kind": "baseline",
@@ -424,12 +520,18 @@ def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
             points.extend([
                 {
                     "label": f"{label} 실패",
+                    "axis_label": label,
+                    "rx_num": f"{prescription_index:02d}",
+                    "step": prescription_index,
                     "score": after,
                     "kept": False,
                     "kind": "failed",
                 },
                 {
                     "label": "원상 복구",
+                    "axis_label": label,
+                    "rx_num": f"{prescription_index:02d}",
+                    "step": prescription_index,
                     "score": before,
                     "kept": True,
                     "kind": "rollback",
@@ -439,6 +541,9 @@ def _build_course(history: list, baseline_score: float) -> list[dict[str, Any]]:
 
         points.append({
             "label": label,
+            "axis_label": label,
+            "rx_num": f"{prescription_index:02d}",
+            "step": prescription_index,
             "score": after if kept else before,
             "kept": kept,
             "kind": "kept" if kept else "pending",
@@ -473,6 +578,7 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
                 "",
                 "",
             ]
+            key = ""
 
         # 헤드라인(composite)과 일관되게 처방 카드 점수도 종합점수로 표시.
         # (유지/롤백 판정 자체는 탐색 신호 기준이므로 direction 과 verdict 이 드물게
@@ -495,12 +601,14 @@ def _build_rxs(history: list) -> list[dict[str, Any]]:
             "state": state_key,
             "num": f"{idx:02d}",
             "change": change,
+            "change_label": _rx_change_label(item, key, idx),
             "action": getattr(item, "action_key", None) or "",
             "target": ", ".join(supporting),
             "resolved": resolved,
             "remaining": remaining,
             "reason": ["처방 근거", item.reason or ""],
             "score": score,
+            "metrics": _build_rx_metric_deltas(item),
             "verdict": (
                 ["error", "실험 오류 · 설정 원복"] if study_error else
                 ["keep", "유지"] if kept else
@@ -830,6 +938,13 @@ def build_ext_report_view(
     gate_summary = _gate_summary(report)
     tier = capability.get("tier", "")
     unmeasured = _unmeasured_components(report)
+    component_scores = {
+        str(component.get("key")): component.get("score")
+        for component in ((report.composite_score or {}).get("components", []) if report else [])
+        if isinstance(component, dict) and component.get("key")
+    }
+    question_count = capability.get("diagnosed", capability.get("records", 0))
+    failed_question_count = len(getattr(report, "failed_questions", []) or []) if report else 0
     if unmeasured:  # noqa: SIM102 — 아래 주석이 이 분기 전체의 근거다
         # 성분 하나가 미측정이면 총점을 내지 않는다. composite 는 측정된 성분만으로
         # 결합하므로, 신뢰도가 빠지면 '품질 점수'가 '종합점수' 이름을 달고 나간다 -
@@ -864,7 +979,9 @@ def build_ext_report_view(
             "depth": _EXT_TIER_LABELS.get(tier, "외부 로그 진단"),
             # diagnosed = 실제로 진단한 건수(--limit 반영). records 는 적재 건수라
             # limit 이 걸리면 부풀려 보인다. 구버전 payload 는 records 로 폴백.
-            "question_count": capability.get("diagnosed", capability.get("records", 0)),
+            "question_count": question_count,
+            "passed_question_count": max(0, question_count - failed_question_count),
+            "failed_question_count": failed_question_count,
             "created_at": report.created_at.isoformat() if report else "",
             "tier": _EXT_TIER_SHORT.get(tier, tier or "-"),
         },
@@ -894,6 +1011,8 @@ def build_ext_report_view(
             # 예비인지가 상대에게 "얼마나 믿고 고칠지"를 알려주는 값이다.
             "confirmed": sum(1 for f in findings if f.confirmed),
             "tentative": sum(1 for f in findings if not f.confirmed),
+            "quality": component_scores.get("quality"),
+            "reliability": component_scores.get("reliability"),
             "kept": 0, "rolled": 0, "errors": 0, "pending": 0,
         },
         # 라벨 코드(ext_grounded_but_wrong)를 그대로 노출하지 않는다 — 진단서는
@@ -906,6 +1025,7 @@ def build_ext_report_view(
         # 로그에도 질문·답변·정답이 있으므로 실패 질문은 채운다 — "어떤 질문에서
         # 무너졌나"가 상대에게 넘길 진단서의 핵심이다.
         "qas": _ext_qas(report, findings),
+        "label_catalog": diagnosis_label_catalog(),
         "recommendations": _ext_recommendation_cards(cards),
         # 화면이 "없음"과 "할 수 없음"을 구분할 수 있게 한다. 빈 치료경과를 그대로
         # 그리면 "최적화를 안 했나"로 읽히는데, 실제로는 남의 인덱스라 못 하는 것이다.
@@ -927,8 +1047,6 @@ def build_ext_report_view(
                  "sub": "RAGAS 4개 지표 (실측)"},
                 {"section": "recommendations", "title": "처방 추천",
                  "sub": "우리가 적용할 수 없어 상대 팀이 직접 적용할 항목"},
-                {"section": "transparency", "title": "진단 범위",
-                 "sub": "무엇을 근거로 어디까지 쟀나"},
             ],
             # 권고는 이 진단서의 결론이다 — 꼬리(06)가 아니라 지표 다음 자리로 올린다.
             "move_before": [{"section": "recommendations", "before": "dxs"}],

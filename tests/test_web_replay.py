@@ -29,7 +29,7 @@ from core import run_registry
 def _log_lines(n: int, *, inline_golden: bool = True) -> str:
     """유효한 triad 로그 n줄.
 
-    기본으로 정답을 인라인에 넣는다 - 웹 경로는 골든셋 면제가 없어서(옵트아웃 없음),
+    기본으로 정답을 인라인에 넣는다 - 웹 경로는 QA셋 면제가 없어서(옵트아웃 없음),
     정답 없는 로그는 업로드 게이트에서 막힌다. 게이트 자체를 보는 테스트만 False 로 준다.
     """
     def line(i):
@@ -92,7 +92,7 @@ class UploadGateTests(_ReplayClient):
     def test_rejects_unsupported_golden_extension(self):
         res = self._post(_log_lines(1), golden=("golden.txt", "질문,정답"))
         self.assertEqual(res.status_code, 400)
-        self.assertIn("골든셋", res.json()["detail"])
+        self.assertIn("QA셋", res.json()["detail"])
 
     def test_no_run_is_registered_when_gate_rejects(self):
         """게이트에 걸린 업로드가 run 을 남기면 프론트가 영원히 폴링한다."""
@@ -105,7 +105,7 @@ class UploadGateTests(_ReplayClient):
 
 
 class GoldenGateTests(_ReplayClient):
-    """웹 경로에는 골든셋 면제가 없다.
+    """웹 경로에는 QA셋 면제가 없다.
 
     정답지가 없으면 신뢰도 축을 못 재 종합점수 자체가 안 나오는데, 원인 7종 중 3종만
     담긴 '점수 없는 진단서'를 받아가는 건 오해만 만든다. 정답지를 아직 못 만든 경우는
@@ -114,7 +114,7 @@ class GoldenGateTests(_ReplayClient):
     def test_rejects_when_no_golden_anywhere(self):
         res = self._post(_log_lines(2, inline_golden=False))
         self.assertEqual(res.status_code, 400)
-        self.assertIn("골든셋", res.json()["detail"])
+        self.assertIn("QA셋", res.json()["detail"])
 
     def test_no_opt_out_parameter_is_honored(self):
         """예전에는 no_golden=1 로 빠져나갈 수 있었다. 그 통로를 없앤 것이 이 변경이다."""
@@ -126,7 +126,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertEqual(res.status_code, 400)
 
     def test_inline_ground_truth_counts_as_golden(self):
-        """로그에 정답이 인라인으로 있으면 골든셋이 없는 게 아니다(CLI 와 같은 판정)."""
+        """로그에 정답이 인라인으로 있으면 QA셋이 없는 게 아니다(CLI 와 같은 판정)."""
         with patch.object(web_api, "_run_replay_background"):
             res = self._post(_log_lines(2))
         self.assertEqual(res.status_code, 200)
@@ -139,7 +139,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertEqual(res.status_code, 200)
 
     def test_rejects_golden_that_matches_nothing(self):
-        """표기가 달라 한 건도 안 붙는 골든셋. 그대로 두면 전량 RAGAS 를 돌린 뒤에야
+        """표기가 달라 한 건도 안 붙는 QA셋. 그대로 두면 전량 RAGAS 를 돌린 뒤에야
         '정답 0건' 리포트가 나온다 - 비싸고, 사용자는 대조된 줄 안다."""
         golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
                             ensure_ascii=False)
@@ -170,7 +170,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertIn("gold_contexts", res.json()["detail"])
 
     def test_rejects_golden_file_without_ground_truth(self):
-        """같은 정렬이 골든셋 '파일' 경로에도 있어야 한다(리뷰 지적).
+        """같은 정렬이 QA셋 '파일' 경로에도 있어야 한다(리뷰 지적).
 
         인라인으로 gold_contexts 만 주면 막는데 파일로 같은 걸 주면 통과하고 있었다 -
         질문이 겹치는지만 보고 그 항목이 정답을 채우는지는 안 봤다. 결과는 같다:
@@ -183,7 +183,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertIn("ground_truth", res.json()["detail"])
 
     def test_rejects_golden_file_with_questions_only(self):
-        """질문 열 하나짜리 골든셋 - 매칭은 전부 되는데 아무것도 안 채운다."""
+        """질문 열 하나짜리 QA셋 - 매칭은 전부 되는데 아무것도 안 채운다."""
         golden = json.dumps({"question": "질문 0"}, ensure_ascii=False)
         res = self._post(_log_lines(2, inline_golden=False),
                          golden=("golden.jsonl", golden))
@@ -191,7 +191,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertIn("ground_truth", res.json()["detail"])
 
     def test_golden_file_without_answers_is_allowed_when_the_log_has_inline_ones(self):
-        """정답 없는 골든셋이어도 로그가 인라인 정답을 들고 있으면 대조가 된다 -
+        """정답 없는 QA셋이어도 로그가 인라인 정답을 들고 있으면 대조가 된다 -
         매칭 0건 선검사와 같은 이유로, 재료를 더 줄수록 거부되면 안 된다."""
         golden = json.dumps({"question": "질문 0", "gold_contexts": ["정답 근거"]},
                             ensure_ascii=False)
@@ -200,7 +200,7 @@ class GoldenGateTests(_ReplayClient):
         self.assertEqual(res.status_code, 200)
 
     def test_zero_match_golden_message_points_at_matching_not_answers(self):
-        """매칭 0건이면 정답도 0건이라, 순서를 뒤집으면 '골든셋에 정답이 없다'는
+        """매칭 0건이면 정답도 0건이라, 순서를 뒤집으면 'QA셋에 정답이 없다'는
         엉뚱한 사유가 나간다 - 고치는 방법이 완전히 다르다
         (report_view._reliability_unavailable_how 와 같은 순서)."""
         golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
@@ -215,7 +215,7 @@ class GoldenGateTests(_ReplayClient):
         """매칭 0건 선검사가 인라인 정답이 있는 로그까지 막고 있었다.
 
         파일을 안 준 경우는 인라인을 인정하는데 파일을 준 경우만 안 하면, 재료를 더
-        줄수록 거부되는 게이트가 된다. 이 로그는 골든셋이 한 건도 안 붙어도 정답
+        줄수록 거부되는 게이트가 된다. 이 로그는 QA셋이 한 건도 안 붙어도 정답
         대조가 된다."""
         golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
                             ensure_ascii=False)
@@ -240,7 +240,7 @@ class RejectedUploadCleanupTests(_ReplayClient):
         self.assertEqual(self._upload_files(), [])
 
     def test_rejected_golden_is_discarded_too(self):
-        """골든셋 거부는 로그를 이미 저장한 뒤에 일어난다 - 두 파일 다 지워져야 한다."""
+        """QA셋 거부는 로그를 이미 저장한 뒤에 일어난다 - 두 파일 다 지워져야 한다."""
         golden = json.dumps({"question": "전혀 다른 질문입니다", "ground_truth": "정답"},
                             ensure_ascii=False)
         res = self._post(_log_lines(2, inline_golden=False),
@@ -258,17 +258,35 @@ class RejectedUploadCleanupTests(_ReplayClient):
 
 class BackgroundRunTests(_ReplayClient):
     def _run_background(self, diagnose_return):
-        """_run_replay_background 를 동기로 한 번 돌리고 run 상태를 돌려준다."""
+        """_run_replay_background 를 동기로 한 번 돌리고 run 상태를 돌려준다.
+
+        diagnose_return 이 호출 가능하면 side_effect 로 넘긴다 - 진단이 도는
+        그 순간의 환경변수처럼 "실행 중" 상태를 봐야 하는 테스트가 쓴다.
+        """
         run_id = "test-replay-run"
         run_registry.create(run_id, depth="full", upload_path="x.jsonl",
                             created_at=0.0, mode="replay")
         log_path = Path(self._tmp.name) / "log.jsonl"
         log_path.write_text(_log_lines(2), encoding="utf-8")
 
-        with patch.object(web_api, "diagnose_external_log", return_value=diagnose_return), \
+        stub = ({"side_effect": diagnose_return} if callable(diagnose_return)
+                else {"return_value": diagnose_return})
+        with patch.object(web_api, "diagnose_external_log", **stub), \
              patch("core.run_logger.setup_run_logging"):
             web_api._run_replay_background(run_id, log_path, None)
         return run_registry.get(run_id)
+
+    def test_replay_does_not_leak_eval_mode_to_the_next_run(self):
+        """리플레이는 EVAL_MODE 를 "deep" 으로 고정해 돈다. 그 값이 프로세스에
+        남으면 이후 파이프라인 실행이 effective_eval_mode 에서 그것을 보고 조용히
+        심층으로 돈다 - .env 에 EVAL_MODE 가 없는 배포에서 실제로 그렇게 된다.
+        run 이 끝나면 원래 값으로 돌아와야 한다."""
+        report = SimpleNamespace(findings=[], findings_summary={"confirmed": 0})
+        with patch.dict(os.environ, {"EVAL_MODE": "standard", "EVAL_ENABLE_LLM": "0"}):
+            run = self._run_background((report, {"tier": "triad", "records": 2}, []))
+            self.assertEqual(run.status, "done")
+            self.assertEqual(os.environ["EVAL_MODE"], "standard")
+            self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "0")
 
     def test_missing_context_tier_becomes_error(self):
         """qa_only(컨텍스트 없음)는 리포트가 안 나온다 — 빈 진단서를 내보내지 않고
@@ -312,11 +330,24 @@ class BackgroundRunTests(_ReplayClient):
 
     def test_forces_deep_llm_regardless_of_form_depth(self):
         """리플레이는 깊이 선택이 없다 — LLM 을 끄면 생성축 라벨 4종이 통째로 죽어
-        '점수는 낮은데 소견 0건' 인 진단서가 나간다."""
+        '점수는 낮은데 소견 0건' 인 진단서가 나간다.
+
+        고정이 지켜져야 하는 곳은 진단이 도는 그 순간이다. 예전에는 run 이 끝난
+        뒤의 os.environ 을 봤는데, 그건 값이 프로세스에 남는다는 사실에 기댄
+        관측이었다 - 이제 _eval_env 가 원래 값으로 되돌린다(EvalEnvTests 참고).
+        """
+        seen = {}
+
+        def fake_diagnose(path, **kwargs):
+            seen["mode"] = os.environ.get("EVAL_MODE")
+            seen["llm"] = os.environ.get("EVAL_ENABLE_LLM")
+            return (None, {"tier": "none"}, [])
+
         with patch.dict(os.environ, {"EVAL_MODE": "fast", "EVAL_ENABLE_LLM": "0"}):
-            self._run_background((None, {"tier": "none"}, []))
-            self.assertEqual(os.environ["EVAL_MODE"], "deep")
-            self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "1")
+            self._run_background(fake_diagnose)
+
+        self.assertEqual(seen["mode"], "deep")
+        self.assertEqual(seen["llm"], "1")
 
 
 class ReportRoutingTests(_ReplayClient):
@@ -350,6 +381,83 @@ class ReportRoutingTests(_ReplayClient):
         res = self.client.get(f"/runs/{run_id}/report")
         self.assertEqual(res.status_code, 500)
         self.assertIn("컨텍스트", res.json()["detail"])
+
+
+class EvalEnvTests(unittest.TestCase):
+    """EVAL_MODE/EVAL_ENABLE_LLM 이 run 밖으로 새지 않는지.
+
+    Eval 은 이 둘을 프로세스 전역 환경변수로 읽는다. run 이 쓴 값을 되돌리지
+    않으면 다음 run 이 그 값을 "운영자가 .env 에 적은 값"으로 착각한다 —
+    리플레이 한 번이 이후 모든 파이프라인 실행을 심층으로 끌어올린다.
+    """
+
+    def _env(self, **values):
+        return patch.dict(os.environ, values, clear=False)
+
+    def test_restores_values_that_existed_before(self):
+        with self._env(EVAL_MODE="standard", EVAL_ENABLE_LLM="0"):
+            with web_api._eval_env("deep", "1", force_llm=True):
+                self.assertEqual(os.environ["EVAL_MODE"], "deep")
+                self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "1")
+            self.assertEqual(os.environ["EVAL_MODE"], "standard")
+            self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "0")
+
+    def test_removes_values_that_did_not_exist(self):
+        with self._env():
+            os.environ.pop("EVAL_MODE", None)
+            os.environ.pop("EVAL_ENABLE_LLM", None)
+            with web_api._eval_env("deep", "1", force_llm=True):
+                self.assertEqual(os.environ["EVAL_MODE"], "deep")
+            self.assertNotIn("EVAL_MODE", os.environ)
+            self.assertNotIn("EVAL_ENABLE_LLM", os.environ)
+
+    def test_restores_even_when_the_body_raises(self):
+        with self._env(EVAL_MODE="standard"):
+            with self.assertRaises(RuntimeError):
+                with web_api._eval_env("deep", "1", force_llm=True):
+                    raise RuntimeError("boom")
+            self.assertEqual(os.environ["EVAL_MODE"], "standard")
+
+    def test_llm_flag_can_be_left_alone_for_non_web_callers(self):
+        """force 하지 않은 내부 호출자는 기존 환경값을 보존할 수 있다."""
+        with self._env(EVAL_ENABLE_LLM="0"):
+            with web_api._eval_env("deep", "1"):
+                self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "0")
+
+    def test_web_pipeline_forces_llm_for_deep_mode(self):
+        """웹 deep 실행은 .env=0 때문에 생성 진단 축을 잃어서는 안 된다."""
+        with self._env(EVAL_ENABLE_LLM="0"):
+            with web_api._eval_env("deep", "1", force_llm=True):
+                self.assertEqual(os.environ["EVAL_ENABLE_LLM"], "1")
+
+    def test_effective_mode_ignores_what_a_previous_run_wrote(self):
+        """effective_eval_mode 는 실행이 덮어쓴 값이 아니라 .env 스냅샷을 본다."""
+        with patch.object(web_api, "_ENV_EVAL_MODE", ""):
+            with self._env(EVAL_MODE="deep"):
+                self.assertEqual(web_api.effective_eval_mode("full"), "full")
+        with patch.object(web_api, "_ENV_EVAL_MODE", "standard"):
+            self.assertEqual(web_api.effective_eval_mode("full"), "standard")
+
+
+class PublicConfigTests(_ReplayClient):
+    def test_config_exposes_names_without_server_directories(self):
+        internal = {
+            "source_type": "korquad",
+            "source_url": r"C:\\private\\corpus\\corpus.jsonl",
+            "qa_path": r"C:\\private\\qa\\qa_pairs.jsonl",
+            "max_docs": 20,
+            "qa_limit": 100,
+            "probe_source": "taxonomy",
+            "max_iterations": 5,
+            "eval_mode": "deep",
+        }
+        with patch.object(web_api, "corpus_config", return_value=internal):
+            corpus = self.client.get("/config").json()["corpus"]
+
+        self.assertEqual(corpus["source_url"], "corpus.jsonl")
+        self.assertEqual(corpus["qa_path"], "qa_pairs.jsonl")
+        self.assertNotIn("private", corpus["source_url"])
+        self.assertNotIn("private", corpus["qa_path"])
 
 
 if __name__ == "__main__":
