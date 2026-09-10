@@ -165,6 +165,7 @@ def _report_apply(
             dict(request.action_score_breakdown) if request is not None else {}
         ),
         deferred_axes=_deferred_axes(request),
+        margin_demoted_actions=_margin_demoted_actions(request),
     )
 
 
@@ -214,6 +215,7 @@ def _report_propose(
             dict(request.action_score_breakdown) if request is not None else {}
         ),
         deferred_axes=_deferred_axes(request),
+        margin_demoted_actions=_margin_demoted_actions(request),
     )
 
 
@@ -300,6 +302,18 @@ def _deferred_axes(request: OptimizationRequest | None) -> list[dict]:
     if request is None:
         return []
     return list(request.metadata.get("deferred_axes") or [])
+
+
+def _margin_demoted_actions(request: OptimizationRequest | None) -> list[dict]:
+    """마진에 못 닿아 인과 우선권을 잃은 후보. 상위 그룹을 건너뛴 이유의 설명이다.
+
+    보류된 축(_deferred_axes)과 같은 층의 정보다 — 둘 다 "왜 저것이 아니라 이것인가"에
+    답한다. 로그에만 남기면 산출물을 읽는 사용자에게는 A그룹 처방이 이유 없이 사라진
+    것으로 보인다.
+    """
+    if request is None:
+        return []
+    return list(request.metadata.get("margin_demoted_actions") or [])
 
 
 def _selected_prescription(request: OptimizationRequest | None) -> str | None:

@@ -657,6 +657,149 @@ def _conflict_sort_key(candidate: ActionCandidate) -> tuple:
     )
 
 
+# ── 4.5 마진 도달 가능성 ──────────────────────────────────────────
+#
+# [왜 필요한가]
+#   A > C > B 인과 순서는 "검색이 새는 상태에서 생성을 튜닝하면 garbage-in" 이라
+#   점수보다 먼저 적용된다. 그런데 그 전제는 **A 를 고치면 아래 단계 측정이 흔들린다**
+#   는 것이다. A 후보가 겨냥한 probe 가 극소수면 고쳐봐야 종합점수를 마진만큼도 못
+#   흔들고, 그 사이 훨씬 큰 B 후보가 계속 밀린다.
+#   실측(pipeline_20260814_105310): probe 1개짜리 A 후보가 probe 14개짜리 B 후보를
+#   두 번(반복 1·4) 눌렀고, 그 A 처방은 완벽히 성공해도 상한이 마진의 절반이었다.
+#   실제로 반복 1의 그 처방은 적용 후 점수가 안 올라 롤백됐다.
+#
+# [무엇을 재는가]
+#   "이 후보가 겨냥한 probe 가 전부 만점이 되면 종합점수가 얼마나 오르는가"의 상한.
+#   상한이 개선 판정 마진에 못 미치면, 성공해도 KEEP 판정을 받을 수 없는 처방이다.
+#
+# [단위 주의]
+#   probe 비율과 마진은 **다른 공간**이다(마진은 종합점수 0~1 의 변화량). 비율을
+#   그대로 마진과 비교하면 안 된다. 그래서 비율을 성분에 얹어 실제 결합식(combine)을
+#   통과시킨 뒤, 나온 **종합점수 변화량**을 마진과 비교한다.
+#
+#   ⚠️ 지금 결합식(조화평균)에서는 이 왕복이 수치적으로 거의 항등이다 — 성분
+#   (20,15)~(85,80) 구간에서 상승폭이 probe 비율과 표시 0.08점 안에서 일치한다.
+#   즉 **현재 실효 규칙은 "지지 probe 수 ≥ 마진 × probe 총수"** 이며, 질문 100개·
+#   마진 0.02 에서 probe 2개다. 그럼에도 combine 을 부르는 이유는 결합식 교체
+#   대비다(scoring.py 가 그 교체를 전제한다) — 비선형 결합식으로 바뀌면 이 코드는
+#   고치지 않아도 따라간다.
+#
+# [후하게 잡되, 엄밀한 상한은 아니다]
+#   겨냥한 probe 가 지금 0점이라고 가정한다(실제로는 부분점수가 있다). 그만큼
+#   상한을 과대평가하므로 보통은 오탈락 쪽으로 기울지 않는다.
+#   다만 **엄밀한 상한은 아니다.** 여기 쓰는 분모는 채점 대상 probe 총수인데, 두
+#   성분은 각자 다른 모집단을 평균한다 — 신뢰도는 판정 가능하고 검색축이 측정된
+#   probe 만(scoring._is_evaluable · _probe_reliability), 품질은 해당 RAGAS 지표가
+#   실린 record 만 본다. 그 모집단이 총수보다 작으면 실제 상승 여력이 이 상한보다
+#   커서 오탈락이 날 수 있다. 실측(pipeline_20260814_160634)에서는 RAGAS 100/100,
+#   골드 오류 1개라 격차가 1% 수준이었지만, DEEP 미만 모드나 ground_truth 없는
+#   probe 가 많은 코퍼스에서는 커진다. 상한을 성분별 모집단으로 정확히 계산하려면
+#   리포트가 성분별 분모를 실어야 한다(지금은 성분 점수만 싣는다).
+#
+# [모르면 건드리지 않는다]
+#   성분이 하나라도 미측정이거나 probe 총수를 모르면 True(기존 동작)로 둔다.
+
+# candidate.metadata 에 실리는 키. rank_action_candidates 가 읽는다.
+MARGIN_REACHABLE_KEY = "margin_reachable"
+MARGIN_CEILING_DELTA_KEY = "margin_ceiling_delta"
+
+
+def _scorable_probe_total(state: AgentDoctorState) -> int | None:
+    """종합점수가 실제로 채점한 probe 수. 모르면 None.
+
+    composite 은 골드 오류 probe 를 빼고 계산하므로(report.build_report 의 scorable)
+    len(state.probes) 를 그대로 쓰면 분모가 커지고 → 비율이 작아지고 → 필요 이상으로
+    후보를 떨어뜨린다. 뺄 개수는 Eval 이 이미 정확히 세어 리포트에 실어 두었다
+    (ragas_scores["gold_labeling_errors"], 0 이면 키가 없다). 그 값을 그대로 쓴다 —
+    같은 판정(is_gold_labeling_error)에서 나온 수라 확정/예비 규칙이 바뀌어도 따라간다.
+
+    라벨 집계(findings_summary)로 근사하지 않는 이유: 그쪽 수치는 probe 당 1/N 로
+    가중돼 실제 제외 probe 수보다 작고(분모가 커져 과잉 강등 쪽으로 기운다), 예비
+    bad_gold_answer 처럼 실제로는 제외되지 않는 건까지 세게 된다.
+    """
+    total = len(state.probes or [])
+    if total <= 0:
+        return None
+    scores = getattr(state.report, "ragas_scores", None) or {}
+    try:
+        excluded = int(scores.get("gold_labeling_errors") or 0)
+    except (TypeError, ValueError):
+        excluded = 0
+    remaining = total - max(0, excluded)
+    return remaining if remaining > 0 else None
+
+
+def _composite_component_values(composite_score: Any) -> list[float] | None:
+    """composite_score dict → 성분값(0~1) 목록. 하나라도 미측정이면 None.
+
+    as_dict 는 성분을 0~100 정수로 반올림해 싣는다(scoring.CompositeScore.as_dict).
+    되돌리면 성분당 최대 0.005 의 오차가 생기는데, 마진(0.02)보다 한 자리 작아 판정을
+    뒤집지 않는다.
+    """
+    if not isinstance(composite_score, dict):
+        return None
+    values: list[float] = []
+    for component in composite_score.get("components") or []:
+        score = component.get("score")
+        if score is None:
+            return None          # 부분 측정 → 판단 보류
+        values.append(float(score) / 100.0)
+    return values or None
+
+
+def margin_ceiling_delta(composite_score: Any, probe_share: float) -> float | None:
+    """probe_share 만큼의 probe 가 만점이 될 때 종합점수 상승폭 상한. 못 재면 None."""
+    values = _composite_component_values(composite_score)
+    if not values:
+        return None
+    # 결합식은 Eval 소유다. 여기서 조화평균을 다시 구현하면 결합식을 바꿀 때 두 곳이
+    # 어긋나므로(scoring.combine 주석이 교체를 전제한다) 그 함수를 그대로 부른다.
+    from agents.eval.scoring import combine
+
+    current = combine(values)
+    ceiling = combine([min(1.0, v + probe_share) for v in values])
+    return ceiling - current
+
+
+def annotate_margin_reachability(
+    candidates: list[ActionCandidate],
+    state: AgentDoctorState,
+) -> list[dict]:
+    """후보마다 마진 도달 가능 여부를 metadata 에 기록하고, 떨어진 것들을 돌려준다.
+
+    반환값은 로그·리포트용이다(어떤 후보가 왜 우선권을 잃었는지). 정렬 자체는
+    rank_action_candidates 가 metadata 를 읽어서 한다.
+    """
+    from agents.optimize.history import MIN_IMPROVEMENT_MARGIN
+
+    total = _scorable_probe_total(state)
+    composite = getattr(state.report, "composite_score", None)
+    demoted: list[dict] = []
+
+    for candidate in candidates:
+        delta = None
+        if total:
+            delta = margin_ceiling_delta(
+                composite, len(candidate.supporting_probes) / total
+            )
+        if delta is None:
+            # 못 재는 상황에서는 기존 인과 순서를 그대로 둔다.
+            candidate.metadata[MARGIN_REACHABLE_KEY] = True
+            continue
+        reachable = delta >= MIN_IMPROVEMENT_MARGIN
+        candidate.metadata[MARGIN_REACHABLE_KEY] = reachable
+        candidate.metadata[MARGIN_CEILING_DELTA_KEY] = delta
+        if not reachable:
+            demoted.append({
+                "action_key": candidate.action_key,
+                "group": candidate.causal_rank_group,
+                "probe_count": len(candidate.supporting_probes),
+                "ceiling_delta": delta,
+                "margin": MIN_IMPROVEMENT_MARGIN,
+            })
+    return demoted
+
+
 # ── 5. 정렬 ───────────────────────────────────────────────────────
 
 def rank_action_candidates(
@@ -664,6 +807,7 @@ def rank_action_candidates(
 ) -> list[ActionCandidate]:
     """최종 정렬 (계획서 §4.2).
 
+        0. 마진 도달 가능성          ← 인과 순서보다 먼저다(annotate 된 경우만)
         1. causal_rank (A, C, B)   ← 불변조건. 점수보다 먼저다
         2. score 내림차순
         3. grounded support 수 내림차순
@@ -672,10 +816,15 @@ def rank_action_candidates(
 
     5번이 있어야 같은 입력이 항상 같은 선택을 낸다. 기존 planner 는 dict 삽입 순서에
     의존해 동점에서 결과가 흔들릴 수 있었다.
+
+    0번은 `annotate_margin_reachability` 가 붙인 플래그다. 주석이 안 붙은 후보는
+    True 로 읽혀 기존 순서를 그대로 따른다(이 함수를 직접 부르는 호출자·테스트는
+    동작이 변하지 않는다). 왜 인과 순서보다 앞서는지는 그 함수 주석 참고.
     """
     return sorted(
         candidates,
         key=lambda c: (
+            0 if c.metadata.get(MARGIN_REACHABLE_KEY, True) else 1,
             _tier_of(c),
             -c.score,
             -sum(1 for s in c.supports if s.is_grounded),

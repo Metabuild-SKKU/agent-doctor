@@ -614,6 +614,21 @@ def _log_selected_action(request: OptimizationRequest) -> None:
             f"[Optimize]   밀린 action: {runner_up['action_key']} "
             f"(점수 {runner_up['score']})"
         )
+    for demoted in request.metadata.get("margin_demoted_actions", []):
+        # 탈락이 아니라 강등이다 — 인과 우선권만 잃었고 후보로는 남아 있다.
+        # 강등된 후보가 그대로 선택되는 경우가 있다(더 나은 대안이 없을 때). 그때
+        # "선택된 action: X" 바로 아래 "우선권 강등: X" 가 찍히면 자기모순으로 읽히므로
+        # 사유를 뒤집어 적는다 — 우선권은 잃었지만 남은 후보가 없어 그대로 갔다는 뜻이다.
+        tail = (
+            f"({demoted.get('group')}그룹, probe {demoted.get('probe_count')}개 → "
+            f"최대 상승 {history.to_display_scale(demoted.get('ceiling_delta') or 0.0):.1f} "
+            f"< 마진 {history.to_display_scale(demoted.get('margin') or 0.0):.1f})"
+        )
+        if demoted.get("action_key") == request.action_key:
+            print(f"[Optimize]   우선권 강등에도 선택: {demoted.get('action_key')} "
+                  f"{tail} — 마진에 닿는 대안이 없다")
+        else:
+            print(f"[Optimize]   우선권 강등: {demoted.get('action_key')} {tail}")
     for deferred in request.metadata.get("deferred_axes", []):
         print(
             f"[Optimize]   보류된 축: {deferred.get('axis')} "

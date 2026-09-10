@@ -59,8 +59,15 @@ AgentDoctor의 차별점은 brute-force로 최적값만 찾는 것이 아니라 
   코퍼스 재조회, LLM 재진단, 라벨 재판정 로직을 Optimize에 넣지 않는다.
 - 한 번에 **config 축 하나**만 바꾼다. 선택 단위는 라벨이 아니라 action(실제 config
   변경)이며, 모든 활성 라벨이 지지하는 action 을 통합해 경쟁시킨 뒤 하나를 고른다.
-  `rules.py` 의 **선언 순서는 실행 순서가 아니다** — 인과 등급(A>C>B) → 고유 probe
-  기반 점수 → 비용 → action key 사전순으로 정한다.
+  `rules.py` 의 **선언 순서는 실행 순서가 아니다** — 마진 도달 가능성 → 인과 등급(A>C>B)
+  → 고유 probe 기반 점수 → 비용 → action key 사전순으로 정한다.
+- 인과 등급보다 앞서는 키가 하나 있다: **성공해도 개선 마진을 못 넘는 후보는 등급
+  우선권을 잃는다**(`action_aggregator.annotate_margin_reachability`). A>C>B 는 "상류를
+  고치면 하류 측정이 흔들린다"는 전제 위에 서 있는데, A 후보가 겨냥한 probe 가 극소수면
+  그 전제가 성립하지 않기 때문이다. 겨냥한 probe 가 전부 만점이 됐을 때의 종합점수
+  상승폭(상한)을 `MIN_IMPROVEMENT_MARGIN` 과 비교해 판정하며, 성분이 미측정이거나 probe
+  총수를 모르면 판단을 보류하고 기존 순서를 지킨다. 탈락이 아니라 강등이라 더 나은
+  후보가 없으면 여전히 선택된다.
 - 성공하면 유지하고 다음 진단으로 진행한다. 무개선·악화 또는 전역 하한선 위반이면
   이전 config로 rollback하고 그 **정확한 전이**(`ActionAttemptKey`)를 차단한 뒤 다음
   action 을 시도한다. 차단은 baseline 별이라 config 가 바뀌면 같은 축을 다시 볼 수 있다.

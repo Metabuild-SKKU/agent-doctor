@@ -92,6 +92,27 @@ class ApplyReportTest(unittest.TestCase):
             ["conflict_margin_unmet"],
         )
 
+    def test_report_carries_margin_demotions(self):
+        """마진에 못 닿아 우선권을 잃은 후보가 산출물에 남아야 한다.
+
+        보류된 축(deferred_axes)과 같은 층의 정보다 — 둘 다 "왜 저것이 아니라
+        이것인가"에 답한다. 로그에만 남기면 리포트를 읽는 사용자에게는 상위 그룹(A)
+        처방이 이유 없이 사라진 것으로 보인다.
+        """
+        request = _request(metadata={
+            "margin_demoted_actions": [
+                {"action_key": "retriever.search_type:replace", "group": "A",
+                 "probe_count": 1, "ceiling_delta": 0.0101, "margin": 0.02},
+            ]
+        })
+        report = reporter.build_report(_decision(), request)
+
+        self.assertEqual(
+            [d["action_key"] for d in report.margin_demoted_actions],
+            ["retriever.search_type:replace"],
+        )
+        self.assertEqual(report.margin_demoted_actions[0]["group"], "A")
+
     def test_selected_prescription_is_read_not_guessed(self):
         """실제 선택된 action 의 출처를 그대로 읽는다.
 
