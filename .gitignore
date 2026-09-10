@@ -1,5 +1,9 @@
 # 환경변수
 .env
+# .env.bak 등 사본까지 막는다(키가 든 파일이 추적 대상으로 뜨는 사고 방지).
+# gitignore 는 줄 끝 주석을 지원하지 않으므로 주석은 반드시 별도 줄에 둔다.
+.env.*
+!.env.example
 
 # Python
 __pycache__/

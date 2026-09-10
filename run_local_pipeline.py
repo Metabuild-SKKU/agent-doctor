@@ -65,6 +65,17 @@ print(f"[Pipeline] {describe_embedding_route()}")
 
 state = AgentDoctorState()
 state.source_type = SOURCE_TYPE
+
+# reranker 를 켜고 출발한다(2026-08-10).
+#
+# core/state.py 의 기본값은 off 다 — "baseline 을 먼저 재고 retrieval_low_rank 처방이
+# 켠다"는 취지이고, tests/test_enable_reranker.py 가 그 전제(꺼진 baseline 에서 처방이
+# 켜는가) 위에 서 있어 전역 기본값을 바꾸면 9건이 깨진다.
+#
+# 그런데 그 처방은 이미 여러 실행에서 반복 검증됐다. off 로 출발하면 매 실행이 같은
+# 처방을 다시 증명하는 데 반복 예산을 쓰고, 그만큼 청킹·top_k 같은 다른 축을 볼 여지가
+# 줄어든다. 실행 스크립트에서만 켜서 전역 기본값과 테스트는 건드리지 않는다.
+state.index_config["use_reranker"] = True
 if SOURCE_TYPE == "korquad":
     state.source_url = os.getenv("SOURCE_URL", "data/corpus.jsonl")
     # korquad 는 qa 도 taxonomy 로 함께 세팅(shell/.env 로 덮게 setdefault).
@@ -111,4 +122,18 @@ if state.report:
           f"gate_pass={gate.passes_report(state.report)}")
     print(f"findings_summary: {state.report.findings_summary}")
 print(f"index_config: {state.index_config}")
+
+# 진단서를 파일로 남긴다 — 서버 불필요(core/report_html 참고).
+#
+# 이게 없으면 API 비용을 들여 얻은 결과가 콘솔 스크롤과 로그 텍스트로만 남는다.
+# report.html 은 브라우저로 그냥 열리고, report.json 은 실행 간 diff 를 뜰 수 있어
+# 재베이스라인 전후 비교에 쓴다.
+try:
+    from core.report_html import write_report
+
+    _report_path, _ = write_report(state, "output/report")
+    print(f"\n진단서 → {_report_path}")
+except Exception as exc:      # 리포트 실패로 파이프라인 결과까지 잃지 않는다
+    print(f"\n[경고] 진단서 저장 실패: {exc}")
+
 print("\n전체 파이프라인 로컬 스모크 완료 [OK]")
